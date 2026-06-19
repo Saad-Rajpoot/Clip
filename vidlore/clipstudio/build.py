@@ -623,8 +623,14 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                     quote_segs.append((best_seg, dlg))
     except Exception:
         pass
-    if not quote_segs:
-        return []
+    # Do NOT early-return on an empty quote pool. Per-beat quotes / anchor dialogue are routinely
+    # absent for ANALYTICAL/essay scripts (the narrator analyses the scene rather than quoting a line)
+    # and the LLM returns anchor dialogue inconsistently under load — so quote_segs can be empty even
+    # when the footage holds perfectly good in-character lines. The EVIDENCE-MINING pass below
+    # ("always runs") finds natural real-audio moments from anchor-source dialogue overlapping the
+    # narration, fully gated (era / recap / commentary / wrong-character Face-ID / burned-text / luma);
+    # the terminal `if not cands: return []` is the real bail-out. (Was: empty quote pool → 0 breakouts
+    # even on a 16-min essay with rich dialogue footage — the Drogon render.)
     srcs = [s for s in proj.sources
             if s.status == "ok" and s.local_path and Path(s.local_path).exists()]
     shots_of = {}

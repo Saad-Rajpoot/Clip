@@ -2169,6 +2169,21 @@ def test_reaction_still_pool_gate():
           ifsrc.count("_shot_has_overlay_text(shot)") >= 2)
 
 
+def test_breakout_evidence_mining_reachable():
+    print("[breakout] evidence-mining runs even when the quote pool is empty (essay scripts)")
+    src = (Path(__file__).resolve().parent.parent / "vidlore" / "clipstudio" /
+           "build.py").read_text(encoding="utf-8")
+    fn = src.split("def _select_breakouts")[1].split("\ndef ")[0]
+    # the structural bug: an early `if not quote_segs: return []` blocked the evidence-miner
+    # (whose own comment says it "always runs") — so analytical/essay scripts got 0 breakouts.
+    check("no early-return on empty quote pool (evidence-mining stays reachable)",
+          "if not quote_segs:" not in fn)
+    check("evidence-mining block still present and unconditional",
+          "EVIDENCE MINING" in fn and "_mine_tier(" in fn)
+    check("terminal bail-out on zero candidates is the real exit",
+          "if not cands:" in fn)
+
+
 def test_discovery_plural_gates_and_purge():
     print("[discover] PLURAL title-gate fix (reactions/reactors/reviews/...) + cached-source purge")
     from vidlore.clipstudio import discover as D
@@ -2342,6 +2357,7 @@ def main():
     test_image_policy_edge_gaps()
     test_reaction_still_pool_gate()
     test_discovery_plural_gates_and_purge()
+    test_breakout_evidence_mining_reachable()
     test_breakout_era_scene_gate()
     test_burned_text_black_and_recap_gates()
     print(f"\n{PASS} passed · {FAIL} failed")
