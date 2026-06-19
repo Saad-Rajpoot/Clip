@@ -1,0 +1,119 @@
+name: netflix_epic
+label: Netflix Historical Epic
+inherits: standard
+version: 1
+
+tone: reverent
+beat_target:    {min: 4.8, max: 5.8}
+beat_min:       {min: 3.4, max: 4.0}
+hook_seconds:   60
+hook_beat_mult: {min: 0.65, max: 0.80}
+climax_silence_mult: {min: 1.20, max: 1.50}
+dissolve_gap:   {min: 2, max: 3}
+dissolve_drop:  1
+camera_easing:  ease_out_quint
+drift_scale:    {min: 0.70, max: 0.85}
+hold_bias:      {min: 1.35, max: 1.60}
+push_in_impact: {min: 0.90, max: 1.05}
+
+graphic_density: {min: 0.85, max: 1.05}
+density_per_min_max: {min: 1, max: 3}
+fav_templates:
+  - timeline
+  - era_banner
+  - map_reveal
+  - map_route
+  - chapter_marker
+  - quote_highlight
+  - photo_collage
+  - document
+  - name_reveal
+avoid_templates:
+  - surveillance
+  - breaking_news
+  - sms_text
+  - social_post
+  - status_indicator
+  - radio_dial
+  - headline_crawl
+  - email_screenshot
+
+chart_style: serif_warm
+map_style:   nautical_chart
+annotation_voice: archival
+accent_rgb: [200, 165, 90]
+
+grade:
+  brightness_lift: {min: -0.04, max: 0.0}
+  saturation_lift: {min: -0.08, max: -0.02}
+  shadow_lift:     {min: 0.03,  max: 0.05}
+  highlight_roll:  {min: -0.03, max: 0.0}
+  warm_shadow_split: 0.022
+
+ai:
+  per_video_floor:   1
+  per_video_ceiling: {min: 4, max: 6}
+  fire_on_roles:     [hook, climax, reveal, name_reveal, evidence]
+  fire_on_intensity: 3
+  portrait_style:    magnum_natgeo
+  grain_strength:    {min: 0.07, max: 0.11}
+  diffusion_fallback: true
+
+archival:
+  enabled: true
+  bias_on_dates_before: 2000
+  source_priority: [loc, nara, internet_archive, pexels_historical]
+
+music:
+  category_bias: [history, orchestral_swell, emotional_piano]
+  intensity:      {min: 1.20, max: 1.40}
+  density_floor:  {min: 0.60, max: 0.80}
+  swell_on_climax: aggressive
+  cue_min_seconds: 22
+  track_repeat_window_days: 21
+
+silence:
+  tier2_pocket_s: {min: 0.55, max: 0.75}
+  tier3_pocket_s: {min: 1.20, max: 1.45}
+  tier3_stretch_s: {min: 0.50, max: 0.65}
+  pre_roll_t3_s:   {min: 0.55, max: 0.65}
+
+sfx:
+  whoosh_min_gap_s: {min: 14, max: 18}
+  boom_min_gap_s:   {min: 35, max: 45}
+  amplitude:        {min: 0.40, max: 0.55}
+  reveal_stinger:   bell_subdrop
+
+text:
+  emphasis_fire_prob_density:   0.85
+  emphasis_fire_prob_restraint: {min: 0.30, max: 0.50}
+  text_density_target_pct:      {min: 8, max: 16}
+
+fonts:
+  display: [Playfair Display, Crimson, VidloreSans]
+  body:    [Crimson, Source Serif Pro, VidloreSans]
+  weight_bias: regular
+  letter_spacing_caps: 0.05
+
+intro:
+  cold_open_s: 12
+  title_hold_s: 3.0
+  hook_compression: 1.3
+
+climax:
+  hold_s: {min: 10, max: 16}
+  pre_silence_s: {min: 1.4, max: 2.0}
+
+animation:
+  default_easing: ease_out_quint
+  stagger_ms: {min: 120, max: 200}
+  philosophy: cinematic_restraint
+
+anti_convergence:
+  history_window: 6
+  min_distance: 0.22
+  forced_drift_axes:
+    - music.category_bias
+    - transition_palette
+    - climax.hold_s
+    - accent_rgb

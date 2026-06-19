@@ -1,0 +1,52 @@
+{
+ "name": "big-mojo",
+ "category": "climax_build",
+ "title": "Big Mojo",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 157.25,
+ "tags": [
+  "action",
+  "dark",
+  "driving",
+  "epic",
+  "grooving",
+  "intense"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "climax_build",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 157.28,
+   "mean_volume_db": -23.0,
+   "max_volume_db": -1.8,
+   "silence_ratio": 0.020361018565615462,
+   "spectral_centroid_hz": 1009.9742741489638,
+   "spectral_flatness": 0.16215083003044128,
+   "energy_arc": "steady",
+   "bpm": 86,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.784,
+   "darkness": 0.786,
+   "orchestral_density": 0.78,
+   "rhythmic_aggression": 0.45
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:epic"
+  ]
+ }
+}

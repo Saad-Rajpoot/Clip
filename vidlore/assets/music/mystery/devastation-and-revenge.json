@@ -1,0 +1,53 @@
+{
+ "name": "devastation-and-revenge",
+ "category": "mystery",
+ "title": "Devastation and Revenge",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 185.26,
+ "tags": [
+  "eerie",
+  "epic",
+  "intense",
+  "mystical",
+  "somber",
+  "suspenseful"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "mystery",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 185.29,
+   "mean_volume_db": -22.5,
+   "max_volume_db": -2.0,
+   "silence_ratio": 0.04636575638188785,
+   "spectral_centroid_hz": 1254.3377019214597,
+   "spectral_flatness": 0.16118711233139038,
+   "energy_arc": "steady",
+   "bpm": 161,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.697,
+   "darkness": 0.674,
+   "orchestral_density": 0.734,
+   "rhythmic_aggression": 0.673
+  }
+ },
+ "doc_quality": {
+  "score": 0.42,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:suspense",
+   "+soft:epic"
+  ]
+ }
+}

@@ -1,0 +1,53 @@
+{
+ "name": "minima",
+ "category": "suspense",
+ "title": "Minima",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 213.89,
+ "tags": [
+  "driving",
+  "epic",
+  "intense",
+  "mysterious",
+  "suspenseful"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "suspense",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 213.92000000000002,
+   "mean_volume_db": -23.2,
+   "max_volume_db": -3.7,
+   "silence_ratio": 0.025016767950635753,
+   "spectral_centroid_hz": 1100.1259109469593,
+   "spectral_flatness": 0.10106023401021957,
+   "energy_arc": "falling",
+   "bpm": 83,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.755,
+   "darkness": 0.764,
+   "orchestral_density": 0.84,
+   "rhythmic_aggression": 0.339
+  }
+ },
+ "doc_quality": {
+  "score": 0.54,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:suspense",
+   "+soft:epic",
+   "+soft:mysterious"
+  ]
+ }
+}

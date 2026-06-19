@@ -1,0 +1,48 @@
+{
+ "name": "unwritten-return",
+ "category": "slow_reveal",
+ "title": "Unwritten Return",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 309.05,
+ "tags": [
+  "grooving",
+  "mysterious"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "slow_reveal",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 309.08,
+   "mean_volume_db": -23.3,
+   "max_volume_db": -2.4,
+   "silence_ratio": 0.02212424938527242,
+   "spectral_centroid_hz": 1985.4511542144132,
+   "spectral_flatness": 0.3634902536869049,
+   "energy_arc": "rising",
+   "bpm": 161,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.486,
+   "darkness": 0.356,
+   "orchestral_density": 0.551,
+   "rhythmic_aggression": 0.907
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:mysterious"
+  ]
+ }
+}

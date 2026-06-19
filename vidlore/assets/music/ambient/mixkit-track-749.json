@@ -1,0 +1,47 @@
+{
+ "name": "mixkit-track-749",
+ "category": "ambient",
+ "title": "Mixkit Track 749",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/749/749.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 117.73,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "ambient",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 117.75999999999999,
+   "mean_volume_db": -25.0,
+   "max_volume_db": -9.8,
+   "silence_ratio": 0.04194087126358696,
+   "spectral_centroid_hz": 839.1971619940333,
+   "spectral_flatness": 0.03447224944829941,
+   "energy_arc": "steady",
+   "bpm": 108,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.752,
+   "darkness": 0.87,
+   "orchestral_density": 0.884,
+   "rhythmic_aggression": 0.302
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:ambient"
+  ]
+ }
+}

@@ -1,0 +1,45 @@
+{
+ "name": "mixkit-track-871",
+ "category": "mystery",
+ "title": "Mixkit Track 871",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/871/871.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 101.33,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "mystery",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 101.33,
+   "mean_volume_db": -23.4,
+   "max_volume_db": -3.0,
+   "silence_ratio": 0.0371745090299023,
+   "spectral_centroid_hz": 1752.6485258958862,
+   "spectral_flatness": 0.22072207927703857,
+   "energy_arc": "steady",
+   "bpm": 92,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.57,
+   "darkness": 0.472,
+   "orchestral_density": 0.684,
+   "rhythmic_aggression": 0.528
+  }
+ },
+ "doc_quality": {
+  "score": 0.0,
+  "verdict": "neutral",
+  "reasons": []
+ }
+}

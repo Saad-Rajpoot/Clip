@@ -1,0 +1,48 @@
+{
+ "name": "unanswered-questions",
+ "category": "suspense",
+ "title": "Unanswered Questions",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 165.69,
+ "tags": [
+  "grooving",
+  "suspenseful"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "suspense",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 165.72,
+   "mean_volume_db": -25.2,
+   "max_volume_db": -8.3,
+   "silence_ratio": 0.10981135047067342,
+   "spectral_centroid_hz": 429.7128829469631,
+   "spectral_flatness": 0.05035172402858734,
+   "energy_arc": "rising",
+   "bpm": 70,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.771,
+   "darkness": 0.914,
+   "orchestral_density": 0.742,
+   "rhythmic_aggression": 0.182
+  }
+ },
+ "doc_quality": {
+  "score": 0.3,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:suspense"
+  ]
+ }
+}

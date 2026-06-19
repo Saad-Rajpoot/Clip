@@ -1,0 +1,6052 @@
+{
+ "suspense": [
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/at-launch.mp3",
+   "name": "at-launch",
+   "category": "suspense",
+   "dur": 185.13,
+   "bpm": null,
+   "tags": [
+    "epic",
+    "intense",
+    "suspenseful",
+    "uplifting"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "At Launch",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 185.16,
+     "mean_volume_db": -25.9,
+     "max_volume_db": -5.9,
+     "silence_ratio": 0.017494340030244113,
+     "spectral_centroid_hz": 762.9049637999921,
+     "spectral_flatness": 0.03940434008836746,
+     "energy_arc": "arc",
+     "bpm": 103,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.868,
+     "darkness": 0.915,
+     "orchestral_density": 0.924,
+     "rhythmic_aggression": 0.366
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:epic"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/chee-zee-cave.mp3",
+   "name": "chee-zee-cave",
+   "category": "suspense",
+   "dur": 231.78,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "humorous",
+    "intense",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Chee Zee Cave",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 231.81,
+     "mean_volume_db": -24.6,
+     "max_volume_db": -7.9,
+     "silence_ratio": 0.0,
+     "spectral_centroid_hz": 968.5338550177191,
+     "spectral_flatness": 0.137959286570549,
+     "energy_arc": "steady",
+     "bpm": 78,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.745,
+     "darkness": 0.822,
+     "orchestral_density": 0.845,
+     "rhythmic_aggression": 0.312
+    }
+   },
+   "doc_quality": {
+    "score": -0.25,
+    "verdict": "neutral",
+    "reasons": [
+     "-hard:humor",
+     "+strong:suspense"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/chee-zee-caves-v2.mp3",
+   "name": "chee-zee-caves-v2",
+   "category": "suspense",
+   "dur": 231.78,
+   "bpm": null,
+   "tags": [
+    "intense",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Chee Zee Caves V2",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 231.81,
+     "mean_volume_db": -24.2,
+     "max_volume_db": -7.5,
+     "silence_ratio": 0.0,
+     "spectral_centroid_hz": 960.6946942692184,
+     "spectral_flatness": 0.13617895543575287,
+     "energy_arc": "steady",
+     "bpm": 117,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.747,
+     "darkness": 0.826,
+     "orchestral_density": 0.847,
+     "rhythmic_aggression": 0.481
+    }
+   },
+   "doc_quality": {
+    "score": 0.3,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/constancy-part-two.mp3",
+   "name": "constancy-part-two",
+   "category": "suspense",
+   "dur": 64.34,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "epic",
+    "intense",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Constancy Part Two",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 64.37,
+     "mean_volume_db": -24.1,
+     "max_volume_db": -8.7,
+     "silence_ratio": 0.06810118067422712,
+     "spectral_centroid_hz": 1000.422483644579,
+     "spectral_flatness": 0.09204772859811783,
+     "energy_arc": "steady",
+     "bpm": 96,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.676,
+     "darkness": 0.776,
+     "orchestral_density": 0.772,
+     "rhythmic_aggression": 0.318
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:epic"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/dances-and-dames.mp3",
+   "name": "dances-and-dames",
+   "category": "suspense",
+   "dur": 146.83,
+   "bpm": null,
+   "tags": [
+    "grooving",
+    "mysterious",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Dances and Dames",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 146.86,
+     "mean_volume_db": -23.2,
+     "max_volume_db": -6.3,
+     "silence_ratio": 0.04288749829769849,
+     "spectral_centroid_hz": 1149.2706906208714,
+     "spectral_flatness": 0.1865546852350235,
+     "energy_arc": "steady",
+     "bpm": 117,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.654,
+     "darkness": 0.711,
+     "orchestral_density": 0.711,
+     "rhythmic_aggression": 0.541
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/enter-the-maze.mp3",
+   "name": "enter-the-maze",
+   "category": "suspense",
+   "dur": 178.13,
+   "bpm": null,
+   "tags": [
+    "intense",
+    "mysterious",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Enter the Maze",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 178.16,
+     "mean_volume_db": -22.4,
+     "max_volume_db": -8.6,
+     "silence_ratio": 0.045150886843286935,
+     "spectral_centroid_hz": 2965.6956532400063,
+     "spectral_flatness": 0.45489105582237244,
+     "energy_arc": "falling",
+     "bpm": 92,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.242,
+     "darkness": 0.17,
+     "orchestral_density": 0.467,
+     "rhythmic_aggression": 0.62
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/ibn-al-noor.mp3",
+   "name": "ibn-al-noor",
+   "category": "suspense",
+   "dur": 218.23,
+   "bpm": null,
+   "tags": [
+    "action",
+    "eerie",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Ibn Al-Noor",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 218.28,
+     "mean_volume_db": -23.1,
+     "max_volume_db": -9.2,
+     "silence_ratio": 0.007580497526113249,
+     "spectral_centroid_hz": 1208.7715176525703,
+     "spectral_flatness": 0.21614527702331543,
+     "energy_arc": "steady",
+     "bpm": 72,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.609,
+     "darkness": 0.704,
+     "orchestral_density": 0.743,
+     "rhythmic_aggression": 0.327
+    }
+   },
+   "doc_quality": {
+    "score": 0.3,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/impending-boom.mp3",
+   "name": "impending-boom",
+   "category": "suspense",
+   "dur": 157.0,
+   "bpm": null,
+   "tags": [
+    "driving",
+    "epic",
+    "intense",
+    "mysterious",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Impending Boom",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "title",
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 157.0,
+     "mean_volume_db": -25.0,
+     "max_volume_db": -5.4,
+     "silence_ratio": 0.027548707006369428,
+     "spectral_centroid_hz": 1186.4930288357914,
+     "spectral_flatness": 0.10253860801458359,
+     "energy_arc": "steady",
+     "bpm": 123,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.735,
+     "darkness": 0.728,
+     "orchestral_density": 0.834,
+     "rhythmic_aggression": 0.518
+    }
+   },
+   "doc_quality": {
+    "score": 0.54,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:epic",
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/industrial-cinematic.mp3",
+   "name": "industrial-cinematic",
+   "category": "suspense",
+   "dur": 244.43,
+   "bpm": null,
+   "tags": [
+    "driving",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Industrial Cinematic",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "title",
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 244.45,
+     "mean_volume_db": -23.5,
+     "max_volume_db": -3.9,
+     "silence_ratio": 0.05111201063612191,
+     "spectral_centroid_hz": 2311.4853998924305,
+     "spectral_flatness": 0.45985835790634155,
+     "energy_arc": "falling",
+     "bpm": 108,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.354,
+     "darkness": 0.2,
+     "orchestral_density": 0.456,
+     "rhythmic_aggression": 0.787
+    }
+   },
+   "doc_quality": {
+    "score": 0.6,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:cinematic",
+     "+strong:suspense"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/minima.mp3",
+   "name": "minima",
+   "category": "suspense",
+   "dur": 213.89,
+   "bpm": null,
+   "tags": [
+    "driving",
+    "epic",
+    "intense",
+    "mysterious",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Minima",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 213.92000000000002,
+     "mean_volume_db": -23.2,
+     "max_volume_db": -3.7,
+     "silence_ratio": 0.025016767950635753,
+     "spectral_centroid_hz": 1100.1259109469593,
+     "spectral_flatness": 0.10106023401021957,
+     "energy_arc": "falling",
+     "bpm": 83,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.755,
+     "darkness": 0.764,
+     "orchestral_density": 0.84,
+     "rhythmic_aggression": 0.339
+    }
+   },
+   "doc_quality": {
+    "score": 0.54,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:epic",
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/mistake-the-getaway.mp3",
+   "name": "mistake-the-getaway",
+   "category": "suspense",
+   "dur": 122.62,
+   "bpm": null,
+   "tags": [
+    "action",
+    "driving",
+    "epic",
+    "intense",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Mistake the Getaway",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 122.64,
+     "mean_volume_db": -25.1,
+     "max_volume_db": -8.5,
+     "silence_ratio": 0.03542640247879974,
+     "spectral_centroid_hz": 2295.8349708928017,
+     "spectral_flatness": 0.3808496296405792,
+     "energy_arc": "falling",
+     "bpm": 144,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.327,
+     "darkness": 0.222,
+     "orchestral_density": 0.507,
+     "rhythmic_aggression": 0.855
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:epic"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/our-story-begins.mp3",
+   "name": "our-story-begins",
+   "category": "suspense",
+   "dur": 84.58,
+   "bpm": null,
+   "tags": [
+    "epic",
+    "suspenseful",
+    "uplifting"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Our Story Begins",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 84.61,
+     "mean_volume_db": -23.8,
+     "max_volume_db": -8.0,
+     "silence_ratio": 0.04700076823070559,
+     "spectral_centroid_hz": 964.8448225885884,
+     "spectral_flatness": 0.10842593759298325,
+     "energy_arc": "arc",
+     "bpm": 89,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.702,
+     "darkness": 0.8,
+     "orchestral_density": 0.792,
+     "rhythmic_aggression": 0.312
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:epic"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/river-of-io.mp3",
+   "name": "river-of-io",
+   "category": "suspense",
+   "dur": 249.29,
+   "bpm": null,
+   "tags": [
+    "driving",
+    "mysterious",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "River of Io",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 249.31,
+     "mean_volume_db": -22.9,
+     "max_volume_db": -6.4,
+     "silence_ratio": 0.01846411295174682,
+     "spectral_centroid_hz": 1022.2776324922035,
+     "spectral_flatness": 0.17946457862854004,
+     "energy_arc": "steady",
+     "bpm": 103,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.698,
+     "darkness": 0.779,
+     "orchestral_density": 0.764,
+     "rhythmic_aggression": 0.465
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/satiate-only-strings.mp3",
+   "name": "satiate-only-strings",
+   "category": "suspense",
+   "dur": 192.05,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "intense",
+    "suspenseful",
+    "unnerving"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Satiate - only strings",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 192.08,
+     "mean_volume_db": -25.7,
+     "max_volume_db": -8.4,
+     "silence_ratio": 0.04626048521449396,
+     "spectral_centroid_hz": 1701.0886021006716,
+     "spectral_flatness": 0.1570182740688324,
+     "energy_arc": "steady",
+     "bpm": 108,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.546,
+     "darkness": 0.502,
+     "orchestral_density": 0.739,
+     "rhythmic_aggression": 0.475
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:strings"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/satiate.mp3",
+   "name": "satiate",
+   "category": "suspense",
+   "dur": 192.05,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "intense",
+    "relaxed",
+    "suspenseful",
+    "unnerving"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Satiate",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 192.08,
+     "mean_volume_db": -23.7,
+     "max_volume_db": -9.5,
+     "silence_ratio": 0.040156403581840895,
+     "spectral_centroid_hz": 1222.8811188765712,
+     "spectral_flatness": 0.1833510547876358,
+     "energy_arc": "steady",
+     "bpm": 117,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.596,
+     "darkness": 0.685,
+     "orchestral_density": 0.72,
+     "rhythmic_aggression": 0.492
+    }
+   },
+   "doc_quality": {
+    "score": 0.3,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/scissors.mp3",
+   "name": "scissors",
+   "category": "suspense",
+   "dur": 207.75,
+   "bpm": null,
+   "tags": [
+    "intense",
+    "mysterious",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Scissors",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 207.78,
+     "mean_volume_db": -23.7,
+     "max_volume_db": -2.7,
+     "silence_ratio": 0.05765353739532198,
+     "spectral_centroid_hz": 3231.4990268917277,
+     "spectral_flatness": 0.4526704251766205,
+     "energy_arc": "rising",
+     "bpm": 68,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.352,
+     "darkness": 0.162,
+     "orchestral_density": 0.444,
+     "rhythmic_aggression": 0.635
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/unanswered-questions.mp3",
+   "name": "unanswered-questions",
+   "category": "suspense",
+   "dur": 165.69,
+   "bpm": null,
+   "tags": [
+    "grooving",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Unanswered Questions",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 165.72,
+     "mean_volume_db": -25.2,
+     "max_volume_db": -8.3,
+     "silence_ratio": 0.10981135047067342,
+     "spectral_centroid_hz": 429.7128829469631,
+     "spectral_flatness": 0.05035172402858734,
+     "energy_arc": "rising",
+     "bpm": 70,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.771,
+     "darkness": 0.914,
+     "orchestral_density": 0.742,
+     "rhythmic_aggression": 0.182
+    }
+   },
+   "doc_quality": {
+    "score": 0.3,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/suspense/undaunted.mp3",
+   "name": "undaunted",
+   "category": "suspense",
+   "dur": 212.53,
+   "bpm": null,
+   "tags": [
+    "driving",
+    "epic",
+    "action",
+    "intense"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Undaunted",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "suspense",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 212.56,
+     "mean_volume_db": -23.8,
+     "max_volume_db": -4.9,
+     "silence_ratio": 0.031803213210387656,
+     "spectral_centroid_hz": 2648.353565057771,
+     "spectral_flatness": 0.5041167140007019,
+     "energy_arc": "rising",
+     "bpm": 129,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.338,
+     "darkness": 0.179,
+     "orchestral_density": 0.492,
+     "rhythmic_aggression": 0.867
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:epic"
+    ]
+   }
+  }
+ ],
+ "mystery": [
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/desert-city.mp3",
+   "name": "desert-city",
+   "category": "mystery",
+   "dur": 89.36,
+   "bpm": null,
+   "tags": [
+    "grooving",
+    "mysterious",
+    "relaxed"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Desert City",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 89.39,
+     "mean_volume_db": -23.7,
+     "max_volume_db": -9.1,
+     "silence_ratio": 0.0,
+     "spectral_centroid_hz": 2065.7526525733533,
+     "spectral_flatness": 0.3207886517047882,
+     "energy_arc": "steady",
+     "bpm": 112,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.397,
+     "darkness": 0.35,
+     "orchestral_density": 0.639,
+     "rhythmic_aggression": 0.632
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/devastation-and-revenge.mp3",
+   "name": "devastation-and-revenge",
+   "category": "mystery",
+   "dur": 185.26,
+   "bpm": null,
+   "tags": [
+    "eerie",
+    "epic",
+    "intense",
+    "mystical",
+    "somber",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Devastation and Revenge",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 185.29,
+     "mean_volume_db": -22.5,
+     "max_volume_db": -2.0,
+     "silence_ratio": 0.04636575638188785,
+     "spectral_centroid_hz": 1254.3377019214597,
+     "spectral_flatness": 0.16118711233139038,
+     "energy_arc": "steady",
+     "bpm": 161,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.697,
+     "darkness": 0.674,
+     "orchestral_density": 0.734,
+     "rhythmic_aggression": 0.673
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:epic"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/envision.mp3",
+   "name": "envision",
+   "category": "mystery",
+   "dur": 85.39,
+   "bpm": null,
+   "tags": [
+    "calm",
+    "grooving",
+    "mysterious"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Envision",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 85.42,
+     "mean_volume_db": -23.9,
+     "max_volume_db": -9.0,
+     "silence_ratio": 0.04660551393116366,
+     "spectral_centroid_hz": 490.5798434703641,
+     "spectral_flatness": 0.04698772728443146,
+     "energy_arc": "steady",
+     "bpm": 99,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.792,
+     "darkness": 0.957,
+     "orchestral_density": 0.862,
+     "rhythmic_aggression": 0.272
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/exotic-battle.mp3",
+   "name": "exotic-battle",
+   "category": "mystery",
+   "dur": 168.57,
+   "bpm": null,
+   "tags": [
+    "action",
+    "aggressive",
+    "epic",
+    "mysterious",
+    "unnerving"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Exotic Battle",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "title",
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 168.59,
+     "mean_volume_db": -25.1,
+     "max_volume_db": -2.4,
+     "silence_ratio": 0.018203268284002608,
+     "spectral_centroid_hz": 2864.7761603251324,
+     "spectral_flatness": 0.5086832046508789,
+     "energy_arc": "falling",
+     "bpm": 62,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.413,
+     "darkness": 0.188,
+     "orchestral_density": 0.517,
+     "rhythmic_aggression": 0.637
+    }
+   },
+   "doc_quality": {
+    "score": 0.24,
+    "verdict": "prefer",
+    "reasons": [
+     "+soft:epic",
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/fast-talkin.mp3",
+   "name": "fast-talkin",
+   "category": "mystery",
+   "dur": 59.22,
+   "bpm": null,
+   "tags": [
+    "grooving",
+    "mysterious"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Fast Talkin",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 59.25,
+     "mean_volume_db": -24.3,
+     "max_volume_db": -6.4,
+     "silence_ratio": 0.051254430379746835,
+     "spectral_centroid_hz": 1999.4063101985073,
+     "spectral_flatness": 0.33477768301963806,
+     "energy_arc": "steady",
+     "bpm": 144,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.419,
+     "darkness": 0.338,
+     "orchestral_density": 0.529,
+     "rhythmic_aggression": 0.825
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/mirage.mp3",
+   "name": "mirage",
+   "category": "mystery",
+   "dur": 240.07,
+   "bpm": null,
+   "tags": [
+    "calming",
+    "eerie",
+    "mysterious",
+    "relaxed"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Mirage",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 240.09,
+     "mean_volume_db": -24.5,
+     "max_volume_db": -7.4,
+     "silence_ratio": 0.03553844808196926,
+     "spectral_centroid_hz": 488.3900619778709,
+     "spectral_flatness": 0.01912306807935238,
+     "energy_arc": "steady",
+     "bpm": 60,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.848,
+     "darkness": 0.972,
+     "orchestral_density": 0.913,
+     "rhythmic_aggression": 0.107
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/mixkit-track-138.mp3",
+   "name": "mixkit-track-138",
+   "category": "mystery",
+   "dur": 104.05,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 138",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/138/138.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 104.07,
+     "mean_volume_db": -25.9,
+     "max_volume_db": -10.5,
+     "silence_ratio": 0.08366033439031421,
+     "spectral_centroid_hz": 2254.9153160369187,
+     "spectral_flatness": 0.3078790307044983,
+     "energy_arc": "steady",
+     "bpm": 161,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.304,
+     "darkness": 0.224,
+     "orchestral_density": 0.5,
+     "rhythmic_aggression": 0.753
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/mixkit-track-588.mp3",
+   "name": "mixkit-track-588",
+   "category": "mystery",
+   "dur": 149.34,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 588",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/588/588.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 149.34,
+     "mean_volume_db": -24.4,
+     "max_volume_db": -4.3,
+     "silence_ratio": 0.08331215347529128,
+     "spectral_centroid_hz": 848.9643995656073,
+     "spectral_flatness": 0.012352333404123783,
+     "energy_arc": "falling",
+     "bpm": 117,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.806,
+     "darkness": 0.845,
+     "orchestral_density": 0.833,
+     "rhythmic_aggression": 0.398
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/mixkit-track-871.mp3",
+   "name": "mixkit-track-871",
+   "category": "mystery",
+   "dur": 101.33,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 871",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/871/871.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 101.33,
+     "mean_volume_db": -23.4,
+     "max_volume_db": -3.0,
+     "silence_ratio": 0.0371745090299023,
+     "spectral_centroid_hz": 1752.6485258958862,
+     "spectral_flatness": 0.22072207927703857,
+     "energy_arc": "steady",
+     "bpm": 92,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.57,
+     "darkness": 0.472,
+     "orchestral_density": 0.684,
+     "rhythmic_aggression": 0.528
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/mystery.mp3",
+   "name": "mystery",
+   "category": "mystery",
+   "dur": 64.06,
+   "bpm": null,
+   "tags": [
+    "mysterious",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Mystery!",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "title",
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 64.08,
+     "mean_volume_db": -27.5,
+     "max_volume_db": -7.7,
+     "silence_ratio": 0.03320750624219725,
+     "spectral_centroid_hz": 2000.8216525954772,
+     "spectral_flatness": 0.21445810794830322,
+     "energy_arc": "steady",
+     "bpm": 161,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.511,
+     "darkness": 0.379,
+     "orchestral_density": 0.698,
+     "rhythmic_aggression": 0.721
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/nervous.mp3",
+   "name": "nervous",
+   "category": "mystery",
+   "dur": 118.2,
+   "bpm": null,
+   "tags": [
+    "unnerving",
+    "mysterious",
+    "mystical"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Nervous",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 118.2,
+     "mean_volume_db": -26.9,
+     "max_volume_db": -1.9,
+     "silence_ratio": 0.15968686971235196,
+     "spectral_centroid_hz": 1355.4793986857699,
+     "spectral_flatness": 0.06872330605983734,
+     "energy_arc": "steady",
+     "bpm": 103,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.673,
+     "darkness": 0.583,
+     "orchestral_density": 0.63,
+     "rhythmic_aggression": 0.465
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/not-as-it-seems.mp3",
+   "name": "not-as-it-seems",
+   "category": "mystery",
+   "dur": 100.68,
+   "bpm": null,
+   "tags": [
+    "eerie",
+    "mystical",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Not As It Seems",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 100.7,
+     "mean_volume_db": -23.4,
+     "max_volume_db": -5.8,
+     "silence_ratio": 0.06222835153922542,
+     "spectral_centroid_hz": 1696.5918143305782,
+     "spectral_flatness": 0.22059278190135956,
+     "energy_arc": "steady",
+     "bpm": 161,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.515,
+     "darkness": 0.477,
+     "orchestral_density": 0.638,
+     "rhythmic_aggression": 0.692
+    }
+   },
+   "doc_quality": {
+    "score": 0.3,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/seven-off.mp3",
+   "name": "seven-off",
+   "category": "mystery",
+   "dur": 55.12,
+   "bpm": null,
+   "tags": [
+    "unnerving",
+    "eerie",
+    "mystical",
+    "mysterious",
+    "suspenseful",
+    "somber"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Seven Off",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 55.12,
+     "mean_volume_db": -25.8,
+     "max_volume_db": -4.2,
+     "silence_ratio": 0.07992167997097242,
+     "spectral_centroid_hz": 1474.164499007946,
+     "spectral_flatness": 0.17711783945560455,
+     "energy_arc": "steady",
+     "bpm": 70,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.633,
+     "darkness": 0.562,
+     "orchestral_density": 0.654,
+     "rhythmic_aggression": 0.403
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/spy-glass.mp3",
+   "name": "spy-glass",
+   "category": "mystery",
+   "dur": 226.98,
+   "bpm": null,
+   "tags": [
+    "grooving",
+    "mysterious"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Spy Glass",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "title",
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 227.0,
+     "mean_volume_db": -25.2,
+     "max_volume_db": -7.8,
+     "silence_ratio": 0.06778477092511012,
+     "spectral_centroid_hz": 2584.859496358851,
+     "spectral_flatness": 0.4623650312423706,
+     "energy_arc": "steady",
+     "bpm": 78,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.284,
+     "darkness": 0.155,
+     "orchestral_density": 0.426,
+     "rhythmic_aggression": 0.619
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/the-other-side-of-the-door.mp3",
+   "name": "the-other-side-of-the-door",
+   "category": "mystery",
+   "dur": 167.81,
+   "bpm": null,
+   "tags": [
+    "driving",
+    "mysterious",
+    "mystical"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "The Other Side of the Door",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 167.84,
+     "mean_volume_db": -25.7,
+     "max_volume_db": -7.1,
+     "silence_ratio": 0.0394046353670162,
+     "spectral_centroid_hz": 1457.654938116247,
+     "spectral_flatness": 0.16971097886562347,
+     "energy_arc": "steady",
+     "bpm": 96,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.623,
+     "darkness": 0.598,
+     "orchestral_density": 0.737,
+     "rhythmic_aggression": 0.458
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/the-path-of-the-goblin-king.mp3",
+   "name": "the-path-of-the-goblin-king",
+   "category": "mystery",
+   "dur": 206.37,
+   "bpm": null,
+   "tags": [
+    "mysterious",
+    "relaxed"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "The Path of the Goblin King",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 206.39,
+     "mean_volume_db": -24.5,
+     "max_volume_db": -2.0,
+     "silence_ratio": 0.008672900818838123,
+     "spectral_centroid_hz": 956.6231435558683,
+     "spectral_flatness": 0.15882796049118042,
+     "energy_arc": "rising",
+     "bpm": 60,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.829,
+     "darkness": 0.816,
+     "orchestral_density": 0.805,
+     "rhythmic_aggression": 0.354
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/willow-and-the-light.mp3",
+   "name": "willow-and-the-light",
+   "category": "mystery",
+   "dur": 192.05,
+   "bpm": null,
+   "tags": [
+    "mysterious",
+    "mystical"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Willow and the Light",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 192.08,
+     "mean_volume_db": -23.3,
+     "max_volume_db": -9.3,
+     "silence_ratio": 0.0,
+     "spectral_centroid_hz": 996.5476690421842,
+     "spectral_flatness": 0.1716793030500412,
+     "energy_arc": "steady",
+     "bpm": 89,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.681,
+     "darkness": 0.803,
+     "orchestral_density": 0.807,
+     "rhythmic_aggression": 0.353
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/mystery/zombie-hoodoo.mp3",
+   "name": "zombie-hoodoo",
+   "category": "mystery",
+   "dur": 86.83,
+   "bpm": null,
+   "tags": [
+    "unnerving",
+    "eerie",
+    "mystical",
+    "mysterious",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Zombie Hoodoo",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "mystery",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 86.86,
+     "mean_volume_db": -24.3,
+     "max_volume_db": -5.1,
+     "silence_ratio": 0.0925914575178448,
+     "spectral_centroid_hz": 504.1124123430954,
+     "spectral_flatness": 0.01772172935307026,
+     "energy_arc": "steady",
+     "bpm": 112,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.836,
+     "darkness": 0.934,
+     "orchestral_density": 0.81,
+     "rhythmic_aggression": 0.367
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:mysterious"
+    ]
+   }
+  }
+ ],
+ "dark_investigation": [
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/blue-feather.mp3",
+   "name": "blue-feather",
+   "category": "dark_investigation",
+   "dur": 278.07,
+   "bpm": null,
+   "tags": [
+    "calming",
+    "dark",
+    "eerie",
+    "mysterious",
+    "relaxed",
+    "somber"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Blue Feather",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 278.1,
+     "mean_volume_db": -27.2,
+     "max_volume_db": -5.1,
+     "silence_ratio": 0.28262733908665943,
+     "spectral_centroid_hz": 596.2623272716421,
+     "spectral_flatness": 0.015120459720492363,
+     "energy_arc": "arc",
+     "bpm": 78,
+     "is_sparse": true,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.727,
+     "darkness": 0.808,
+     "orchestral_density": 0.465,
+     "rhythmic_aggression": 0.264
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/constance.mp3",
+   "name": "constance",
+   "category": "dark_investigation",
+   "dur": 140.3,
+   "bpm": null,
+   "tags": [
+    "action",
+    "dark",
+    "epic",
+    "intense",
+    "mysterious",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Constance",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 140.32999999999998,
+     "mean_volume_db": -23.8,
+     "max_volume_db": -6.3,
+     "silence_ratio": 0.027661554906292313,
+     "spectral_centroid_hz": 962.6043053474721,
+     "spectral_flatness": 0.16031236946582794,
+     "energy_arc": "rising",
+     "bpm": 108,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.728,
+     "darkness": 0.8,
+     "orchestral_density": 0.769,
+     "rhythmic_aggression": 0.482
+    }
+   },
+   "doc_quality": {
+    "score": 0.54,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:epic",
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/controlled-chaos.mp3",
+   "name": "controlled-chaos",
+   "category": "dark_investigation",
+   "dur": 352.26,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "eerie",
+    "intense",
+    "mysterious",
+    "suspenseful",
+    "unnerving"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Controlled Chaos",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 352.29,
+     "mean_volume_db": -23.8,
+     "max_volume_db": -9.6,
+     "silence_ratio": 0.025846762610349426,
+     "spectral_centroid_hz": 2038.1146516112112,
+     "spectral_flatness": 0.37283405661582947,
+     "energy_arc": "falling",
+     "bpm": 70,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.356,
+     "darkness": 0.33,
+     "orchestral_density": 0.533,
+     "rhythmic_aggression": 0.5
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/drums-of-the-deep.mp3",
+   "name": "drums-of-the-deep",
+   "category": "dark_investigation",
+   "dur": 174.18,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "suspenseful",
+    "unnerving"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Drums of the Deep",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 174.21,
+     "mean_volume_db": -23.9,
+     "max_volume_db": -2.0,
+     "silence_ratio": 0.037532047528844495,
+     "spectral_centroid_hz": 439.67946560562905,
+     "spectral_flatness": 0.048274315893650055,
+     "energy_arc": "falling",
+     "bpm": 76,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.916,
+     "darkness": 0.963,
+     "orchestral_density": 0.877,
+     "rhythmic_aggression": 0.289
+    }
+   },
+   "doc_quality": {
+    "score": 0.3,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/interloper.mp3",
+   "name": "interloper",
+   "category": "dark_investigation",
+   "dur": 262.66,
+   "bpm": null,
+   "tags": [
+    "action",
+    "dark",
+    "eerie",
+    "epic",
+    "intense",
+    "mysterious"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Interloper",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 262.69,
+     "mean_volume_db": -23.0,
+     "max_volume_db": -2.0,
+     "silence_ratio": 0.05403297803494613,
+     "spectral_centroid_hz": 465.81253627031776,
+     "spectral_flatness": 0.03501398488879204,
+     "energy_arc": "falling",
+     "bpm": 129,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.892,
+     "darkness": 0.955,
+     "orchestral_density": 0.862,
+     "rhythmic_aggression": 0.491
+    }
+   },
+   "doc_quality": {
+    "score": 0.24,
+    "verdict": "prefer",
+    "reasons": [
+     "+soft:epic",
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/intrepid.mp3",
+   "name": "intrepid",
+   "category": "dark_investigation",
+   "dur": 190.98,
+   "bpm": null,
+   "tags": [
+    "eerie",
+    "mysterious",
+    "somber",
+    "dark"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Intrepid",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 191.01,
+     "mean_volume_db": -23.3,
+     "max_volume_db": -5.8,
+     "silence_ratio": 0.05201221402020837,
+     "spectral_centroid_hz": 1157.9751524788421,
+     "spectral_flatness": 0.19335496425628662,
+     "energy_arc": "falling",
+     "bpm": 86,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.652,
+     "darkness": 0.7,
+     "orchestral_density": 0.687,
+     "rhythmic_aggression": 0.423
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/mixkit-track-140.mp3",
+   "name": "mixkit-track-140",
+   "category": "dark_investigation",
+   "dur": 99.74,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 140",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/140/140.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 99.75999999999999,
+     "mean_volume_db": -26.4,
+     "max_volume_db": -10.4,
+     "silence_ratio": 0.078114915797915,
+     "spectral_centroid_hz": 1589.2982226474694,
+     "spectral_flatness": 0.2321953922510147,
+     "energy_arc": "steady",
+     "bpm": 66,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.495,
+     "darkness": 0.505,
+     "orchestral_density": 0.596,
+     "rhythmic_aggression": 0.354
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/mixkit-track-188.mp3",
+   "name": "mixkit-track-188",
+   "category": "dark_investigation",
+   "dur": 226.3,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 188",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/188/188.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 226.32,
+     "mean_volume_db": -23.1,
+     "max_volume_db": -6.3,
+     "silence_ratio": 0.04623868416401555,
+     "spectral_centroid_hz": 734.0936626631558,
+     "spectral_flatness": 0.06911302357912064,
+     "energy_arc": "arc",
+     "bpm": 136,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.786,
+     "darkness": 0.9,
+     "orchestral_density": 0.837,
+     "rhythmic_aggression": 0.49
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/mixkit-track-565.mp3",
+   "name": "mixkit-track-565",
+   "category": "dark_investigation",
+   "dur": 294.9,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 565",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/565/565.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 294.92,
+     "mean_volume_db": -25.8,
+     "max_volume_db": -8.7,
+     "silence_ratio": 0.023080472670554728,
+     "spectral_centroid_hz": 1232.1959187391287,
+     "spectral_flatness": 0.12120077013969421,
+     "energy_arc": "steady",
+     "bpm": 112,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.68,
+     "darkness": 0.708,
+     "orchestral_density": 0.821,
+     "rhythmic_aggression": 0.449
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/mixkit-track-612.mp3",
+   "name": "mixkit-track-612",
+   "category": "dark_investigation",
+   "dur": 193.65,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 612",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/612/612.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 193.65,
+     "mean_volume_db": -24.5,
+     "max_volume_db": -10.0,
+     "silence_ratio": 0.08045407694293828,
+     "spectral_centroid_hz": 2614.940575616146,
+     "spectral_flatness": 0.3997156620025635,
+     "energy_arc": "rising",
+     "bpm": 65,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.225,
+     "darkness": 0.146,
+     "orchestral_density": 0.403,
+     "rhythmic_aggression": 0.513
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/mixkit-track-76.mp3",
+   "name": "mixkit-track-76",
+   "category": "dark_investigation",
+   "dur": 98.61,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 76",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/76/76.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 98.61,
+     "mean_volume_db": -23.8,
+     "max_volume_db": -7.5,
+     "silence_ratio": 0.02402694452895244,
+     "spectral_centroid_hz": 1556.248107154805,
+     "spectral_flatness": 0.21728913486003876,
+     "energy_arc": "falling",
+     "bpm": 103,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.558,
+     "darkness": 0.558,
+     "orchestral_density": 0.712,
+     "rhythmic_aggression": 0.504
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/oppressive-gloom.mp3",
+   "name": "oppressive-gloom",
+   "category": "dark_investigation",
+   "dur": 199.39,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "eerie",
+    "epic",
+    "mysterious",
+    "somber",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Oppressive Gloom",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 199.42000000000002,
+     "mean_volume_db": -24.3,
+     "max_volume_db": -6.8,
+     "silence_ratio": 0.015874380704041718,
+     "spectral_centroid_hz": 865.7829910457085,
+     "spectral_flatness": 0.09456955641508102,
+     "energy_arc": "steady",
+     "bpm": 60,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.784,
+     "darkness": 0.862,
+     "orchestral_density": 0.865,
+     "rhythmic_aggression": 0.198
+    }
+   },
+   "doc_quality": {
+    "score": 0.54,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:epic",
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/ossuary-3-words.mp3",
+   "name": "ossuary-3-words",
+   "category": "dark_investigation",
+   "dur": 236.83,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "eerie",
+    "mysterious"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Ossuary 3 - Words",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 236.85,
+     "mean_volume_db": -25.2,
+     "max_volume_db": -5.9,
+     "silence_ratio": 0.030754751952712683,
+     "spectral_centroid_hz": 1975.5648007201075,
+     "spectral_flatness": 0.3234173655509949,
+     "energy_arc": "steady",
+     "bpm": 99,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.469,
+     "darkness": 0.364,
+     "orchestral_density": 0.58,
+     "rhythmic_aggression": 0.656
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/past-the-edge.mp3",
+   "name": "past-the-edge",
+   "category": "dark_investigation",
+   "dur": 78.18,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "eerie",
+    "mysterious",
+    "somber"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Past the Edge",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "title",
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 78.21000000000001,
+     "mean_volume_db": -23.7,
+     "max_volume_db": -6.0,
+     "silence_ratio": 0.05426201253036695,
+     "spectral_centroid_hz": 1140.9704235117802,
+     "spectral_flatness": 0.06955264508724213,
+     "energy_arc": "steady",
+     "bpm": 185,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.703,
+     "darkness": 0.736,
+     "orchestral_density": 0.822,
+     "rhythmic_aggression": 0.173
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/redletter.mp3",
+   "name": "redletter",
+   "category": "dark_investigation",
+   "dur": 268.15,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "eerie",
+    "intense",
+    "suspenseful",
+    "unnerving"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Redletter",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 268.2,
+     "mean_volume_db": -23.6,
+     "max_volume_db": -5.8,
+     "silence_ratio": 0.01757851230425056,
+     "spectral_centroid_hz": 802.6303092829017,
+     "spectral_flatness": 0.043179016560316086,
+     "energy_arc": "arc",
+     "bpm": 66,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.821,
+     "darkness": 0.899,
+     "orchestral_density": 0.919,
+     "rhythmic_aggression": 0.171
+    }
+   },
+   "doc_quality": {
+    "score": 0.3,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/reign-supreme.mp3",
+   "name": "reign-supreme",
+   "category": "dark_investigation",
+   "dur": 66.06,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "eerie",
+    "mysterious",
+    "somber"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Reign Supreme",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 66.09,
+     "mean_volume_db": -22.5,
+     "max_volume_db": -2.5,
+     "silence_ratio": 0.05399151157512483,
+     "spectral_centroid_hz": 1498.3532947049775,
+     "spectral_flatness": 0.20589697360992432,
+     "energy_arc": "steady",
+     "bpm": 144,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.611,
+     "darkness": 0.563,
+     "orchestral_density": 0.669,
+     "rhythmic_aggression": 0.715
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/sneak-n-get-caught.mp3",
+   "name": "sneak-n-get-caught",
+   "category": "dark_investigation",
+   "dur": 52.4,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "mysterious",
+    "epic",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Sneak 'n Get Caught",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 52.43,
+     "mean_volume_db": -23.6,
+     "max_volume_db": -2.3,
+     "silence_ratio": 0.18691848178523746,
+     "spectral_centroid_hz": 1144.8107052170585,
+     "spectral_flatness": 0.0735575407743454,
+     "energy_arc": "rising",
+     "bpm": 172,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.651,
+     "darkness": 0.645,
+     "orchestral_density": 0.575,
+     "rhythmic_aggression": 0.588
+    }
+   },
+   "doc_quality": {
+    "score": 0.54,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:epic",
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/spider-eyes.mp3",
+   "name": "spider-eyes",
+   "category": "dark_investigation",
+   "dur": 215.33,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "eerie",
+    "mysterious",
+    "suspenseful",
+    "unnerving"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Spider Eyes",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 215.35,
+     "mean_volume_db": -26.7,
+     "max_volume_db": -4.6,
+     "silence_ratio": 0.16815636405850942,
+     "spectral_centroid_hz": 1328.434991396774,
+     "spectral_flatness": 0.13908816874027252,
+     "energy_arc": "steady",
+     "bpm": 152,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.614,
+     "darkness": 0.57,
+     "orchestral_density": 0.535,
+     "rhythmic_aggression": 0.675
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/static-motion.mp3",
+   "name": "static-motion",
+   "category": "dark_investigation",
+   "dur": 188.79,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "eerie",
+    "mysterious",
+    "suspenseful",
+    "unnerving"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Static Motion",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "title",
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 188.81,
+     "mean_volume_db": -23.7,
+     "max_volume_db": -5.6,
+     "silence_ratio": 0.04678952915629469,
+     "spectral_centroid_hz": 787.1265857614998,
+     "spectral_flatness": 0.10994598269462585,
+     "energy_arc": "steady",
+     "bpm": 185,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.78,
+     "darkness": 0.869,
+     "orchestral_density": 0.791,
+     "rhythmic_aggression": 0.225
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/dark_investigation/thunder-dreams.mp3",
+   "name": "thunder-dreams",
+   "category": "dark_investigation",
+   "dur": 230.4,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "mysterious",
+    "suspenseful",
+    "unnerving"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Thunder Dreams",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "dark_investigation",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 230.43,
+     "mean_volume_db": -24.8,
+     "max_volume_db": -4.2,
+     "silence_ratio": 0.052751126155448504,
+     "spectral_centroid_hz": 599.2840868401486,
+     "spectral_flatness": 0.012894648127257824,
+     "energy_arc": "arc",
+     "bpm": 185,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.895,
+     "darkness": 0.962,
+     "orchestral_density": 0.889,
+     "rhythmic_aggression": 0.158
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:mysterious"
+    ]
+   }
+  }
+ ],
+ "emotional_piano": [
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/emotional_piano/danse-of-questionable-tuning.mp3",
+   "name": "danse-of-questionable-tuning",
+   "category": "emotional_piano",
+   "dur": 126.2,
+   "bpm": null,
+   "tags": [
+    "bouncy",
+    "grooving",
+    "somber"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Danse of Questionable Tuning",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "emotional_piano",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 126.22,
+     "mean_volume_db": -24.4,
+     "max_volume_db": -5.0,
+     "silence_ratio": 0.008573015369988909,
+     "spectral_centroid_hz": 1644.1381079390414,
+     "spectral_flatness": 0.12527692317962646,
+     "energy_arc": "steady",
+     "bpm": 129,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.637,
+     "darkness": 0.557,
+     "orchestral_density": 0.843,
+     "rhythmic_aggression": 0.566
+    }
+   },
+   "doc_quality": {
+    "score": -0.13,
+    "verdict": "neutral",
+    "reasons": [
+     "-soft:bouncy",
+     "+soft:piano"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/emotional_piano/lithium.mp3",
+   "name": "lithium",
+   "category": "emotional_piano",
+   "dur": 156.06,
+   "bpm": null,
+   "tags": [
+    "somber"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Lithium",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "emotional_piano",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 156.07999999999998,
+     "mean_volume_db": -26.7,
+     "max_volume_db": -6.9,
+     "silence_ratio": 0.0852467132239877,
+     "spectral_centroid_hz": 928.1459528129745,
+     "spectral_flatness": 0.024738021194934845,
+     "energy_arc": "steady",
+     "bpm": 70,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.777,
+     "darkness": 0.809,
+     "orchestral_density": 0.816,
+     "rhythmic_aggression": 0.202
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:piano"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/emotional_piano/mixkit-track-493.mp3",
+   "name": "mixkit-track-493",
+   "category": "emotional_piano",
+   "dur": 97.02,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 493",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/493/493.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "emotional_piano",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 97.03999999999999,
+     "mean_volume_db": -25.3,
+     "max_volume_db": -11.0,
+     "silence_ratio": 0.03486441673536686,
+     "spectral_centroid_hz": 1017.7911125260204,
+     "spectral_flatness": 0.1536535620689392,
+     "energy_arc": "steady",
+     "bpm": 185,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.659,
+     "darkness": 0.776,
+     "orchestral_density": 0.763,
+     "rhythmic_aggression": 0.211
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:piano"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/emotional_piano/mixkit-track-601.mp3",
+   "name": "mixkit-track-601",
+   "category": "emotional_piano",
+   "dur": 205.9,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 601",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/601/601.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "emotional_piano",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 205.9,
+     "mean_volume_db": -25.5,
+     "max_volume_db": -11.4,
+     "silence_ratio": 0.08615017969888294,
+     "spectral_centroid_hz": 1079.562899862474,
+     "spectral_flatness": 0.08616440743207932,
+     "energy_arc": "steady",
+     "bpm": 144,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.624,
+     "darkness": 0.735,
+     "orchestral_density": 0.745,
+     "rhythmic_aggression": 0.482
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:piano"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/emotional_piano/mixkit-track-657.mp3",
+   "name": "mixkit-track-657",
+   "category": "emotional_piano",
+   "dur": 145.82,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 657",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/657/657.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "emotional_piano",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 145.82,
+     "mean_volume_db": -24.6,
+     "max_volume_db": -8.2,
+     "silence_ratio": 0.029578754628994654,
+     "spectral_centroid_hz": 1414.16535604397,
+     "spectral_flatness": 0.07142235338687897,
+     "energy_arc": "steady",
+     "bpm": 92,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.641,
+     "darkness": 0.646,
+     "orchestral_density": 0.865,
+     "rhythmic_aggression": 0.294
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:piano"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/emotional_piano/mixkit-track-659.mp3",
+   "name": "mixkit-track-659",
+   "category": "emotional_piano",
+   "dur": 158.59,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 659",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/659/659.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "emotional_piano",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 158.62,
+     "mean_volume_db": -23.8,
+     "max_volume_db": -4.3,
+     "silence_ratio": 0.017065130500567394,
+     "spectral_centroid_hz": 412.2246548087181,
+     "spectral_flatness": 0.0004669146437663585,
+     "energy_arc": "falling",
+     "bpm": 89,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.911,
+     "darkness": 0.989,
+     "orchestral_density": 0.968,
+     "rhythmic_aggression": 0.252
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:piano"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/emotional_piano/piece-for-disaffected-piano-one.mp3",
+   "name": "piece-for-disaffected-piano-one",
+   "category": "emotional_piano",
+   "dur": 188.45,
+   "bpm": null,
+   "tags": [],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Piece for Disaffected Piano One",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "emotional_piano",
+    "confidence": 0.85,
+    "voted_by": [
+     "title",
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 188.47,
+     "mean_volume_db": -24.3,
+     "max_volume_db": -3.0,
+     "silence_ratio": 0.11448510638297872,
+     "spectral_centroid_hz": 464.9376467157732,
+     "spectral_flatness": 0.009362548589706421,
+     "energy_arc": "arc",
+     "bpm": 60,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.856,
+     "darkness": 0.921,
+     "orchestral_density": 0.78,
+     "rhythmic_aggression": 0.166
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:piano"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/emotional_piano/vanes.mp3",
+   "name": "vanes",
+   "category": "emotional_piano",
+   "dur": 105.95,
+   "bpm": null,
+   "tags": [
+    "somber",
+    "unnerving"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Vanes",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "emotional_piano",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 105.97999999999999,
+     "mean_volume_db": -25.0,
+     "max_volume_db": -6.4,
+     "silence_ratio": 0.09917778826193623,
+     "spectral_centroid_hz": 2203.883050280762,
+     "spectral_flatness": 0.3555442988872528,
+     "energy_arc": "steady",
+     "bpm": 161,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.338,
+     "darkness": 0.221,
+     "orchestral_density": 0.418,
+     "rhythmic_aggression": 0.86
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:piano"
+    ]
+   }
+  }
+ ],
+ "ambient": [
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/ambient/aretes.mp3",
+   "name": "aretes",
+   "category": "ambient",
+   "dur": 276.43,
+   "bpm": null,
+   "tags": [
+    "calming",
+    "uplifting"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Aretes",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "ambient",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 276.48,
+     "mean_volume_db": -24.3,
+     "max_volume_db": -4.5,
+     "silence_ratio": 0.034042393663194434,
+     "spectral_centroid_hz": 639.0375484808187,
+     "spectral_flatness": 0.004177686758339405,
+     "energy_arc": "rising",
+     "bpm": 96,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.891,
+     "darkness": 0.961,
+     "orchestral_density": 0.933,
+     "rhythmic_aggression": 0.292
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:ambient"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/ambient/autumn-day.mp3",
+   "name": "autumn-day",
+   "category": "ambient",
+   "dur": 184.82,
+   "bpm": null,
+   "tags": [
+    "bright",
+    "calming"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Autumn Day",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "ambient",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 184.87,
+     "mean_volume_db": -22.6,
+     "max_volume_db": -6.8,
+     "silence_ratio": 0.013507929896684156,
+     "spectral_centroid_hz": 1007.9490024155645,
+     "spectral_flatness": 0.17122825980186462,
+     "energy_arc": "steady",
+     "bpm": 63,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.697,
+     "darkness": 0.79,
+     "orchestral_density": 0.783,
+     "rhythmic_aggression": 0.269
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:ambient"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/ambient/eastminster.mp3",
+   "name": "eastminster",
+   "category": "ambient",
+   "dur": 405.05,
+   "bpm": null,
+   "tags": [
+    "calming",
+    "relaxed"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Eastminster",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "ambient",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 405.08,
+     "mean_volume_db": -24.2,
+     "max_volume_db": -1.9,
+     "silence_ratio": 0.014881862841907772,
+     "spectral_centroid_hz": 1537.1774886762096,
+     "spectral_flatness": 0.17096643149852753,
+     "energy_arc": "steady",
+     "bpm": 62,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.687,
+     "darkness": 0.583,
+     "orchestral_density": 0.78,
+     "rhythmic_aggression": 0.373
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:ambient"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/ambient/finding-movement.mp3",
+   "name": "finding-movement",
+   "category": "ambient",
+   "dur": 116.06,
+   "bpm": null,
+   "tags": [
+    "calming",
+    "uplifting"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Finding Movement",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "ambient",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 116.11,
+     "mean_volume_db": -24.6,
+     "max_volume_db": -5.2,
+     "silence_ratio": 0.04337664283868745,
+     "spectral_centroid_hz": 2154.6302667433533,
+     "spectral_flatness": 0.3205605447292328,
+     "energy_arc": "steady",
+     "bpm": 136,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.422,
+     "darkness": 0.286,
+     "orchestral_density": 0.56,
+     "rhythmic_aggression": 0.816
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:ambient"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/ambient/immersed.mp3",
+   "name": "immersed",
+   "category": "ambient",
+   "dur": 248.97,
+   "bpm": null,
+   "tags": [
+    "calming",
+    "mystical",
+    "relaxed",
+    "somber"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Immersed",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "ambient",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 249.0,
+     "mean_volume_db": -23.7,
+     "max_volume_db": -3.7,
+     "silence_ratio": 0.016379983935742973,
+     "spectral_centroid_hz": 862.0611903800992,
+     "spectral_flatness": 0.07888884097337723,
+     "energy_arc": "steady",
+     "bpm": 103,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.832,
+     "darkness": 0.867,
+     "orchestral_density": 0.881,
+     "rhythmic_aggression": 0.41
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:ambient"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/ambient/mixkit-track-127.mp3",
+   "name": "mixkit-track-127",
+   "category": "ambient",
+   "dur": 133.78,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 127",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/127/127.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "ambient",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 133.83,
+     "mean_volume_db": -26.0,
+     "max_volume_db": -9.3,
+     "silence_ratio": 0.10601953224239705,
+     "spectral_centroid_hz": 2374.483622400263,
+     "spectral_flatness": 0.41170915961265564,
+     "energy_arc": "falling",
+     "bpm": 62,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.246,
+     "darkness": 0.139,
+     "orchestral_density": 0.356,
+     "rhythmic_aggression": 0.537
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:ambient"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/ambient/mixkit-track-139.mp3",
+   "name": "mixkit-track-139",
+   "category": "ambient",
+   "dur": 113.21,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 139",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/139/139.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "ambient",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 113.24000000000001,
+     "mean_volume_db": -26.9,
+     "max_volume_db": -10.6,
+     "silence_ratio": 0.0735994259978806,
+     "spectral_centroid_hz": 2148.0874407461374,
+     "spectral_flatness": 0.3135639429092407,
+     "energy_arc": "falling",
+     "bpm": 99,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.349,
+     "darkness": 0.271,
+     "orchestral_density": 0.512,
+     "rhythmic_aggression": 0.595
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:ambient"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/ambient/mixkit-track-292.mp3",
+   "name": "mixkit-track-292",
+   "category": "ambient",
+   "dur": 108.04,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 292",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/292/292.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "ambient",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 108.03999999999999,
+     "mean_volume_db": -26.5,
+     "max_volume_db": -10.8,
+     "silence_ratio": 0.10157319511292114,
+     "spectral_centroid_hz": 447.5560799733127,
+     "spectral_flatness": 0.0005375902401283383,
+     "energy_arc": "steady",
+     "bpm": 172,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.777,
+     "darkness": 0.932,
+     "orchestral_density": 0.813,
+     "rhythmic_aggression": 0.412
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:ambient"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/ambient/mixkit-track-580.mp3",
+   "name": "mixkit-track-580",
+   "category": "ambient",
+   "dur": 167.81,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 580",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/580/580.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "ambient",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 167.81,
+     "mean_volume_db": -23.1,
+     "max_volume_db": -7.3,
+     "silence_ratio": 0.02395255348310589,
+     "spectral_centroid_hz": 284.6014974883101,
+     "spectral_flatness": 0.009944824501872063,
+     "energy_arc": "steady",
+     "bpm": 99,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.84,
+     "darkness": 0.982,
+     "orchestral_density": 0.945,
+     "rhythmic_aggression": 0.245
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:ambient"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/ambient/mixkit-track-682.mp3",
+   "name": "mixkit-track-682",
+   "category": "ambient",
+   "dur": 113.19,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 682",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/682/682.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "ambient",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 113.19,
+     "mean_volume_db": -25.8,
+     "max_volume_db": -10.3,
+     "silence_ratio": 0.06176118031628236,
+     "spectral_centroid_hz": 537.5346398901241,
+     "spectral_flatness": 0.0020423014648258686,
+     "energy_arc": "steady",
+     "bpm": 92,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.806,
+     "darkness": 0.958,
+     "orchestral_density": 0.884,
+     "rhythmic_aggression": 0.201
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:ambient"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/ambient/mixkit-track-749.mp3",
+   "name": "mixkit-track-749",
+   "category": "ambient",
+   "dur": 117.73,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 749",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/749/749.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "ambient",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 117.75999999999999,
+     "mean_volume_db": -25.0,
+     "max_volume_db": -9.8,
+     "silence_ratio": 0.04194087126358696,
+     "spectral_centroid_hz": 839.1971619940333,
+     "spectral_flatness": 0.03447224944829941,
+     "energy_arc": "steady",
+     "bpm": 108,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.752,
+     "darkness": 0.87,
+     "orchestral_density": 0.884,
+     "rhythmic_aggression": 0.302
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:ambient"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/ambient/thunderbird.mp3",
+   "name": "thunderbird",
+   "category": "ambient",
+   "dur": 361.61,
+   "bpm": null,
+   "tags": [
+    "somber",
+    "relaxed",
+    "mystical",
+    "calming"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Thunderbird",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "ambient",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 361.64,
+     "mean_volume_db": -24.7,
+     "max_volume_db": -11.7,
+     "silence_ratio": 0.016151288574272758,
+     "spectral_centroid_hz": 650.2675657249008,
+     "spectral_flatness": 0.09590813517570496,
+     "energy_arc": "steady",
+     "bpm": 172,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.756,
+     "darkness": 0.946,
+     "orchestral_density": 0.862,
+     "rhythmic_aggression": 0.475
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:ambient"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/ambient/what-is-love.mp3",
+   "name": "what-is-love",
+   "category": "ambient",
+   "dur": 207.99,
+   "bpm": null,
+   "tags": [
+    "calming",
+    "relaxed"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "What Is Love",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "ambient",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 208.01,
+     "mean_volume_db": -25.1,
+     "max_volume_db": -11.7,
+     "silence_ratio": 0.023658593336858803,
+     "spectral_centroid_hz": 2846.5215561447244,
+     "spectral_flatness": 0.5038925409317017,
+     "energy_arc": "steady",
+     "bpm": 78,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.254,
+     "darkness": 0.184,
+     "orchestral_density": 0.507,
+     "rhythmic_aggression": 0.552
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:ambient"
+    ]
+   }
+  }
+ ],
+ "historical_epic": [
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/historical_epic/discover.mp3",
+   "name": "discover",
+   "category": "historical_epic",
+   "dur": 102.43,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Discover",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/680/680.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "historical_epic",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 102.43,
+     "mean_volume_db": -25.2,
+     "max_volume_db": -7.0,
+     "silence_ratio": 0.0797341208630284,
+     "spectral_centroid_hz": 2076.4212167018454,
+     "spectral_flatness": 0.3912864923477173,
+     "energy_arc": "steady",
+     "bpm": 152,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.362,
+     "darkness": 0.275,
+     "orchestral_density": 0.414,
+     "rhythmic_aggression": 0.894
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:historical",
+     "+soft:epic"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/historical_epic/epical-drums-05.mp3",
+   "name": "epical-drums-05",
+   "category": "historical_epic",
+   "dur": 96.0,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Epical Drums 05",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/724/724.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "historical_epic",
+    "confidence": 0.85,
+    "voted_by": [
+     "title",
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 96.03,
+     "mean_volume_db": -26.0,
+     "max_volume_db": -12.6,
+     "silence_ratio": 0.07258478600437362,
+     "spectral_centroid_hz": 1049.651807143417,
+     "spectral_flatness": 0.1466464400291443,
+     "energy_arc": "steady",
+     "bpm": 123,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.608,
+     "darkness": 0.74,
+     "orchestral_density": 0.702,
+     "rhythmic_aggression": 0.464
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:historical",
+     "+soft:epic"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/historical_epic/free-orchestral-stock-music.mp3",
+   "name": "free-orchestral-stock-music",
+   "category": "historical_epic",
+   "dur": 144.04,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Free Orchestral Stock Music",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/587/587.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "historical_epic",
+    "confidence": 0.85,
+    "voted_by": [
+     "title",
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 144.04,
+     "mean_volume_db": -24.3,
+     "max_volume_db": -7.2,
+     "silence_ratio": 0.0646219175229103,
+     "spectral_centroid_hz": 1500.280889603712,
+     "spectral_flatness": 0.12020613253116608,
+     "energy_arc": "steady",
+     "bpm": 185,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.586,
+     "darkness": 0.577,
+     "orchestral_density": 0.746,
+     "rhythmic_aggression": 0.22
+    }
+   },
+   "doc_quality": {
+    "score": 0.54,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:historical",
+     "+soft:epic",
+     "+soft:orchestral"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/historical_epic/long-road-ahead-b.mp3",
+   "name": "long-road-ahead-b",
+   "category": "historical_epic",
+   "dur": 103.97,
+   "bpm": null,
+   "tags": [
+    "epic",
+    "mystical",
+    "somber"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Long Road Ahead B",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "historical_epic",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 103.99000000000001,
+     "mean_volume_db": -27.1,
+     "max_volume_db": -9.8,
+     "silence_ratio": 0.10345055293778249,
+     "spectral_centroid_hz": 681.7329113118082,
+     "spectral_flatness": 0.05925099551677704,
+     "energy_arc": "falling",
+     "bpm": 112,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.762,
+     "darkness": 0.884,
+     "orchestral_density": 0.744,
+     "rhythmic_aggression": 0.382
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:historical",
+     "+soft:epic"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/historical_epic/majestic-hills.mp3",
+   "name": "majestic-hills",
+   "category": "historical_epic",
+   "dur": 199.16,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "epic",
+    "somber"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Majestic Hills",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "historical_epic",
+    "confidence": 0.85,
+    "voted_by": [
+     "title",
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 199.18,
+     "mean_volume_db": -26.7,
+     "max_volume_db": -4.9,
+     "silence_ratio": 0.04188841249121398,
+     "spectral_centroid_hz": 647.9816074836547,
+     "spectral_flatness": 0.05026846379041672,
+     "energy_arc": "rising",
+     "bpm": 117,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.899,
+     "darkness": 0.941,
+     "orchestral_density": 0.867,
+     "rhythmic_aggression": 0.469
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:historical",
+     "+soft:epic"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/historical_epic/mixkit-track-322.mp3",
+   "name": "mixkit-track-322",
+   "category": "historical_epic",
+   "dur": 121.18,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 322",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/322/322.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "historical_epic",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 121.18,
+     "mean_volume_db": -25.2,
+     "max_volume_db": -4.3,
+     "silence_ratio": 0.12797962535071794,
+     "spectral_centroid_hz": 1050.3637680537847,
+     "spectral_flatness": 0.08517719805240631,
+     "energy_arc": "steady",
+     "bpm": 144,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.71,
+     "darkness": 0.718,
+     "orchestral_density": 0.67,
+     "rhythmic_aggression": 0.594
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:historical",
+     "+soft:epic"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/historical_epic/mixkit-track-614.mp3",
+   "name": "mixkit-track-614",
+   "category": "historical_epic",
+   "dur": 160.42,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 614",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/614/614.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "historical_epic",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 160.42000000000002,
+     "mean_volume_db": -24.3,
+     "max_volume_db": -5.8,
+     "silence_ratio": 0.12725976810871464,
+     "spectral_centroid_hz": 2094.801105366725,
+     "spectral_flatness": 0.15454813838005066,
+     "energy_arc": "steady",
+     "bpm": 144,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.412,
+     "darkness": 0.295,
+     "orchestral_density": 0.593,
+     "rhythmic_aggression": 0.632
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:historical",
+     "+soft:epic"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/historical_epic/mixkit-track-671.mp3",
+   "name": "mixkit-track-671",
+   "category": "historical_epic",
+   "dur": 113.03,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 671",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/671/671.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "historical_epic",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 113.03,
+     "mean_volume_db": -24.5,
+     "max_volume_db": -4.8,
+     "silence_ratio": 0.05212490489250642,
+     "spectral_centroid_hz": 777.6626934384702,
+     "spectral_flatness": 0.09108076244592667,
+     "energy_arc": "steady",
+     "bpm": 103,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.811,
+     "darkness": 0.873,
+     "orchestral_density": 0.802,
+     "rhythmic_aggression": 0.419
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:historical",
+     "+soft:epic"
+    ]
+   }
+  }
+ ],
+ "military_tension": [
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/military_tension/evil-march.mp3",
+   "name": "evil-march",
+   "category": "military_tension",
+   "dur": 71.02,
+   "bpm": null,
+   "tags": [
+    "action",
+    "driving",
+    "intense"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Evil March",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "military_tension",
+    "confidence": 0.85,
+    "voted_by": [
+     "title",
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 71.05,
+     "mean_volume_db": -22.1,
+     "max_volume_db": -1.9,
+     "silence_ratio": 0.08219467980295567,
+     "spectral_centroid_hz": 2267.4184854878185,
+     "spectral_flatness": 0.3940314054489136,
+     "energy_arc": "falling",
+     "bpm": 99,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.35,
+     "darkness": 0.198,
+     "orchestral_density": 0.406,
+     "rhythmic_aggression": 0.751
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:tension"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/military_tension/exciting-trailer.mp3",
+   "name": "exciting-trailer",
+   "category": "military_tension",
+   "dur": 75.08,
+   "bpm": null,
+   "tags": [
+    "action",
+    "aggressive",
+    "dark",
+    "driving",
+    "epic",
+    "intense"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Exciting Trailer",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "military_tension",
+    "confidence": 0.85,
+    "voted_by": [
+     "title",
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 75.1,
+     "mean_volume_db": -23.9,
+     "max_volume_db": -3.9,
+     "silence_ratio": 0.054383728362183754,
+     "spectral_centroid_hz": 978.1431478470656,
+     "spectral_flatness": 0.08643294870853424,
+     "energy_arc": "steady",
+     "bpm": 60,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.772,
+     "darkness": 0.795,
+     "orchestral_density": 0.803,
+     "rhythmic_aggression": 0.231
+    }
+   },
+   "doc_quality": {
+    "score": 0.24,
+    "verdict": "prefer",
+    "reasons": [
+     "+soft:epic",
+     "+soft:tension"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/military_tension/failing-defense.mp3",
+   "name": "failing-defense",
+   "category": "military_tension",
+   "dur": 105.5,
+   "bpm": null,
+   "tags": [
+    "action",
+    "aggressive",
+    "intense",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Failing Defense",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "military_tension",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 105.53,
+     "mean_volume_db": -24.6,
+     "max_volume_db": -7.0,
+     "silence_ratio": 0.05605438264000758,
+     "spectral_centroid_hz": 801.1903335493336,
+     "spectral_flatness": 0.09092985093593597,
+     "energy_arc": "rising",
+     "bpm": 172,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.768,
+     "darkness": 0.862,
+     "orchestral_density": 0.795,
+     "rhythmic_aggression": 0.546
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:tension"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/military_tension/prelude-and-action.mp3",
+   "name": "prelude-and-action",
+   "category": "military_tension",
+   "dur": 98.85,
+   "bpm": null,
+   "tags": [
+    "action",
+    "driving",
+    "intense",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Prelude and Action",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "military_tension",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 98.87,
+     "mean_volume_db": -23.1,
+     "max_volume_db": -5.3,
+     "silence_ratio": 0.02628293719024982,
+     "spectral_centroid_hz": 879.3208490010217,
+     "spectral_flatness": 0.15242443978786469,
+     "energy_arc": "steady",
+     "bpm": 172,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.756,
+     "darkness": 0.836,
+     "orchestral_density": 0.78,
+     "rhythmic_aggression": 0.618
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:tension"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/military_tension/the-escalation.mp3",
+   "name": "the-escalation",
+   "category": "military_tension",
+   "dur": 327.34,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "driving",
+    "action",
+    "intense"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "The Escalation",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "military_tension",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 327.37,
+     "mean_volume_db": -21.9,
+     "max_volume_db": -2.6,
+     "silence_ratio": 0.04425664844060238,
+     "spectral_centroid_hz": 2337.3709648384333,
+     "spectral_flatness": 0.4637489318847656,
+     "energy_arc": "falling",
+     "bpm": 81,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.349,
+     "darkness": 0.195,
+     "orchestral_density": 0.469,
+     "rhythmic_aggression": 0.664
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:tension"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/military_tension/truth-of-the-legend.mp3",
+   "name": "truth-of-the-legend",
+   "category": "military_tension",
+   "dur": 93.02,
+   "bpm": null,
+   "tags": [
+    "action",
+    "dark",
+    "driving",
+    "epic",
+    "intense"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Truth of the Legend",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "military_tension",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 93.05,
+     "mean_volume_db": -24.8,
+     "max_volume_db": -7.0,
+     "silence_ratio": 0.0891216120365395,
+     "spectral_centroid_hz": 3599.2710914654494,
+     "spectral_flatness": 0.611440896987915,
+     "energy_arc": "steady",
+     "bpm": 66,
+     "is_sparse": false,
+     "is_bright": true,
+     "is_dynamic": true,
+     "tension": 0.272,
+     "darkness": 0.141,
+     "orchestral_density": 0.387,
+     "rhythmic_aggression": 0.573
+    }
+   },
+   "doc_quality": {
+    "score": 0.24,
+    "verdict": "prefer",
+    "reasons": [
+     "+soft:epic",
+     "+soft:tension"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/military_tension/unity.mp3",
+   "name": "unity",
+   "category": "military_tension",
+   "dur": 264.07,
+   "bpm": null,
+   "tags": [
+    "action",
+    "driving",
+    "intense"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Unity",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "military_tension",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 264.1,
+     "mean_volume_db": -24.7,
+     "max_volume_db": -8.6,
+     "silence_ratio": 0.0638065694812571,
+     "spectral_centroid_hz": 1350.0864109085533,
+     "spectral_flatness": 0.26571354269981384,
+     "energy_arc": "steady",
+     "bpm": 144,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.549,
+     "darkness": 0.599,
+     "orchestral_density": 0.584,
+     "rhythmic_aggression": 0.717
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:tension"
+    ]
+   }
+  }
+ ],
+ "tech_cyber": [
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/tech_cyber/brain-dance.mp3",
+   "name": "brain-dance",
+   "category": "tech_cyber",
+   "dur": 214.91,
+   "bpm": null,
+   "tags": [
+    "grooving",
+    "driving"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Brain Dance",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "tech_cyber",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 214.94,
+     "mean_volume_db": -25.4,
+     "max_volume_db": -4.7,
+     "silence_ratio": 0.029060160975155857,
+     "spectral_centroid_hz": 2138.2876116867596,
+     "spectral_flatness": 0.3909217417240143,
+     "energy_arc": "steady",
+     "bpm": 62,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.432,
+     "darkness": 0.285,
+     "orchestral_density": 0.507,
+     "rhythmic_aggression": 0.594
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/tech_cyber/delightful-d.mp3",
+   "name": "delightful-d",
+   "category": "tech_cyber",
+   "dur": 184.06,
+   "bpm": null,
+   "tags": [
+    "bright",
+    "driving",
+    "grooving"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Delightful D",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "tech_cyber",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 184.08,
+     "mean_volume_db": -24.1,
+     "max_volume_db": -11.8,
+     "silence_ratio": 0.01741392872664059,
+     "spectral_centroid_hz": 1796.8641036185363,
+     "spectral_flatness": 0.34471309185028076,
+     "energy_arc": "steady",
+     "bpm": 152,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.395,
+     "darkness": 0.437,
+     "orchestral_density": 0.58,
+     "rhythmic_aggression": 0.743
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/tech_cyber/future-cha-cha.mp3",
+   "name": "future-cha-cha",
+   "category": "tech_cyber",
+   "dur": 277.79,
+   "bpm": null,
+   "tags": [
+    "bouncy",
+    "driving"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Future Cha Cha",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "tech_cyber",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 277.81,
+     "mean_volume_db": -23.2,
+     "max_volume_db": -3.3,
+     "silence_ratio": 0.017078834455203196,
+     "spectral_centroid_hz": 2949.7938701602525,
+     "spectral_flatness": 0.518774151802063,
+     "energy_arc": "falling",
+     "bpm": 70,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.367,
+     "darkness": 0.189,
+     "orchestral_density": 0.519,
+     "rhythmic_aggression": 0.625
+    }
+   },
+   "doc_quality": {
+    "score": -0.25,
+    "verdict": "neutral",
+    "reasons": [
+     "-soft:bouncy"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/tech_cyber/take-the-lead.mp3",
+   "name": "take-the-lead",
+   "category": "tech_cyber",
+   "dur": 224.64,
+   "bpm": null,
+   "tags": [
+    "aggressive",
+    "driving"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Take the Lead",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "tech_cyber",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 224.68,
+     "mean_volume_db": -23.2,
+     "max_volume_db": -8.2,
+     "silence_ratio": 0.019103311376179453,
+     "spectral_centroid_hz": 2772.3611062100504,
+     "spectral_flatness": 0.4997042417526245,
+     "energy_arc": "steady",
+     "bpm": 92,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.284,
+     "darkness": 0.187,
+     "orchestral_density": 0.515,
+     "rhythmic_aggression": 0.64
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/tech_cyber/thinking-out-loud.mp3",
+   "name": "thinking-out-loud",
+   "category": "tech_cyber",
+   "dur": 284.58,
+   "bpm": null,
+   "tags": [
+    "grooving",
+    "driving",
+    "dark"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Thinking Out Loud",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "tech_cyber",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 284.6,
+     "mean_volume_db": -25.0,
+     "max_volume_db": -8.1,
+     "silence_ratio": 0.059453137737174984,
+     "spectral_centroid_hz": 1182.1870234223943,
+     "spectral_flatness": 0.23119492828845978,
+     "energy_arc": "falling",
+     "bpm": 83,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.616,
+     "darkness": 0.676,
+     "orchestral_density": 0.631,
+     "rhythmic_aggression": 0.442
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/tech_cyber/variation-on-egmont.mp3",
+   "name": "variation-on-egmont",
+   "category": "tech_cyber",
+   "dur": 212.98,
+   "bpm": null,
+   "tags": [
+    "driving",
+    "aggressive",
+    "unnerving"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Variation on Egmont",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "tech_cyber",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 213.0,
+     "mean_volume_db": -24.3,
+     "max_volume_db": -9.0,
+     "silence_ratio": 0.020089746478873242,
+     "spectral_centroid_hz": 2636.1386919610786,
+     "spectral_flatness": 0.4993000626564026,
+     "energy_arc": "rising",
+     "bpm": 74,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.288,
+     "darkness": 0.187,
+     "orchestral_density": 0.513,
+     "rhythmic_aggression": 0.566
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  }
+ ],
+ "slow_reveal": [
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/slow_reveal/colorless-aura.mp3",
+   "name": "colorless-aura",
+   "category": "slow_reveal",
+   "dur": 158.07,
+   "bpm": null,
+   "tags": [
+    "mysterious",
+    "somber"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Colorless Aura",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "slow_reveal",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 158.09,
+     "mean_volume_db": -26.3,
+     "max_volume_db": -6.4,
+     "silence_ratio": 0.07957334429755201,
+     "spectral_centroid_hz": 761.1767125797037,
+     "spectral_flatness": 0.0015560141764581203,
+     "energy_arc": "arc",
+     "bpm": 108,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.829,
+     "darkness": 0.884,
+     "orchestral_density": 0.852,
+     "rhythmic_aggression": 0.343
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/slow_reveal/dhaka.mp3",
+   "name": "dhaka",
+   "category": "slow_reveal",
+   "dur": 248.24,
+   "bpm": null,
+   "tags": [
+    "mysterious",
+    "mystical"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Dhaka",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "slow_reveal",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 248.27,
+     "mean_volume_db": -25.1,
+     "max_volume_db": -3.7,
+     "silence_ratio": 0.015102146856245217,
+     "spectral_centroid_hz": 1620.9667482518207,
+     "spectral_flatness": 0.18050748109817505,
+     "energy_arc": "steady",
+     "bpm": 74,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.65,
+     "darkness": 0.548,
+     "orchestral_density": 0.769,
+     "rhythmic_aggression": 0.421
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/slow_reveal/dirt-rhodes.mp3",
+   "name": "dirt-rhodes",
+   "category": "slow_reveal",
+   "dur": 120.06,
+   "bpm": null,
+   "tags": [
+    "grooving",
+    "mysterious"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Dirt Rhodes",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "slow_reveal",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 120.08,
+     "mean_volume_db": -24.2,
+     "max_volume_db": -7.5,
+     "silence_ratio": 0.039452539973351096,
+     "spectral_centroid_hz": 869.8569441742711,
+     "spectral_flatness": 0.1350516378879547,
+     "energy_arc": "steady",
+     "bpm": 83,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.735,
+     "darkness": 0.835,
+     "orchestral_density": 0.776,
+     "rhythmic_aggression": 0.331
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/slow_reveal/kool-kats.mp3",
+   "name": "kool-kats",
+   "category": "slow_reveal",
+   "dur": 200.78,
+   "bpm": null,
+   "tags": [
+    "grooving",
+    "mysterious"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Kool Kats",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "slow_reveal",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 200.8,
+     "mean_volume_db": -24.5,
+     "max_volume_db": -4.6,
+     "silence_ratio": 0.024086195219123505,
+     "spectral_centroid_hz": 1298.6045675189587,
+     "spectral_flatness": 0.14987681806087494,
+     "energy_arc": "steady",
+     "bpm": 112,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.7,
+     "darkness": 0.675,
+     "orchestral_density": 0.787,
+     "rhythmic_aggression": 0.528
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/slow_reveal/unwritten-return.mp3",
+   "name": "unwritten-return",
+   "category": "slow_reveal",
+   "dur": 309.05,
+   "bpm": null,
+   "tags": [
+    "grooving",
+    "mysterious"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Unwritten Return",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "slow_reveal",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 309.08,
+     "mean_volume_db": -23.3,
+     "max_volume_db": -2.4,
+     "silence_ratio": 0.02212424938527242,
+     "spectral_centroid_hz": 1985.4511542144132,
+     "spectral_flatness": 0.3634902536869049,
+     "energy_arc": "rising",
+     "bpm": 161,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.486,
+     "darkness": 0.356,
+     "orchestral_density": 0.551,
+     "rhythmic_aggression": 0.907
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:mysterious"
+    ]
+   }
+  }
+ ],
+ "climax_build": [
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/climax_build/big-mojo.mp3",
+   "name": "big-mojo",
+   "category": "climax_build",
+   "dur": 157.25,
+   "bpm": null,
+   "tags": [
+    "action",
+    "dark",
+    "driving",
+    "epic",
+    "grooving",
+    "intense"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Big Mojo",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "climax_build",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 157.28,
+     "mean_volume_db": -23.0,
+     "max_volume_db": -1.8,
+     "silence_ratio": 0.020361018565615462,
+     "spectral_centroid_hz": 1009.9742741489638,
+     "spectral_flatness": 0.16215083003044128,
+     "energy_arc": "steady",
+     "bpm": 86,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.784,
+     "darkness": 0.786,
+     "orchestral_density": 0.78,
+     "rhythmic_aggression": 0.45
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:epic"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/climax_build/chase.mp3",
+   "name": "chase",
+   "category": "climax_build",
+   "dur": 132.68,
+   "bpm": null,
+   "tags": [
+    "action",
+    "driving",
+    "eerie",
+    "epic",
+    "intense"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Chase",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "climax_build",
+    "confidence": 0.85,
+    "voted_by": [
+     "title",
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 132.7,
+     "mean_volume_db": -24.4,
+     "max_volume_db": -3.3,
+     "silence_ratio": 0.07920411454408441,
+     "spectral_centroid_hz": 1108.0237911863028,
+     "spectral_flatness": 0.17807403206825256,
+     "energy_arc": "steady",
+     "bpm": 74,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.706,
+     "darkness": 0.705,
+     "orchestral_density": 0.654,
+     "rhythmic_aggression": 0.413
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:epic"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/climax_build/clenched-teeth.mp3",
+   "name": "clenched-teeth",
+   "category": "climax_build",
+   "dur": 91.15,
+   "bpm": null,
+   "tags": [
+    "action",
+    "driving",
+    "epic",
+    "intense"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Clenched Teeth",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "climax_build",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 91.19,
+     "mean_volume_db": -25.1,
+     "max_volume_db": -8.2,
+     "silence_ratio": 0.06778078736703586,
+     "spectral_centroid_hz": 1598.986960117082,
+     "spectral_flatness": 0.29031407833099365,
+     "energy_arc": "steady",
+     "bpm": 161,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.494,
+     "darkness": 0.494,
+     "orchestral_density": 0.549,
+     "rhythmic_aggression": 0.758
+    }
+   },
+   "doc_quality": {
+    "score": 0.12,
+    "verdict": "neutral",
+    "reasons": [
+     "+soft:epic"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/climax_build/long-time-coming.mp3",
+   "name": "long-time-coming",
+   "category": "climax_build",
+   "dur": 274.36,
+   "bpm": null,
+   "tags": [
+    "driving",
+    "action",
+    "grooving"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Long Time Coming",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "climax_build",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 274.39,
+     "mean_volume_db": -23.2,
+     "max_volume_db": -4.5,
+     "silence_ratio": 0.0,
+     "spectral_centroid_hz": 1924.9736557705617,
+     "spectral_flatness": 0.3278822600841522,
+     "energy_arc": "rising",
+     "bpm": 60,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.494,
+     "darkness": 0.403,
+     "orchestral_density": 0.631,
+     "rhythmic_aggression": 0.481
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/climax_build/mixkit-track-51.mp3",
+   "name": "mixkit-track-51",
+   "category": "climax_build",
+   "dur": 96.39,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 51",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/51/51.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "climax_build",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 96.39,
+     "mean_volume_db": -25.1,
+     "max_volume_db": -12.3,
+     "silence_ratio": 0.017500944081336237,
+     "spectral_centroid_hz": 1976.4844886656779,
+     "spectral_flatness": 0.369001179933548,
+     "energy_arc": "steady",
+     "bpm": 63,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.354,
+     "darkness": 0.361,
+     "orchestral_density": 0.553,
+     "rhythmic_aggression": 0.442
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/climax_build/mixkit-track-676.mp3",
+   "name": "mixkit-track-676",
+   "category": "climax_build",
+   "dur": 105.98,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 676",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/676/676.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "climax_build",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 105.97999999999999,
+     "mean_volume_db": -23.5,
+     "max_volume_db": -6.4,
+     "silence_ratio": 0.06793327986412531,
+     "spectral_centroid_hz": 1574.3834003838135,
+     "spectral_flatness": 0.3099835515022278,
+     "energy_arc": "steady",
+     "bpm": 72,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.496,
+     "darkness": 0.498,
+     "orchestral_density": 0.527,
+     "rhythmic_aggression": 0.486
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/climax_build/mixkit-track-688.mp3",
+   "name": "mixkit-track-688",
+   "category": "climax_build",
+   "dur": 123.04,
+   "bpm": null,
+   "tags": [
+    "mixkit"
+   ],
+   "license": "Mixkit Free License -- free for commercial use, no attribution required",
+   "source": "mixkit",
+   "title": "Mixkit Track 688",
+   "channel": "Mixkit",
+   "source_url": "https://assets.mixkit.co/music/688/688.mp3",
+   "attribution": "",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "climax_build",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 123.06,
+     "mean_volume_db": -25.0,
+     "max_volume_db": -6.0,
+     "silence_ratio": 0.06657740939379164,
+     "spectral_centroid_hz": 601.7176793058387,
+     "spectral_flatness": 0.005635188892483711,
+     "energy_arc": "steady",
+     "bpm": 60,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.859,
+     "darkness": 0.954,
+     "orchestral_density": 0.872,
+     "rhythmic_aggression": 0.123
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/climax_build/nerves.mp3",
+   "name": "nerves",
+   "category": "climax_build",
+   "dur": 172.22,
+   "bpm": null,
+   "tags": [
+    "action",
+    "dark",
+    "eerie",
+    "epic",
+    "intense",
+    "suspenseful"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Nerves",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "climax_build",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 172.25,
+     "mean_volume_db": -22.6,
+     "max_volume_db": -2.1,
+     "silence_ratio": 0.03099223802612482,
+     "spectral_centroid_hz": 548.8333473356855,
+     "spectral_flatness": 0.031551845371723175,
+     "energy_arc": "falling",
+     "bpm": 68,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.904,
+     "darkness": 0.971,
+     "orchestral_density": 0.908,
+     "rhythmic_aggression": 0.212
+    }
+   },
+   "doc_quality": {
+    "score": 0.42,
+    "verdict": "prefer",
+    "reasons": [
+     "+strong:suspense",
+     "+soft:epic"
+    ]
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/climax_build/rising-game.mp3",
+   "name": "rising-game",
+   "category": "climax_build",
+   "dur": 112.14,
+   "bpm": null,
+   "tags": [
+    "dark",
+    "driving",
+    "epic",
+    "grooving",
+    "intense",
+    "mysterious"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Rising Game",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "climax_build",
+    "confidence": 0.85,
+    "voted_by": [
+     "title",
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 112.17,
+     "mean_volume_db": -22.7,
+     "max_volume_db": -6.9,
+     "silence_ratio": 0.04634324685744851,
+     "spectral_centroid_hz": 1434.2634685194926,
+     "spectral_flatness": 0.2526228725910187,
+     "energy_arc": "steady",
+     "bpm": 112,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.545,
+     "darkness": 0.582,
+     "orchestral_density": 0.631,
+     "rhythmic_aggression": 0.575
+    }
+   },
+   "doc_quality": {
+    "score": 0.24,
+    "verdict": "prefer",
+    "reasons": [
+     "+soft:epic",
+     "+soft:mysterious"
+    ]
+   }
+  }
+ ],
+ "aftermath": [
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/aftermath/continue-life.mp3",
+   "name": "continue-life",
+   "category": "aftermath",
+   "dur": 114.05,
+   "bpm": null,
+   "tags": [
+    "relaxed",
+    "calming",
+    "uplifting"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Continue Life",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "aftermath",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 114.05,
+     "mean_volume_db": -24.1,
+     "max_volume_db": -5.3,
+     "silence_ratio": 0.0047325822007891274,
+     "spectral_centroid_hz": 716.337839344838,
+     "spectral_flatness": 0.01454333495348692,
+     "energy_arc": "steady",
+     "bpm": 83,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.878,
+     "darkness": 0.948,
+     "orchestral_density": 0.975,
+     "rhythmic_aggression": 0.23
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/aftermath/eternal-hope.mp3",
+   "name": "eternal-hope",
+   "category": "aftermath",
+   "dur": 284.06,
+   "bpm": null,
+   "tags": [
+    "calming",
+    "uplifting",
+    "relaxed"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Eternal Hope",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "aftermath",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 284.08,
+     "mean_volume_db": -23.3,
+     "max_volume_db": -2.0,
+     "silence_ratio": 0.028346504505773026,
+     "spectral_centroid_hz": 719.7713708278251,
+     "spectral_flatness": 0.019971655681729317,
+     "energy_arc": "steady",
+     "bpm": 72,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.897,
+     "darkness": 0.93,
+     "orchestral_density": 0.926,
+     "rhythmic_aggression": 0.23
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/aftermath/gymnopedie-no-1.mp3",
+   "name": "gymnopedie-no-1",
+   "category": "aftermath",
+   "dur": 187.09,
+   "bpm": null,
+   "tags": [
+    "calming",
+    "relaxed",
+    "uplifting"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Gymnopedie No. 1",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "aftermath",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 187.12,
+     "mean_volume_db": -25.5,
+     "max_volume_db": -3.0,
+     "silence_ratio": 0.031812072466866174,
+     "spectral_centroid_hz": 369.4325081688931,
+     "spectral_flatness": 0.01856873370707035,
+     "energy_arc": "steady",
+     "bpm": 76,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.942,
+     "darkness": 0.974,
+     "orchestral_density": 0.921,
+     "rhythmic_aggression": 0.266
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/aftermath/gymnopedie-no-2.mp3",
+   "name": "gymnopedie-no-2",
+   "category": "aftermath",
+   "dur": 159.03,
+   "bpm": null,
+   "tags": [
+    "calming",
+    "relaxed",
+    "uplifting"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Gymnopedie No. 2",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "aftermath",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 159.06,
+     "mean_volume_db": -25.0,
+     "max_volume_db": -2.7,
+     "silence_ratio": 0.04493591097698981,
+     "spectral_centroid_hz": 384.2142590904067,
+     "spectral_flatness": 0.005199337378144264,
+     "energy_arc": "falling",
+     "bpm": 76,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.932,
+     "darkness": 0.969,
+     "orchestral_density": 0.912,
+     "rhythmic_aggression": 0.248
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/aftermath/peaceful-desolation.mp3",
+   "name": "peaceful-desolation",
+   "category": "aftermath",
+   "dur": 91.17,
+   "bpm": null,
+   "tags": [
+    "calming",
+    "relaxed",
+    "somber",
+    "uplifting"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Peaceful Desolation",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "aftermath",
+    "confidence": 0.85,
+    "voted_by": [
+     "title",
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 91.19,
+     "mean_volume_db": -25.1,
+     "max_volume_db": -4.7,
+     "silence_ratio": 0.061622359907884644,
+     "spectral_centroid_hz": 1388.396438955208,
+     "spectral_flatness": 0.11306270211935043,
+     "energy_arc": "falling",
+     "bpm": 112,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.671,
+     "darkness": 0.624,
+     "orchestral_density": 0.76,
+     "rhythmic_aggression": 0.495
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  },
+  {
+   "path": "/Users/hussnain/Desktop/vidlore-clipstudio/vidlore/assets/music/aftermath/ranz-des-vaches.mp3",
+   "name": "ranz-des-vaches",
+   "category": "aftermath",
+   "dur": 85.01,
+   "bpm": null,
+   "tags": [
+    "calming",
+    "relaxed",
+    "uplifting"
+   ],
+   "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+   "source": "incompetech",
+   "title": "Ranz des Vaches",
+   "channel": "Kevin MacLeod (incompetech)",
+   "source_url": "https://incompetech.com/music/royalty-free/index.html",
+   "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+   "fetched": "2026-05-23",
+   "classify": {
+    "category": "aftermath",
+    "confidence": 0.85,
+    "voted_by": [
+     "source_hint",
+     "audio_agree"
+    ],
+    "features": {
+     "duration": 85.05,
+     "mean_volume_db": -25.8,
+     "max_volume_db": -9.1,
+     "silence_ratio": 0.1755965902410347,
+     "spectral_centroid_hz": 1292.200245478506,
+     "spectral_flatness": 0.07165870070457458,
+     "energy_arc": "steady",
+     "bpm": 172,
+     "is_sparse": false,
+     "is_bright": false,
+     "is_dynamic": true,
+     "tension": 0.551,
+     "darkness": 0.596,
+     "orchestral_density": 0.597,
+     "rhythmic_aggression": 0.509
+    }
+   },
+   "doc_quality": {
+    "score": 0.0,
+    "verdict": "neutral",
+    "reasons": []
+   }
+  }
+ ],
+ "_sig": "25e9183f25cc8d8b"
+}

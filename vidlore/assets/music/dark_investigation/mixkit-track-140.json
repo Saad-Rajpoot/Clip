@@ -1,0 +1,45 @@
+{
+ "name": "mixkit-track-140",
+ "category": "dark_investigation",
+ "title": "Mixkit Track 140",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/140/140.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 99.74,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "dark_investigation",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 99.75999999999999,
+   "mean_volume_db": -26.4,
+   "max_volume_db": -10.4,
+   "silence_ratio": 0.078114915797915,
+   "spectral_centroid_hz": 1589.2982226474694,
+   "spectral_flatness": 0.2321953922510147,
+   "energy_arc": "steady",
+   "bpm": 66,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.495,
+   "darkness": 0.505,
+   "orchestral_density": 0.596,
+   "rhythmic_aggression": 0.354
+  }
+ },
+ "doc_quality": {
+  "score": 0.0,
+  "verdict": "neutral",
+  "reasons": []
+ }
+}

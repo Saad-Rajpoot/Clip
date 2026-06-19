@@ -1,0 +1,47 @@
+{
+ "name": "mixkit-track-139",
+ "category": "ambient",
+ "title": "Mixkit Track 139",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/139/139.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 113.21,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "ambient",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 113.24000000000001,
+   "mean_volume_db": -26.9,
+   "max_volume_db": -10.6,
+   "silence_ratio": 0.0735994259978806,
+   "spectral_centroid_hz": 2148.0874407461374,
+   "spectral_flatness": 0.3135639429092407,
+   "energy_arc": "falling",
+   "bpm": 99,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.349,
+   "darkness": 0.271,
+   "orchestral_density": 0.512,
+   "rhythmic_aggression": 0.595
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:ambient"
+  ]
+ }
+}

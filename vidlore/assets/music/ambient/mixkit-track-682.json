@@ -1,0 +1,47 @@
+{
+ "name": "mixkit-track-682",
+ "category": "ambient",
+ "title": "Mixkit Track 682",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/682/682.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 113.19,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "ambient",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 113.19,
+   "mean_volume_db": -25.8,
+   "max_volume_db": -10.3,
+   "silence_ratio": 0.06176118031628236,
+   "spectral_centroid_hz": 537.5346398901241,
+   "spectral_flatness": 0.0020423014648258686,
+   "energy_arc": "steady",
+   "bpm": 92,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.806,
+   "darkness": 0.958,
+   "orchestral_density": 0.884,
+   "rhythmic_aggression": 0.201
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:ambient"
+  ]
+ }
+}

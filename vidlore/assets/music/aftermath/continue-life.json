@@ -1,0 +1,47 @@
+{
+ "name": "continue-life",
+ "category": "aftermath",
+ "title": "Continue Life",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 114.05,
+ "tags": [
+  "relaxed",
+  "calming",
+  "uplifting"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "aftermath",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 114.05,
+   "mean_volume_db": -24.1,
+   "max_volume_db": -5.3,
+   "silence_ratio": 0.0047325822007891274,
+   "spectral_centroid_hz": 716.337839344838,
+   "spectral_flatness": 0.01454333495348692,
+   "energy_arc": "steady",
+   "bpm": 83,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.878,
+   "darkness": 0.948,
+   "orchestral_density": 0.975,
+   "rhythmic_aggression": 0.23
+  }
+ },
+ "doc_quality": {
+  "score": 0.0,
+  "verdict": "neutral",
+  "reasons": []
+ }
+}

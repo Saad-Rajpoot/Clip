@@ -1,0 +1,720 @@
+{
+ "fingerprints": {
+  "079dd38044e561a13355200146922c158cdb2af08ef8d94150cc59d6a8664fdc": {
+   "slug": "zombie-hoodoo",
+   "category": "mystery",
+   "source": "incompetech"
+  },
+  "8dcbd6fba7a0f5ddddb541d71e0bb6ff9ffcb52f3d411a3dda8dad8178c86500": {
+   "slug": "scissors",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "17bdf7c958c302f590604ba2678edbbe5fce36e40f0078bdc627c4e5615ac28f": {
+   "slug": "constance",
+   "category": "dark_investigation",
+   "source": "incompetech"
+  },
+  "2f9d90e64f4b2c03a77e59a30fa870bd48378377699ef19c49217412e1168a56": {
+   "slug": "eastminster",
+   "category": "ambient",
+   "source": "incompetech"
+  },
+  "5d218579db2cdcfe26a756122d8e142af95e36faf0cc67eb1842a02e7de4ecc9": {
+   "slug": "static-motion",
+   "category": "dark_investigation",
+   "source": "incompetech"
+  },
+  "ed569cf9ecc1526cbd3255045bdb09ea1d99c1c636a6c6bb951ed51feea09fc2": {
+   "slug": "mistake-the-getaway",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "0fe3eaad8cfcc7d586efff06ab9cc910a2edbf95a38f57e1068b819ecbd30555": {
+   "slug": "devastation-and-revenge",
+   "category": "mystery",
+   "source": "incompetech"
+  },
+  "a0ae57283106f5209ac1259829aadeae481fcf0f45045a561a423dbc1719740b": {
+   "slug": "impending-boom",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "222b4deae5ebdb782812b8aceeeb55d478760a782e4250510894b8f70a5d9194": {
+   "slug": "redletter",
+   "category": "dark_investigation",
+   "source": "incompetech"
+  },
+  "3189678895a83f90b3b7ac4053aa25053e84fedeb5423de7ef8c9b38c72a7aa3": {
+   "slug": "unanswered-questions",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "b048a1bf01357125c99aae17adb7fdaeb4f3e150c1db13a95120fa06a5c7fff3": {
+   "slug": "controlled-chaos",
+   "category": "dark_investigation",
+   "source": "incompetech"
+  },
+  "bfef976da76ad42cdcf1cadc6f7dc8aeb4954b38689ec4364c053052cdae9719": {
+   "slug": "chee-zee-caves-v2",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "d15fe3260675b203b250e6a9f2bb3922e5b4bb67f8a159523160ec764e22422a": {
+   "slug": "dances-and-dames",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "3f87334d4a8297a7b09cb8f41257045e4cc2ffae2186bd98521798b2a543c8df": {
+   "slug": "fast-talkin",
+   "category": "mystery",
+   "source": "incompetech"
+  },
+  "cb881bd0b406a49fc62c1b64c9cbd460e5192c547deaa019c05c8aca85fbc3c2": {
+   "slug": "drums-of-the-deep",
+   "category": "dark_investigation",
+   "source": "incompetech"
+  },
+  "64d4d444ebd9667a4828ab458aadefbd731175a4e39e16d8840e7d354fed3e33": {
+   "slug": "ossuary-3-words",
+   "category": "dark_investigation",
+   "source": "incompetech"
+  },
+  "0c2a11a414f446a399ba54b67afaeeb560de31806cd7cc21300d5be67469f2ba": {
+   "slug": "seven-off",
+   "category": "mystery",
+   "source": "incompetech"
+  },
+  "b34d5ce14cb11490fbef382814214a87bb19f3f5df212b13d52934dff0db73ec": {
+   "slug": "thunder-dreams",
+   "category": "dark_investigation",
+   "source": "incompetech"
+  },
+  "0ad575450efd1ec0090dcd0c72bd6fd7847d2216f4aec56d7135d3644fc8531a": {
+   "slug": "oppressive-gloom",
+   "category": "dark_investigation",
+   "source": "incompetech"
+  },
+  "f61b6be635542192b72687c7d80648190012c88e0357013c11f1c6631dea7cfa": {
+   "slug": "enter-the-maze",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "638b0c0191dd99a8237779c8989d5637c04f63c1500324df811cbbb989155d44": {
+   "slug": "interloper",
+   "category": "dark_investigation",
+   "source": "incompetech"
+  },
+  "9a5cd4d5396148bd3466d54f9f392b36d313f1b86155a5f6811f603c7e166bf9": {
+   "slug": "spider-eyes",
+   "category": "dark_investigation",
+   "source": "incompetech"
+  },
+  "b086e2fd760c793e2a31ae0d1dcbad9f4baff14985d9fc0d6a90ad995af1a320": {
+   "slug": "blue-feather",
+   "category": "dark_investigation",
+   "source": "incompetech"
+  },
+  "6efed083e58c3bd5ab7e03da5c1ca4cbc045b7543a009b385cff7311a9be09cc": {
+   "slug": "sneak-n-get-caught",
+   "category": "dark_investigation",
+   "source": "incompetech"
+  },
+  "c5e0fb6bfe753b41059e211405d2c34a3206c80df555432ecfd5059186821b8a": {
+   "slug": "at-launch",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "c6100b7f71b28384f43b8e7d87f3888326d075836713dbdb08af1a851158f8f0": {
+   "slug": "industrial-cinematic",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "18f1211c206f42520c47311a14a142d0e5de320facaa972ba7cd08f7b9130f8a": {
+   "slug": "finding-movement",
+   "category": "ambient",
+   "source": "incompetech"
+  },
+  "f6cf4c135244e890b68df27b1fbb4897c7aa5822c8be30390e9289dfa72d6fa1": {
+   "slug": "our-story-begins",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "a9f853a55fc4280e1d4367d508a44962cf18bbecea6cbda1b0ddeb5db127057b": {
+   "slug": "minima",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "9610d78bdf9fea596db99804a3169a066799b2db9ae079ec699ad30c2713b94f": {
+   "slug": "nervous",
+   "category": "mystery",
+   "source": "incompetech"
+  },
+  "7e7fecfaa913b4813de604796138512a5fc923e749fe1fb9c912af627c299f23": {
+   "slug": "mirage",
+   "category": "mystery",
+   "source": "incompetech"
+  },
+  "b440f7c2e888c0e30168ba0d45534200c90536f86762259edecd7e25765ba627": {
+   "slug": "long-time-coming",
+   "category": "climax_build",
+   "source": "incompetech"
+  },
+  "13a244a2ff283b114ed9c2730dd903d327176b700ee2c6080288095621d5f928": {
+   "slug": "undaunted",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "b09f23b23d3f5311caf751a105e1851246d69446f013e41c63b5444649ec36aa": {
+   "slug": "spy-glass",
+   "category": "mystery",
+   "source": "incompetech"
+  },
+  "c08d1965c5794e8e6f1aed726c727027ac285f98d76b94b89cc80bf52f5c2174": {
+   "slug": "immersed",
+   "category": "ambient",
+   "source": "incompetech"
+  },
+  "44101df0ef784398424f8c6bf9dc440240d29ee3a562e655dbe5fe5e5768b000": {
+   "slug": "exotic-battle",
+   "category": "mystery",
+   "source": "incompetech"
+  },
+  "e9ad43af7f0a32f5cc983406f6f64da2bb7efbada087b6078833e7a0272a3543": {
+   "slug": "autumn-day",
+   "category": "ambient",
+   "source": "incompetech"
+  },
+  "4a59db1cf3625e67664122674a74fb3efc6ab9f7c7eaa4792430cd945934dd0b": {
+   "slug": "not-as-it-seems",
+   "category": "mystery",
+   "source": "incompetech"
+  },
+  "cd7acc5f32caa88bac75a730bd6d11bece8b6b59dc340347e0b1eb434cb881cb": {
+   "slug": "aretes",
+   "category": "ambient",
+   "source": "incompetech"
+  },
+  "56271739a4d41bf58f933ecf1b3728dd1d7c4a238075fbf2088a3a6f6e07ab08": {
+   "slug": "desert-city",
+   "category": "mystery",
+   "source": "incompetech"
+  },
+  "60fe3e27e7809bc3eef945337f8f38bc4b26e06a9ac209aa54b30f3ca41b2032": {
+   "slug": "majestic-hills",
+   "category": "historical_epic",
+   "source": "incompetech"
+  },
+  "1fea4ff38da4f87c6441a945ec331a56af84ba3fffea1d7b06a8248ebe729059": {
+   "slug": "mixkit-track-614",
+   "category": "historical_epic",
+   "source": "mixkit"
+  },
+  "85ecee2a48953487e62adf0ab62c250766fec278e9adeee660049f02d560d4c6": {
+   "slug": "exciting-trailer",
+   "category": "military_tension",
+   "source": "incompetech"
+  },
+  "1eec10ad42758dfac0d93898956affeef18ded440d5575d9cef64028f62e4258": {
+   "slug": "mixkit-track-580",
+   "category": "ambient",
+   "source": "mixkit"
+  },
+  "09b93faffbf2cd890bdc1ad7afcdd52f29ae2dfc053f4e2a8ccd2aa33b9e840b": {
+   "slug": "lithium",
+   "category": "emotional_piano",
+   "source": "incompetech"
+  },
+  "764cde6c03b3d087f1d1abab34de1d732a75cd398fd6e4eea09ceee6635548df": {
+   "slug": "mixkit-track-188",
+   "category": "dark_investigation",
+   "source": "mixkit"
+  },
+  "dfd81f4d4d8155452b92021883b71954713ada45df72a8d9791d8583aec70885": {
+   "slug": "eternal-hope",
+   "category": "aftermath",
+   "source": "incompetech"
+  },
+  "f0cbf2645b4cc45cca65e7a6dff8da07dc6db143af3aff9135566166ae453f0a": {
+   "slug": "mixkit-track-493",
+   "category": "emotional_piano",
+   "source": "mixkit"
+  },
+  "14465f98fdc4d354cd6ae0b69e66b9bd1a4316eb2e2239c794a572d7ffb845a6": {
+   "slug": "mixkit-track-322",
+   "category": "historical_epic",
+   "source": "mixkit"
+  },
+  "e6e61440627b44a6d0542bbb6098755b98558b30829e50e310ea835e87e59719": {
+   "slug": "clenched-teeth",
+   "category": "climax_build",
+   "source": "incompetech"
+  },
+  "7e51e7de9163970978479e1312d8d6a51a4d815531e9ad51ba336f597f1586f3": {
+   "slug": "mixkit-track-127",
+   "category": "ambient",
+   "source": "mixkit"
+  },
+  "26b934715fbdf1cdfb2f88e34f41b63c0b7effb68de24698c9aa84c30a5d7f14": {
+   "slug": "mixkit-track-871",
+   "category": "mystery",
+   "source": "mixkit"
+  },
+  "cad6e9c82eca1873bfb1f4d436232f8f17e8e8148ddf91944fe1a1d2a588ce6e": {
+   "slug": "the-path-of-the-goblin-king",
+   "category": "mystery",
+   "source": "incompetech"
+  },
+  "0f93d0e329e1fd64bb7c9834ac1cefcceb2a0d3ac14621a445fb8ca84242ad8f": {
+   "slug": "free-orchestral-stock-music",
+   "category": "historical_epic",
+   "source": "mixkit"
+  },
+  "4d6c0835b8f8cfeb0e713d0460e8518632081f53e3e8b2c0de2fbfbfa2c46aad": {
+   "slug": "brain-dance",
+   "category": "tech_cyber",
+   "source": "incompetech"
+  },
+  "e0ac22564db4db3045eaf2172ea43fac066b15ceaeb2bd98bee796a8dd6f5faf": {
+   "slug": "mixkit-track-682",
+   "category": "ambient",
+   "source": "mixkit"
+  },
+  "affe97eeb05a95c4cceadf13a9d94c44dee6741fe4b31cc367cdd80cfeb75941": {
+   "slug": "evil-march",
+   "category": "military_tension",
+   "source": "incompetech"
+  },
+  "b1250f08004b0611fd63e7bb7fd1a392395bdfabf4349ebb7cc2a3318ac2adfc": {
+   "slug": "mixkit-track-612",
+   "category": "dark_investigation",
+   "source": "mixkit"
+  },
+  "cf67748c452fa95a6881b1c5c516ce4f84d327521a2dfdff00363eaec06bf916": {
+   "slug": "danse-of-questionable-tuning",
+   "category": "emotional_piano",
+   "source": "incompetech"
+  },
+  "396407b065b9c727230daad6386840cfe35e5aabedde498cbf96eb9807809b9d": {
+   "slug": "peaceful-desolation",
+   "category": "aftermath",
+   "source": "incompetech"
+  },
+  "865c95f79057d18f7f458a7ce776d63664eb410cf1f8ee362e10abab5e1d4442": {
+   "slug": "mixkit-track-292",
+   "category": "ambient",
+   "source": "mixkit"
+  },
+  "c75d7424f6ed4bf5e024651d3c9762301cc4cc9fcbf80fcf6921c3ada7f1407a": {
+   "slug": "thunderbird",
+   "category": "ambient",
+   "source": "incompetech"
+  },
+  "2c71002692db4274e511e6845f64b2969155ee4a4c509b95ca2b7fd1489a8948": {
+   "slug": "past-the-edge",
+   "category": "dark_investigation",
+   "source": "incompetech"
+  },
+  "27527a86d52bcee2fcfe35e737c7da6e2c61562b68a8df743d3840b5b2c5cea3": {
+   "slug": "discover",
+   "category": "historical_epic",
+   "source": "mixkit"
+  },
+  "b55f7722275d0d7ab8caee5f9db4671fe89b50cd209149be1bf634eb0cc97d5c": {
+   "slug": "constancy-part-two",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "ee3466940f2d1ea4c7049ffdeed78164f9f7d698ed0fdbc9279162c85fb6800a": {
+   "slug": "mixkit-track-671",
+   "category": "historical_epic",
+   "source": "mixkit"
+  },
+  "c04a76d6764a572b214cf8c0b400f7ac039b7451c2ebdf7f2e5bdf5afd323f41": {
+   "slug": "the-other-side-of-the-door",
+   "category": "mystery",
+   "source": "incompetech"
+  },
+  "9b53cb8d6b0531eea01769900365ab800b43bc0be822113bd86df5d39382a079": {
+   "slug": "mixkit-track-140",
+   "category": "dark_investigation",
+   "source": "mixkit"
+  },
+  "a49285bd6783940b0a14857379b2f81844766f4d68cdb8f35e8a2d6777d12c6a": {
+   "slug": "long-road-ahead-b",
+   "category": "historical_epic",
+   "source": "incompetech"
+  },
+  "e53db5827609f89e50e23212be827962c755ad7b0fe4e21bd8d79a489496e517": {
+   "slug": "mixkit-track-657",
+   "category": "emotional_piano",
+   "source": "mixkit"
+  },
+  "25cd137846b63ffcb2a828c1f518112364daf854acb807676cdba6a2ed23016b": {
+   "slug": "mixkit-track-139",
+   "category": "ambient",
+   "source": "mixkit"
+  },
+  "14de44523971aba6c09476155af634dd3a31fb3896accb978a77082f55952815": {
+   "slug": "piece-for-disaffected-piano-one",
+   "category": "emotional_piano",
+   "source": "incompetech"
+  },
+  "14225466a20b2b9abb694ef0cce60487f0539067a3bd186023b92c7529620127": {
+   "slug": "gymnopedie-no-1",
+   "category": "aftermath",
+   "source": "incompetech"
+  },
+  "93f814d3f601fb1bc2c1a0f1fd8c6aad94b63357a231331b254c38bca939ae6f": {
+   "slug": "dhaka",
+   "category": "slow_reveal",
+   "source": "incompetech"
+  },
+  "b35f6b786ed65887c3e0162157772106539ee8eac3ecc085d5085d52da8e88a9": {
+   "slug": "mixkit-track-601",
+   "category": "emotional_piano",
+   "source": "mixkit"
+  },
+  "afd5ae8ad4ce6b810f7c6bd415d4806fff632a7ca792668da699d740e86e1bc8": {
+   "slug": "big-mojo",
+   "category": "climax_build",
+   "source": "incompetech"
+  },
+  "13d0c4861cef15ff67444ce1fc4d96841550ee3929f653b75fe8e20df214827a": {
+   "slug": "epical-drums-05",
+   "category": "historical_epic",
+   "source": "mixkit"
+  },
+  "5cecd893a94526621b3942826dcebdf9506abd07af02e2ab7c84bf13dcc16b41": {
+   "slug": "what-is-love",
+   "category": "ambient",
+   "source": "incompetech"
+  },
+  "4a37154d5e27356d714dd3de26c09d8bd8192a6925a078f4f72033597bdf4be0": {
+   "slug": "reign-supreme",
+   "category": "dark_investigation",
+   "source": "incompetech"
+  },
+  "02c50f3721c04cb7693a74d9293ae016fc233595fe7e86ad8bb0de4c1d7fb80f": {
+   "slug": "satiate",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "befc5140117fd3dc5504ebf7ff25f93b37ff5b86bb4ee1dbd0397f5adc57fee4": {
+   "slug": "mixkit-track-565",
+   "category": "dark_investigation",
+   "source": "mixkit"
+  },
+  "01f8b424317c5034e1625606aa07c62067fb3ce667a39b2eb68cbc8cbbc6e347": {
+   "slug": "mystery",
+   "category": "mystery",
+   "source": "incompetech"
+  },
+  "c180e9c83c0ede0fb889dbdf32b38c133ba77fa045597c9b1b2e27a49990b4ac": {
+   "slug": "mixkit-track-659",
+   "category": "emotional_piano",
+   "source": "mixkit"
+  },
+  "cf9e2f99b1c68733edb08a714247f926b0c706fea22c7cf650de4d73a1037d46": {
+   "slug": "future-cha-cha",
+   "category": "tech_cyber",
+   "source": "incompetech"
+  },
+  "589c47d13a1b20e6ffc8ad2842f7630664f150ebb711a61caf4283be728d12a2": {
+   "slug": "mixkit-track-749",
+   "category": "ambient",
+   "source": "mixkit"
+  },
+  "043284dcec28e666a9aad37c95aeb5ef7d1637988f3dfa25ef0c38a2a826041a": {
+   "slug": "mixkit-track-676",
+   "category": "climax_build",
+   "source": "mixkit"
+  },
+  "13d200bcdf62b696b8bea7b25a35b8509896d8b561b9898943659dde6cea041a": {
+   "slug": "failing-defense",
+   "category": "military_tension",
+   "source": "incompetech"
+  },
+  "594a1d9ab5359596909a8c638f02d4b2651939ea42fbc2daa27c22eece51322d": {
+   "slug": "mixkit-track-138",
+   "category": "mystery",
+   "source": "mixkit"
+  },
+  "a019d851a74edc9c9f2bfc14a446e031cca57a58bf5865ae11f7b4f74ecc2ac8": {
+   "slug": "vanes",
+   "category": "emotional_piano",
+   "source": "incompetech"
+  },
+  "a983c960c5660b87f2c93113fc047115e18e32b89b284e206133362e50645f05": {
+   "slug": "dirt-rhodes",
+   "category": "slow_reveal",
+   "source": "incompetech"
+  },
+  "6f997a819cc5170293a3abeedbf5fcd6a85d5c32a89f2547dfa9042436c47ff0": {
+   "slug": "chase",
+   "category": "climax_build",
+   "source": "incompetech"
+  },
+  "2d6d0cdf207196f006d6bba0e55ae560ac74289fb1429d1045911d720c4dec73": {
+   "slug": "mixkit-track-76",
+   "category": "dark_investigation",
+   "source": "mixkit"
+  },
+  "ae6b25ff1c88f078b31f869ab50a7c2191d388651585cfd83c10dfe152a17da1": {
+   "slug": "intrepid",
+   "category": "dark_investigation",
+   "source": "incompetech"
+  },
+  "e36fc3638a2c4dfa0d28b71d49525ff45db6958a1d51fd06bb929aae69c35a02": {
+   "slug": "chee-zee-cave",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "be30b5017c256c91392e90f3a52e1c7a439e069baf3afa23e907649a76438e73": {
+   "slug": "willow-and-the-light",
+   "category": "mystery",
+   "source": "incompetech"
+  },
+  "ded3afcc2a69e0958ac6dbe29440230eaceaa03ca278b7f0c035f3a8c9e2326d": {
+   "slug": "mixkit-track-51",
+   "category": "climax_build",
+   "source": "mixkit"
+  },
+  "ccce077702bfce48f0fc4f04dc19a095eb0d03d2b01ce54f260f7b9a7221f79f": {
+   "slug": "thinking-out-loud",
+   "category": "tech_cyber",
+   "source": "incompetech"
+  },
+  "0b062121ab02a5b0fa0047ef9d5f0938f431b4d96e7fdcd1d61f6ee905abda98": {
+   "slug": "mixkit-track-588",
+   "category": "mystery",
+   "source": "mixkit"
+  },
+  "0e89321bc93454c207f6e66653d2576551243d9f51045200663a9e32cd703d14": {
+   "slug": "truth-of-the-legend",
+   "category": "military_tension",
+   "source": "incompetech"
+  },
+  "a3f74f7be2fdfb7b2fa04501dd97d551cd17f80809e9074ef4f08a6a40d1844d": {
+   "slug": "ranz-des-vaches",
+   "category": "aftermath",
+   "source": "incompetech"
+  },
+  "2b5b3dd7ec286bf69eca50e26cf9b7084a6b44eaee421b2cc5a2922b8fdf6dad": {
+   "slug": "kool-kats",
+   "category": "slow_reveal",
+   "source": "incompetech"
+  },
+  "a340d67f0c3b25bcb551929ba8b4dcc29f631c84141ce871668f52769a2f1c9a": {
+   "slug": "nerves",
+   "category": "climax_build",
+   "source": "incompetech"
+  },
+  "2293d410bbb2c1819c981d9110a0d9bff099beb81f14c65428e324fcacdd9bcf": {
+   "slug": "river-of-io",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "a00fbe50de8e1ac6ec74a858e9b4f061347ea5cf626750e8d70e286d88b121a7": {
+   "slug": "envision",
+   "category": "mystery",
+   "source": "incompetech"
+  },
+  "3b1476deaeb1c8757c35bbf3e4a9f410939fcc911bf8a1d9622e781d561b87af": {
+   "slug": "delightful-d",
+   "category": "tech_cyber",
+   "source": "incompetech"
+  },
+  "d11db6ac2e38b7e7a39dda790456c4d5b7db929deb01a6d04a17e5f19a8c2169": {
+   "slug": "unity",
+   "category": "military_tension",
+   "source": "incompetech"
+  },
+  "ac8847b7223f39651be5e4743c81eb3e8f4886e16b77e158c250e8989b68b3ec": {
+   "slug": "gymnopedie-no-2",
+   "category": "aftermath",
+   "source": "incompetech"
+  },
+  "7c01b9389adadc9b70d191dc7dee10ea4977cad94c8c60967ae2d1a8ea5a90e7": {
+   "slug": "colorless-aura",
+   "category": "slow_reveal",
+   "source": "incompetech"
+  },
+  "d1fc67c09647887a2ecd4cc332065dc8f4768e2696df19451974e043ca5fbe81": {
+   "slug": "rising-game",
+   "category": "climax_build",
+   "source": "incompetech"
+  },
+  "c8b13dd3b5f89b45d1e9d56be5122906055f97040ddfece0d8ee7e1f7511d099": {
+   "slug": "mixkit-track-688",
+   "category": "climax_build",
+   "source": "mixkit"
+  },
+  "fe24e8e9cbdd5c7bfd532e3742ed6dc305dd568e169a55a4d6c7701f5c6ddba5": {
+   "slug": "satiate-only-strings",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "25595d70c6688172e248924feda6192ad4a0d838cb1f2ff1b1adf92b62468917": {
+   "slug": "take-the-lead",
+   "category": "tech_cyber",
+   "source": "incompetech"
+  },
+  "230b1b04358db146f32108ea24dcf5dea61281aed54ab742b9078509fff90008": {
+   "slug": "prelude-and-action",
+   "category": "military_tension",
+   "source": "incompetech"
+  },
+  "b4a5bcfdcb3d5652d480b84ea18b9fa8ad2eeb222d2528bc9b6f35b5604eac9c": {
+   "slug": "continue-life",
+   "category": "aftermath",
+   "source": "incompetech"
+  },
+  "da92e97ac4b241175ec1ea4e94c6c641887db0a69a63f089768eb7d667008fd2": {
+   "slug": "unwritten-return",
+   "category": "slow_reveal",
+   "source": "incompetech"
+  },
+  "32b915b4cc6c7f5fa13cca130bbbf15dc11dc16035da744830f155089fa980bd": {
+   "slug": "ibn-al-noor",
+   "category": "suspense",
+   "source": "incompetech"
+  },
+  "97c9f409322f71b5fc8d8a2049cbdb892f6c10aae202c169b75a5c96f7b528aa": {
+   "slug": "variation-on-egmont",
+   "category": "tech_cyber",
+   "source": "incompetech"
+  },
+  "e096129a78a03aac880b20e122f8c4daab7d357b44f15bccaea500cdfca6b86c": {
+   "slug": "the-escalation",
+   "category": "military_tension",
+   "source": "incompetech"
+  }
+ },
+ "urls": {
+  "https://incompetech.com/music/royalty-free/index.html": "zombie-hoodoo",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Scissors.mp3": "scissors",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Constance.mp3": "constance",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Eastminster.mp3": "eastminster",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Static%20Motion.mp3": "static-motion",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Mistake%20the%20Getaway.mp3": "mistake-the-getaway",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Devastation%20and%20Revenge.mp3": "devastation-and-revenge",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Impending%20Boom.mp3": "impending-boom",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Redletter.mp3": "redletter",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Unanswered%20Questions.mp3": "unanswered-questions",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Controlled%20Chaos.mp3": "controlled-chaos",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Chee%20Zee%20Caves%20V2.mp3": "chee-zee-caves-v2",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Dances%20and%20Dames.mp3": "dances-and-dames",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Fast%20Talkin.mp3": "fast-talkin",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Drums%20of%20the%20Deep.mp3": "drums-of-the-deep",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Ossuary%203%20-%20Words.mp3": "ossuary-3-words",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Seven%20Off.mp3": "seven-off",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Thunder%20Dreams.mp3": "thunder-dreams",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Oppressive%20Gloom.mp3": "oppressive-gloom",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Enter%20the%20Maze.mp3": "enter-the-maze",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Interloper.mp3": "interloper",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Spider%20Eyes.mp3": "spider-eyes",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Blue%20Feather.mp3": "blue-feather",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Sneak%20n%20Get%20Caught.mp3": "sneak-n-get-caught",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/At%20Launch.mp3": "at-launch",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Industrial%20Cinematic.mp3": "industrial-cinematic",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Finding%20Movement.mp3": "finding-movement",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Our%20Story%20Begins.mp3": "our-story-begins",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Minima.mp3": "minima",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Nervous%20Piano.mp3": "nervous",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Mirage.mp3": "mirage",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Long%20Time%20Coming.mp3": "long-time-coming",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Undaunted.mp3": "undaunted",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Spy%20Glass.mp3": "spy-glass",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Immersed.mp3": "immersed",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Exotic%20Battle.mp3": "exotic-battle",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Autumn%20Day.mp3": "autumn-day",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Not%20As%20It%20Seems.mp3": "not-as-it-seems",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Aretes.mp3": "aretes",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Desert%20City.mp3": "desert-city",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Majestic%20Hills.mp3": "majestic-hills",
+  "https://assets.mixkit.co/music/614/614.mp3": "mixkit-track-614",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Exciting%20Trailer.mp3": "exciting-trailer",
+  "https://assets.mixkit.co/music/580/580.mp3": "mixkit-track-580",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Lithium.mp3": "lithium",
+  "https://assets.mixkit.co/music/188/188.mp3": "mixkit-track-188",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Eternal%20Hope.mp3": "eternal-hope",
+  "https://assets.mixkit.co/music/493/493.mp3": "mixkit-track-493",
+  "https://assets.mixkit.co/music/322/322.mp3": "mixkit-track-322",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Clenched%20Teeth.mp3": "clenched-teeth",
+  "https://assets.mixkit.co/music/127/127.mp3": "mixkit-track-127",
+  "https://assets.mixkit.co/music/871/871.mp3": "mixkit-track-871",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/The%20Path%20of%20the%20Goblin%20King.mp3": "the-path-of-the-goblin-king",
+  "https://assets.mixkit.co/music/587/587.mp3": "free-orchestral-stock-music",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Brain%20Dance.mp3": "brain-dance",
+  "https://assets.mixkit.co/music/682/682.mp3": "mixkit-track-682",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Evil%20March.mp3": "evil-march",
+  "https://assets.mixkit.co/music/612/612.mp3": "mixkit-track-612",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Danse%20of%20Questionable%20Tuning.mp3": "danse-of-questionable-tuning",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Peaceful%20Desolation.mp3": "peaceful-desolation",
+  "https://assets.mixkit.co/music/292/292.mp3": "mixkit-track-292",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Thunderbird.mp3": "thunderbird",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Past%20the%20Edge.mp3": "past-the-edge",
+  "https://assets.mixkit.co/music/680/680.mp3": "discover",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Constancy%20Part%20Two.mp3": "constancy-part-two",
+  "https://assets.mixkit.co/music/671/671.mp3": "mixkit-track-671",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/The%20Other%20Side%20of%20the%20Door.mp3": "the-other-side-of-the-door",
+  "https://assets.mixkit.co/music/140/140.mp3": "mixkit-track-140",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Long%20Road%20Ahead%20B.mp3": "long-road-ahead-b",
+  "https://assets.mixkit.co/music/657/657.mp3": "mixkit-track-657",
+  "https://assets.mixkit.co/music/139/139.mp3": "mixkit-track-139",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Piece%20for%20Disaffected%20Piano%20One.mp3": "piece-for-disaffected-piano-one",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Gymnopedie%20No%201.mp3": "gymnopedie-no-1",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Dhaka.mp3": "dhaka",
+  "https://assets.mixkit.co/music/601/601.mp3": "mixkit-track-601",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Big%20Mojo.mp3": "big-mojo",
+  "https://assets.mixkit.co/music/724/724.mp3": "epical-drums-05",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/What%20Is%20Love.mp3": "what-is-love",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Reign%20Supreme.mp3": "reign-supreme",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Satiate.mp3": "satiate",
+  "https://assets.mixkit.co/music/565/565.mp3": "mixkit-track-565",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/mystery.mp3": "mystery",
+  "https://assets.mixkit.co/music/659/659.mp3": "mixkit-track-659",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Future%20Cha%20Cha.mp3": "future-cha-cha",
+  "https://assets.mixkit.co/music/749/749.mp3": "mixkit-track-749",
+  "https://assets.mixkit.co/music/676/676.mp3": "mixkit-track-676",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Failing%20Defense.mp3": "failing-defense",
+  "https://assets.mixkit.co/music/138/138.mp3": "mixkit-track-138",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Vanes.mp3": "vanes",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Dirt%20Rhodes.mp3": "dirt-rhodes",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Chase.mp3": "chase",
+  "https://assets.mixkit.co/music/76/76.mp3": "mixkit-track-76",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Intrepid.mp3": "intrepid",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Chee%20Zee%20Cave.mp3": "chee-zee-cave",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Willow%20and%20the%20Light.mp3": "willow-and-the-light",
+  "https://assets.mixkit.co/music/51/51.mp3": "mixkit-track-51",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Thinking%20Out%20Loud.mp3": "thinking-out-loud",
+  "https://assets.mixkit.co/music/588/588.mp3": "mixkit-track-588",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Truth%20of%20the%20Legend.mp3": "truth-of-the-legend",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Ranz%20des%20Vaches.mp3": "ranz-des-vaches",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Kool%20Kats.mp3": "kool-kats",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Nerves.mp3": "nerves",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/River%20of%20Io.mp3": "river-of-io",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Envision.mp3": "envision",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Delightful%20D.mp3": "delightful-d",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Unity.mp3": "unity",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Gymnopedie%20No%202.mp3": "gymnopedie-no-2",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Colorless%20Aura.mp3": "colorless-aura",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Rising%20Game.mp3": "rising-game",
+  "https://assets.mixkit.co/music/688/688.mp3": "mixkit-track-688",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Satiate%20Strings.mp3": "satiate-only-strings",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Take%20the%20Lead.mp3": "take-the-lead",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Prelude%20and%20Action.mp3": "prelude-and-action",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Continue%20Life.mp3": "continue-life",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Unwritten%20Return.mp3": "unwritten-return",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Ibn%20Al-Noor.mp3": "ibn-al-noor",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Variation%20on%20Egmont.mp3": "variation-on-egmont",
+  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/The%20Escalation.mp3": "the-escalation"
+ },
+ "yt_ids": {},
+ "sources_last_run": {
+  "incompetech": "2026-05-23",
+  "mixkit": "2026-05-23"
+ },
+ "usage": {}
+}

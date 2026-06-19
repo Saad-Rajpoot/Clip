@@ -1,0 +1,440 @@
+{
+ "schema_version": 1,
+ "videos": [
+  {
+   "video_id": "John D. Rockefeller: The Man Who Built Standard Oil",
+   "niche": "business",
+   "date": "",
+   "lead_category": "emotional_piano",
+   "categories": [
+    "emotional_piano",
+    "historical_epic",
+    "slow_reveal"
+   ],
+   "tracks": [
+    "emotional_piano/mixkit-track-493",
+    "emotional_piano/mixkit-track-659",
+    "historical_epic/long-road-ahead-b",
+    "slow_reveal/colorless-aura"
+   ],
+   "sfx_families": [
+    "whoosh"
+   ]
+  },
+  {
+   "video_id": "Our Man in Damascus: The Spy Who Reached the Heart of an Enemy State",
+   "niche": "geopolitics",
+   "date": "",
+   "lead_category": "dark_investigation",
+   "categories": [
+    "dark_investigation",
+    "emotional_piano"
+   ],
+   "tracks": [
+    "dark_investigation/constance",
+    "emotional_piano/mixkit-track-493"
+   ],
+   "sfx_families": [
+    "impact",
+    "ui"
+   ]
+  },
+  {
+   "video_id": "The Untouchable: How They Finally Caught Al Capone",
+   "niche": "crime",
+   "date": "",
+   "lead_category": "suspense",
+   "categories": [
+    "dark_investigation",
+    "suspense"
+   ],
+   "tracks": [
+    "dark_investigation/past-the-edge",
+    "suspense/-YXLrqPaac4",
+    "suspense/unanswered-questions"
+   ],
+   "sfx_families": [
+    "impact",
+    "ui"
+   ]
+  },
+  {
+   "video_id": "The Richest Man in the World: Andrew Carnegie and the Empire of Steel",
+   "niche": "business",
+   "date": "",
+   "lead_category": "history",
+   "categories": [
+    "emotional_piano",
+    "history"
+   ],
+   "tracks": [
+    "emotional_piano/mixkit-track-493",
+    "history/mixkit-track-657"
+   ],
+   "sfx_families": [
+    "data",
+    "impact",
+    "ui",
+    "whoosh"
+   ]
+  },
+  {
+   "video_id": "Thirteen Days: The World on the Edge of Nuclear War",
+   "niche": "geopolitics",
+   "date": "",
+   "lead_category": "suspense",
+   "categories": [
+    "dark_investigation",
+    "suspense"
+   ],
+   "tracks": [
+    "dark_investigation/past-the-edge",
+    "suspense/ibn-al-noor",
+    "suspense/unanswered-questions"
+   ],
+   "sfx_families": [
+    "impact",
+    "ui"
+   ]
+  },
+  {
+   "video_id": "The Invisible Killer: How John Snow Mapped a Cholera Outbreak",
+   "niche": "history",
+   "date": "",
+   "lead_category": "emotional_piano",
+   "categories": [
+    "emotional_piano",
+    "suspense"
+   ],
+   "tracks": [
+    "emotional_piano/mixkit-track-493",
+    "suspense/our-story-begins"
+   ],
+   "sfx_families": [
+    "data",
+    "impact",
+    "ui",
+    "whoosh"
+   ]
+  },
+  {
+   "video_id": "The Machine That Won the War: Cracking Enigma at Bletchley Park",
+   "niche": "history",
+   "date": "",
+   "lead_category": "dark_investigation",
+   "categories": [
+    "dark_investigation"
+   ],
+   "tracks": [
+    "dark_investigation/constance"
+   ],
+   "sfx_families": [
+    "data",
+    "impact",
+    "ui"
+   ]
+  },
+  {
+   "video_id": "The Road to Moscow: Napoleon's Catastrophe of 1812",
+   "niche": "history",
+   "date": "",
+   "lead_category": "tech_cyber",
+   "categories": [
+    "climax_build",
+    "tech_cyber"
+   ],
+   "tracks": [
+    "climax_build/clenched-teeth",
+    "tech_cyber/variation-on-egmont"
+   ],
+   "sfx_families": [
+    "impact",
+    "ui",
+    "whoosh"
+   ]
+  },
+  {
+   "video_id": "The Cambridge Spy Who Vanished",
+   "niche": "spy",
+   "date": "",
+   "lead_category": "dark_investigation",
+   "categories": [
+    "dark_investigation",
+    "suspense"
+   ],
+   "tracks": [
+    "dark_investigation/past-the-edge",
+    "dark_investigation/sneak-n-get-caught",
+    "suspense/chee-zee-cave",
+    "suspense/constancy-part-two"
+   ],
+   "sfx_families": [
+    "impact",
+    "ui"
+   ]
+  },
+  {
+   "video_id": "How the Iran-Iraq War Reshaped the Middle East",
+   "niche": "geopolitics",
+   "date": "",
+   "lead_category": "suspense",
+   "categories": [
+    "dark_investigation",
+    "suspense"
+   ],
+   "tracks": [
+    "dark_investigation/drums-of-the-deep",
+    "dark_investigation/past-the-edge",
+    "suspense/constancy-part-two",
+    "suspense/unanswered-questions"
+   ],
+   "sfx_families": [
+    "data",
+    "impact",
+    "timeline",
+    "ui"
+   ]
+  },
+  {
+   "video_id": "How a Simple Chemical Reaction Prevents Corrosion",
+   "niche": "history",
+   "date": "",
+   "lead_category": "history",
+   "categories": [
+    "history"
+   ],
+   "tracks": [
+    "history/danse-of-questionable-tuning"
+   ],
+   "sfx_families": [
+    "impact",
+    "ui",
+    "whoosh"
+   ]
+  },
+  {
+   "video_id": "How an Oil Monopoly Controlled Railroads and Refineries",
+   "niche": "business",
+   "date": "",
+   "lead_category": "history",
+   "categories": [
+    "emotional_piano",
+    "history"
+   ],
+   "tracks": [
+    "emotional_piano/mixkit-track-493",
+    "history/vanes"
+   ],
+   "sfx_families": [
+    "impact",
+    "ui",
+    "whoosh"
+   ]
+  },
+  {
+   "video_id": "How a Hidden Vulnerability Exposed Millions of Devices",
+   "niche": "history",
+   "date": "",
+   "lead_category": "history",
+   "categories": [
+    "history"
+   ],
+   "tracks": [
+    "history/mixkit-track-601"
+   ],
+   "sfx_families": [
+    "impact",
+    "ui",
+    "whoosh"
+   ]
+  },
+  {
+   "video_id": "How a Carrier Group Crosses an Ocean",
+   "niche": "history",
+   "date": "",
+   "lead_category": "suspense",
+   "categories": [
+    "dark_investigation",
+    "suspense"
+   ],
+   "tracks": [
+    "dark_investigation/drums-of-the-deep",
+    "suspense/unanswered-questions"
+   ],
+   "sfx_families": [
+    "impact",
+    "ui"
+   ]
+  },
+  {
+   "video_id": "How Steve Jobs Turned a Small Computer Company Into an Empire",
+   "niche": "history",
+   "date": "",
+   "lead_category": "tech_cyber",
+   "categories": [
+    "climax_build",
+    "tech_cyber"
+   ],
+   "tracks": [
+    "climax_build/clenched-teeth",
+    "tech_cyber/variation-on-egmont"
+   ],
+   "sfx_families": [
+    "impact",
+    "ui",
+    "whoosh"
+   ]
+  },
+  {
+   "video_id": "How Napoleon Rose From Soldier to Emperor",
+   "niche": "history",
+   "date": "",
+   "lead_category": "historical_epic",
+   "categories": [
+    "emotional_piano",
+    "historical_epic"
+   ],
+   "tracks": [
+    "emotional_piano/mixkit-track-493",
+    "historical_epic/majestic-hills"
+   ],
+   "sfx_families": [
+    "impact",
+    "ui"
+   ]
+  },
+  {
+   "video_id": "How Rockefeller Built the Most Powerful Oil Empire in America",
+   "niche": "history",
+   "date": "",
+   "lead_category": "tech_cyber",
+   "categories": [
+    "climax_build",
+    "financial",
+    "tech_cyber"
+   ],
+   "tracks": [
+    "climax_build/clenched-teeth",
+    "financial/385c21acdd373fd7",
+    "tech_cyber/AdpR-e2aSVw"
+   ],
+   "sfx_families": [
+    "impact",
+    "ui",
+    "whoosh"
+   ]
+  },
+  {
+   "video_id": "How Rockefeller Built His Oil Empire — A Life in Three Acts",
+   "niche": "history",
+   "date": "",
+   "lead_category": "historical_epic",
+   "categories": [
+    "historical_epic"
+   ],
+   "tracks": [
+    "historical_epic/majestic-hills"
+   ],
+   "sfx_families": [
+    "impact",
+    "ui",
+    "whoosh"
+   ]
+  },
+  {
+   "video_id": "How an Electron Microscope Reveals Objects Smaller Than Light Can See",
+   "niche": "history",
+   "date": "",
+   "lead_category": "suspense",
+   "categories": [
+    "dark_investigation",
+    "suspense"
+   ],
+   "tracks": [
+    "dark_investigation/drums-of-the-deep",
+    "suspense/unanswered-questions"
+   ],
+   "sfx_families": [
+    "impact",
+    "ui"
+   ]
+  },
+  {
+   "video_id": "The Eastern Front: How Supply Lines Decided a War",
+   "niche": "geopolitics",
+   "date": "",
+   "lead_category": "suspense",
+   "categories": [
+    "dark_investigation",
+    "suspense"
+   ],
+   "tracks": [
+    "dark_investigation/past-the-edge",
+    "suspense/unanswered-questions"
+   ],
+   "sfx_families": [
+    "impact",
+    "ui"
+   ]
+  },
+  {
+   "video_id": "Standard Oil — Facts and Fabrications",
+   "niche": "business",
+   "date": "",
+   "lead_category": "neutral",
+   "categories": [
+    "neutral",
+    "tech_cyber"
+   ],
+   "tracks": [
+    "neutral/0352446442b23c4f",
+    "tech_cyber/thinking-out-loud"
+   ],
+   "sfx_families": [
+    "foley_doc",
+    "impact",
+    "ui",
+    "whoosh"
+   ]
+  },
+  {
+   "video_id": "The Rise of Standard Oil",
+   "niche": "business",
+   "date": "",
+   "lead_category": "neutral",
+   "categories": [
+    "climax_build",
+    "neutral"
+   ],
+   "tracks": [
+    "climax_build/long-time-coming",
+    "neutral/056ac9319a1df85b"
+   ],
+   "sfx_families": [
+    "impact",
+    "ui",
+    "whoosh"
+   ]
+  },
+  {
+   "video_id": "The 2,000-Year-Old Computer Pulled From the Sea",
+   "niche": "history",
+   "date": "",
+   "lead_category": "dark_investigation",
+   "categories": [
+    "dark_investigation"
+   ],
+   "tracks": [
+    "dark_investigation/constance"
+   ],
+   "sfx_families": [
+    "data",
+    "foley_doc",
+    "impact",
+    "map",
+    "ui",
+    "whoosh"
+   ]
+  }
+ ]
+}

@@ -1,0 +1,50 @@
+{
+ "name": "free-orchestral-stock-music",
+ "category": "historical_epic",
+ "title": "Free Orchestral Stock Music",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/587/587.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 144.04,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "historical_epic",
+  "confidence": 0.85,
+  "voted_by": [
+   "title",
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 144.04,
+   "mean_volume_db": -24.3,
+   "max_volume_db": -7.2,
+   "silence_ratio": 0.0646219175229103,
+   "spectral_centroid_hz": 1500.280889603712,
+   "spectral_flatness": 0.12020613253116608,
+   "energy_arc": "steady",
+   "bpm": 185,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.586,
+   "darkness": 0.577,
+   "orchestral_density": 0.746,
+   "rhythmic_aggression": 0.22
+  }
+ },
+ "doc_quality": {
+  "score": 0.54,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:historical",
+   "+soft:epic",
+   "+soft:orchestral"
+  ]
+ }
+}

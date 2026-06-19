@@ -1,0 +1,48 @@
+{
+ "name": "what-is-love",
+ "category": "ambient",
+ "title": "What Is Love",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 207.99,
+ "tags": [
+  "calming",
+  "relaxed"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "ambient",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 208.01,
+   "mean_volume_db": -25.1,
+   "max_volume_db": -11.7,
+   "silence_ratio": 0.023658593336858803,
+   "spectral_centroid_hz": 2846.5215561447244,
+   "spectral_flatness": 0.5038925409317017,
+   "energy_arc": "steady",
+   "bpm": 78,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.254,
+   "darkness": 0.184,
+   "orchestral_density": 0.507,
+   "rhythmic_aggression": 0.552
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:ambient"
+  ]
+ }
+}

@@ -1,0 +1,23 @@
+title: "Operation Blackbird: The Defection That Broke the Cold War"
+prompt: |
+  A cinematic investigative documentary about a fictional Cold War
+  intelligence operation. Cover it like a Netflix true-history film with
+  rich geography and evidence:
+  - It begins in Berlin in 1961, then traces the defector's escape route
+    from Berlin through Vienna to London.
+  - Explain the divided territory of East Germany as a region.
+  - Show declassified CIA and KGB documents and field reports, with exact
+    dates logged like an intelligence file.
+  - Reveal the network of agents, handlers and double agents connecting
+    Moscow, Berlin and Washington.
+  - Walk through HOW the dead-drop signal system worked, step by step.
+  - Give the hard numbers: how many agents, how many years, the percentage
+    of intercepted messages.
+  - Build a timeline of the operation from 1961 to its exposure in 1974.
+  Authoritative, tense, investigative — guide the viewer through the
+  geography, the evidence, and the chronology.
+fmt: documentary
+duration: "6-8"
+theme: crime
+style: auto
+background: auto

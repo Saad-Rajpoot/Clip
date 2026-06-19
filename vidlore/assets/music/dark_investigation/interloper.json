@@ -1,0 +1,53 @@
+{
+ "name": "interloper",
+ "category": "dark_investigation",
+ "title": "Interloper",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 262.66,
+ "tags": [
+  "action",
+  "dark",
+  "eerie",
+  "epic",
+  "intense",
+  "mysterious"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "dark_investigation",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 262.69,
+   "mean_volume_db": -23.0,
+   "max_volume_db": -2.0,
+   "silence_ratio": 0.05403297803494613,
+   "spectral_centroid_hz": 465.81253627031776,
+   "spectral_flatness": 0.03501398488879204,
+   "energy_arc": "falling",
+   "bpm": 129,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.892,
+   "darkness": 0.955,
+   "orchestral_density": 0.862,
+   "rhythmic_aggression": 0.491
+  }
+ },
+ "doc_quality": {
+  "score": 0.24,
+  "verdict": "prefer",
+  "reasons": [
+   "+soft:epic",
+   "+soft:mysterious"
+  ]
+ }
+}

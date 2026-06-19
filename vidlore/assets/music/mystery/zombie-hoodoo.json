@@ -1,0 +1,52 @@
+{
+ "name": "zombie-hoodoo",
+ "category": "mystery",
+ "title": "Zombie Hoodoo",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 86.83,
+ "tags": [
+  "unnerving",
+  "eerie",
+  "mystical",
+  "mysterious",
+  "suspenseful"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "mystery",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 86.86,
+   "mean_volume_db": -24.3,
+   "max_volume_db": -5.1,
+   "silence_ratio": 0.0925914575178448,
+   "spectral_centroid_hz": 504.1124123430954,
+   "spectral_flatness": 0.01772172935307026,
+   "energy_arc": "steady",
+   "bpm": 112,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.836,
+   "darkness": 0.934,
+   "orchestral_density": 0.81,
+   "rhythmic_aggression": 0.367
+  }
+ },
+ "doc_quality": {
+  "score": 0.42,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:suspense",
+   "+soft:mysterious"
+  ]
+ }
+}

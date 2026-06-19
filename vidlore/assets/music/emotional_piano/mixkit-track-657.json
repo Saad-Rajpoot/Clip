@@ -1,0 +1,47 @@
+{
+ "name": "mixkit-track-657",
+ "category": "emotional_piano",
+ "title": "Mixkit Track 657",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/657/657.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 145.82,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "emotional_piano",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 145.82,
+   "mean_volume_db": -24.6,
+   "max_volume_db": -8.2,
+   "silence_ratio": 0.029578754628994654,
+   "spectral_centroid_hz": 1414.16535604397,
+   "spectral_flatness": 0.07142235338687897,
+   "energy_arc": "steady",
+   "bpm": 92,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.641,
+   "darkness": 0.646,
+   "orchestral_density": 0.865,
+   "rhythmic_aggression": 0.294
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:piano"
+  ]
+ }
+}

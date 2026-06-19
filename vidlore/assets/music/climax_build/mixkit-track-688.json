@@ -1,0 +1,45 @@
+{
+ "name": "mixkit-track-688",
+ "category": "climax_build",
+ "title": "Mixkit Track 688",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/688/688.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 123.04,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "climax_build",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 123.06,
+   "mean_volume_db": -25.0,
+   "max_volume_db": -6.0,
+   "silence_ratio": 0.06657740939379164,
+   "spectral_centroid_hz": 601.7176793058387,
+   "spectral_flatness": 0.005635188892483711,
+   "energy_arc": "steady",
+   "bpm": 60,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.859,
+   "darkness": 0.954,
+   "orchestral_density": 0.872,
+   "rhythmic_aggression": 0.123
+  }
+ },
+ "doc_quality": {
+  "score": 0.0,
+  "verdict": "neutral",
+  "reasons": []
+ }
+}

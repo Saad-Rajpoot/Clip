@@ -1,0 +1,67 @@
+# ===== secrets (NEVER commit) =====
+.env
+.env.*
+!.env.example
+.secrets/
+*.key
+*.pem
+
+# ===== python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# ===== virtualenvs =====
+.venv/
+.hdvenv/
+venv/
+env/
+
+# ===== node / vendored sub-projects (own builds + a nested .git) =====
+node_modules/
+.cobalt/
+.pot/
+.clipstudio_libs/
+
+# ===== OS / editor =====
+.DS_Store
+*.swp
+*~
+
+# ===== local machine-specific Claude Code settings (keep shared settings.json) =====
+.claude/settings.local.json
+
+# ===== render output (32G) + runtime caches =====
+output/
+editor_cache/
+last_ffmpeg_fail.txt
+
+# YTAL USE-ONLY raw audio cache — local runtime/dev library; NEVER bundled in dist.
+# (Manifests live in vidlore/audio_library/ and ARE committed; only the raw cache is ignored.)
+vidlore/audio_library/ytal_cache/
+
+# ===== heavy binaries: media / models / fonts (kept locally, not in git) =====
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.avi
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.aac
+*.onnx
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.gguf
+*.node
+*.ttf
+*.otf
+*.woff
+*.woff2

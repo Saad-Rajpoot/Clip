@@ -1,0 +1,48 @@
+{
+ "name": "finding-movement",
+ "category": "ambient",
+ "title": "Finding Movement",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 116.06,
+ "tags": [
+  "calming",
+  "uplifting"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "ambient",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 116.11,
+   "mean_volume_db": -24.6,
+   "max_volume_db": -5.2,
+   "silence_ratio": 0.04337664283868745,
+   "spectral_centroid_hz": 2154.6302667433533,
+   "spectral_flatness": 0.3205605447292328,
+   "energy_arc": "steady",
+   "bpm": 136,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.422,
+   "darkness": 0.286,
+   "orchestral_density": 0.56,
+   "rhythmic_aggression": 0.816
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:ambient"
+  ]
+ }
+}

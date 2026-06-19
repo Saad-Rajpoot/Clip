@@ -1,0 +1,127 @@
+name: standard
+label: Standard (neutral baseline)
+version: 1
+
+tone: neutral
+beat_target:    {min: 3.2, max: 3.6}
+beat_min:       {min: 2.2, max: 2.6}
+hook_seconds:   42
+hook_beat_mult: {min: 0.60, max: 0.70}
+climax_silence_mult: {min: 1.00, max: 1.10}
+dissolve_gap:   {min: 3, max: 4}
+dissolve_drop:  2
+camera_easing:  ease_out_cubic
+drift_scale:    {min: 0.90, max: 1.05}
+hold_bias:      {min: 1.00, max: 1.20}
+handheld_micro_float: true
+push_in_impact: {min: 0.95, max: 1.05}
+graphic_density: {min: 1.0, max: 1.1}
+density_per_min_max: {min: 2, max: 3}
+fav_templates: []
+avoid_templates: []
+chart_style: sans_clinical
+map_style:   satellite
+annotation_voice: clinical
+accent_rgb: [255, 210, 90]
+
+grade:
+  brightness_lift: {min: -0.02, max: 0.02}
+  saturation_lift: {min: -0.04, max: 0.02}
+  shadow_lift:     {min: 0.0,   max: 0.03}
+  highlight_roll:  {min: -0.02, max: 0.0}
+  warm_shadow_split: 0.012
+
+ai:
+  per_video_floor:   0
+  per_video_ceiling: {min: 2, max: 5}
+  fire_on_roles:     [climax, reveal, name_reveal]
+  fire_on_intensity: 4
+  portrait_style:    magnum_natgeo
+  grain_strength:    {min: 0.06, max: 0.10}
+  diffusion_fallback: false
+
+archival:
+  enabled: false
+  bias_on_dates_before: 1950
+  source_priority: [pexels_historical]
+
+music:
+  category_bias: []
+  intensity:      {min: 0.95, max: 1.10}
+  density_floor:  {min: 0.55, max: 0.75}
+  swell_on_climax: restrained
+  cue_min_seconds: 14
+  track_repeat_window_days: 7
+
+silence:
+  tier1_pocket_s: 0.0
+  tier2_pocket_s: {min: 0.45, max: 0.55}
+  tier3_pocket_s: {min: 0.95, max: 1.15}
+  tier3_stretch_s: {min: 0.35, max: 0.55}
+  pre_roll_t3_s:   {min: 0.45, max: 0.55}
+
+sfx:
+  whoosh_min_gap_s: {min: 10, max: 14}
+  boom_min_gap_s:   {min: 28, max: 36}
+  amplitude:        {min: 0.45, max: 0.62}
+  reveal_stinger:   none
+
+text:
+  emphasis_fire_prob_density:   1.0
+  emphasis_fire_prob_restraint: {min: 0.45, max: 0.60}
+  scrim_under_busy_shots: true
+  text_density_target_pct: {min: 12, max: 22}
+
+fonts:
+  display: [VidloreSans]
+  body:    [VidloreSans]
+  weight_bias: bold
+  letter_spacing_caps: 0.03
+
+lower_third:
+  variant: scrim_panel_v1
+  duration_s: {min: 4.0, max: 5.5}
+  accent_underline: true
+
+name_reveal:
+  layout: portrait_left_text_right_v1
+  serif_name: true
+  gold_underline: true
+  scrim_panel_behind_text_only: true
+
+captions:
+  enabled_default: false
+  ass_style_overrides: {}
+
+intro:
+  cold_open_s: 6
+  title_hold_s: 2.0
+  hook_compression: 1.4
+
+climax:
+  hold_s: {min: 6, max: 12}
+  pre_silence_s: {min: 1.0, max: 1.4}
+
+animation:
+  default_easing: ease_out_cubic
+  stagger_ms: {min: 80, max: 140}
+  philosophy: cinematic_restraint
+
+voice:
+  backend: edge_tts
+  voice_id: en-US-GuyNeural
+  rate_pct: 0
+  pitch_st: 0
+
+anti_convergence:
+  history_window: 5
+  min_distance: 0.18
+  forced_drift_axes:
+    - beat_target
+    - music.intensity
+    - silence.tier3_pocket_s
+    - graphic_density
+
+variation:
+  cursor_stride: 1
+  deterministic: true

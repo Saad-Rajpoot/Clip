@@ -1,0 +1,51 @@
+{
+ "name": "majestic-hills",
+ "category": "historical_epic",
+ "title": "Majestic Hills",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 199.16,
+ "tags": [
+  "dark",
+  "epic",
+  "somber"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "historical_epic",
+  "confidence": 0.85,
+  "voted_by": [
+   "title",
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 199.18,
+   "mean_volume_db": -26.7,
+   "max_volume_db": -4.9,
+   "silence_ratio": 0.04188841249121398,
+   "spectral_centroid_hz": 647.9816074836547,
+   "spectral_flatness": 0.05026846379041672,
+   "energy_arc": "rising",
+   "bpm": 117,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.899,
+   "darkness": 0.941,
+   "orchestral_density": 0.867,
+   "rhythmic_aggression": 0.469
+  }
+ },
+ "doc_quality": {
+  "score": 0.42,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:historical",
+   "+soft:epic"
+  ]
+ }
+}

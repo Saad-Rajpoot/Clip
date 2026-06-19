@@ -1,0 +1,45 @@
+{
+ "name": "mixkit-track-612",
+ "category": "dark_investigation",
+ "title": "Mixkit Track 612",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/612/612.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 193.65,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "dark_investigation",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 193.65,
+   "mean_volume_db": -24.5,
+   "max_volume_db": -10.0,
+   "silence_ratio": 0.08045407694293828,
+   "spectral_centroid_hz": 2614.940575616146,
+   "spectral_flatness": 0.3997156620025635,
+   "energy_arc": "rising",
+   "bpm": 65,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.225,
+   "darkness": 0.146,
+   "orchestral_density": 0.403,
+   "rhythmic_aggression": 0.513
+  }
+ },
+ "doc_quality": {
+  "score": 0.0,
+  "verdict": "neutral",
+  "reasons": []
+ }
+}

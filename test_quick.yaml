@@ -1,0 +1,13 @@
+title: "Operation Conduit: A Cold War Intelligence Vignette"
+prompt: |
+  A SHORT (~2 minute) cinematic intelligence vignette set in 1957 Vienna —
+  the CIA's wideband listening post on Praterstrasse, intercepting Soviet
+  diplomatic and military radio from Budapest, Prague, and East Berlin.
+  Reference declassified field reports and intercept logs (4,000+ signals
+  per month). End on the moment the operation is compromised by a source
+  inside British SIS. Keep it tight: 2-3 beats, evidence-driven, no filler.
+fmt: documentary
+duration: "1-2"
+theme: crime
+style: auto
+background: auto

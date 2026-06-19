@@ -1,0 +1,49 @@
+{
+ "name": "spy-glass",
+ "category": "mystery",
+ "title": "Spy Glass",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 226.98,
+ "tags": [
+  "grooving",
+  "mysterious"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "mystery",
+  "confidence": 0.85,
+  "voted_by": [
+   "title",
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 227.0,
+   "mean_volume_db": -25.2,
+   "max_volume_db": -7.8,
+   "silence_ratio": 0.06778477092511012,
+   "spectral_centroid_hz": 2584.859496358851,
+   "spectral_flatness": 0.4623650312423706,
+   "energy_arc": "steady",
+   "bpm": 78,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.284,
+   "darkness": 0.155,
+   "orchestral_density": 0.426,
+   "rhythmic_aggression": 0.619
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:mysterious"
+  ]
+ }
+}

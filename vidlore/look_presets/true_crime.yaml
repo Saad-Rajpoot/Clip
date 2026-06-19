@@ -1,0 +1,128 @@
+name: true_crime
+label: True Crime / Investigation
+inherits: standard
+version: 1
+
+tone: tense
+beat_target:    {min: 2.8, max: 3.2}
+beat_min:       {min: 1.9, max: 2.3}
+hook_seconds:   38
+hook_beat_mult: {min: 0.50, max: 0.62}
+climax_silence_mult: {min: 1.15, max: 1.45}
+dissolve_gap:   {min: 4, max: 5}
+dissolve_drop:  3
+camera_easing:  ease_out_cubic
+drift_scale:    {min: 0.85, max: 0.95}
+hold_bias:      {min: 1.15, max: 1.30}
+push_in_impact: {min: 1.10, max: 1.30}
+
+graphic_density: {min: 1.10, max: 1.25}
+density_per_min_max: {min: 3, max: 5}
+fav_templates:
+  - evidence
+  - evidence_tag
+  - case_file
+  - classified
+  - redacted
+  - conspiracy_board
+  - surveillance
+  - call_log
+  - document
+  - document_stack
+  - timeline
+  - map_pin_cluster
+  - newspaper
+  - news_article
+  - verdict_stamp
+  - voice_memo
+  - gps_stamp
+avoid_templates:
+  - era_banner
+  - award_ribbon
+  - inscription
+  - photo_collage
+  - polaroid_stack
+  - did_you_know
+  - hashtag_trend
+  - speech_bubble
+  - film_slate
+
+chart_style: sans_clinical
+map_style:   satellite
+annotation_voice: clinical
+accent_rgb: [220, 50, 50]
+
+grade:
+  brightness_lift: {min: -0.06, max: -0.02}
+  saturation_lift: {min: -0.10, max: -0.04}
+  shadow_lift:     {min: 0.0,   max: 0.02}
+  highlight_roll:  {min: -0.04, max: -0.01}
+  warm_shadow_split: -0.008
+
+ai:
+  per_video_floor:   1
+  per_video_ceiling: {min: 2, max: 4}
+  fire_on_roles:     [climax, reveal, name_reveal]
+  fire_on_intensity: 4
+  portrait_style:    candid
+  grain_strength:    {min: 0.08, max: 0.12}
+  diffusion_fallback: true
+
+archival:
+  enabled: true
+  bias_on_dates_before: 2010
+  source_priority: [internet_archive, loc, nara]
+
+music:
+  category_bias: [dark_investigation, suspense, tension]
+  intensity:      {min: 1.10, max: 1.25}
+  density_floor:  {min: 0.45, max: 0.60}
+  swell_on_climax: aggressive
+  cue_min_seconds: 18
+  track_repeat_window_days: 14
+
+silence:
+  tier2_pocket_s: {min: 0.55, max: 0.70}
+  tier3_pocket_s: {min: 1.10, max: 1.35}
+  tier3_stretch_s: {min: 0.45, max: 0.60}
+  pre_roll_t3_s:   {min: 0.55, max: 0.65}
+
+sfx:
+  whoosh_min_gap_s: {min: 14, max: 18}
+  boom_min_gap_s:   {min: 22, max: 30}
+  amplitude:        {min: 0.55, max: 0.75}
+  reveal_stinger:   bowed_drone
+
+text:
+  emphasis_fire_prob_density:   1.0
+  emphasis_fire_prob_restraint: {min: 0.40, max: 0.55}
+  text_density_target_pct:      {min: 24, max: 38}
+
+fonts:
+  display: [Helvetica Neue Bold, Inter, VidloreSans]
+  body:    [Inter, VidloreSans]
+  weight_bias: bold
+  letter_spacing_caps: 0.06
+
+intro:
+  cold_open_s: 5
+  title_hold_s: 1.8
+  hook_compression: 1.8
+
+climax:
+  hold_s: {min: 7, max: 12}
+  pre_silence_s: {min: 1.3, max: 1.8}
+
+animation:
+  default_easing: ease_out_cubic
+  stagger_ms: {min: 70, max: 120}
+  philosophy: youtube_energetic
+
+anti_convergence:
+  history_window: 5
+  min_distance: 0.22
+  forced_drift_axes:
+    - music.category_bias
+    - transition_palette
+    - climax.hold_s
+    - graphic_density

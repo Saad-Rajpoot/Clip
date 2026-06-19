@@ -1,0 +1,51 @@
+{
+ "name": "failing-defense",
+ "category": "military_tension",
+ "title": "Failing Defense",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 105.5,
+ "tags": [
+  "action",
+  "aggressive",
+  "intense",
+  "suspenseful"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "military_tension",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 105.53,
+   "mean_volume_db": -24.6,
+   "max_volume_db": -7.0,
+   "silence_ratio": 0.05605438264000758,
+   "spectral_centroid_hz": 801.1903335493336,
+   "spectral_flatness": 0.09092985093593597,
+   "energy_arc": "rising",
+   "bpm": 172,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.768,
+   "darkness": 0.862,
+   "orchestral_density": 0.795,
+   "rhythmic_aggression": 0.546
+  }
+ },
+ "doc_quality": {
+  "score": 0.42,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:suspense",
+   "+soft:tension"
+  ]
+ }
+}

@@ -1,0 +1,49 @@
+{
+ "name": "unity",
+ "category": "military_tension",
+ "title": "Unity",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 264.07,
+ "tags": [
+  "action",
+  "driving",
+  "intense"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "military_tension",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 264.1,
+   "mean_volume_db": -24.7,
+   "max_volume_db": -8.6,
+   "silence_ratio": 0.0638065694812571,
+   "spectral_centroid_hz": 1350.0864109085533,
+   "spectral_flatness": 0.26571354269981384,
+   "energy_arc": "steady",
+   "bpm": 144,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.549,
+   "darkness": 0.599,
+   "orchestral_density": 0.584,
+   "rhythmic_aggression": 0.717
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:tension"
+  ]
+ }
+}

@@ -1,0 +1,29 @@
+title: "The Forgotten Ledger: How a Century-Old Farm Report Solved a Modern Pest Crisis"
+prompt: |
+  A calm, investigative documentary about a rediscovered agricultural method,
+  reconstructed almost entirely from PAPER EVIDENCE — old field reports,
+  county extension surveys, farm ledgers, and a researcher's notebooks.
+  Style it like a MagnatesMedia / Johnny Harris piece that keeps cutting to
+  the actual documents and quoting them on screen.
+  - Open on a dusty 1887 Pennsylvania farm ledger whose entry describes a
+    mineral seed-coating recipe; quote the entry directly.
+  - Walk through Penn State extension field reports from 1923 that surveyed
+    Amish and Mennonite farms; the reports record yields 15-25% above local
+    averages and "remarkably low insect infestation without purchased
+    insecticides."
+  - Quote a county inspector's field notebook and a 1924 agricultural
+    bulletin, with exact dates as if reading the records aloud.
+  - Bring it to the present: a modern gardener's documented trial, written up
+    like a report, shows a 90% drop in pest losses after copying the old
+    copper-and-zinc method.
+  - Give the hard numbers throughout: percentages, yields, dollar costs per
+    acre, the number of farms surveyed.
+  - Treat every claim as evidence: cite the source each time, as a careful
+    documentary would.
+  Authoritative, measured, evidence-driven — the documents ARE the story.
+  Keep it grounded in one region; this is about the paper trail, not a map.
+fmt: documentary
+duration: "6-8"
+theme: history
+style: auto
+background: auto

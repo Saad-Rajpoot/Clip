@@ -1,0 +1,45 @@
+{
+ "name": "mixkit-track-565",
+ "category": "dark_investigation",
+ "title": "Mixkit Track 565",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/565/565.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 294.9,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "dark_investigation",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 294.92,
+   "mean_volume_db": -25.8,
+   "max_volume_db": -8.7,
+   "silence_ratio": 0.023080472670554728,
+   "spectral_centroid_hz": 1232.1959187391287,
+   "spectral_flatness": 0.12120077013969421,
+   "energy_arc": "steady",
+   "bpm": 112,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.68,
+   "darkness": 0.708,
+   "orchestral_density": 0.821,
+   "rhythmic_aggression": 0.449
+  }
+ },
+ "doc_quality": {
+  "score": 0.0,
+  "verdict": "neutral",
+  "reasons": []
+ }
+}

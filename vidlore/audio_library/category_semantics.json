@@ -1,0 +1,447 @@
+{
+ "_doc": "Documentary music taxonomy (adversarially verified by the audio-engine design workflow). Per-category editorial semantics folded into every track by tools/build_audio_manifests.py and used by the music director for routing. 0..1 scales. ducking_profile in {gentle,standard,aggressive}. reuse_gap_videos = videos before this category may repeat.",
+ "_schema_version": 1,
+ "_source": "audio-engine-design-specs workflow (wf_f5d0f6ab-791), verifier-corrected",
+ "categories": {
+  "suspense": {
+   "populated": true,
+   "mood": "taut unresolved dread",
+   "energy": 0.5,
+   "tension": 0.85,
+   "darkness": 0.6,
+   "cinematic": 0.75,
+   "niches": [
+    "spy",
+    "crime",
+    "mystery",
+    "geopolitics"
+   ],
+   "intro_suitability": 0.55,
+   "body_suitability": 0.9,
+   "climax_suitability": 0.55,
+   "outro_suitability": 0.3,
+   "ducking_profile": "standard",
+   "reuse_gap_videos": 2,
+   "notes": "Workhorse mid-body bed for rising stakes and unanswered questions. Sustained tension without resolution, so it sags as an outro and over-commits as a true climax. Holds long stretches of narration well under standard ducking. Largest pool (18) tolerates a 2-video gap. Pair with mystery for investigative arcs. TENSE-DREAD CLUSTER member: never place two adjacent acts on the dread cluster (suspense, dark_investigation, military_tension, tech_cyber, investigative_pulse, geopolitical_urgency, conspiracy_drone) or the darkest register turns monotone and muddy."
+  },
+  "mystery": {
+   "populated": true,
+   "mood": "curious shadowed intrigue",
+   "energy": 0.4,
+   "tension": 0.7,
+   "darkness": 0.55,
+   "cinematic": 0.7,
+   "niches": [
+    "mystery",
+    "crime",
+    "spy",
+    "history"
+   ],
+   "intro_suitability": 0.7,
+   "body_suitability": 0.85,
+   "climax_suitability": 0.4,
+   "outro_suitability": 0.45,
+   "ducking_profile": "standard",
+   "reuse_gap_videos": 2,
+   "notes": "Inquisitive open-ended texture, lighter and more melodic than suspense. Excellent for cold opens and the who/what/why setup, strong through body, but lacks the weight to land a climax. Slightly better outro than suspense because its harmonic ambiguity can fade gracefully. Deep pool (18); 2-video reuse gap. Default opener for unsolved-case and disappearance stories."
+  },
+  "dark_investigation": {
+   "populated": true,
+   "mood": "grim forensic descent",
+   "energy": 0.45,
+   "tension": 0.8,
+   "darkness": 0.85,
+   "cinematic": 0.8,
+   "niches": [
+    "crime",
+    "spy",
+    "mystery",
+    "geopolitics"
+   ],
+   "intro_suitability": 0.4,
+   "body_suitability": 0.9,
+   "climax_suitability": 0.6,
+   "outro_suitability": 0.25,
+   "ducking_profile": "standard",
+   "reuse_gap_videos": 2,
+   "notes": "Heavier, darker cousin of suspense for evidence walls, corruption, and the uglier turns of a case. Too oppressive to open on cold, superb for sustained mid-to-late body and pre-climax pressure. Pairs naturally with redacted_document and framed_evidence_spotlight foley. Largest pool (20) allows a tight 2-video gap. TENSE-DREAD CLUSTER member: no two adjacent acts on the dread cluster, and rotate against suspense so the darkest bed does not dominate every act."
+  },
+  "emotional_piano": {
+   "populated": true,
+   "mood": "tender human gravity",
+   "energy": 0.25,
+   "tension": 0.3,
+   "darkness": 0.35,
+   "cinematic": 0.7,
+   "niches": [
+    "history",
+    "crime",
+    "mystery",
+    "business"
+   ],
+   "intro_suitability": 0.55,
+   "body_suitability": 0.5,
+   "climax_suitability": 0.2,
+   "outro_suitability": 0.95,
+   "ducking_profile": "gentle",
+   "reuse_gap_videos": 4,
+   "notes": "The reflective heart and THE definitive outro/resolution bed: victims remembered, legacies weighed, the quiet aftermath of a human cost. Very low climax suitability by design (sparse piano cannot carry a peak). Gentle ducking preserves intimate dynamics and decay tails under voice. Small pool (8), so enforce a 4-video gap to keep its emotional weight rare and earned; never use two emotional cues in one video, and never pair with somber_reflection (same emotional slot)."
+  },
+  "ambient": {
+   "populated": true,
+   "mood": "weightless neutral air",
+   "energy": 0.2,
+   "tension": 0.3,
+   "darkness": 0.4,
+   "cinematic": 0.55,
+   "niches": [
+    "mystery",
+    "history",
+    "geopolitics",
+    "business"
+   ],
+   "intro_suitability": 0.9,
+   "body_suitability": 0.85,
+   "climax_suitability": 0.15,
+   "outro_suitability": 0.6,
+   "ducking_profile": "gentle",
+   "reuse_gap_videos": 2,
+   "notes": "Textural connective tissue and the safest cold-open bed: low-information, non-committal, lets narration lead. High intro/body, near-zero climax. Gentle ducking because it already sits low and benefits from staying barely-there under voice. Doubles as a transitional breath between intense acts. Pool of 13; 2-video gap. UTILITY-CALM CLUSTER: the textural-air option, distinct from flat neutral and warmer clinical_explainer; avoid cycling all three tightly in one explainer-heavy piece."
+  },
+  "historical_epic": {
+   "populated": true,
+   "mood": "sweeping orchestral grandeur",
+   "energy": 0.7,
+   "tension": 0.55,
+   "darkness": 0.45,
+   "cinematic": 0.95,
+   "niches": [
+    "history",
+    "geopolitics",
+    "business",
+    "spy"
+   ],
+   "intro_suitability": 0.6,
+   "body_suitability": 0.7,
+   "climax_suitability": 0.85,
+   "outro_suitability": 0.6,
+   "ducking_profile": "standard",
+   "reuse_gap_videos": 4,
+   "notes": "Big-canvas scale for empires, wars, and turning points. Credible climax for triumph or catastrophe; intro lowered to 0.6 because it is the most orchestrally dense populated category and opening cold on a full orchestra is fatiguing and amateur. Use as an opener ONLY for restrained era-setting, and never in the same arc where it also serves the climax (the arc must have somewhere to travel). Small pool (8) means a 4-video reuse gap. Pairs with era_band_timeline and world_map_arc; spy is included for grand cold-war-scale espionage history rather than intimate tradecraft."
+  },
+  "military_tension": {
+   "populated": true,
+   "mood": "disciplined martial pressure",
+   "energy": 0.6,
+   "tension": 0.8,
+   "darkness": 0.6,
+   "cinematic": 0.8,
+   "niches": [
+    "spy",
+    "geopolitics",
+    "history",
+    "crime"
+   ],
+   "intro_suitability": 0.45,
+   "body_suitability": 0.85,
+   "climax_suitability": 0.7,
+   "outro_suitability": 0.25,
+   "ducking_profile": "standard",
+   "reuse_gap_videos": 4,
+   "notes": "Percussive, marching, ops-room urgency for covert action, conflict, and standoffs. Serves spy + geopolitics + history as the brief specifies. Strong escalating body and a hard-edged climax; poor outro (no resolution in its DNA). Small pool (7) requires a 4-video gap. TENSE-DREAD CLUSTER member: no two adjacent acts on the dread cluster; rotate especially against suspense and geopolitical_urgency to avoid a monotone of dread. Strong with map_route_spread and countdown_clock beats."
+  },
+  "tech_cyber": {
+   "populated": true,
+   "mood": "cold digital precision",
+   "energy": 0.55,
+   "tension": 0.65,
+   "darkness": 0.55,
+   "cinematic": 0.7,
+   "niches": [
+    "spy",
+    "business",
+    "geopolitics",
+    "crime"
+   ],
+   "intro_suitability": 0.6,
+   "body_suitability": 0.8,
+   "climax_suitability": 0.55,
+   "outro_suitability": 0.3,
+   "ducking_profile": "standard",
+   "reuse_gap_videos": 4,
+   "notes": "Synth-driven, pulsing, surveillance-state and data-breach texture. The signature bed for hacking, fintech, and digital-espionage segments; pairs with data, surveillance, and ui SFX pools. Modern sheen makes it wrong for period history. Smallest tech pool (6), so a 4-video gap is mandatory. Good under statistic_bar_reveal and connection_web; keep off purely emotional or archival passages. TENSE-DREAD CLUSTER member: observe the no-adjacent-act rule."
+  },
+  "financial": {
+   "populated": false,
+   "mood": "clinical market momentum",
+   "energy": 0.55,
+   "tension": 0.6,
+   "darkness": 0.4,
+   "cinematic": 0.65,
+   "niches": [
+    "business",
+    "geopolitics",
+    "crime"
+   ],
+   "intro_suitability": 0.6,
+   "body_suitability": 0.85,
+   "climax_suitability": 0.6,
+   "outro_suitability": 0.35,
+   "ducking_profile": "standard",
+   "reuse_gap_videos": 3,
+   "notes": "EMPTY today (priority to populate). Distinct from tech_cyber: less menace, more momentum and stakes-of-money. The core bed for fraud, collapses, empire-building, and market drama. Pairs tightly with money_flow_empire, growth_curve_chart, sankey_flow, and statistic_bar_reveal plus money-tick foley. Once populated, target a 2-3 video gap. Brighter and less dark than crime beds so corruption stories can still breathe."
+  },
+  "survival_urgency": {
+   "populated": false,
+   "mood": "breathless escalating peril",
+   "energy": 0.85,
+   "tension": 0.95,
+   "darkness": 0.6,
+   "cinematic": 0.8,
+   "niches": [
+    "spy",
+    "crime",
+    "geopolitics",
+    "mystery"
+   ],
+   "intro_suitability": 0.2,
+   "body_suitability": 0.45,
+   "climax_suitability": 0.9,
+   "outro_suitability": 0.15,
+   "ducking_profile": "aggressive",
+   "reuse_gap_videos": 4,
+   "notes": "EMPTY today (priority to populate). The highest-energy non-resolution bed: chases, manhunts, ticking-clock escapes. Wrong as opener (nowhere to climb) and as outro. CRITICAL: this is broadband-transient material; aggressive sidechain alone will pump on every hit. Reserve for narration-SPARSE peak moments, not sustained voice-over (hence body lowered to 0.45). At master, pre-compress the bed and use a faster sidechain release than the default 300ms on this category so transients duck cleanly without breathing. Once populated use a 3-4 video gap so the panic stays exceptional. Pairs with countdown_clock and map_route_spread."
+  },
+  "slow_reveal": {
+   "populated": true,
+   "mood": "creeping dawning realization",
+   "energy": 0.35,
+   "tension": 0.7,
+   "darkness": 0.55,
+   "cinematic": 0.8,
+   "niches": [
+    "mystery",
+    "crime",
+    "spy",
+    "history"
+   ],
+   "intro_suitability": 0.5,
+   "body_suitability": 0.75,
+   "climax_suitability": 0.45,
+   "outro_suitability": 0.4,
+   "ducking_profile": "standard",
+   "reuse_gap_videos": 4,
+   "notes": "Purpose-built for the reveal-ducking tiers: a deliberate, building sustain that supports tier2/tier3 dips and pre-silence without fighting the drop. Best immediately before and during disclosures, not as a peak itself. Small pool (5) is a constraint, so enforce a 4-video gap and lean on its synergy with redacted_document and framed_evidence_spotlight rather than overplaying it."
+  },
+  "climax_build": {
+   "populated": true,
+   "mood": "accelerating inevitable surge",
+   "energy": 0.9,
+   "tension": 0.9,
+   "darkness": 0.55,
+   "cinematic": 0.9,
+   "niches": [
+    "spy",
+    "crime",
+    "geopolitics",
+    "history"
+   ],
+   "intro_suitability": 0.15,
+   "body_suitability": 0.55,
+   "climax_suitability": 0.95,
+   "outro_suitability": 0.2,
+   "ducking_profile": "aggressive",
+   "reuse_gap_videos": 3,
+   "notes": "The dedicated peak engine: risers, swells, and resolution-point payoff. Explicitly low intro suitability per the brief; opening on it spends the arc too early. Aggressive ducking because dense builds otherwise swallow the voice at the most important line; on the peak line, prefer a momentary deeper dip on the keyword over riding the whole bed down. Pool of 9 supports a 3-video gap. Place at act-ends and the single main climax; follow with aftermath or emotional_piano to decompress."
+  },
+  "aftermath": {
+   "populated": true,
+   "mood": "hollow settling stillness",
+   "energy": 0.3,
+   "tension": 0.4,
+   "darkness": 0.55,
+   "cinematic": 0.75,
+   "niches": [
+    "crime",
+    "history",
+    "geopolitics",
+    "mystery"
+   ],
+   "intro_suitability": 0.45,
+   "body_suitability": 0.55,
+   "climax_suitability": 0.2,
+   "outro_suitability": 0.85,
+   "ducking_profile": "gentle",
+   "reuse_gap_videos": 4,
+   "notes": "The come-down after a climax and a strong second outro option alongside emotional_piano, but more desolate than tender, fitting consequences, fallout, and unresolved endings. Low climax by design. Gentle ducking lets sparse sustains and silence do the work. Pool of 6 warrants a 4-video gap. Natural successor to climax_build and survival_urgency; pairs with statement_card and cinematic_portrait_hold."
+  },
+  "neutral": {
+   "populated": false,
+   "mood": "transparent informational calm",
+   "energy": 0.3,
+   "tension": 0.25,
+   "darkness": 0.3,
+   "cinematic": 0.4,
+   "niches": [
+    "business",
+    "history",
+    "geopolitics",
+    "mystery"
+   ],
+   "intro_suitability": 0.8,
+   "body_suitability": 0.9,
+   "climax_suitability": 0.1,
+   "outro_suitability": 0.55,
+   "ducking_profile": "gentle",
+   "reuse_gap_videos": 2,
+   "notes": "EMPTY today (priority to populate). The most genre-agnostic, low-affect bed for explanatory and expository stretches where music must not editorialize, lighter and flatter than ambient. Highest body suitability of any category precisely because it disappears. Gentle ducking. Gap set to 2 (not 1) so the most-reused utility bed does not become recognizable wallpaper in a permanent engine. UTILITY-CALM CLUSTER: the flattest of neutral/ambient/clinical_explainer; do not cycle all three tightly in one piece."
+  },
+  "archive_texture": {
+   "populated": false,
+   "mood": "aged grainy authenticity",
+   "energy": 0.3,
+   "tension": 0.45,
+   "darkness": 0.5,
+   "cinematic": 0.6,
+   "niches": [
+    "history",
+    "crime",
+    "geopolitics",
+    "spy"
+   ],
+   "intro_suitability": 0.65,
+   "body_suitability": 0.7,
+   "climax_suitability": 0.2,
+   "outro_suitability": 0.45,
+   "ducking_profile": "gentle",
+   "reuse_gap_videos": 3,
+   "notes": "EMPTY today (priority to populate). Lo-fi, period-flavored, vinyl/tape-degraded texture that reads as historical record under archival footage and documents. Complements (not replaces) the 0.30 archival room-tone bed. Gentle ducking and low level so it sits as patina beneath voice and foley. Best for history and cold-case material. Once populated, a 3-video gap keeps the effect from feeling like a gimmick."
+  },
+  "investigative_pulse": {
+   "populated": false,
+   "mood": "methodical driving inquiry",
+   "energy": 0.55,
+   "tension": 0.7,
+   "darkness": 0.5,
+   "cinematic": 0.7,
+   "niches": [
+    "crime",
+    "spy",
+    "business",
+    "mystery"
+   ],
+   "intro_suitability": 0.45,
+   "body_suitability": 0.9,
+   "climax_suitability": 0.45,
+   "outro_suitability": 0.25,
+   "ducking_profile": "standard",
+   "reuse_gap_videos": 3,
+   "notes": "NEW. A rhythmic, forward-leaning following-the-thread bed built around a steady pulse/ostinato, more momentum than suspense, less dread than dark_investigation. Fills the gap for procedural body music that keeps datapoints moving (records, connections, follow-the-money). Pairs with connection_web, chronology_timeline, and bullet_list. Standard ducking; target a 2-3 video gap once populated. TENSE-DREAD CLUSTER member: no two adjacent acts on the dread cluster, so its pulse does not blur into suspense/dark_investigation in the same stretch."
+  },
+  "geopolitical_urgency": {
+   "populated": false,
+   "mood": "grave global stakes",
+   "energy": 0.65,
+   "tension": 0.8,
+   "darkness": 0.6,
+   "cinematic": 0.85,
+   "niches": [
+    "geopolitics",
+    "spy",
+    "history",
+    "business"
+   ],
+   "intro_suitability": 0.5,
+   "body_suitability": 0.8,
+   "climax_suitability": 0.75,
+   "outro_suitability": 0.3,
+   "ducking_profile": "standard",
+   "reuse_gap_videos": 3,
+   "notes": "NEW. Wide, tense, news-of-the-world weight for borders, alliances, sanctions, and brinkmanship, broader and more orchestral than military_tension and less martial. Strong body and a serious climax for crises and turning points. Pairs with world_map_arc, map_heat_spread, map_region_highlight, and cause_effect_chain. Standard ducking; 3-video gap. Serves the geopolitics niche as its signature bed while military_tension covers the combat/ops register. TENSE-DREAD CLUSTER member: rotate against military_tension and suspense, never adjacent acts."
+  },
+  "somber_reflection": {
+   "populated": false,
+   "mood": "muted mournful weight",
+   "energy": 0.18,
+   "tension": 0.35,
+   "darkness": 0.55,
+   "cinematic": 0.75,
+   "niches": [
+    "history",
+    "crime",
+    "geopolitics",
+    "mystery"
+   ],
+   "intro_suitability": 0.45,
+   "body_suitability": 0.5,
+   "climax_suitability": 0.15,
+   "outro_suitability": 0.9,
+   "ducking_profile": "gentle",
+   "reuse_gap_videos": 4,
+   "notes": "NEW. A strings/pad-led ELEGIAC bed that gives a non-piano alternative to emotional_piano for loss, tragedy, and moral reckoning, useful when piano timbre is overexposed or too intimate. Differentiated by timbre and tone: more desolate and modal than emotional_piano's intimate melody (energy 0.18), and deliberately the SECOND-choice outro (0.9) below emotional_piano's definitive 0.95 so selection stays unambiguous. Very high outro, near-zero climax. Gentle ducking to protect long sustains and silence. 4-video gap, and never pair in the same video as emotional_piano (they compete for the same emotional slot). Pairs with cinematic_portrait_hold and pull_quote_portrait."
+  },
+  "triumphant_resolution": {
+   "populated": false,
+   "mood": "earned uplifting arrival",
+   "energy": 0.7,
+   "tension": 0.3,
+   "darkness": 0.2,
+   "cinematic": 0.9,
+   "niches": [
+    "business",
+    "history",
+    "geopolitics",
+    "spy"
+   ],
+   "intro_suitability": 0.25,
+   "body_suitability": 0.4,
+   "climax_suitability": 0.85,
+   "outro_suitability": 0.85,
+   "ducking_profile": "gentle",
+   "reuse_gap_videos": 4,
+   "notes": "NEW. The major-key payoff that resolves an arc upward: justice served, empire built, mission succeeded, the rare positive ending most documentary libraries lack. Functions as both a climactic peak and a satisfying outro, so it is the bright counterpart to aftermath. Lowest darkness in the taxonomy. Ducking set to gentle (not standard) because its outro deployment carries the final reflective line, which standard ducking would over-suppress; its climax use is a resolved/narration-sparse payoff that does not need an aggressive bus. Use sparingly (4-video gap) because earned triumph loses meaning if frequent; pairs with growth_curve_chart and statement_card."
+  },
+  "conspiracy_drone": {
+   "populated": false,
+   "mood": "paranoid subliminal unease",
+   "energy": 0.3,
+   "tension": 0.75,
+   "darkness": 0.8,
+   "cinematic": 0.8,
+   "niches": [
+    "spy",
+    "mystery",
+    "geopolitics",
+    "crime"
+   ],
+   "intro_suitability": 0.7,
+   "body_suitability": 0.8,
+   "climax_suitability": 0.4,
+   "outro_suitability": 0.35,
+   "ducking_profile": "gentle",
+   "reuse_gap_videos": 3,
+   "notes": "NEW. A low, sustained, almost sub-audible drone/atmosphere that breeds dread without rhythm, ideal for cover-ups, hidden hands, and something-is-wrong-here passages. Low energy but high tension and darkness. Excellent unsettling cold-open and a creeping body bed beneath narration. Gentle ducking, BUT because low-frequency drone energy holds through the release, high-pass the sidechain key (or use a slower, frequency-aware release) so the sub-bass does not wobble/pump on every syllable. Pairs with redacted_document and surveillance SFX. 3-video gap keeps the unease fresh. TENSE-DREAD CLUSTER member: do not place adjacent to another dread-cluster act."
+  },
+  "clinical_explainer": {
+   "populated": false,
+   "mood": "bright analytical clarity",
+   "energy": 0.45,
+   "tension": 0.35,
+   "darkness": 0.25,
+   "cinematic": 0.5,
+   "niches": [
+    "business",
+    "geopolitics",
+    "history",
+    "mystery"
+   ],
+   "intro_suitability": 0.65,
+   "body_suitability": 0.85,
+   "climax_suitability": 0.25,
+   "outro_suitability": 0.4,
+   "ducking_profile": "gentle",
+   "reuse_gap_videos": 3,
+   "notes": "NEW. A light, pulsing, optimistic-neutral bed for data-forward explanation, how-it-works, mechanisms, and breakdowns, warmer and slightly more rhythmic than neutral, with no menace. The right floor under statistic_bar_reveal, proportion_ring, pictograph_scale, comparison_split, and bullet_list. Gentle ducking. Gap set to 3 (not 2) so it is not a second tightly-cycling gap-2 utility bed alongside ambient. UTILITY-CALM CLUSTER: the warm/rhythmic one, distinct from flat neutral and textural ambient; do not cycle all three tightly in one explainer-heavy piece."
+  }
+ }
+}

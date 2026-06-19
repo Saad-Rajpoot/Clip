@@ -1,0 +1,47 @@
+{
+ "name": "mixkit-track-127",
+ "category": "ambient",
+ "title": "Mixkit Track 127",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/127/127.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 133.78,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "ambient",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 133.83,
+   "mean_volume_db": -26.0,
+   "max_volume_db": -9.3,
+   "silence_ratio": 0.10601953224239705,
+   "spectral_centroid_hz": 2374.483622400263,
+   "spectral_flatness": 0.41170915961265564,
+   "energy_arc": "falling",
+   "bpm": 62,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.246,
+   "darkness": 0.139,
+   "orchestral_density": 0.356,
+   "rhythmic_aggression": 0.537
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:ambient"
+  ]
+ }
+}

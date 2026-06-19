@@ -1,0 +1,48 @@
+{
+ "name": "mixkit-track-671",
+ "category": "historical_epic",
+ "title": "Mixkit Track 671",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/671/671.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 113.03,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "historical_epic",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 113.03,
+   "mean_volume_db": -24.5,
+   "max_volume_db": -4.8,
+   "silence_ratio": 0.05212490489250642,
+   "spectral_centroid_hz": 777.6626934384702,
+   "spectral_flatness": 0.09108076244592667,
+   "energy_arc": "steady",
+   "bpm": 103,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.811,
+   "darkness": 0.873,
+   "orchestral_density": 0.802,
+   "rhythmic_aggression": 0.419
+  }
+ },
+ "doc_quality": {
+  "score": 0.42,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:historical",
+   "+soft:epic"
+  ]
+ }
+}

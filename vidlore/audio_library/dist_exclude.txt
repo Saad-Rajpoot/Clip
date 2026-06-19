@@ -1,0 +1,30 @@
+# USE-ONLY raw audio files — keep these OUT of any distributable build.
+# Licensed for use IN rendered videos, NOT for standalone redistribution.
+# (Mixkit Free License / Pixabay / YouTube Audio Library.) Auto-generated.
+vidlore/assets/music/ambient/mixkit-track-127.mp3
+vidlore/assets/music/ambient/mixkit-track-139.mp3
+vidlore/assets/music/ambient/mixkit-track-292.mp3
+vidlore/assets/music/ambient/mixkit-track-580.mp3
+vidlore/assets/music/ambient/mixkit-track-682.mp3
+vidlore/assets/music/ambient/mixkit-track-749.mp3
+vidlore/assets/music/climax_build/mixkit-track-51.mp3
+vidlore/assets/music/climax_build/mixkit-track-676.mp3
+vidlore/assets/music/climax_build/mixkit-track-688.mp3
+vidlore/assets/music/dark_investigation/mixkit-track-140.mp3
+vidlore/assets/music/dark_investigation/mixkit-track-188.mp3
+vidlore/assets/music/dark_investigation/mixkit-track-565.mp3
+vidlore/assets/music/dark_investigation/mixkit-track-612.mp3
+vidlore/assets/music/dark_investigation/mixkit-track-76.mp3
+vidlore/assets/music/emotional_piano/mixkit-track-493.mp3
+vidlore/assets/music/emotional_piano/mixkit-track-601.mp3
+vidlore/assets/music/emotional_piano/mixkit-track-657.mp3
+vidlore/assets/music/emotional_piano/mixkit-track-659.mp3
+vidlore/assets/music/historical_epic/discover.mp3
+vidlore/assets/music/historical_epic/epical-drums-05.mp3
+vidlore/assets/music/historical_epic/free-orchestral-stock-music.mp3
+vidlore/assets/music/historical_epic/mixkit-track-322.mp3
+vidlore/assets/music/historical_epic/mixkit-track-614.mp3
+vidlore/assets/music/historical_epic/mixkit-track-671.mp3
+vidlore/assets/music/mystery/mixkit-track-138.mp3
+vidlore/assets/music/mystery/mixkit-track-588.mp3
+vidlore/assets/music/mystery/mixkit-track-871.mp3

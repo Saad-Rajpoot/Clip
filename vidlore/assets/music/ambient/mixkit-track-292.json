@@ -1,0 +1,47 @@
+{
+ "name": "mixkit-track-292",
+ "category": "ambient",
+ "title": "Mixkit Track 292",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/292/292.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 108.04,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "ambient",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 108.03999999999999,
+   "mean_volume_db": -26.5,
+   "max_volume_db": -10.8,
+   "silence_ratio": 0.10157319511292114,
+   "spectral_centroid_hz": 447.5560799733127,
+   "spectral_flatness": 0.0005375902401283383,
+   "energy_arc": "steady",
+   "bpm": 172,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.777,
+   "darkness": 0.932,
+   "orchestral_density": 0.813,
+   "rhythmic_aggression": 0.412
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:ambient"
+  ]
+ }
+}

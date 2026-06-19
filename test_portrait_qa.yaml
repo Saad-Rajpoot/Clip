@@ -1,0 +1,15 @@
+title: "Eli's Secret: The Amish Farmer Who Hasn't Used Insecticide in 19 Years"
+prompt: |
+  A SHORT (~2 minute) documentary VIGNETTE about a specific person:
+  Eli, a 70-year-old Amish farmer in Lancaster County, Pennsylvania,
+  who hasn't bought a single bottle of insecticide in 19 years. The
+  video should INTRODUCE ELI BY NAME in an early scene — a clear
+  "meet the character" moment with his portrait and role line
+  ("AMISH ELDER · LANCASTER CO." or similar). Then reveal his
+  technique (the 1860s copper-strip method) and the yields he gets.
+  Keep it intimate — this is a character-driven doc, not a survey.
+fmt: documentary
+duration: "1-2"
+theme: history
+style: auto
+background: auto

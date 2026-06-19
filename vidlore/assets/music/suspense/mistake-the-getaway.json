@@ -1,0 +1,52 @@
+{
+ "name": "mistake-the-getaway",
+ "category": "suspense",
+ "title": "Mistake the Getaway",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 122.62,
+ "tags": [
+  "action",
+  "driving",
+  "epic",
+  "intense",
+  "suspenseful"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "suspense",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 122.64,
+   "mean_volume_db": -25.1,
+   "max_volume_db": -8.5,
+   "silence_ratio": 0.03542640247879974,
+   "spectral_centroid_hz": 2295.8349708928017,
+   "spectral_flatness": 0.3808496296405792,
+   "energy_arc": "falling",
+   "bpm": 144,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.327,
+   "darkness": 0.222,
+   "orchestral_density": 0.507,
+   "rhythmic_aggression": 0.855
+  }
+ },
+ "doc_quality": {
+  "score": 0.42,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:suspense",
+   "+soft:epic"
+  ]
+ }
+}

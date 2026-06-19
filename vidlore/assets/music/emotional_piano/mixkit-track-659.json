@@ -1,0 +1,47 @@
+{
+ "name": "mixkit-track-659",
+ "category": "emotional_piano",
+ "title": "Mixkit Track 659",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/659/659.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 158.59,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "emotional_piano",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 158.62,
+   "mean_volume_db": -23.8,
+   "max_volume_db": -4.3,
+   "silence_ratio": 0.017065130500567394,
+   "spectral_centroid_hz": 412.2246548087181,
+   "spectral_flatness": 0.0004669146437663585,
+   "energy_arc": "falling",
+   "bpm": 89,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.911,
+   "darkness": 0.989,
+   "orchestral_density": 0.968,
+   "rhythmic_aggression": 0.252
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:piano"
+  ]
+ }
+}

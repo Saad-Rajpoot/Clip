@@ -1,0 +1,50 @@
+{
+ "name": "mirage",
+ "category": "mystery",
+ "title": "Mirage",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 240.07,
+ "tags": [
+  "calming",
+  "eerie",
+  "mysterious",
+  "relaxed"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "mystery",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 240.09,
+   "mean_volume_db": -24.5,
+   "max_volume_db": -7.4,
+   "silence_ratio": 0.03553844808196926,
+   "spectral_centroid_hz": 488.3900619778709,
+   "spectral_flatness": 0.01912306807935238,
+   "energy_arc": "steady",
+   "bpm": 60,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.848,
+   "darkness": 0.972,
+   "orchestral_density": 0.913,
+   "rhythmic_aggression": 0.107
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:mysterious"
+  ]
+ }
+}

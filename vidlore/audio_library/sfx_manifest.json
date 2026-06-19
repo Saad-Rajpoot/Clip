@@ -1,0 +1,1165 @@
+{
+ "schema_version": 1,
+ "kind": "sfx",
+ "built": "2026-06-01",
+ "license_tier": "bundle",
+ "license": {
+  "source": "synthesized_original",
+  "creator": "Vidlore",
+  "commercial_use": true,
+  "attribution_required": false,
+  "redistribution_allowed": true,
+  "note": "100% procedurally synthesized (no third-party samples); Vidlore owns all SFX -> always bundle-safe."
+ },
+ "synthesis": "ffmpeg lavfi (sine + colored noise + filter chains + envelopes + seeded jitter)",
+ "total_presets": 123,
+ "pool_count": 11,
+ "pools": {
+  "text_reveal": {
+   "count": 11,
+   "family": "whoosh",
+   "preset_ids": [
+    "tr_whoosh_a",
+    "tr_whoosh_b",
+    "tr_whoosh_c",
+    "tr_whoosh_d",
+    "tr_paper_swipe_a",
+    "tr_paper_swipe_b",
+    "tr_paper_swipe_c",
+    "tr_breath_a",
+    "tr_breath_b",
+    "tr_breath_c",
+    "tr_keyword_tap"
+   ]
+  },
+  "impact": {
+   "count": 11,
+   "family": "impact",
+   "preset_ids": [
+    "im_boom_a",
+    "im_boom_b",
+    "im_boom_c",
+    "im_boom_d",
+    "im_soft_hit_a",
+    "im_soft_hit_b",
+    "im_dark",
+    "im_reveal_thud",
+    "im_evidence",
+    "im_evidence_soft",
+    "im_verdict"
+   ]
+  },
+  "map": {
+   "count": 14,
+   "family": "map",
+   "preset_ids": [
+    "mp_pin_a",
+    "mp_pin_b",
+    "mp_pin_c",
+    "mp_pulse_a",
+    "mp_pulse_b",
+    "mp_pulse_c",
+    "mp_route_draw_a",
+    "mp_route_draw_b",
+    "mp_route_draw_c",
+    "mp_location_lock",
+    "mp_radar_a",
+    "mp_radar_b",
+    "mp_region_swell",
+    "mp_tick"
+   ]
+  },
+  "ui": {
+   "count": 15,
+   "family": "ui",
+   "preset_ids": [
+    "ui_blip_a",
+    "ui_blip_b",
+    "ui_blip_c",
+    "ui_beep_a",
+    "ui_beep_b",
+    "ui_beep_c",
+    "ui_target_lock",
+    "ui_tick_a",
+    "ui_tick_b",
+    "ui_chirp",
+    "ui_pulse",
+    "kb_key_a",
+    "kb_key_b",
+    "kb_key_c",
+    "kb_key_d"
+   ]
+  },
+  "document": {
+   "count": 13,
+   "family": "foley_doc",
+   "preset_ids": [
+    "doc_paper_slide_a",
+    "doc_paper_slide_b",
+    "doc_paper_slide_c",
+    "doc_folder_open",
+    "doc_page_flip",
+    "doc_stamp_a",
+    "doc_stamp_b",
+    "doc_stamp_c",
+    "doc_highlighter_a",
+    "doc_highlighter_b",
+    "doc_highlighter_c",
+    "doc_tape_click",
+    "doc_scanner_hum"
+   ]
+  },
+  "timeline": {
+   "count": 9,
+   "family": "data",
+   "preset_ids": [
+    "tl_marker_tick_a",
+    "tl_marker_tick_b",
+    "tl_marker_tick_c",
+    "tl_date_lock_a",
+    "tl_date_lock_b",
+    "tl_date_lock_c",
+    "tl_line_draw",
+    "tl_reveal_hit",
+    "tl_time_pulse"
+   ]
+  },
+  "process": {
+   "count": 11,
+   "family": "data",
+   "preset_ids": [
+    "pr_step_pop_a",
+    "pr_step_pop_b",
+    "pr_step_pop_c",
+    "pr_step_pop_d",
+    "pr_arrow_draw",
+    "pr_node_connect_a",
+    "pr_node_connect_b",
+    "pr_node_connect_c",
+    "pr_flow_pulse",
+    "pr_diagram_build",
+    "pr_system_lock"
+   ]
+  },
+  "data": {
+   "count": 13,
+   "family": "data",
+   "preset_ids": [
+    "da_count_tick_a",
+    "da_count_tick_b",
+    "da_count_tick_c",
+    "da_settle_a",
+    "da_settle_b",
+    "da_settle_c",
+    "da_bar_grow",
+    "da_chart_reveal",
+    "da_graph_pulse",
+    "da_percent_hit",
+    "da_money_tick_a",
+    "da_money_tick_b",
+    "da_money_tick_c"
+   ]
+  },
+  "surveillance": {
+   "count": 7,
+   "family": "surveillance",
+   "preset_ids": [
+    "sv_shutter",
+    "sv_cctv_beep_a",
+    "sv_cctv_beep_b",
+    "sv_rec_click",
+    "sv_static",
+    "sv_radio_crackle",
+    "sv_tag_snap"
+   ]
+  },
+  "transition": {
+   "count": 10,
+   "family": "whoosh",
+   "preset_ids": [
+    "tx_whoosh_a",
+    "tx_whoosh_b",
+    "tx_whoosh_c",
+    "tx_whoosh_d",
+    "tx_air_pass",
+    "tx_dark_riser",
+    "tx_tension_swell",
+    "tx_hard_cut_hit",
+    "tx_dissolve_breath",
+    "tx_flashback_wash"
+   ]
+  },
+  "kinetic": {
+   "count": 9,
+   "family": "whoosh",
+   "preset_ids": [
+    "kt_word_pop_a",
+    "kt_word_pop_b",
+    "kt_word_pop_c",
+    "kt_word_pop_d",
+    "kt_emphasis_hit",
+    "kt_text_slam",
+    "kt_masked_sweep",
+    "kt_phrase_pulse",
+    "kt_final_settle"
+   ]
+  }
+ },
+ "presets": {
+  "da_bar_grow": {
+   "pool": "data",
+   "family": "data",
+   "duration_s": 0.4,
+   "base_volume": 0.2,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "da_chart_reveal": {
+   "pool": "data",
+   "family": "data",
+   "duration_s": 0.45,
+   "base_volume": 0.2,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "da_count_tick_a": {
+   "pool": "data",
+   "family": "data",
+   "duration_s": 0.03,
+   "base_volume": 0.17,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "da_count_tick_b": {
+   "pool": "data",
+   "family": "data",
+   "duration_s": 0.03,
+   "base_volume": 0.17,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "da_count_tick_c": {
+   "pool": "data",
+   "family": "data",
+   "duration_s": 0.03,
+   "base_volume": 0.17,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "da_graph_pulse": {
+   "pool": "data",
+   "family": "data",
+   "duration_s": 0.3,
+   "base_volume": 0.2,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "da_money_tick_a": {
+   "pool": "data",
+   "family": "data",
+   "duration_s": 0.05,
+   "base_volume": 0.16,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "da_money_tick_b": {
+   "pool": "data",
+   "family": "data",
+   "duration_s": 0.05,
+   "base_volume": 0.16,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "da_money_tick_c": {
+   "pool": "data",
+   "family": "data",
+   "duration_s": 0.05,
+   "base_volume": 0.16,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "da_percent_hit": {
+   "pool": "data",
+   "family": "data",
+   "duration_s": 0.55,
+   "base_volume": 0.42,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "da_settle_a": {
+   "pool": "data",
+   "family": "data",
+   "duration_s": 0.24,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "da_settle_b": {
+   "pool": "data",
+   "family": "data",
+   "duration_s": 0.26,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "da_settle_c": {
+   "pool": "data",
+   "family": "data",
+   "duration_s": 0.28,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "doc_folder_open": {
+   "pool": "document",
+   "family": "foley_doc",
+   "duration_s": 0.3,
+   "base_volume": 0.2,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "doc_highlighter_a": {
+   "pool": "document",
+   "family": "foley_doc",
+   "duration_s": 0.29,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "doc_highlighter_b": {
+   "pool": "document",
+   "family": "foley_doc",
+   "duration_s": 0.32,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "doc_highlighter_c": {
+   "pool": "document",
+   "family": "foley_doc",
+   "duration_s": 0.35,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "doc_page_flip": {
+   "pool": "document",
+   "family": "foley_doc",
+   "duration_s": 0.16,
+   "base_volume": 0.2,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "doc_paper_slide_a": {
+   "pool": "document",
+   "family": "foley_doc",
+   "duration_s": 0.2,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "doc_paper_slide_b": {
+   "pool": "document",
+   "family": "foley_doc",
+   "duration_s": 0.22,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "doc_paper_slide_c": {
+   "pool": "document",
+   "family": "foley_doc",
+   "duration_s": 0.24,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "doc_scanner_hum": {
+   "pool": "document",
+   "family": "foley_doc",
+   "duration_s": 0.8,
+   "base_volume": 0.16,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "doc_stamp_a": {
+   "pool": "document",
+   "family": "foley_doc",
+   "duration_s": 0.18,
+   "base_volume": 0.52,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "doc_stamp_b": {
+   "pool": "document",
+   "family": "foley_doc",
+   "duration_s": 0.2,
+   "base_volume": 0.52,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "doc_stamp_c": {
+   "pool": "document",
+   "family": "foley_doc",
+   "duration_s": 0.22,
+   "base_volume": 0.52,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "doc_tape_click": {
+   "pool": "document",
+   "family": "foley_doc",
+   "duration_s": 0.04,
+   "base_volume": 0.24,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "im_boom_a": {
+   "pool": "impact",
+   "family": "impact",
+   "duration_s": 1.01,
+   "base_volume": 0.62,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "im_boom_b": {
+   "pool": "impact",
+   "family": "impact",
+   "duration_s": 1.1,
+   "base_volume": 0.62,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "im_boom_c": {
+   "pool": "impact",
+   "family": "impact",
+   "duration_s": 1.2,
+   "base_volume": 0.62,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "im_boom_d": {
+   "pool": "impact",
+   "family": "impact",
+   "duration_s": 1.29,
+   "base_volume": 0.62,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "im_dark": {
+   "pool": "impact",
+   "family": "impact",
+   "duration_s": 1.3,
+   "base_volume": 0.66,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "im_evidence": {
+   "pool": "impact",
+   "family": "impact",
+   "duration_s": 0.7,
+   "base_volume": 0.5,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "im_evidence_soft": {
+   "pool": "impact",
+   "family": "impact",
+   "duration_s": 0.5,
+   "base_volume": 0.4,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "im_reveal_thud": {
+   "pool": "impact",
+   "family": "impact",
+   "duration_s": 0.9,
+   "base_volume": 0.55,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "im_soft_hit_a": {
+   "pool": "impact",
+   "family": "impact",
+   "duration_s": 0.58,
+   "base_volume": 0.42,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "im_soft_hit_b": {
+   "pool": "impact",
+   "family": "impact",
+   "duration_s": 0.62,
+   "base_volume": 0.42,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "im_verdict": {
+   "pool": "impact",
+   "family": "impact",
+   "duration_s": 1.2,
+   "base_volume": 0.64,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "kb_key_a": {
+   "pool": "ui",
+   "family": "ui",
+   "duration_s": 0.02,
+   "base_volume": 0.16,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "kb_key_b": {
+   "pool": "ui",
+   "family": "ui",
+   "duration_s": 0.02,
+   "base_volume": 0.16,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "kb_key_c": {
+   "pool": "ui",
+   "family": "ui",
+   "duration_s": 0.03,
+   "base_volume": 0.16,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "kb_key_d": {
+   "pool": "ui",
+   "family": "ui",
+   "duration_s": 0.03,
+   "base_volume": 0.16,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "kt_emphasis_hit": {
+   "pool": "kinetic",
+   "family": "whoosh",
+   "duration_s": 0.5,
+   "base_volume": 0.42,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "kt_final_settle": {
+   "pool": "kinetic",
+   "family": "whoosh",
+   "duration_s": 0.5,
+   "base_volume": 0.34,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "kt_masked_sweep": {
+   "pool": "kinetic",
+   "family": "whoosh",
+   "duration_s": 0.3,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "kt_phrase_pulse": {
+   "pool": "kinetic",
+   "family": "whoosh",
+   "duration_s": 0.28,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "kt_text_slam": {
+   "pool": "kinetic",
+   "family": "whoosh",
+   "duration_s": 0.6,
+   "base_volume": 0.5,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "kt_word_pop_a": {
+   "pool": "kinetic",
+   "family": "whoosh",
+   "duration_s": 0.05,
+   "base_volume": 0.24,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "kt_word_pop_b": {
+   "pool": "kinetic",
+   "family": "whoosh",
+   "duration_s": 0.06,
+   "base_volume": 0.24,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "kt_word_pop_c": {
+   "pool": "kinetic",
+   "family": "whoosh",
+   "duration_s": 0.06,
+   "base_volume": 0.24,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "kt_word_pop_d": {
+   "pool": "kinetic",
+   "family": "whoosh",
+   "duration_s": 0.07,
+   "base_volume": 0.24,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "mp_location_lock": {
+   "pool": "map",
+   "family": "map",
+   "duration_s": 0.12,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "mp_pin_a": {
+   "pool": "map",
+   "family": "map",
+   "duration_s": 0.11,
+   "base_volume": 0.42,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "mp_pin_b": {
+   "pool": "map",
+   "family": "map",
+   "duration_s": 0.12,
+   "base_volume": 0.42,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "mp_pin_c": {
+   "pool": "map",
+   "family": "map",
+   "duration_s": 0.13,
+   "base_volume": 0.42,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "mp_pulse_a": {
+   "pool": "map",
+   "family": "map",
+   "duration_s": 0.46,
+   "base_volume": 0.24,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "mp_pulse_b": {
+   "pool": "map",
+   "family": "map",
+   "duration_s": 0.5,
+   "base_volume": 0.24,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "mp_pulse_c": {
+   "pool": "map",
+   "family": "map",
+   "duration_s": 0.54,
+   "base_volume": 0.24,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "mp_radar_a": {
+   "pool": "map",
+   "family": "map",
+   "duration_s": 0.29,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "mp_radar_b": {
+   "pool": "map",
+   "family": "map",
+   "duration_s": 0.31,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "mp_region_swell": {
+   "pool": "map",
+   "family": "map",
+   "duration_s": 1.0,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "mp_route_draw_a": {
+   "pool": "map",
+   "family": "map",
+   "duration_s": 0.55,
+   "base_volume": 0.24,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "mp_route_draw_b": {
+   "pool": "map",
+   "family": "map",
+   "duration_s": 0.6,
+   "base_volume": 0.24,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "mp_route_draw_c": {
+   "pool": "map",
+   "family": "map",
+   "duration_s": 0.65,
+   "base_volume": 0.24,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "mp_tick": {
+   "pool": "map",
+   "family": "map",
+   "duration_s": 0.03,
+   "base_volume": 0.18,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "pr_arrow_draw": {
+   "pool": "process",
+   "family": "data",
+   "duration_s": 0.18,
+   "base_volume": 0.18,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "pr_diagram_build": {
+   "pool": "process",
+   "family": "data",
+   "duration_s": 0.4,
+   "base_volume": 0.18,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "pr_flow_pulse": {
+   "pool": "process",
+   "family": "data",
+   "duration_s": 0.3,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "pr_node_connect_a": {
+   "pool": "process",
+   "family": "data",
+   "duration_s": 0.06,
+   "base_volume": 0.26,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "pr_node_connect_b": {
+   "pool": "process",
+   "family": "data",
+   "duration_s": 0.07,
+   "base_volume": 0.26,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "pr_node_connect_c": {
+   "pool": "process",
+   "family": "data",
+   "duration_s": 0.08,
+   "base_volume": 0.26,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "pr_step_pop_a": {
+   "pool": "process",
+   "family": "data",
+   "duration_s": 0.08,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "pr_step_pop_b": {
+   "pool": "process",
+   "family": "data",
+   "duration_s": 0.09,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "pr_step_pop_c": {
+   "pool": "process",
+   "family": "data",
+   "duration_s": 0.09,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "pr_step_pop_d": {
+   "pool": "process",
+   "family": "data",
+   "duration_s": 0.1,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "pr_system_lock": {
+   "pool": "process",
+   "family": "data",
+   "duration_s": 0.22,
+   "base_volume": 0.34,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "sv_cctv_beep_a": {
+   "pool": "surveillance",
+   "family": "surveillance",
+   "duration_s": 0.1,
+   "base_volume": 0.24,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "sv_cctv_beep_b": {
+   "pool": "surveillance",
+   "family": "surveillance",
+   "duration_s": 0.1,
+   "base_volume": 0.24,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "sv_radio_crackle": {
+   "pool": "surveillance",
+   "family": "surveillance",
+   "duration_s": 0.3,
+   "base_volume": 0.2,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "sv_rec_click": {
+   "pool": "surveillance",
+   "family": "surveillance",
+   "duration_s": 0.05,
+   "base_volume": 0.26,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "sv_shutter": {
+   "pool": "surveillance",
+   "family": "surveillance",
+   "duration_s": 0.08,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "sv_static": {
+   "pool": "surveillance",
+   "family": "surveillance",
+   "duration_s": 0.25,
+   "base_volume": 0.2,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "sv_tag_snap": {
+   "pool": "surveillance",
+   "family": "surveillance",
+   "duration_s": 0.08,
+   "base_volume": 0.36,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tl_date_lock_a": {
+   "pool": "timeline",
+   "family": "data",
+   "duration_s": 0.11,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tl_date_lock_b": {
+   "pool": "timeline",
+   "family": "data",
+   "duration_s": 0.12,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tl_date_lock_c": {
+   "pool": "timeline",
+   "family": "data",
+   "duration_s": 0.13,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tl_line_draw": {
+   "pool": "timeline",
+   "family": "data",
+   "duration_s": 0.5,
+   "base_volume": 0.2,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tl_marker_tick_a": {
+   "pool": "timeline",
+   "family": "data",
+   "duration_s": 0.04,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tl_marker_tick_b": {
+   "pool": "timeline",
+   "family": "data",
+   "duration_s": 0.04,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tl_marker_tick_c": {
+   "pool": "timeline",
+   "family": "data",
+   "duration_s": 0.04,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tl_reveal_hit": {
+   "pool": "timeline",
+   "family": "data",
+   "duration_s": 0.6,
+   "base_volume": 0.42,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tl_time_pulse": {
+   "pool": "timeline",
+   "family": "data",
+   "duration_s": 0.35,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tr_breath_a": {
+   "pool": "text_reveal",
+   "family": "whoosh",
+   "duration_s": 0.46,
+   "base_volume": 0.18,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tr_breath_b": {
+   "pool": "text_reveal",
+   "family": "whoosh",
+   "duration_s": 0.5,
+   "base_volume": 0.18,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tr_breath_c": {
+   "pool": "text_reveal",
+   "family": "whoosh",
+   "duration_s": 0.54,
+   "base_volume": 0.18,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tr_keyword_tap": {
+   "pool": "text_reveal",
+   "family": "whoosh",
+   "duration_s": 0.04,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tr_paper_swipe_a": {
+   "pool": "text_reveal",
+   "family": "whoosh",
+   "duration_s": 0.17,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tr_paper_swipe_b": {
+   "pool": "text_reveal",
+   "family": "whoosh",
+   "duration_s": 0.18,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tr_paper_swipe_c": {
+   "pool": "text_reveal",
+   "family": "whoosh",
+   "duration_s": 0.19,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tr_whoosh_a": {
+   "pool": "text_reveal",
+   "family": "whoosh",
+   "duration_s": 0.41,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tr_whoosh_b": {
+   "pool": "text_reveal",
+   "family": "whoosh",
+   "duration_s": 0.44,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tr_whoosh_c": {
+   "pool": "text_reveal",
+   "family": "whoosh",
+   "duration_s": 0.48,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tr_whoosh_d": {
+   "pool": "text_reveal",
+   "family": "whoosh",
+   "duration_s": 0.52,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tx_air_pass": {
+   "pool": "transition",
+   "family": "whoosh",
+   "duration_s": 0.45,
+   "base_volume": 0.26,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tx_dark_riser": {
+   "pool": "transition",
+   "family": "whoosh",
+   "duration_s": 1.4,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tx_dissolve_breath": {
+   "pool": "transition",
+   "family": "whoosh",
+   "duration_s": 0.7,
+   "base_volume": 0.2,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tx_flashback_wash": {
+   "pool": "transition",
+   "family": "whoosh",
+   "duration_s": 0.9,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tx_hard_cut_hit": {
+   "pool": "transition",
+   "family": "whoosh",
+   "duration_s": 0.4,
+   "base_volume": 0.46,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tx_tension_swell": {
+   "pool": "transition",
+   "family": "whoosh",
+   "duration_s": 1.6,
+   "base_volume": 0.3,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tx_whoosh_a": {
+   "pool": "transition",
+   "family": "whoosh",
+   "duration_s": 0.44,
+   "base_volume": 0.32,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tx_whoosh_b": {
+   "pool": "transition",
+   "family": "whoosh",
+   "duration_s": 0.48,
+   "base_volume": 0.32,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tx_whoosh_c": {
+   "pool": "transition",
+   "family": "whoosh",
+   "duration_s": 0.52,
+   "base_volume": 0.32,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "tx_whoosh_d": {
+   "pool": "transition",
+   "family": "whoosh",
+   "duration_s": 0.56,
+   "base_volume": 0.32,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "ui_beep_a": {
+   "pool": "ui",
+   "family": "ui",
+   "duration_s": 0.07,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "ui_beep_b": {
+   "pool": "ui",
+   "family": "ui",
+   "duration_s": 0.08,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "ui_beep_c": {
+   "pool": "ui",
+   "family": "ui",
+   "duration_s": 0.09,
+   "base_volume": 0.22,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "ui_blip_a": {
+   "pool": "ui",
+   "family": "ui",
+   "duration_s": 0.05,
+   "base_volume": 0.24,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "ui_blip_b": {
+   "pool": "ui",
+   "family": "ui",
+   "duration_s": 0.05,
+   "base_volume": 0.24,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "ui_blip_c": {
+   "pool": "ui",
+   "family": "ui",
+   "duration_s": 0.05,
+   "base_volume": 0.24,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "ui_chirp": {
+   "pool": "ui",
+   "family": "ui",
+   "duration_s": 0.06,
+   "base_volume": 0.2,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "ui_pulse": {
+   "pool": "ui",
+   "family": "ui",
+   "duration_s": 0.3,
+   "base_volume": 0.2,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "ui_target_lock": {
+   "pool": "ui",
+   "family": "ui",
+   "duration_s": 0.16,
+   "base_volume": 0.26,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "ui_tick_a": {
+   "pool": "ui",
+   "family": "ui",
+   "duration_s": 0.03,
+   "base_volume": 0.18,
+   "synthesis": "ffmpeg-lavfi"
+  },
+  "ui_tick_b": {
+   "pool": "ui",
+   "family": "ui",
+   "duration_s": 0.03,
+   "base_volume": 0.18,
+   "synthesis": "ffmpeg-lavfi"
+  }
+ },
+ "event_routing": {
+  "event_to_category": {
+   "arrow_draw": "process",
+   "bar_grow": "data",
+   "beep": "ui",
+   "blip": "ui",
+   "boom": "impact",
+   "chart_reveal": "data",
+   "date_lock": "timeline",
+   "dissolve": "transition",
+   "doc_highlight": "document",
+   "doc_slide": "document",
+   "emphasis": "kinetic",
+   "evidence": "impact",
+   "folder_open": "document",
+   "impact": "impact",
+   "kb_key": "ui",
+   "keyboard": "ui",
+   "land": "impact",
+   "location_lock": "map",
+   "map_pin": "map",
+   "map_pulse": "map",
+   "map_region": "map",
+   "map_route": "map",
+   "money_tick": "data",
+   "node_connect": "process",
+   "page_flip": "document",
+   "percent_hit": "data",
+   "phrase": "text_reveal",
+   "process_step": "process",
+   "radar_ping": "map",
+   "rec": "surveillance",
+   "reveal": "text_reveal",
+   "riser": "transition",
+   "shutter": "surveillance",
+   "stamp": "document",
+   "stat_settle": "data",
+   "stat_tick": "data",
+   "surveillance": "surveillance",
+   "system_lock": "process",
+   "tag_snap": "surveillance",
+   "target_lock": "ui",
+   "terminal": "ui",
+   "text_reveal": "text_reveal",
+   "text_slam": "kinetic",
+   "timeline_draw": "timeline",
+   "timeline_tick": "timeline",
+   "transition": "transition",
+   "ui": "ui",
+   "whoosh": "transition",
+   "word_pop": "kinetic"
+  },
+  "event_preferred_preset": {
+   "arrow_draw": "pr_arrow_draw",
+   "bar_grow": "da_bar_grow",
+   "chart_reveal": "da_chart_reveal",
+   "date_lock": "tl_date_lock",
+   "dissolve": "tx_dissolve_breath",
+   "doc_highlight": "doc_highlighter",
+   "doc_slide": "doc_paper_slide",
+   "emphasis": "kt_emphasis_hit",
+   "evidence": "im_evidence",
+   "impact": "im_boom",
+   "keyboard": "kb_key",
+   "location_lock": "mp_location_lock",
+   "map_pin": "mp_pin",
+   "map_pulse": "mp_pulse",
+   "map_region": "mp_region_swell",
+   "map_route": "mp_route_draw",
+   "money_tick": "da_money_tick",
+   "node_connect": "pr_node_connect",
+   "page_flip": "doc_page_flip",
+   "percent_hit": "da_percent_hit",
+   "phrase": "tr_breath",
+   "process_step": "pr_step_pop",
+   "radar_ping": "mp_radar",
+   "rec": "sv_rec_click",
+   "reveal": "tr_whoosh",
+   "riser": "tx_dark_riser",
+   "shutter": "sv_shutter",
+   "stamp": "doc_stamp",
+   "stat_settle": "da_settle",
+   "stat_tick": "da_count_tick",
+   "system_lock": "pr_system_lock",
+   "tag_snap": "sv_tag_snap",
+   "terminal": "kb_key",
+   "text_slam": "kt_text_slam",
+   "timeline_draw": "tl_line_draw",
+   "timeline_tick": "tl_marker_tick",
+   "transition": "tx_whoosh",
+   "whoosh": "tx_whoosh",
+   "word_pop": "kt_word_pop"
+  }
+ }
+}

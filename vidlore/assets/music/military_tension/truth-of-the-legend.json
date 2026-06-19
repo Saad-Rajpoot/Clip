@@ -1,0 +1,52 @@
+{
+ "name": "truth-of-the-legend",
+ "category": "military_tension",
+ "title": "Truth of the Legend",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 93.02,
+ "tags": [
+  "action",
+  "dark",
+  "driving",
+  "epic",
+  "intense"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "military_tension",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 93.05,
+   "mean_volume_db": -24.8,
+   "max_volume_db": -7.0,
+   "silence_ratio": 0.0891216120365395,
+   "spectral_centroid_hz": 3599.2710914654494,
+   "spectral_flatness": 0.611440896987915,
+   "energy_arc": "steady",
+   "bpm": 66,
+   "is_sparse": false,
+   "is_bright": true,
+   "is_dynamic": true,
+   "tension": 0.272,
+   "darkness": 0.141,
+   "orchestral_density": 0.387,
+   "rhythmic_aggression": 0.573
+  }
+ },
+ "doc_quality": {
+  "score": 0.24,
+  "verdict": "prefer",
+  "reasons": [
+   "+soft:epic",
+   "+soft:tension"
+  ]
+ }
+}

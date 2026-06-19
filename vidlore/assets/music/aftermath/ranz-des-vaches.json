@@ -1,0 +1,47 @@
+{
+ "name": "ranz-des-vaches",
+ "category": "aftermath",
+ "title": "Ranz des Vaches",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 85.01,
+ "tags": [
+  "calming",
+  "relaxed",
+  "uplifting"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "aftermath",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 85.05,
+   "mean_volume_db": -25.8,
+   "max_volume_db": -9.1,
+   "silence_ratio": 0.1755965902410347,
+   "spectral_centroid_hz": 1292.200245478506,
+   "spectral_flatness": 0.07165870070457458,
+   "energy_arc": "steady",
+   "bpm": 172,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.551,
+   "darkness": 0.596,
+   "orchestral_density": 0.597,
+   "rhythmic_aggression": 0.509
+  }
+ },
+ "doc_quality": {
+  "score": 0.0,
+  "verdict": "neutral",
+  "reasons": []
+ }
+}

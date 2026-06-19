@@ -1,0 +1,120 @@
+# Music Library - Track Sources & Licenses
+
+- **mystery/zombie-hoodoo** -- Zombie Hoodoo -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **suspense/scissors** -- Scissors -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/constance** -- Constance -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **ambient/eastminster** -- Eastminster -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/static-motion** -- Static Motion -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **suspense/mistake-the-getaway** -- Mistake the Getaway -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **mystery/devastation-and-revenge** -- Devastation and Revenge -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **suspense/impending-boom** -- Impending Boom -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/redletter** -- Redletter -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **suspense/unanswered-questions** -- Unanswered Questions -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/controlled-chaos** -- Controlled Chaos -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **suspense/chee-zee-caves-v2** -- Chee Zee Caves V2 -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **suspense/dances-and-dames** -- Dances and Dames -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **mystery/fast-talkin** -- Fast Talkin -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/drums-of-the-deep** -- Drums of the Deep -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/ossuary-3-words** -- Ossuary 3 - Words -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **mystery/seven-off** -- Seven Off -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/thunder-dreams** -- Thunder Dreams -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/oppressive-gloom** -- Oppressive Gloom -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **suspense/enter-the-maze** -- Enter the Maze -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/interloper** -- Interloper -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/spider-eyes** -- Spider Eyes -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/blue-feather** -- Blue Feather -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/sneak-n-get-caught** -- Sneak 'n Get Caught -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **suspense/at-launch** -- At Launch -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **suspense/industrial-cinematic** -- Industrial Cinematic -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **ambient/finding-movement** -- Finding Movement -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **suspense/our-story-begins** -- Our Story Begins -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **suspense/minima** -- Minima -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **mystery/nervous** -- Nervous -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **mystery/mirage** -- Mirage -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **climax_build/long-time-coming** -- Long Time Coming -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **suspense/undaunted** -- Undaunted -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **mystery/spy-glass** -- Spy Glass -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **ambient/immersed** -- Immersed -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **mystery/exotic-battle** -- Exotic Battle -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **ambient/autumn-day** -- Autumn Day -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **mystery/not-as-it-seems** -- Not As It Seems -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **ambient/aretes** -- Aretes -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **mystery/desert-city** -- Desert City -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **historical_epic/majestic-hills** -- Majestic Hills -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **historical_epic/mixkit-track-614** -- Mixkit Track 614 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/614/614.mp3>
+- **military_tension/exciting-trailer** -- Exciting Trailer -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **ambient/mixkit-track-580** -- Mixkit Track 580 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/580/580.mp3>
+- **emotional_piano/lithium** -- Lithium -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/mixkit-track-188** -- Mixkit Track 188 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/188/188.mp3>
+- **aftermath/eternal-hope** -- Eternal Hope -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **emotional_piano/mixkit-track-493** -- Mixkit Track 493 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/493/493.mp3>
+- **historical_epic/mixkit-track-322** -- Mixkit Track 322 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/322/322.mp3>
+- **climax_build/clenched-teeth** -- Clenched Teeth -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **ambient/mixkit-track-127** -- Mixkit Track 127 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/127/127.mp3>
+- **mystery/mixkit-track-871** -- Mixkit Track 871 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/871/871.mp3>
+- **mystery/the-path-of-the-goblin-king** -- The Path of the Goblin King -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **historical_epic/free-orchestral-stock-music** -- Free Orchestral Stock Music -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/587/587.mp3>
+- **tech_cyber/brain-dance** -- Brain Dance -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **ambient/mixkit-track-682** -- Mixkit Track 682 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/682/682.mp3>
+- **military_tension/evil-march** -- Evil March -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/mixkit-track-612** -- Mixkit Track 612 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/612/612.mp3>
+- **emotional_piano/danse-of-questionable-tuning** -- Danse of Questionable Tuning -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **aftermath/peaceful-desolation** -- Peaceful Desolation -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **ambient/mixkit-track-292** -- Mixkit Track 292 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/292/292.mp3>
+- **ambient/thunderbird** -- Thunderbird -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/past-the-edge** -- Past the Edge -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **historical_epic/discover** -- Discover -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/680/680.mp3>
+- **suspense/constancy-part-two** -- Constancy Part Two -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **historical_epic/mixkit-track-671** -- Mixkit Track 671 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/671/671.mp3>
+- **mystery/the-other-side-of-the-door** -- The Other Side of the Door -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/mixkit-track-140** -- Mixkit Track 140 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/140/140.mp3>
+- **historical_epic/long-road-ahead-b** -- Long Road Ahead B -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **emotional_piano/mixkit-track-657** -- Mixkit Track 657 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/657/657.mp3>
+- **ambient/mixkit-track-139** -- Mixkit Track 139 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/139/139.mp3>
+- **emotional_piano/piece-for-disaffected-piano-one** -- Piece for Disaffected Piano One -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **aftermath/gymnopedie-no-1** -- Gymnopedie No. 1 -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **slow_reveal/dhaka** -- Dhaka -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **emotional_piano/mixkit-track-601** -- Mixkit Track 601 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/601/601.mp3>
+- **climax_build/big-mojo** -- Big Mojo -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **historical_epic/epical-drums-05** -- Epical Drums 05 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/724/724.mp3>
+- **ambient/what-is-love** -- What Is Love -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/reign-supreme** -- Reign Supreme -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **suspense/satiate** -- Satiate -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/mixkit-track-565** -- Mixkit Track 565 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/565/565.mp3>
+- **mystery/mystery** -- Mystery! -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **emotional_piano/mixkit-track-659** -- Mixkit Track 659 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/659/659.mp3>
+- **tech_cyber/future-cha-cha** -- Future Cha Cha -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **ambient/mixkit-track-749** -- Mixkit Track 749 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/749/749.mp3>
+- **climax_build/mixkit-track-676** -- Mixkit Track 676 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/676/676.mp3>
+- **military_tension/failing-defense** -- Failing Defense -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **mystery/mixkit-track-138** -- Mixkit Track 138 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/138/138.mp3>
+- **emotional_piano/vanes** -- Vanes -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **slow_reveal/dirt-rhodes** -- Dirt Rhodes -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **climax_build/chase** -- Chase -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **dark_investigation/mixkit-track-76** -- Mixkit Track 76 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/76/76.mp3>
+- **dark_investigation/intrepid** -- Intrepid -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **suspense/chee-zee-cave** -- Chee Zee Cave -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **mystery/willow-and-the-light** -- Willow and the Light -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **climax_build/mixkit-track-51** -- Mixkit Track 51 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/51/51.mp3>
+- **tech_cyber/thinking-out-loud** -- Thinking Out Loud -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **mystery/mixkit-track-588** -- Mixkit Track 588 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/588/588.mp3>
+- **military_tension/truth-of-the-legend** -- Truth of the Legend -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **aftermath/ranz-des-vaches** -- Ranz des Vaches -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **slow_reveal/kool-kats** -- Kool Kats -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **climax_build/nerves** -- Nerves -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **suspense/river-of-io** -- River of Io -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **mystery/envision** -- Envision -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **tech_cyber/delightful-d** -- Delightful D -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **military_tension/unity** -- Unity -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **aftermath/gymnopedie-no-2** -- Gymnopedie No. 2 -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **slow_reveal/colorless-aura** -- Colorless Aura -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **climax_build/rising-game** -- Rising Game -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **climax_build/mixkit-track-688** -- Mixkit Track 688 -- Mixkit -- Mixkit Free License -- free for commercial use, no attribution required -- <https://assets.mixkit.co/music/688/688.mp3>
+- **suspense/satiate-only-strings** -- Satiate - only strings -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **tech_cyber/take-the-lead** -- Take the Lead -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **military_tension/prelude-and-action** -- Prelude and Action -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **aftermath/continue-life** -- Continue Life -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **slow_reveal/unwritten-return** -- Unwritten Return -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **suspense/ibn-al-noor** -- Ibn Al-Noor -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **tech_cyber/variation-on-egmont** -- Variation on Egmont -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>
+- **military_tension/the-escalation** -- The Escalation -- Kevin MacLeod (incompetech) -- Kevin MacLeod (incompetech.com) -- CC BY 4.0 -- <https://incompetech.com/music/royalty-free/index.html>

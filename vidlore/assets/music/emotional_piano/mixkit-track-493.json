@@ -1,0 +1,47 @@
+{
+ "name": "mixkit-track-493",
+ "category": "emotional_piano",
+ "title": "Mixkit Track 493",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/493/493.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 97.02,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "emotional_piano",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 97.03999999999999,
+   "mean_volume_db": -25.3,
+   "max_volume_db": -11.0,
+   "silence_ratio": 0.03486441673536686,
+   "spectral_centroid_hz": 1017.7911125260204,
+   "spectral_flatness": 0.1536535620689392,
+   "energy_arc": "steady",
+   "bpm": 185,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.659,
+   "darkness": 0.776,
+   "orchestral_density": 0.763,
+   "rhythmic_aggression": 0.211
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:piano"
+  ]
+ }
+}

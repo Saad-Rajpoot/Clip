@@ -1,0 +1,161 @@
+# ATLAS EXPLAINED — Vox / Johnny Harris density-heavy explainer.
+# Fast cuts (~14/min like genre anchors), HEAVY motion graphics
+# (maps, timelines, stats), bright saturated palette, almost zero
+# silence, always-on emphasis stabs.
+name: atlas_explained
+label: "Atlas Explained (Vox/Harris density-heavy explainer)"
+inherits: standard
+version: 1
+
+tone: clinical
+
+# ── PACING — relentless cuts + many short scenes
+# scene_count_mult 1.8 = same brief becomes ~1.8× scenes (a 5-scene
+# default explodes into 9 short scenes; matches Vox / Harris density).
+# pacing_hint nudges the LLM into punchy short narration units.
+scene_count_mult: 2.4
+pacing_hint: "fast explainer cadence — short punchy sentences, lots of stat/data callouts, frequent scene turnover; treat each new fact as its own scene"
+beat_target:    {min: 2.4, max: 2.8}
+beat_min:       {min: 1.6, max: 1.9}
+hook_seconds:   30
+hook_beat_mult: {min: 0.50, max: 0.62}
+climax_silence_mult: {min: 1.00, max: 1.15}
+dissolve_gap:   {min: 6, max: 8}      # hard cuts DOMINATE
+dissolve_drop:  3
+camera_easing:  ease_out_cubic
+# Atlas pushes the camera harder — active explainer motion, faster
+# zoom-ins on data callouts.  1.20-1.40 noticeably outpaces Amber's
+# 0.50-0.60 and Midnight's 0.80-0.92.
+drift_scale:    {min: 1.20, max: 1.40}
+hold_bias:      {min: 0.95, max: 1.05}
+push_in_impact: {min: 1.10, max: 1.30}
+
+# ── MOTION GRAPHICS — the show IS the graphics
+graphic_density: {min: 1.25, max: 1.45}
+density_per_min_max: 6
+fav_templates:
+  - map_reveal
+  - map_route
+  - timeline
+  - stat_dashboard
+  - process_diagram
+  - comparison
+  - line_chart
+  - bullet_list
+  - statement
+  - callout
+  - vertical_bar
+  - horizontal_stats
+  - donut_chart
+  - stat_insight
+avoid_templates:
+  - evidence
+  - case_file
+  - classified
+  - redacted
+  - voice_memo
+  - era_banner       # too historical for this look
+  - inscription
+  - polaroid_stack
+
+# ── GRADE — bright, saturated, modern
+accent_rgb: [240, 80, 60]            # signature Vox red
+grade:
+  brightness_lift: {min: 0.04, max: 0.08}
+  saturation_lift: {min: 0.10, max: 0.18}
+  shadow_lift:     {min: 0.04, max: 0.06}
+  highlight_roll:  {min: 0.00, max: 0.02}
+  warm_shadow_split: 0.008
+
+# ── FOOTAGE TASTE — biases Pexels toward modern editorial / studio
+# stock so the dataviz-explainer feel reaches the footage layer too.
+# Words chosen to PASS the bad-slug filter (no "infographic / dataviz"
+# tokens which are blacklisted) — "modern", "clean", "studio" are
+# safe and read as the channel's visual identity.
+footage:
+  query_suffix: "modern clean studio"
+
+# ── AI — minimal, this style relies on stock + graphics
+ai:
+  per_video_floor:   0
+  per_video_ceiling: 2
+  fire_on_roles:     [climax, reveal]
+  fire_on_intensity: 5
+  portrait_style:    studio
+  grain_strength:    {min: 0.03, max: 0.05}
+  diffusion_fallback: true
+
+# ── MUSIC — energetic loop, almost no silence
+music:
+  # Real categories from musiclib._FALLBACK_CHAIN — pinning Atlas to
+  # the modern / mechanical / data-energy end of the library so it
+  # NEVER plays orchestral_swell or historical_epic by accident.
+  category_bias: [tech_cyber, financial, climax_build, neutral]
+  hard_filter: true
+  intensity:      {min: 1.10, max: 1.30}
+  density_floor:  {min: 0.85, max: 0.95}   # bed stays loud
+  swell_on_climax: restrained
+  cue_min_seconds: 16
+
+# ── SILENCE — minimal (it would break the cadence)
+silence:
+  tier2_pocket_s: {min: 0.30, max: 0.45}
+  tier3_pocket_s: {min: 0.55, max: 0.75}
+  tier3_stretch_s: {min: 0.20, max: 0.35}
+  pre_roll_t3_s:   {min: 0.30, max: 0.40}
+
+# ── SFX — frequent, snappy, light
+sfx:
+  whoosh_min_gap_s: {min: 6, max: 9}
+  boom_min_gap_s:   {min: 18, max: 26}
+  amplitude:        {min: 0.40, max: 0.55}
+  reveal_stinger:   none
+
+# ── REVEAL PSYCHOLOGY — Atlas pulls music down on DATA reveals.
+# Stats, percentages, study findings → the music gets out of the way
+# so the number lands.  Universal triggers ("suddenly", "but then")
+# still fire on top.
+reveal:
+  tier2: [percent, billion, trillion, "the data shows", "the study found",
+          "research shows", "the numbers", "the chart shows", "the graph shows"]
+  tier3_boost: [percent, billion, trillion, thousand, million,
+                doubled, halved, quadrupled, "ten times", "a hundred times"]
+
+# ── TEXT — type lives on the screen
+text:
+  emphasis_fire_prob_density:   1.0
+  emphasis_fire_prob_restraint: {min: 0.85, max: 0.95}   # almost always fire
+  text_density_target_pct:      {min: 45, max: 60}
+
+fonts:
+  display: [Bricolage Grotesque, Inter, VidloreSans]
+  body:    [Inter, Source Sans, VidloreSans]
+  weight_bias: bold
+  letter_spacing_caps: 0.02
+
+# ── CAPTIONS — dense always-on Vox/Harris energy.
+# max_words 4 + max_dur 2.0 = caption changes ~every 1.5 s.
+# Tight to bottom (margin_v_mult 0.85), slight size bump, snappy
+# 60ms fades — the captions visually "tick" with the explainer
+# rhythm.  Bricolage Grotesque keeps the editorial sans identity.
+captions:
+  max_words: 4
+  max_dur_s: 2.0
+  size_mult: 1.05
+  fade_in_ms: 60
+  fade_out_ms: 60
+  margin_v_mult: 0.85
+  font_family: [Bricolage Grotesque, Inter, Helvetica Neue]
+
+intro:
+  cold_open_s: 4
+  title_hold_s: 1.5
+  hook_compression: 1.9
+
+climax:
+  hold_s: {min: 4, max: 7}             # short hold even on climax
+  pre_silence_s: {min: 0.6, max: 0.9}
+
+animation:
+  default_easing: ease_out_cubic
+  philosophy: youtube_energetic

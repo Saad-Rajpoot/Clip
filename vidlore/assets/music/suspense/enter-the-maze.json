@@ -1,0 +1,50 @@
+{
+ "name": "enter-the-maze",
+ "category": "suspense",
+ "title": "Enter the Maze",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 178.13,
+ "tags": [
+  "intense",
+  "mysterious",
+  "suspenseful"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "suspense",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 178.16,
+   "mean_volume_db": -22.4,
+   "max_volume_db": -8.6,
+   "silence_ratio": 0.045150886843286935,
+   "spectral_centroid_hz": 2965.6956532400063,
+   "spectral_flatness": 0.45489105582237244,
+   "energy_arc": "falling",
+   "bpm": 92,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.242,
+   "darkness": 0.17,
+   "orchestral_density": 0.467,
+   "rhythmic_aggression": 0.62
+  }
+ },
+ "doc_quality": {
+  "score": 0.42,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:suspense",
+   "+soft:mysterious"
+  ]
+ }
+}

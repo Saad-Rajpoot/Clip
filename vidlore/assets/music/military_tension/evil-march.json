@@ -1,0 +1,50 @@
+{
+ "name": "evil-march",
+ "category": "military_tension",
+ "title": "Evil March",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 71.02,
+ "tags": [
+  "action",
+  "driving",
+  "intense"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "military_tension",
+  "confidence": 0.85,
+  "voted_by": [
+   "title",
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 71.05,
+   "mean_volume_db": -22.1,
+   "max_volume_db": -1.9,
+   "silence_ratio": 0.08219467980295567,
+   "spectral_centroid_hz": 2267.4184854878185,
+   "spectral_flatness": 0.3940314054489136,
+   "energy_arc": "falling",
+   "bpm": 99,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.35,
+   "darkness": 0.198,
+   "orchestral_density": 0.406,
+   "rhythmic_aggression": 0.751
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:tension"
+  ]
+ }
+}

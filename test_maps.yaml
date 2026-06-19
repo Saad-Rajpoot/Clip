@@ -1,0 +1,15 @@
+title: "The Silk Road: How One Trade Route Connected Three Empires"
+prompt: |
+  A cinematic documentary about the ancient Silk Road. Cover the geography
+  in detail: where it began in Xi'an, China, the journey west through
+  Samarkand and across Persia, reaching Constantinople and finally Venice.
+  Explain the territories it crossed — the Tarim Basin, the Persian Empire,
+  the Byzantine lands. Show the routes caravans took, the distances, and how
+  goods, ideas and disease travelled the same paths. Emphasise the real
+  geography throughout: cities, regions, and the long routes between them.
+  Authoritative, sweeping, historical.
+fmt: documentary
+duration: "6-8"
+theme: history
+style: auto
+background: auto

@@ -1,0 +1,49 @@
+{
+ "name": "nervous",
+ "category": "mystery",
+ "title": "Nervous",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 118.2,
+ "tags": [
+  "unnerving",
+  "mysterious",
+  "mystical"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "mystery",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 118.2,
+   "mean_volume_db": -26.9,
+   "max_volume_db": -1.9,
+   "silence_ratio": 0.15968686971235196,
+   "spectral_centroid_hz": 1355.4793986857699,
+   "spectral_flatness": 0.06872330605983734,
+   "energy_arc": "steady",
+   "bpm": 103,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.673,
+   "darkness": 0.583,
+   "orchestral_density": 0.63,
+   "rhythmic_aggression": 0.465
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:mysterious"
+  ]
+ }
+}

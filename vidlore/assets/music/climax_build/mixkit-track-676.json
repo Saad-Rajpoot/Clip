@@ -1,0 +1,45 @@
+{
+ "name": "mixkit-track-676",
+ "category": "climax_build",
+ "title": "Mixkit Track 676",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/676/676.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 105.98,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "climax_build",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 105.97999999999999,
+   "mean_volume_db": -23.5,
+   "max_volume_db": -6.4,
+   "silence_ratio": 0.06793327986412531,
+   "spectral_centroid_hz": 1574.3834003838135,
+   "spectral_flatness": 0.3099835515022278,
+   "energy_arc": "steady",
+   "bpm": 72,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.496,
+   "darkness": 0.498,
+   "orchestral_density": 0.527,
+   "rhythmic_aggression": 0.486
+  }
+ },
+ "doc_quality": {
+  "score": 0.0,
+  "verdict": "neutral",
+  "reasons": []
+ }
+}

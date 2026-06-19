@@ -1,0 +1,50 @@
+{
+ "name": "clenched-teeth",
+ "category": "climax_build",
+ "title": "Clenched Teeth",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 91.15,
+ "tags": [
+  "action",
+  "driving",
+  "epic",
+  "intense"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "climax_build",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 91.19,
+   "mean_volume_db": -25.1,
+   "max_volume_db": -8.2,
+   "silence_ratio": 0.06778078736703586,
+   "spectral_centroid_hz": 1598.986960117082,
+   "spectral_flatness": 0.29031407833099365,
+   "energy_arc": "steady",
+   "bpm": 161,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.494,
+   "darkness": 0.494,
+   "orchestral_density": 0.549,
+   "rhythmic_aggression": 0.758
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:epic"
+  ]
+ }
+}

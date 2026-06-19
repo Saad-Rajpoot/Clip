@@ -1,0 +1,49 @@
+{
+ "name": "epical-drums-05",
+ "category": "historical_epic",
+ "title": "Epical Drums 05",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/724/724.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 96.0,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "historical_epic",
+  "confidence": 0.85,
+  "voted_by": [
+   "title",
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 96.03,
+   "mean_volume_db": -26.0,
+   "max_volume_db": -12.6,
+   "silence_ratio": 0.07258478600437362,
+   "spectral_centroid_hz": 1049.651807143417,
+   "spectral_flatness": 0.1466464400291443,
+   "energy_arc": "steady",
+   "bpm": 123,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.608,
+   "darkness": 0.74,
+   "orchestral_density": 0.702,
+   "rhythmic_aggression": 0.464
+  }
+ },
+ "doc_quality": {
+  "score": 0.42,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:historical",
+   "+soft:epic"
+  ]
+ }
+}

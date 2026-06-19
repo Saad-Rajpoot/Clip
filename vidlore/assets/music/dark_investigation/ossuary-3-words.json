@@ -1,0 +1,49 @@
+{
+ "name": "ossuary-3-words",
+ "category": "dark_investigation",
+ "title": "Ossuary 3 - Words",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 236.83,
+ "tags": [
+  "dark",
+  "eerie",
+  "mysterious"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "dark_investigation",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 236.85,
+   "mean_volume_db": -25.2,
+   "max_volume_db": -5.9,
+   "silence_ratio": 0.030754751952712683,
+   "spectral_centroid_hz": 1975.5648007201075,
+   "spectral_flatness": 0.3234173655509949,
+   "energy_arc": "steady",
+   "bpm": 99,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.469,
+   "darkness": 0.364,
+   "orchestral_density": 0.58,
+   "rhythmic_aggression": 0.656
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:mysterious"
+  ]
+ }
+}

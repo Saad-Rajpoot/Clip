@@ -1,0 +1,45 @@
+{
+ "name": "mixkit-track-76",
+ "category": "dark_investigation",
+ "title": "Mixkit Track 76",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/76/76.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 98.61,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "dark_investigation",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 98.61,
+   "mean_volume_db": -23.8,
+   "max_volume_db": -7.5,
+   "silence_ratio": 0.02402694452895244,
+   "spectral_centroid_hz": 1556.248107154805,
+   "spectral_flatness": 0.21728913486003876,
+   "energy_arc": "falling",
+   "bpm": 103,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.558,
+   "darkness": 0.558,
+   "orchestral_density": 0.712,
+   "rhythmic_aggression": 0.504
+  }
+ },
+ "doc_quality": {
+  "score": 0.0,
+  "verdict": "neutral",
+  "reasons": []
+ }
+}

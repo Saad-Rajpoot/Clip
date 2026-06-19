@@ -1,0 +1,38 @@
+# LONG-FORM VALIDATION (6-8 min production length)
+# Same brief, each channel generates its own channel-native script.
+# At duration "6-8", target_points = (4, 5).  With channel mults:
+#   • Atlas    mult 2.4 → ~10-12 scenes (Vox-density)
+#   • Midnight mult 1.0 →  ~4-5 scenes  (Netflix-doc baseline)
+#   • Amber    mult 0.6 →  ~2-3 scenes  (museum hold — no floor clamp)
+# A true 4× scene-count spread at production length where the design
+# can actually breathe.  Pacing / fatigue / repetition all surface
+# here in ways a 2-min test can't reveal.
+title: "September 15, 2008: The Day Wall Street Cracked"
+prompt: |
+  Tell the story of September 15, 2008 — the day Lehman Brothers filed
+  for bankruptcy and the global financial system seized.  Center the
+  narrative on Treasury Secretary Henry Paulson and the 96 hours that
+  followed.  Hit these beats:
+
+  • The morning Lehman files Chapter 11 at 1:45am ET.
+  • The trading floor scene in Lower Manhattan at market open.
+  • Paulson's emergency Sunday session at the New York Fed.
+  • The $700B TARP request to Congress.
+  • Capital ratios before vs after (4.2% → 13.1%).
+  • The chain reaction: AIG rescue, money-market freeze, UK
+    nationalisations within 30 days.
+  • Quote from Paulson: "The fundamentals of our economy are strong."
+  • The 96-hour Lehman weekend at the New York Fed conference room.
+  • Bear Stearns six months earlier — the warning shot.
+  • TARP vote sequence, Treasury press conferences.
+  • Closing: the regulatory aftermath — Dodd-Frank, stress tests,
+    Basel III, capital ratio doubling, regulator stance today.
+
+  Tone: factual, named-source-driven, deliberate.  Cite Reuters,
+  Treasury press releases, Fed minutes where relevant.
+
+fmt: documentary
+duration: "6-8"
+theme: history
+captions: true
+background: auto

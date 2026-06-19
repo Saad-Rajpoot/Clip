@@ -1,0 +1,318 @@
+{
+ "_doc": "Per-primitive SFX restraint policy for all 39 motion-graphics primitives. Read by sfx_director. default_silence=usually silent; max_intensity caps loudest cue; cooldown_s/variant_count prevent stamping; family groups for anti-rep. Verifier-corrected for restraint.",
+ "_schema_version": 1,
+ "policy": {
+  "gold_number_callout": {
+   "default_silence": false,
+   "max_intensity": 0.7,
+   "cooldown_s": 18,
+   "variant_count": 3,
+   "family": "impact",
+   "notes": "Hero stat reveal. One soft motivated 'settle' impact as the gold number locks; not a whoosh. Reserve the louder variant for the single biggest figure in the piece. Let the number breathe before any cue."
+  },
+  "cinematic_portrait_hold": {
+   "default_silence": true,
+   "max_intensity": 0.45,
+   "cooldown_s": 30,
+   "variant_count": 2,
+   "family": "impact",
+   "notes": "SILENCE-DEFAULT. Faces are emotional anchors, carried by music and VO. Only rarely accent the first frame with a near-inaudible low swell from the impact pool (lowest variant). Never whoosh a person's face."
+  },
+  "headline_document_reveal": {
+   "default_silence": false,
+   "max_intensity": 0.6,
+   "cooldown_s": 20,
+   "variant_count": 3,
+   "family": "document",
+   "notes": "Diegetic only: paper rustle, type-set thunk, or soft stamp as the headline lands. NEVER whoosh. Keep it dry and motivated so it reads as an archival document, not a UI. Routes to the document pool."
+  },
+  "portrait_name_over_map": {
+   "default_silence": true,
+   "max_intensity": 0.45,
+   "cooldown_s": 30,
+   "variant_count": 2,
+   "family": "map",
+   "notes": "SILENCE-DEFAULT. Identification beat over geography; usually silent. If accented, a single faint map-pin tick when the name pins, never a transition whoosh over the face."
+  },
+  "kinetic_keyword": {
+   "default_silence": true,
+   "max_intensity": 0.5,
+   "cooldown_s": 12,
+   "variant_count": 4,
+   "family": "text_reveal",
+   "notes": "SILENCE-DEFAULT. Fires often, so default silent to avoid stamping. When used, a crisp short text-tick on the key word only (text_reveal pool). 4 variants mandatory; relies on the rapid-fire cooldown to stay sparse."
+  },
+  "money_flow_empire": {
+   "default_silence": false,
+   "max_intensity": 0.65,
+   "cooldown_s": 22,
+   "variant_count": 3,
+   "family": "impact",
+   "notes": "Diegetic money foley: coin/cash riffle or register tick following the flow, voiced from the impact pool (physical, dry). NEVER whoosh. Tie one soft accent to the flow arrival, not to every node."
+  },
+  "chronology_timeline": {
+   "default_silence": false,
+   "max_intensity": 0.55,
+   "cooldown_s": 20,
+   "variant_count": 3,
+   "family": "timeline",
+   "notes": "Soft sequential ticks as the timeline steps; do not sound every node. One light timeline cue per advance, with the louder variant saved for the final date landing."
+  },
+  "pull_quote_portrait": {
+   "default_silence": true,
+   "max_intensity": 0.45,
+   "cooldown_s": 30,
+   "variant_count": 2,
+   "family": "text_reveal",
+   "notes": "SILENCE-DEFAULT. Quote over a face: text-heavy and emotional, keep silent so the words read. Rare faint text-set accent only on quote-mark appearance (text_reveal pool). No whoosh on portraits."
+  },
+  "comparison_split": {
+   "default_silence": false,
+   "max_intensity": 0.55,
+   "cooldown_s": 18,
+   "variant_count": 3,
+   "family": "ui",
+   "notes": "Two-panel reveal: one soft UI divider tick as the split lands. Avoid double-hitting both sides; a single motivated cue communicates the comparison."
+  },
+  "framed_evidence_spotlight": {
+   "default_silence": false,
+   "max_intensity": 0.6,
+   "cooldown_s": 20,
+   "variant_count": 3,
+   "family": "document",
+   "notes": "Diegetic evidence thud / dry photo-set or spotlight click as the frame snaps in, voiced from the document pool. NEVER whoosh. Key investigative beat; keep it physical and restrained."
+  },
+  "statistic_bar_reveal": {
+   "default_silence": true,
+   "max_intensity": 0.5,
+   "cooldown_s": 18,
+   "variant_count": 3,
+   "family": "data",
+   "notes": "SILENCE-DEFAULT. Bars usually silent; let the figure speak. If accented, one soft data 'fill' tick as the bar reaches value, not a tick per bar segment."
+  },
+  "location_establish_card": {
+   "default_silence": false,
+   "max_intensity": 0.5,
+   "cooldown_s": 22,
+   "variant_count": 3,
+   "family": "map",
+   "notes": "Establishing card: one faint map/place-pin cue as the location names. Soft and atmospheric; this sets place, it should not announce itself loudly."
+  },
+  "growth_curve_chart": {
+   "default_silence": false,
+   "max_intensity": 0.55,
+   "cooldown_s": 18,
+   "variant_count": 3,
+   "family": "data",
+   "notes": "Single rising data sweep that resolves when the curve peaks; one cue, not a continuous riser. Save the slightly louder variant for a dramatic exponential climb."
+  },
+  "annotated_detail_callout": {
+   "default_silence": true,
+   "max_intensity": 0.45,
+   "cooldown_s": 15,
+   "variant_count": 3,
+   "family": "ui",
+   "notes": "SILENCE-DEFAULT. Magnifier/annotation on detail; usually silent to feel forensic. Optional faint UI pin-tick when the annotation line draws. Restraint reads as scrutiny."
+  },
+  "map_route_spread": {
+   "default_silence": false,
+   "max_intensity": 0.55,
+   "cooldown_s": 22,
+   "variant_count": 3,
+   "family": "map",
+   "notes": "Route draw: one soft map line-travel cue as the path completes. Whoosh-family is allowed here as a motivated travel sound but is subject to the GLOBAL 24s whoosh budget (whoosh_budget block); if the global window has not elapsed, fall back to a dry map line cue. Honors this primitive's low cap and 22s local spacing."
+  },
+  "proportion_ring": {
+   "default_silence": true,
+   "max_intensity": 0.45,
+   "cooldown_s": 18,
+   "variant_count": 3,
+   "family": "data",
+   "notes": "SILENCE-DEFAULT. Donut/ring fill is a quiet quantitative card. If accented, a single soft data tick on ring completion, never per-segment."
+  },
+  "process_diagram": {
+   "default_silence": false,
+   "max_intensity": 0.5,
+   "cooldown_s": 18,
+   "variant_count": 3,
+   "family": "process",
+   "notes": "Stepwise process: light mechanical step-clicks as stages connect. Do not sound every micro-node; one cue per major step keeps it clean and procedural."
+  },
+  "org_hierarchy_tree": {
+   "default_silence": true,
+   "max_intensity": 0.5,
+   "cooldown_s": 20,
+   "variant_count": 3,
+   "family": "data",
+   "notes": "SILENCE-DEFAULT. Org tree can stamp if every node sounds. If accented, a single soft connect-tick when the structure resolves, not per branch."
+  },
+  "statement_card": {
+   "default_silence": true,
+   "max_intensity": 0.45,
+   "cooldown_s": 30,
+   "variant_count": 2,
+   "family": "text_reveal",
+   "notes": "SILENCE-DEFAULT. Bold full-screen statement: text-heavy, keep silent so the line lands hard on its own. Silence here is the design. At most a faint settle on rare key statements (text_reveal pool, lowest variant)."
+  },
+  "pictograph_scale": {
+   "default_silence": true,
+   "max_intensity": 0.5,
+   "cooldown_s": 18,
+   "variant_count": 3,
+   "family": "data",
+   "notes": "SILENCE-DEFAULT. Icon-array scale (e.g. 1 in N); sounding each icon stamps badly. Optional one soft data cue when the full array is shown."
+  },
+  "composition_stack": {
+   "default_silence": true,
+   "max_intensity": 0.45,
+   "cooldown_s": 18,
+   "variant_count": 3,
+   "family": "data",
+   "notes": "SILENCE-DEFAULT. Stacked composition bar; quiet quantitative card. If accented, one soft tick on final stack assembly, never per layer."
+  },
+  "definition_card": {
+   "default_silence": true,
+   "max_intensity": 0.45,
+   "cooldown_s": 30,
+   "variant_count": 2,
+   "family": "text_reveal",
+   "notes": "SILENCE-DEFAULT. Term + definition is text-heavy and must be read. Rare faint text-set tick on the term only (text_reveal pool). No whoosh, ever."
+  },
+  "vs_balance_scale": {
+   "default_silence": false,
+   "max_intensity": 0.55,
+   "cooldown_s": 18,
+   "variant_count": 3,
+   "family": "ui",
+   "notes": "Two-sided balance: one soft tip/settle cue as the scale resolves toward a side. Single motivated hit; do not sound both pans loading."
+  },
+  "before_after_slider": {
+   "default_silence": false,
+   "max_intensity": 0.55,
+   "cooldown_s": 18,
+   "variant_count": 3,
+   "family": "ui",
+   "notes": "Wipe between states: one soft dry UI slider-pass cue tied to the wipe. WHOOSH PROHIBITED here (this is a UI state-change, not motivated travel; reserve the whoosh budget for map_route_spread/world_map_arc). Not on every nudge."
+  },
+  "headline_montage": {
+   "default_silence": false,
+   "max_intensity": 0.6,
+   "cooldown_s": 25,
+   "variant_count": 4,
+   "family": "document",
+   "notes": "Rapid press clippings: use diegetic paper/print foley from the document pool, NOT a whoosh per card. 4 variants to avoid a stamped rhythm; let only a few headlines in the burst accent, the rest land silently."
+  },
+  "map_heat_spread": {
+   "default_silence": false,
+   "max_intensity": 0.55,
+   "cooldown_s": 22,
+   "variant_count": 3,
+   "family": "map",
+   "notes": "Heat/contagion bloom across a map: one soft swelling map cue as the spread peaks, not per cell. Ominous and low; this is a tension beat, keep it understated. No whoosh."
+  },
+  "redacted_document": {
+   "default_silence": false,
+   "max_intensity": 0.6,
+   "cooldown_s": 20,
+   "variant_count": 3,
+   "family": "document",
+   "notes": "Signature spy beat: diegetic marker-stroke / stamp / paper as bars black out, voiced from the document pool. NEVER whoosh. The redaction sound IS the drama; dry, physical, restrained."
+  },
+  "ranked_list_countdown": {
+   "default_silence": false,
+   "max_intensity": 0.65,
+   "cooldown_s": 15,
+   "variant_count": 3,
+   "family": "ui",
+   "notes": "Countdown list: soft rank-lock tick per entry, building toward #1. Per-item cues are the device but each must stay <=0.35; only #1 may land near the 0.65 cap. Keeps the build from stamping."
+  },
+  "sankey_flow": {
+   "default_silence": false,
+   "max_intensity": 0.55,
+   "cooldown_s": 20,
+   "variant_count": 3,
+   "family": "data",
+   "notes": "Flow-volume diagram: one soft data flow cue as streams resolve. Do not sound each ribbon; a single motivated cue conveys the routing of value."
+  },
+  "era_band_timeline": {
+   "default_silence": false,
+   "max_intensity": 0.55,
+   "cooldown_s": 22,
+   "variant_count": 3,
+   "family": "timeline",
+   "notes": "Era bands sweeping across time: one soft period-transition cue per era change (timeline pool), with the louder variant for the climactic era. Avoid sounding minor tick marks."
+  },
+  "countdown_clock": {
+   "default_silence": false,
+   "max_intensity": 0.75,
+   "cooldown_s": 15,
+   "variant_count": 3,
+   "family": "impact",
+   "notes": "Tension clock. The 0.75 cap is reserved STRICTLY for the single hit at zero (deadline payoff). Any running tick/clock pulse must sit far lower (<=0.3) and duck under voice like a bed so it never pumps dialogue. The only primitive permitted near the top of the cap, and only on the zero frame."
+  },
+  "connection_web": {
+   "default_silence": true,
+   "max_intensity": 0.5,
+   "cooldown_s": 18,
+   "variant_count": 3,
+   "family": "surveillance",
+   "notes": "SILENCE-DEFAULT. Link-analysis web; feels like a surveillance board. If accented, a single soft connect/ping when the decisive link is drawn, never per node."
+  },
+  "quote_stream": {
+   "default_silence": true,
+   "max_intensity": 0.45,
+   "cooldown_s": 25,
+   "variant_count": 2,
+   "family": "text_reveal",
+   "notes": "SILENCE-DEFAULT. Streaming quotes are text-heavy and must be read; sounding each quote stamps badly. At most one faint text-tick on the opening quote of the stream (text_reveal pool). Never whoosh."
+  },
+  "map_region_highlight": {
+   "default_silence": false,
+   "max_intensity": 0.5,
+   "cooldown_s": 22,
+   "variant_count": 3,
+   "family": "map",
+   "notes": "Single region glow/outline: one faint map highlight cue as the area locks. Soft and geographic; should orient, not announce. Whoosh prohibited."
+  },
+  "cause_effect_chain": {
+   "default_silence": false,
+   "max_intensity": 0.6,
+   "cooldown_s": 18,
+   "variant_count": 3,
+   "family": "impact",
+   "notes": "Domino logic chain: soft motivated 'click into place' per link. Mid-chain links MUST stay <=0.3 (quiet) so they do not stamp a mechanical rhythm; only the final consequence hit approaches the 0.6 cap. No whoosh."
+  },
+  "spectrum_meter": {
+   "default_silence": true,
+   "max_intensity": 0.5,
+   "cooldown_s": 18,
+   "variant_count": 3,
+   "family": "data",
+   "notes": "SILENCE-DEFAULT. Gradient/meter reading on a scale; stay clinical. Optional single soft data cue when the marker settles, not while it sweeps."
+  },
+  "spotlight_object_hold": {
+   "default_silence": true,
+   "max_intensity": 0.45,
+   "cooldown_s": 30,
+   "variant_count": 2,
+   "family": "impact",
+   "notes": "SILENCE-DEFAULT. Held hero object under a spotlight: carried by score. Rare faint dry spotlight-click or evidence-set on first frame (impact pool, lowest variant). Treat like a portrait; no whoosh."
+  },
+  "flowchart_decision": {
+   "default_silence": false,
+   "max_intensity": 0.5,
+   "cooldown_s": 18,
+   "variant_count": 3,
+   "family": "process",
+   "notes": "Decision branch: one soft mechanical branch-click when the path is chosen. Sound only the taken branch, not every node, to keep the logic legible and quiet."
+  },
+  "world_map_arc": {
+   "default_silence": false,
+   "max_intensity": 0.6,
+   "cooldown_s": 25,
+   "variant_count": 3,
+   "family": "map",
+   "notes": "Global arc between points (signature geopolitics/spy travel beat): one motivated arc-travel cue as the line completes. A restrained whoosh is permitted here as the canonical travel sound but is subject to the GLOBAL 24s whoosh budget (whoosh_budget block); if the global window has not elapsed, fall back to a dry map arc cue. Honors this cap and the long 25s local spacing so it stays rare."
+  }
+ }
+}

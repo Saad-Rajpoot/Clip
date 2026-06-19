@@ -1,0 +1,14 @@
+edge-tts>=6.1.0
+imageio-ffmpeg>=0.5.1
+requests>=2.31.0
+Pillow>=10.0.0
+pyyaml>=6.0
+anthropic>=0.39.0
+flask>=3.0.0
+faster-whisper>=1.0.0
+# Multilingual text rendering — Arabic / Urdu / Hebrew shaping + BiDi.
+# Required so the bundled Noto fonts render connected letters in the
+# correct visual order; without these, RTL scripts show isolated forms
+# in LTR order (illegible).
+arabic-reshaper>=3.0.0
+python-bidi>=0.4.2

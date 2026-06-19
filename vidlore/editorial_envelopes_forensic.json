@@ -1,0 +1,993 @@
+{
+ "_provenance": "synthesized from tools/deep_forensics.py on 4 refs (LEMMiNO/Johnny Harris/MagnatesMedia/Fall of Civilizations); see research/forensic_refs/_SYNTHESIS.md",
+ "_token_safety": {
+  "map_styles_real": [
+   "satellite",
+   "dark",
+   "political",
+   "parchment",
+   "tactical",
+   "news"
+  ],
+  "transitions_real": [
+   "dissolve",
+   "slow_dissolve",
+   "film_dissolve",
+   "fadeblack",
+   "archive_flash",
+   "evidence_flash",
+   "page_wipe",
+   "page_wipe_r",
+   "geo_push",
+   "geo_push_r",
+   "whip",
+   "whip_r",
+   "blur_cut",
+   "glitch",
+   "soft_dissolve",
+   "iris"
+  ],
+  "normalizations": {
+   "flat_dark": "dark (front-loaded over satellite; pulsing-pin behavior is a backlog item)",
+   "antique_ink": "parchment",
+   "color_region/locator_inset": "satellite/political (accent register is a backlog item, not a new token)",
+   "stamp_cut/dark_wipe/whip_blur/motivated_cross_dissolve/territory_flyin": "NOT real tokens -> backlog items, not emitted here"
+  },
+  "wiring_note": "to_look_overrides() currently emits only tone, accent_rgb, map_style, chart_style, beat_target. New/changed keys (hold_mult, music_bed, density, music_behavior, rhythm_profile, silence_pockets, lower_third_families, motion_bias, sfx_restraint) are RECORDED on the recipe; they drive the live look knobs only after REC_WIRE_AXES / per-feature wiring. Editing the envelope is safe (data-only) regardless."
+ },
+ "mystery": {
+  "accents": [
+   [
+    120,
+    145,
+    170
+   ],
+   [
+    138,
+    120,
+    165
+   ],
+   [
+    108,
+    142,
+    150
+   ],
+   [
+    180,
+    60,
+    64
+   ],
+   [
+    110,
+    175,
+    120
+   ],
+   [
+    150,
+    140,
+    120
+   ]
+  ],
+  "map_styles": [
+   "dark",
+   "tactical",
+   "satellite"
+  ],
+  "transition_families": [
+   [
+    "cut",
+    "cut",
+    "slow_dissolve",
+    "fadeblack"
+   ],
+   [
+    "cut",
+    "cut",
+    "dissolve",
+    "slow_dissolve"
+   ]
+  ],
+  "lower_third_families": [
+   "text_on_black",
+   "mono_tag",
+   "mono_evidence_card",
+   "scrim_panel"
+  ],
+  "grade_sat": [
+   0.55,
+   0.7
+  ],
+  "beat_target": [
+   3.4,
+   4.6
+  ],
+  "hold_mult": [
+   1.25,
+   1.48
+  ],
+  "density": [
+   0.7,
+   0.95
+  ],
+  "music_bed": [
+   0.66,
+   0.82
+  ],
+  "music_behavior": "silence_punctuated",
+  "silence_pockets": {
+   "count_per_min": [
+    0.8,
+    1.2
+   ],
+   "len_s": [
+    0.8,
+    3.0
+   ],
+   "placement": "chapter_turns+intensity5_reveals"
+  },
+  "rhythm_profile": {
+   "mode": "slow_with_single_burst",
+   "burst_per_min": [
+    0.25,
+    0.35
+   ],
+   "burst_shot_s": [
+    0.4,
+    2.9
+   ],
+   "burst_shots": [
+    3,
+    4
+   ]
+  },
+  "motion_bias": [
+   "slow_push",
+   "controlled_static",
+   "drift"
+  ],
+  "_notes": "Coldest niche: drop grade floor to 0.55 (ref 0.02-0.06 confirms mystery is coldest) + enforce footage sat <=0.10 so the single recipe accent pops on graphics only (controlled_accent_pop). Front-load 'dark' (flat) over satellite; demote satellite last. Transitions CUT-DOMINANT (cut repeated to weight it) + sparse slow_dissolve/fadeblack for chapter beats; NO whip/blur/glitch. text_on_black added as primary lower-third (full-screen mono cipher/manifesto). Dark-synth bed receded + 0.8-3.0s structural silence pockets. ONE sanctioned rapid-cut burst per 3-4min (rhythm_profile). Atmosphere-only cold open (NO delayed-title; DOC_006 removed). Backlog: evidence_board_parallax, ui_reenactment, tracking_reticle, flat-dark pulsing pins. CLASS F: never literal Cicada/AGRIPPA/runic/TOR/4chan assets."
+ },
+ "geopolitics": {
+  "accents": [
+   [
+    220,
+    120,
+    70
+   ],
+   [
+    210,
+    140,
+    80
+   ],
+   [
+    200,
+    132,
+    95
+   ],
+   [
+    225,
+    128,
+    60
+   ],
+   [
+    235,
+    205,
+    70
+   ]
+  ],
+  "map_styles": [
+   "political",
+   "tactical",
+   "satellite"
+  ],
+  "transition_families": [
+   [
+    "geo_push",
+    "page_wipe",
+    "cut",
+    "soft_dissolve"
+   ],
+   [
+    "geo_push",
+    "cut",
+    "blur_cut"
+   ],
+   [
+    "cut",
+    "cut",
+    "geo_push",
+    "page_wipe"
+   ]
+  ],
+  "lower_third_families": [
+   "clean_bar",
+   "location_label",
+   "data_pill",
+   "define_term_card",
+   "criteria_card"
+  ],
+  "grade_sat": [
+   0.84,
+   0.96
+  ],
+  "beat_target": [
+   2.6,
+   3.6
+  ],
+  "hold_mult": [
+   0.85,
+   1.15
+  ],
+  "density": [
+   1.0,
+   1.3
+  ],
+  "music_bed": [
+   0.85,
+   1.0
+  ],
+  "music_behavior": "momentum_continuous",
+  "silence_pockets": {
+   "count_per_min": [
+    0.2,
+    0.4
+   ],
+   "len_s": [
+    0.5,
+    1.8
+   ],
+   "placement": "key_reveals_late"
+  },
+  "rhythm_profile": {
+   "mode": "bimodal_burst",
+   "burst_per_min": [
+    0.3,
+    0.8
+   ],
+   "burst_shot_s": [
+    0.4,
+    0.8
+   ],
+   "burst_shots": [
+    5,
+    8
+   ],
+   "gate": "list_or_enumeration_beats_only",
+   "median_target_s": [
+    1.3,
+    3.0
+   ]
+  },
+  "motion_bias": [
+   "active_pan",
+   "map_drift",
+   "push_hold"
+  ],
+  "_notes": "Map-as-spine: keep political as primary muted 'house' map (~90% of map beats), satellite/saturated register as an ACCENT on specific-place/era beats (two_map_registers; accent register is a backlog item). Verify post-grade lands a muted bed ~0.25-0.30 (NOT 0.12-flat) with warm-orange accents carrying the color; brightness stays bright (~0.66). ADD bimodal rhythm_profile gated to real list/montage beats (capped per video), long holds preserved elsewhere. define_term_card (once, early = thesis) + criteria_card (rule bullets docked beside held map). Momentum bed (~99% presence, steady, sidechain-ducked) + a few late silence pockets + dense LOW-LEVEL diegetic foley tied to graphic actions (pin/paper), deduped -- never whoosh-per-cut. rare yellow [235,205,70] reserved for 1-2 full-frame word-stab peaks only. CLASS F: not Harris's basemap art / define-card wording / specific archival / TREASON card / his track."
+ },
+ "business": {
+  "accents": [
+   [
+    235,
+    170,
+    70
+   ],
+   [
+    240,
+    150,
+    70
+   ],
+   [
+    225,
+    178,
+    60
+   ],
+   [
+    224,
+    168,
+    96
+   ],
+   [
+    210,
+    150,
+    78
+   ],
+   [
+    196,
+    160,
+    95
+   ]
+  ],
+  "map_styles": [
+   "political",
+   "news",
+   "parchment",
+   "satellite"
+  ],
+  "transition_families": [
+   [
+    "geo_push",
+    "page_wipe",
+    "cut",
+    "soft_dissolve"
+   ],
+   [
+    "page_wipe",
+    "cut",
+    "soft_dissolve"
+   ],
+   [
+    "cut",
+    "film_dissolve",
+    "soft_dissolve",
+    "page_wipe"
+   ]
+  ],
+  "lower_third_families": [
+   "clean_bar",
+   "data_pill",
+   "scrim_panel",
+   "serif_engraved",
+   "quote_caption_side",
+   "name_portrait"
+  ],
+  "grade_sat": [
+   0.82,
+   0.98
+  ],
+  "beat_target": [
+   2.6,
+   3.6
+  ],
+  "hold_mult": [
+   0.7,
+   1.2
+  ],
+  "density": [
+   1.0,
+   1.3
+  ],
+  "music_bed": [
+   0.74,
+   1.0
+  ],
+  "music_behavior": "momentum_continuous",
+  "silence_pockets": {
+   "count_per_min": [
+    0.1,
+    0.25
+   ],
+   "len_s": [
+    0.6,
+    2.3
+   ],
+   "placement": "major_turns_only"
+  },
+  "rhythm_profile": {
+   "mode": "bimodal_burst",
+   "burst_frac": [
+    0.3,
+    0.35
+   ],
+   "burst_shot_s": [
+    0.3,
+    1.5
+   ],
+   "burst_shots": [
+    3,
+    6
+   ],
+   "hero_hold_s": [
+    12,
+    24
+   ],
+   "median_target_s": [
+    3.0,
+    4.0
+   ],
+   "mean_target_s": [
+    6.0,
+    7.0
+   ],
+   "gate": "scenes_with_multiple_short_assets"
+  },
+  "motion_bias": [
+   "active_pan",
+   "reveal_push",
+   "push_hold"
+  ],
+  "grade_subgrade": {
+   "gilded": {
+    "grade_sat": [
+     0.82,
+     0.92
+    ],
+    "shadow_crush": true,
+    "vignette": true,
+    "dark_frame_frac": [
+     0.25,
+     0.3
+    ],
+    "warm_gold": true,
+    "note": "OPTIONAL gilded-age tycoon sub-mood (firelight-on-near-black, saturation PRESERVED). NOT the global business grade -- keep clinical option so the niche stays a SET."
+   }
+  },
+  "_notes": "ADD a warm low-key 'gilded' sub-grade option for tycoon/industrialist bios (current 0.86-0.98 is too clinical for that arc); keep the clinical option. Pacing is the headline: ADD bimodal rhythm_profile (burst_frac 0.30-0.35 sub-2s clusters AND hero holds 12-24s; the median 3.5/mean 6.5 gap is the signature -- current business hold_mult 0.7-0.95 too fast, biography 1.2-1.45 too slow; this needs BOTH co-existing). Footage-led, graphics as punctuation (~1.5-2/min, <=20% graphic frames). big_word_stab (1-2/video), money_value count-up OVER footage, verbatim_quote_caption_over_portrait. Momentum score (~64.5% present, swells +3-5dB into bursts) with FEW short silence pockets. parchment/aged-map ground for dossier beats. Backlog: territory_silhouette_flyin, ghost_portrait_parallax, document->charged_image dissolve, hand_drawn_annotation. CLASS F: no Standard-Oil octopus / channel bug."
+ },
+ "biography": {
+  "accents": [
+   [
+    200,
+    165,
+    90
+   ],
+   [
+    208,
+    150,
+    84
+   ],
+   [
+    190,
+    158,
+    96
+   ],
+   [
+    224,
+    168,
+    96
+   ],
+   [
+    206,
+    158,
+    80
+   ]
+  ],
+  "map_styles": [
+   "parchment",
+   "political",
+   "satellite"
+  ],
+  "transition_families": [
+   [
+    "cut",
+    "film_dissolve",
+    "slow_dissolve"
+   ],
+   [
+    "slow_dissolve",
+    "dissolve",
+    "page_wipe",
+    "cut"
+   ],
+   [
+    "cut",
+    "cut",
+    "film_dissolve",
+    "slow_dissolve"
+   ]
+  ],
+  "lower_third_families": [
+   "serif_engraved",
+   "name_portrait",
+   "scrim_panel",
+   "quote_caption_side",
+   "dossier_id_card"
+  ],
+  "grade_sat": [
+   0.82,
+   0.95
+  ],
+  "beat_target": [
+   3.5,
+   5.6
+  ],
+  "hold_mult": [
+   1.1,
+   1.45
+  ],
+  "density": [
+   0.85,
+   1.1
+  ],
+  "music_bed": [
+   0.7,
+   0.86
+  ],
+  "music_behavior": "momentum_continuous",
+  "silence_pockets": {
+   "count_per_min": [
+    0.15,
+    0.3
+   ],
+   "len_s": [
+    0.6,
+    2.3
+   ],
+   "placement": "major_turns_and_reveals"
+  },
+  "rhythm_profile": {
+   "mode": "bimodal_optional",
+   "burst_frac": [
+    0.2,
+    0.35
+   ],
+   "burst_shot_s": [
+    0.3,
+    1.5
+   ],
+   "hero_hold_s": [
+    12,
+    24
+   ],
+   "median_target_s": [
+    3.0,
+    5.0
+   ],
+   "gate": "montage_beats_only"
+  },
+  "motion_bias": [
+   "slow_push",
+   "drift",
+   "reveal_push"
+  ],
+  "grade_subgrade": {
+   "gilded": {
+    "grade_sat": [
+     0.82,
+     0.92
+    ],
+    "shadow_crush": true,
+    "vignette": true,
+    "warm_gold": true,
+    "note": "Shared gilded sub-mood with business for period/tycoon bios."
+   }
+  },
+  "divine_light_bloom": {
+   "frequency": "~1_in_6_backlit_hero",
+   "warm_soft_highlight": true
+  },
+  "_notes": "Bridge between history (reverent holds) and business (momentum + bimodal). Widen beat_target lower-bound (3.5) so a punchy bio can co-exist with long hero holds (bimodal_optional, montage beats only). ADD gilded sub-grade + divine_light_bloom (capped). verbatim_quote_caption_over_portrait, big_word/name stab, dossier_id_card on aged-map ground, ghost_portrait_parallax (backlog). italic source citation already built. Momentum-leaning bed with few short silence pockets. Backlog: territory_flyin, document->charged_image dissolve. CLASS F: reproduce principle, not channel assets."
+ },
+ "history": {
+  "accents": [
+   [
+    206,
+    158,
+    80
+   ],
+   [
+    196,
+    150,
+    92
+   ],
+   [
+    188,
+    146,
+    70
+   ],
+   [
+    180,
+    150,
+    100
+   ]
+  ],
+  "map_styles": [
+   "parchment",
+   "political",
+   "satellite"
+  ],
+  "transition_families": [
+   [
+    "cut",
+    "cut",
+    "cut",
+    "slow_dissolve",
+    "fadeblack"
+   ],
+   [
+    "cut",
+    "cut",
+    "film_dissolve",
+    "fadeblack"
+   ]
+  ],
+  "lower_third_families": [
+   "serif_engraved",
+   "era_label",
+   "scrim_panel",
+   "long_quote_hold",
+   "define_term_card"
+  ],
+  "grade_sat": [
+   0.82,
+   0.92
+  ],
+  "beat_target": [
+   4.6,
+   6.0
+  ],
+  "hold_mult": [
+   1.3,
+   1.55
+  ],
+  "density": [
+   0.7,
+   0.95
+  ],
+  "music_bed": [
+   0.66,
+   0.82
+  ],
+  "music_behavior": "voice_led_recede",
+  "silence_pockets": {
+   "count_per_min": [
+    1.0,
+    1.6
+   ],
+   "len_s": [
+    0.6,
+    1.2
+   ],
+   "placement": "clause_boundaries+reveals"
+  },
+  "rhythm_profile": {
+   "mode": "slow_with_motivated_windows",
+   "fast_shot_frac": [
+    0.05,
+    0.1
+   ],
+   "burst_windows_per_video": [
+    1,
+    2
+   ],
+   "burst_shot_s": [
+    0.8,
+    2.0
+   ],
+   "gate": "battle_fall_destruction_beats"
+  },
+  "motion_bias": [
+   "slow_push",
+   "drift",
+   "controlled_static"
+  ],
+  "divine_light_bloom": {
+   "frequency": "~1_in_6_backlit_hero",
+   "warm_soft_highlight": true
+  },
+  "_notes": "Reference VALIDATES the envelope (~80% already built). Tighten grade_sat ceiling to 0.92 (premium-muted, content sat 0.12-0.31). Make 'cut' DOMINANT (~70-80% -- cut repeated 3x in family); reserve slow_dissolve/film_dissolve for era/location jumps; fadeblack ONLY at act-break bookends + cold open + outro (~1% runtime). ADD long_quote_hold (sustained 10-40s primary-source quote) + define_term_card. divine_light_bloom (capped ~1-in-6 back-lit). Many short breath pockets (~0.86s median) at clause boundaries. parchment FIRST; satellite only for a true modern-geography beat. fast cuts CLUSTER into 1-2 motivated montage windows, not scattered. Cold open is atmosphere ONLY (NO delayed-title; DOC_006 removed). CLASS F: no bespoke CG / map artwork / illuminated plates / narration / music."
+ },
+ "true_crime": {
+  "accents": [
+   [
+    210,
+    55,
+    55
+   ],
+   [
+    196,
+    72,
+    48
+   ],
+   [
+    184,
+    58,
+    64
+   ],
+   [
+    176,
+    66,
+    52
+   ],
+   [
+    180,
+    60,
+    64
+   ]
+  ],
+  "map_styles": [
+   "dark",
+   "tactical",
+   "satellite"
+  ],
+  "transition_families": [
+   [
+    "evidence_flash",
+    "blur_cut",
+    "page_wipe",
+    "cut"
+   ],
+   [
+    "archive_flash",
+    "blur_cut",
+    "cut",
+    "dissolve"
+   ],
+   [
+    "cut",
+    "cut",
+    "evidence_flash",
+    "slow_dissolve"
+   ]
+  ],
+  "lower_third_families": [
+   "scrim_panel",
+   "case_file_tag",
+   "redacted_strip",
+   "text_on_black",
+   "quote_caption_side"
+  ],
+  "grade_sat": [
+   0.74,
+   0.9
+  ],
+  "beat_target": [
+   2.7,
+   3.6
+  ],
+  "hold_mult": [
+   1.05,
+   1.3
+  ],
+  "density": [
+   0.9,
+   1.15
+  ],
+  "music_bed": [
+   0.78,
+   0.92
+  ],
+  "music_behavior": "tension_bed_with_pockets",
+  "silence_pockets": {
+   "count_per_min": [
+    0.4,
+    0.8
+   ],
+   "len_s": [
+    0.7,
+    2.5
+   ],
+   "placement": "reveals_and_turns"
+  },
+  "rhythm_profile": {
+   "mode": "bimodal_optional",
+   "burst_frac": [
+    0.2,
+    0.3
+   ],
+   "burst_shot_s": [
+    0.3,
+    1.2
+   ],
+   "hero_hold_s": [
+    8,
+    18
+   ],
+   "gate": "evidence_montage_beats"
+  },
+  "motion_bias": [
+   "push_hold",
+   "investigative_pan",
+   "impact_push"
+  ],
+  "_notes": "Borrows mystery's evidence-board + text_on_black + tracking_reticle + ui_reenactment (investigative seat) and business's verbatim-quote-over-portrait + hand_drawn_annotation + archival_scan_grid (evidence-under-examination). Lower grade floor to 0.74 (colder option) while red accents stay the only saturated pop (controlled_accent_pop). ADD bimodal_optional burst on evidence-montage beats + a third cut-leaning transition family (reserve whip/blur for bursts only). text_on_black + quote_caption_side added. Existing dossier/case-file/redacted templates cover the document register. CLASS F: never copy real case documents/photos -- recreate generically."
+ },
+ "spy_intel": {
+  "accents": [
+   [
+    110,
+    150,
+    178
+   ],
+   [
+    96,
+    132,
+    150
+   ],
+   [
+    122,
+    142,
+    165
+   ],
+   [
+    88,
+    120,
+    140
+   ],
+   [
+    120,
+    145,
+    170
+   ]
+  ],
+  "map_styles": [
+   "tactical",
+   "dark",
+   "political",
+   "satellite"
+  ],
+  "transition_families": [
+   [
+    "slow_dissolve",
+    "dissolve",
+    "cut",
+    "page_wipe"
+   ],
+   [
+    "blur_cut",
+    "dissolve",
+    "cut",
+    "geo_push"
+   ],
+   [
+    "cut",
+    "cut",
+    "slow_dissolve",
+    "page_wipe"
+   ]
+  ],
+  "lower_third_families": [
+   "scrim_panel",
+   "classified_strip",
+   "mono_tag",
+   "text_on_black",
+   "dossier_id_card"
+  ],
+  "grade_sat": [
+   0.74,
+   0.86
+  ],
+  "beat_target": [
+   3.2,
+   4.2
+  ],
+  "hold_mult": [
+   1.15,
+   1.35
+  ],
+  "density": [
+   0.8,
+   1.0
+  ],
+  "music_bed": [
+   0.72,
+   0.86
+  ],
+  "music_behavior": "tension_bed_with_pockets",
+  "silence_pockets": {
+   "count_per_min": [
+    0.4,
+    0.8
+   ],
+   "len_s": [
+    0.8,
+    2.5
+   ],
+   "placement": "reveals_and_turns"
+  },
+  "rhythm_profile": {
+   "mode": "slow_with_single_burst",
+   "burst_per_min": [
+    0.2,
+    0.4
+   ],
+   "burst_shot_s": [
+    0.4,
+    1.5
+   ],
+   "burst_shots": [
+    3,
+    5
+   ],
+   "gate": "operation_montage_beats"
+  },
+  "motion_bias": [
+   "slow_push",
+   "controlled_static",
+   "drift"
+  ],
+  "_notes": "Borrows mystery's text_on_black + ui_reenactment + tracking_reticle and biography's dossier_id_card. Cold steel-blue accent kept as the only saturated pop. ADD a cut-leaning third transition family + a single sanctioned operation-montage burst. tactical map primary; satellite last. Restrained density (intel = restraint). CLASS F: no real classified-doc / agency-logo copies -- generic chrome only."
+ },
+ "science": {
+  "accents": [
+   [
+    90,
+    185,
+    200
+   ],
+   [
+    110,
+    175,
+    210
+   ],
+   [
+    80,
+    195,
+    180
+   ],
+   [
+    120,
+    180,
+    215
+   ]
+  ],
+  "map_styles": [
+   "political",
+   "satellite"
+  ],
+  "transition_families": [
+   [
+    "geo_push",
+    "page_wipe",
+    "cut",
+    "soft_dissolve"
+   ],
+   [
+    "cut",
+    "soft_dissolve",
+    "page_wipe"
+   ],
+   [
+    "cut",
+    "cut",
+    "geo_push",
+    "soft_dissolve"
+   ]
+  ],
+  "lower_third_families": [
+   "clean_bar",
+   "labeled_diagram",
+   "data_pill",
+   "define_term_card"
+  ],
+  "grade_sat": [
+   0.9,
+   1.02
+  ],
+  "beat_target": [
+   2.4,
+   3.2
+  ],
+  "hold_mult": [
+   0.75,
+   1.05
+  ],
+  "density": [
+   1.0,
+   1.3
+  ],
+  "music_bed": [
+   0.85,
+   1.0
+  ],
+  "music_behavior": "momentum_continuous",
+  "silence_pockets": {
+   "count_per_min": [
+    0.15,
+    0.35
+   ],
+   "len_s": [
+    0.6,
+    1.8
+   ],
+   "placement": "key_reveals"
+  },
+  "rhythm_profile": {
+   "mode": "bimodal_optional",
+   "burst_frac": [
+    0.15,
+    0.3
+   ],
+   "burst_shot_s": [
+    0.4,
+    1.0
+   ],
+   "gate": "enumeration_or_process_montage"
+  },
+  "motion_bias": [
+   "active_pan",
+   "reveal_push"
+  ],
+  "_notes": "Brightest/most-saturated niche (data-viz forward) -- keep grade ceiling high; this is the explainer pole opposite mystery. ADD define_term_card (introduce a concept once, early) + reserve a process/enumeration montage burst (bimodal_optional). labeled_diagram already built. Momentum bed; sparse late silence pockets. The 4 refs are NOT science -- this niche inherits cross-cutting primitives only (define-term, restrained-text-over-footage, momentum sound, bordered-card-on-ground); it should NOT take mystery's cold grade or silence-heavy sound."
+ }
+}

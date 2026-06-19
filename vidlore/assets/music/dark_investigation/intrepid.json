@@ -1,0 +1,50 @@
+{
+ "name": "intrepid",
+ "category": "dark_investigation",
+ "title": "Intrepid",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 190.98,
+ "tags": [
+  "eerie",
+  "mysterious",
+  "somber",
+  "dark"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "dark_investigation",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 191.01,
+   "mean_volume_db": -23.3,
+   "max_volume_db": -5.8,
+   "silence_ratio": 0.05201221402020837,
+   "spectral_centroid_hz": 1157.9751524788421,
+   "spectral_flatness": 0.19335496425628662,
+   "energy_arc": "falling",
+   "bpm": 86,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.652,
+   "darkness": 0.7,
+   "orchestral_density": 0.687,
+   "rhythmic_aggression": 0.423
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:mysterious"
+  ]
+ }
+}

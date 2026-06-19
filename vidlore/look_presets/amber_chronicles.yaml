@@ -1,0 +1,160 @@
+# AMBER CHRONICLES — Slow emotional historical documentary.
+# Very long shots, massive silence pockets, warm amber/sepia grade,
+# dissolves on every motivated emotional exhale, sparse but
+# beautiful AI portraits (Magnum / Joe Sacco style).
+name: amber_chronicles
+label: "Amber Chronicles (slow emotional historical)"
+inherits: standard
+version: 1
+
+tone: reverent
+
+# ── PACING — slow, contemplative + fewer, longer scenes
+# scene_count_mult 0.55 = same brief collapses into ~half the scenes
+# (a 5-scene default becomes 3 long scenes; lets every moment breathe).
+# pacing_hint nudges the LLM toward reflective, multi-sentence units.
+# 0.60 (not the earlier 0.40 extreme) keeps Amber unmistakably
+# slower than Midnight/Atlas while restoring enough scene variety
+# that the viewer doesn't read it as "forgot to change the slide".
+# At 0.40, a 2-min brief collapsed to 2 scenes — the same card
+# repeated across ~70% of the timeline. 0.60 gives ~3 scenes for
+# the same brief, ~5 for a 6-8min: contemplative without monotony.
+scene_count_mult: 0.60
+pacing_hint: "slow contemplative cadence — let scenes breathe with longer reflective sentences, fewer abrupt cuts, treat each moment as a stand-alone tableau; resist the urge to fragment"
+beat_target:    {min: 5.4, max: 6.4}
+beat_min:       {min: 3.6, max: 4.2}
+hook_seconds:   60
+hook_beat_mult: {min: 0.70, max: 0.85}
+climax_silence_mult: {min: 1.45, max: 1.70}
+dissolve_gap:   {min: 1, max: 2}      # dissolves frequent
+dissolve_drop:  1
+camera_easing:  ease_out_quint
+# Amber holds nearly still — the camera barely breathes.  0.50-0.60
+# gives a slow Ken Burns crawl that the viewer reads as cinematic
+# restraint vs Atlas's 1.20-1.40 active push.
+drift_scale:    {min: 0.50, max: 0.60}    # museum-still glide
+hold_bias:      {min: 1.45, max: 1.70}
+push_in_impact: {min: 0.90, max: 1.05}
+
+# ── MOTION GRAPHICS — sparse + literary
+graphic_density: {min: 0.75, max: 0.95}
+density_per_min_max: 2
+fav_templates:
+  - name_reveal
+  - quote_highlight
+  - document
+  - era_banner
+  - timeline
+  - chapter_marker
+  - inscription
+  - photo_collage
+  - footnote
+avoid_templates:
+  - status_indicator
+  - radio_dial
+  - email_screenshot
+  - sms_text
+  - speech_bubble
+  - hashtag_trend
+  - breaking_news
+  - countdown
+  - heatmap
+
+# ── GRADE — warm amber / sepia, lifted shadows, low saturation
+accent_rgb: [206, 158, 80]           # signature amber
+grade:
+  brightness_lift: {min: -0.04, max: 0.0}
+  saturation_lift: {min: -0.18, max: -0.10}
+  shadow_lift:     {min: 0.06,  max: 0.09}
+  highlight_roll:  {min: -0.05, max: -0.02}
+  warm_shadow_split: 0.034          # strong warm tint
+
+# ── FOOTAGE TASTE — biases Pexels toward archival / vintage / film
+# stock so the museum-plaque feel reaches the footage layer too.
+footage:
+  query_suffix: "vintage archival film grainy"
+
+# ── AI — period-evoking, painterly
+ai:
+  per_video_floor:   2
+  per_video_ceiling: 6
+  fire_on_roles:     [hook, climax, reveal, name_reveal, evidence]
+  fire_on_intensity: 3
+  portrait_style:    painted
+  grain_strength:    {min: 0.10, max: 0.14}    # heavier grain
+  diffusion_fallback: true
+
+# ── MUSIC — orchestral, swelling
+music:
+  # Real categories — pinning Amber to historical / orchestral /
+  # emotional buckets.  hard_filter true means it NEVER drifts into
+  # tech_cyber / financial / suspense — keeps the museum-plaque feel.
+  category_bias: [historical_epic, emotional_piano, slow_reveal, aftermath, ambient]
+  hard_filter: true
+  intensity:      {min: 1.25, max: 1.45}
+  density_floor:  {min: 0.55, max: 0.70}
+  swell_on_climax: aggressive
+  cue_min_seconds: 24
+
+# ── SILENCE — biggest of the three styles
+silence:
+  tier2_pocket_s: {min: 0.85, max: 1.05}
+  tier3_pocket_s: {min: 1.55, max: 1.85}
+  tier3_stretch_s: {min: 0.65, max: 0.85}
+  pre_roll_t3_s:   {min: 0.70, max: 0.85}
+
+# ── SFX — minimal, gentle
+sfx:
+  whoosh_min_gap_s: {min: 22, max: 28}
+  boom_min_gap_s:   {min: 40, max: 55}
+  amplitude:        {min: 0.30, max: 0.45}
+  reveal_stinger:   bell_subdrop
+
+# ── REVEAL PSYCHOLOGY — Amber pulls music down on EMOTIONAL reveals.
+# Loss, memory, finality, generations.  Music gets out of the way so
+# the human weight of the moment lands.
+reveal:
+  tier2: [remembered, forgotten, lost, vanished, buried,
+          "for the last time", "never again", "the final",
+          "for generations", "her last", "his last"]
+  tier3_boost: [remembered, forgotten, vanished, lost, alone,
+                generations, century, decades, forever, never]
+
+# ── TEXT — barely any type on screen
+text:
+  emphasis_fire_prob_density:   0.55
+  emphasis_fire_prob_restraint: {min: 0.20, max: 0.35}
+  text_density_target_pct:      {min: 4, max: 12}
+
+fonts:
+  display: [Playfair Display, Crimson, VidloreSans]
+  body:    [Crimson, Source Serif Pro, VidloreSans]
+  weight_bias: regular
+  letter_spacing_caps: 0.05
+
+# ── CAPTIONS — sparse cinematic restraint.
+# max_words 9 + max_dur 5.5 = captions hold across breath, only
+# 1-2 swaps per scene.  Slow 320ms fades, lifted 18% off the
+# bottom for a more cinematic position, serif font chain so the
+# caption matches the museum-plaque card chrome.
+captions:
+  max_words: 9
+  max_dur_s: 5.5
+  size_mult: 1.00
+  fade_in_ms: 320
+  fade_out_ms: 320
+  margin_v_mult: 1.18
+  font_family: [Playfair Display, Crimson, Source Serif Pro]
+
+intro:
+  cold_open_s: 14
+  title_hold_s: 3.5
+  hook_compression: 1.25
+
+climax:
+  hold_s: {min: 12, max: 18}
+  pre_silence_s: {min: 1.8, max: 2.4}
+
+animation:
+  default_easing: ease_out_quint
+  philosophy: cinematic_restraint

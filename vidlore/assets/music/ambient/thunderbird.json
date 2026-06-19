@@ -1,0 +1,50 @@
+{
+ "name": "thunderbird",
+ "category": "ambient",
+ "title": "Thunderbird",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 361.61,
+ "tags": [
+  "somber",
+  "relaxed",
+  "mystical",
+  "calming"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "ambient",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 361.64,
+   "mean_volume_db": -24.7,
+   "max_volume_db": -11.7,
+   "silence_ratio": 0.016151288574272758,
+   "spectral_centroid_hz": 650.2675657249008,
+   "spectral_flatness": 0.09590813517570496,
+   "energy_arc": "steady",
+   "bpm": 172,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.756,
+   "darkness": 0.946,
+   "orchestral_density": 0.862,
+   "rhythmic_aggression": 0.475
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:ambient"
+  ]
+ }
+}

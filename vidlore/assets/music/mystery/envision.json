@@ -1,0 +1,49 @@
+{
+ "name": "envision",
+ "category": "mystery",
+ "title": "Envision",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 85.39,
+ "tags": [
+  "calm",
+  "grooving",
+  "mysterious"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "mystery",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 85.42,
+   "mean_volume_db": -23.9,
+   "max_volume_db": -9.0,
+   "silence_ratio": 0.04660551393116366,
+   "spectral_centroid_hz": 490.5798434703641,
+   "spectral_flatness": 0.04698772728443146,
+   "energy_arc": "steady",
+   "bpm": 99,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.792,
+   "darkness": 0.957,
+   "orchestral_density": 0.862,
+   "rhythmic_aggression": 0.272
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:mysterious"
+  ]
+ }
+}

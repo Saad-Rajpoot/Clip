@@ -1,0 +1,49 @@
+# Vidlore Music Library -- source list for vidlore.music_extract
+#
+# Each entry maps a YouTube URL (video, playlist, channel, or @handle) to a
+# target category. Run:
+#     python -m vidlore.music_extract --reindex
+#
+# `category` options:
+#   suspense, mystery, dark_investigation, emotional_piano, ambient,
+#   historical_epic, military_tension, tech_cyber, financial,
+#   survival_urgency, slow_reveal, climax_build, aftermath, neutral,
+#   archive_texture
+# Or set `category: auto` to classify each track from its title.
+#
+# `max`           caps how many tracks the extractor will pull from this URL.
+# `license`       copied into each downloaded track's sidecar JSON
+#                 and appended to LICENSES.md -- be honest, attribution
+#                 obligations are met downstream from this field.
+# `attribution`   credit string (printed verbatim where attribution is needed)
+#
+# IMPORTANT: only paste sources you have VERIFIED as license-safe (YouTube
+# Audio Library, NCS, Pixabay, Mixkit, Kevin MacLeod / Incompetech,
+# public-domain archive.org sets, etc.). The tool does not check licensing.
+
+sources:
+  # ---- starter examples; uncomment, paste real URLs, then run -------------
+  #
+  # - url: https://www.youtube.com/playlist?list=PLxxxxxxxxxxxxxxxxxxx
+  #   category: auto
+  #   license: "YouTube Audio Library -- Free To Use"
+  #   attribution: ""
+  #   max: 12
+  #
+  # - url: https://www.youtube.com/@NoCopyrightSounds
+  #   category: tech_cyber
+  #   license: "NCS -- free with attribution"
+  #   attribution: "Music provided by NoCopyrightSounds"
+  #   max: 6
+  #
+  # - url: https://www.youtube.com/playlist?list=PLyyyyyyyyyyyyyyyyy
+  #   category: historical_epic
+  #   license: "Kevin MacLeod (incompetech.com) -- CC BY 4.0"
+  #   attribution: "Music: Kevin MacLeod (incompetech.com), CC BY 4.0"
+  #   max: 8
+  #
+  # - url: https://www.youtube.com/watch?v=zzzzzzzzzzz
+  #   category: emotional_piano
+  #   license: "Pixabay Content License -- free, no attribution"
+  #   attribution: ""
+  #   max: 1

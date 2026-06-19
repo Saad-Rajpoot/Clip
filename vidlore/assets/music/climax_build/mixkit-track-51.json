@@ -1,0 +1,45 @@
+{
+ "name": "mixkit-track-51",
+ "category": "climax_build",
+ "title": "Mixkit Track 51",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/51/51.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 96.39,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "climax_build",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 96.39,
+   "mean_volume_db": -25.1,
+   "max_volume_db": -12.3,
+   "silence_ratio": 0.017500944081336237,
+   "spectral_centroid_hz": 1976.4844886656779,
+   "spectral_flatness": 0.369001179933548,
+   "energy_arc": "steady",
+   "bpm": 63,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.354,
+   "darkness": 0.361,
+   "orchestral_density": 0.553,
+   "rhythmic_aggression": 0.442
+  }
+ },
+ "doc_quality": {
+  "score": 0.0,
+  "verdict": "neutral",
+  "reasons": []
+ }
+}

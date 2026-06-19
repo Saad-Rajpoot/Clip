@@ -1,0 +1,53 @@
+{
+ "name": "seven-off",
+ "category": "mystery",
+ "title": "Seven Off",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 55.12,
+ "tags": [
+  "unnerving",
+  "eerie",
+  "mystical",
+  "mysterious",
+  "suspenseful",
+  "somber"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "mystery",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 55.12,
+   "mean_volume_db": -25.8,
+   "max_volume_db": -4.2,
+   "silence_ratio": 0.07992167997097242,
+   "spectral_centroid_hz": 1474.164499007946,
+   "spectral_flatness": 0.17711783945560455,
+   "energy_arc": "steady",
+   "bpm": 70,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.633,
+   "darkness": 0.562,
+   "orchestral_density": 0.654,
+   "rhythmic_aggression": 0.403
+  }
+ },
+ "doc_quality": {
+  "score": 0.42,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:suspense",
+   "+soft:mysterious"
+  ]
+ }
+}

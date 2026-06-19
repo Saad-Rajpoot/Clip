@@ -1,0 +1,47 @@
+{
+ "name": "long-time-coming",
+ "category": "climax_build",
+ "title": "Long Time Coming",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 274.36,
+ "tags": [
+  "driving",
+  "action",
+  "grooving"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "climax_build",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 274.39,
+   "mean_volume_db": -23.2,
+   "max_volume_db": -4.5,
+   "silence_ratio": 0.0,
+   "spectral_centroid_hz": 1924.9736557705617,
+   "spectral_flatness": 0.3278822600841522,
+   "energy_arc": "rising",
+   "bpm": 60,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.494,
+   "darkness": 0.403,
+   "orchestral_density": 0.631,
+   "rhythmic_aggression": 0.481
+  }
+ },
+ "doc_quality": {
+  "score": 0.0,
+  "verdict": "neutral",
+  "reasons": []
+ }
+}

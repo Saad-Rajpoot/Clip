@@ -1,0 +1,48 @@
+{
+ "name": "eastminster",
+ "category": "ambient",
+ "title": "Eastminster",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 405.05,
+ "tags": [
+  "calming",
+  "relaxed"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "ambient",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 405.08,
+   "mean_volume_db": -24.2,
+   "max_volume_db": -1.9,
+   "silence_ratio": 0.014881862841907772,
+   "spectral_centroid_hz": 1537.1774886762096,
+   "spectral_flatness": 0.17096643149852753,
+   "energy_arc": "steady",
+   "bpm": 62,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.687,
+   "darkness": 0.583,
+   "orchestral_density": 0.78,
+   "rhythmic_aggression": 0.373
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:ambient"
+  ]
+ }
+}

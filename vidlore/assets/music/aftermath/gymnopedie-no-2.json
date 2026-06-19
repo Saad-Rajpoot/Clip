@@ -1,0 +1,47 @@
+{
+ "name": "gymnopedie-no-2",
+ "category": "aftermath",
+ "title": "Gymnopedie No. 2",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 159.03,
+ "tags": [
+  "calming",
+  "relaxed",
+  "uplifting"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "aftermath",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 159.06,
+   "mean_volume_db": -25.0,
+   "max_volume_db": -2.7,
+   "silence_ratio": 0.04493591097698981,
+   "spectral_centroid_hz": 384.2142590904067,
+   "spectral_flatness": 0.005199337378144264,
+   "energy_arc": "falling",
+   "bpm": 76,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.932,
+   "darkness": 0.969,
+   "orchestral_density": 0.912,
+   "rhythmic_aggression": 0.248
+  }
+ },
+ "doc_quality": {
+  "score": 0.0,
+  "verdict": "neutral",
+  "reasons": []
+ }
+}

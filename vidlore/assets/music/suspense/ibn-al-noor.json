@@ -1,0 +1,49 @@
+{
+ "name": "ibn-al-noor",
+ "category": "suspense",
+ "title": "Ibn Al-Noor",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 218.23,
+ "tags": [
+  "action",
+  "eerie",
+  "suspenseful"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "suspense",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 218.28,
+   "mean_volume_db": -23.1,
+   "max_volume_db": -9.2,
+   "silence_ratio": 0.007580497526113249,
+   "spectral_centroid_hz": 1208.7715176525703,
+   "spectral_flatness": 0.21614527702331543,
+   "energy_arc": "steady",
+   "bpm": 72,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.609,
+   "darkness": 0.704,
+   "orchestral_density": 0.743,
+   "rhythmic_aggression": 0.327
+  }
+ },
+ "doc_quality": {
+  "score": 0.3,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:suspense"
+  ]
+ }
+}

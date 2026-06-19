@@ -1,0 +1,48 @@
+{
+ "name": "dirt-rhodes",
+ "category": "slow_reveal",
+ "title": "Dirt Rhodes",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 120.06,
+ "tags": [
+  "grooving",
+  "mysterious"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "slow_reveal",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 120.08,
+   "mean_volume_db": -24.2,
+   "max_volume_db": -7.5,
+   "silence_ratio": 0.039452539973351096,
+   "spectral_centroid_hz": 869.8569441742711,
+   "spectral_flatness": 0.1350516378879547,
+   "energy_arc": "steady",
+   "bpm": 83,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.735,
+   "darkness": 0.835,
+   "orchestral_density": 0.776,
+   "rhythmic_aggression": 0.331
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:mysterious"
+  ]
+ }
+}

@@ -1,0 +1,54 @@
+{
+ "name": "exciting-trailer",
+ "category": "military_tension",
+ "title": "Exciting Trailer",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 75.08,
+ "tags": [
+  "action",
+  "aggressive",
+  "dark",
+  "driving",
+  "epic",
+  "intense"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "military_tension",
+  "confidence": 0.85,
+  "voted_by": [
+   "title",
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 75.1,
+   "mean_volume_db": -23.9,
+   "max_volume_db": -3.9,
+   "silence_ratio": 0.054383728362183754,
+   "spectral_centroid_hz": 978.1431478470656,
+   "spectral_flatness": 0.08643294870853424,
+   "energy_arc": "steady",
+   "bpm": 60,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.772,
+   "darkness": 0.795,
+   "orchestral_density": 0.803,
+   "rhythmic_aggression": 0.231
+  }
+ },
+ "doc_quality": {
+  "score": 0.24,
+  "verdict": "prefer",
+  "reasons": [
+   "+soft:epic",
+   "+soft:tension"
+  ]
+ }
+}

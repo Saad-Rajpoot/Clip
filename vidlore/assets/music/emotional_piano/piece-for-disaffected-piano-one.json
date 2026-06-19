@@ -1,0 +1,46 @@
+{
+ "name": "piece-for-disaffected-piano-one",
+ "category": "emotional_piano",
+ "title": "Piece for Disaffected Piano One",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 188.45,
+ "tags": [],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "emotional_piano",
+  "confidence": 0.85,
+  "voted_by": [
+   "title",
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 188.47,
+   "mean_volume_db": -24.3,
+   "max_volume_db": -3.0,
+   "silence_ratio": 0.11448510638297872,
+   "spectral_centroid_hz": 464.9376467157732,
+   "spectral_flatness": 0.009362548589706421,
+   "energy_arc": "arc",
+   "bpm": 60,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.856,
+   "darkness": 0.921,
+   "orchestral_density": 0.78,
+   "rhythmic_aggression": 0.166
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:piano"
+  ]
+ }
+}

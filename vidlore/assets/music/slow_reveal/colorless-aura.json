@@ -1,0 +1,48 @@
+{
+ "name": "colorless-aura",
+ "category": "slow_reveal",
+ "title": "Colorless Aura",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 158.07,
+ "tags": [
+  "mysterious",
+  "somber"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "slow_reveal",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 158.09,
+   "mean_volume_db": -26.3,
+   "max_volume_db": -6.4,
+   "silence_ratio": 0.07957334429755201,
+   "spectral_centroid_hz": 761.1767125797037,
+   "spectral_flatness": 0.0015560141764581203,
+   "energy_arc": "arc",
+   "bpm": 108,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.829,
+   "darkness": 0.884,
+   "orchestral_density": 0.852,
+   "rhythmic_aggression": 0.343
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:mysterious"
+  ]
+ }
+}

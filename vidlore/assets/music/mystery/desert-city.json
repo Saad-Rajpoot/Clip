@@ -1,0 +1,49 @@
+{
+ "name": "desert-city",
+ "category": "mystery",
+ "title": "Desert City",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 89.36,
+ "tags": [
+  "grooving",
+  "mysterious",
+  "relaxed"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "mystery",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 89.39,
+   "mean_volume_db": -23.7,
+   "max_volume_db": -9.1,
+   "silence_ratio": 0.0,
+   "spectral_centroid_hz": 2065.7526525733533,
+   "spectral_flatness": 0.3207886517047882,
+   "energy_arc": "steady",
+   "bpm": 112,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.397,
+   "darkness": 0.35,
+   "orchestral_density": 0.639,
+   "rhythmic_aggression": 0.632
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:mysterious"
+  ]
+ }
+}

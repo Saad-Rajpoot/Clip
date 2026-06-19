@@ -1,0 +1,47 @@
+{
+ "name": "thinking-out-loud",
+ "category": "tech_cyber",
+ "title": "Thinking Out Loud",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 284.58,
+ "tags": [
+  "grooving",
+  "driving",
+  "dark"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "tech_cyber",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 284.6,
+   "mean_volume_db": -25.0,
+   "max_volume_db": -8.1,
+   "silence_ratio": 0.059453137737174984,
+   "spectral_centroid_hz": 1182.1870234223943,
+   "spectral_flatness": 0.23119492828845978,
+   "energy_arc": "falling",
+   "bpm": 83,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.616,
+   "darkness": 0.676,
+   "orchestral_density": 0.631,
+   "rhythmic_aggression": 0.442
+  }
+ },
+ "doc_quality": {
+  "score": 0.0,
+  "verdict": "neutral",
+  "reasons": []
+ }
+}

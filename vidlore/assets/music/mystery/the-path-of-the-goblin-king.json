@@ -1,0 +1,48 @@
+{
+ "name": "the-path-of-the-goblin-king",
+ "category": "mystery",
+ "title": "The Path of the Goblin King",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 206.37,
+ "tags": [
+  "mysterious",
+  "relaxed"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "mystery",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 206.39,
+   "mean_volume_db": -24.5,
+   "max_volume_db": -2.0,
+   "silence_ratio": 0.008672900818838123,
+   "spectral_centroid_hz": 956.6231435558683,
+   "spectral_flatness": 0.15882796049118042,
+   "energy_arc": "rising",
+   "bpm": 60,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.829,
+   "darkness": 0.816,
+   "orchestral_density": 0.805,
+   "rhythmic_aggression": 0.354
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:mysterious"
+  ]
+ }
+}

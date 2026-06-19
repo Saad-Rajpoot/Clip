@@ -1,0 +1,21 @@
+{
+  "_comment": "ClipStudio source list. permission MUST be one of: owner | licensed | public_domain | cc | fair_use_claim. 'unverified' (the default) is BLOCKED and the source is skipped. ClipStudio records your assertion; it does NOT certify fair use or copyright safety.",
+  "sources": [
+    {
+      "ref": "/absolute/path/to/your_movie.mp4",
+      "permission": "owner",
+      "note": "own footage / licensed master",
+      "title": "Optional display title"
+    },
+    {
+      "ref": "https://archive.org/details/some_public_domain_film",
+      "permission": "public_domain",
+      "note": "PD per archive.org record"
+    },
+    {
+      "ref": "https://www.youtube.com/watch?v=VIDEO_ID",
+      "permission": "licensed",
+      "note": "licensed via <agreement / channel permission>"
+    }
+  ]
+}

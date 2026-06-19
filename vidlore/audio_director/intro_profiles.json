@@ -1,0 +1,119 @@
+{
+ "profiles": [
+  {
+   "niche": "spy",
+   "duration_s": 28,
+   "opening_texture": "restrained pulse + cold ambience",
+   "intro_level": 0.391,
+   "recede_to": 0.17,
+   "recede_at_s": 26,
+   "fallback_category": "suspense",
+   "category_preference": [
+    "suspense",
+    "dark_investigation",
+    "tech_cyber",
+    "ambient",
+    "military_tension",
+    "slow_reveal"
+   ],
+   "silence_bias": 0.62,
+   "description": "A cold, clandestine open. A barely-there low pulse over glassy ambience implies surveillance and held breath rather than action. Opens about 2x above the body bed so the first frame has weight, then is already receding as the narrator enters, reaching the body bed by ~7s. Favors suspense and dark_investigation textures; tech_cyber accents are permitted for signals/intercept stories. High silence bias keeps the floor near-empty so a single motivated cue (a distant tone, a faint mechanism) reads as deliberate tradecraft, never scoring. If the chosen folder is empty, falls back to suspense."
+  },
+  {
+   "niche": "crime",
+   "duration_s": 26,
+   "opening_texture": "low ember tension",
+   "intro_level": 0.414,
+   "recede_to": 0.17,
+   "recede_at_s": 26,
+   "fallback_category": "dark_investigation",
+   "category_preference": [
+    "dark_investigation",
+    "suspense",
+    "mystery",
+    "ambient",
+    "aftermath",
+    "emotional_piano"
+   ],
+   "silence_bias": 0.55,
+   "description": "A smoldering, case-file open. A low, unresolved ember of tension sits under the first lines like evidence laid on a table. Opens about 2x the body bed for gravity, then settles into a tight investigative bed by ~6.5s so the facts carry as the narrator speaks. Leads with dark_investigation and suspense and keeps an investigative color on the open; aftermath and emotional_piano are demoted below ambient and reserved strictly for victim-context or somber framing so the intro never opens on a resolution color. Moderate-high silence bias leaves room for diegetic foley (an evidence thud, a stamp) to land as the motivated accent rather than musical hits. Falls back to dark_investigation if a folder is empty."
+  },
+  {
+   "niche": "business",
+   "duration_s": 24,
+   "opening_texture": "confident cinematic swell",
+   "intro_level": 0.46,
+   "recede_to": 0.18,
+   "recede_at_s": 26,
+   "fallback_category": "climax_build",
+   "category_preference": [
+    "climax_build",
+    "historical_epic",
+    "tech_cyber",
+    "ambient",
+    "financial",
+    "neutral"
+   ],
+   "silence_bias": 0.22,
+   "description": "The most confident, fullest open of the set: a forward, polished cinematic swell that signals scale, capital, and ambition from the first frame. Opens hot at ~+8 dB over the body bed for presence, but at 0.42 rather than a stinger-hot 0.50 so it can sit under the narrator without masking consonants, and resolves down to the body bed by ~6s so the recede tracks the narrator's entry instead of fighting it. This keeps the described sidechain (threshold 0.030, ratio 12) from clamping a too-hot bed into audible per-syllable pumping. Prefers climax_build and historical_epic for grandeur, with tech_cyber for product/innovation stories. financial and neutral are EMPTY today and intentionally placed last; until populated, selection lands on climax_build or another populated category, and fallback_category=climax_build guarantees a populated bed. Lowest silence bias of the niches, because empire-building wants drive and presence over space."
+  },
+  {
+   "niche": "history",
+   "duration_s": 32,
+   "opening_texture": "slow atmospheric drone",
+   "intro_level": 0.356,
+   "recede_to": 0.16,
+   "recede_at_s": 26,
+   "fallback_category": "historical_epic",
+   "category_preference": [
+    "historical_epic",
+    "ambient",
+    "emotional_piano",
+    "slow_reveal",
+    "aftermath",
+    "archive_texture"
+   ],
+   "silence_bias": 0.6,
+   "description": "A patient, weathered open. A slow atmospheric drone with epic undertones evokes deep time and consequence, giving the longest runway of the set. Opens at ~0.31 — present but restrained, roughly twice the body bed rather than the louder 0.33 — to keep the sense of distance and age intact, then thins to the near-archival body floor by ~8s as the narrator establishes the period. Leads with historical_epic and ambient; emotional_piano carries human stakes. archive_texture is the intended period-grain layer but is EMPTY today, so it is placed last and selection falls through to a populated color (fallback_category=historical_epic). High silence bias lets room-tone and a single sustained swell do the emotional work."
+  },
+  {
+   "niche": "geopolitics",
+   "duration_s": 27,
+   "opening_texture": "urgency + restraint",
+   "intro_level": 0.46,
+   "recede_to": 0.17,
+   "recede_at_s": 26,
+   "fallback_category": "military_tension",
+   "category_preference": [
+    "military_tension",
+    "suspense",
+    "dark_investigation",
+    "ambient",
+    "historical_epic",
+    "survival_urgency"
+   ],
+   "silence_bias": 0.4,
+   "description": "A taut, high-stakes open balancing urgency against control. A purposeful low tension with measured forward motion implies borders, briefings, and pressure without tipping into alarm. Opens with real presence for gravity, then pulls back to the body bed by ~6.5s as the narrator frames the conflict, so the bed is already receding by the time the first lines land. Leads with military_tension and suspense; historical_epic supports map/empire scope. survival_urgency is the intended escalation folder but is EMPTY today, so it is placed last and selection falls through to a populated color (fallback_category=military_tension). Mid-range silence bias keeps it tighter and more driven than spy/history but still leaves space for a motivated map or transition cue."
+  },
+  {
+   "niche": "mystery",
+   "duration_s": 30,
+   "opening_texture": "silence-heavy, single sustained tone",
+   "intro_level": 0.299,
+   "recede_to": 0.14,
+   "recede_at_s": 26,
+   "fallback_category": "mystery",
+   "category_preference": [
+    "mystery",
+    "ambient",
+    "slow_reveal",
+    "dark_investigation",
+    "emotional_piano",
+    "archive_texture"
+   ],
+   "silence_bias": 0.82,
+   "description": "The quietest, most spacious open of the set. A single sustained tone hangs in near-silence, posing the question rather than answering it, and recedes to the lowest floor (0.14, intentionally just below the 0.16 body bed) by ~8s as the narrator enters. Lowest intro_level and highest silence bias by design: the unease comes from emptiness and one unresolved sustain, not from a bed. Leads with mystery and ambient, with slow_reveal for the unfolding and dark_investigation only when the thread turns investigative. archive_texture is EMPTY today and placed last; fallback_category=mystery guarantees a populated bed. Silence is the primary instrument here, so any sfx must be rare and clearly motivated, and the ducker should be gated for this sub-0.20 sustained tone so it does not breathe with the voice."
+  }
+ ],
+ "_doc": "Niche-aware intro-music profiles (first 20-35s): louder-then-recede. Read by music_director.intro_profile(). Verifier-corrected."
+}

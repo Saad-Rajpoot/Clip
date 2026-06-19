@@ -1,0 +1,51 @@
+{
+ "name": "past-the-edge",
+ "category": "dark_investigation",
+ "title": "Past the Edge",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 78.18,
+ "tags": [
+  "dark",
+  "eerie",
+  "mysterious",
+  "somber"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "dark_investigation",
+  "confidence": 0.85,
+  "voted_by": [
+   "title",
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 78.21000000000001,
+   "mean_volume_db": -23.7,
+   "max_volume_db": -6.0,
+   "silence_ratio": 0.05426201253036695,
+   "spectral_centroid_hz": 1140.9704235117802,
+   "spectral_flatness": 0.06955264508724213,
+   "energy_arc": "steady",
+   "bpm": 185,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.703,
+   "darkness": 0.736,
+   "orchestral_density": 0.822,
+   "rhythmic_aggression": 0.173
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:mysterious"
+  ]
+ }
+}

@@ -1,0 +1,51 @@
+{
+ "name": "constancy-part-two",
+ "category": "suspense",
+ "title": "Constancy Part Two",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 64.34,
+ "tags": [
+  "dark",
+  "epic",
+  "intense",
+  "suspenseful"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "suspense",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 64.37,
+   "mean_volume_db": -24.1,
+   "max_volume_db": -8.7,
+   "silence_ratio": 0.06810118067422712,
+   "spectral_centroid_hz": 1000.422483644579,
+   "spectral_flatness": 0.09204772859811783,
+   "energy_arc": "steady",
+   "bpm": 96,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.676,
+   "darkness": 0.776,
+   "orchestral_density": 0.772,
+   "rhythmic_aggression": 0.318
+  }
+ },
+ "doc_quality": {
+  "score": 0.42,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:suspense",
+   "+soft:epic"
+  ]
+ }
+}

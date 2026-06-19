@@ -1,0 +1,51 @@
+{
+ "name": "redletter",
+ "category": "dark_investigation",
+ "title": "Redletter",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 268.15,
+ "tags": [
+  "dark",
+  "eerie",
+  "intense",
+  "suspenseful",
+  "unnerving"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "dark_investigation",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 268.2,
+   "mean_volume_db": -23.6,
+   "max_volume_db": -5.8,
+   "silence_ratio": 0.01757851230425056,
+   "spectral_centroid_hz": 802.6303092829017,
+   "spectral_flatness": 0.043179016560316086,
+   "energy_arc": "arc",
+   "bpm": 66,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.821,
+   "darkness": 0.899,
+   "orchestral_density": 0.919,
+   "rhythmic_aggression": 0.171
+  }
+ },
+ "doc_quality": {
+  "score": 0.3,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:suspense"
+  ]
+ }
+}

@@ -1,0 +1,121 @@
+name: homestead
+label: Homestead Gold (forgotten-knowledge / old-ways doc)
+inherits: standard
+version: 1
+
+tone: reverent
+beat_target:    {min: 3.6, max: 4.2}
+beat_min:       {min: 2.4, max: 2.8}
+hook_seconds:   42
+hook_beat_mult: {min: 0.55, max: 0.70}
+climax_silence_mult: {min: 1.10, max: 1.40}
+dissolve_gap:   {min: 3, max: 4}
+dissolve_drop:  2
+camera_easing:  ease_out_cubic
+drift_scale:    {min: 0.78, max: 0.95}
+hold_bias:      {min: 1.15, max: 1.40}
+push_in_impact: {min: 0.95, max: 1.10}
+
+graphic_density: {min: 1.05, max: 1.20}
+density_per_min_max: {min: 2, max: 4}
+fav_templates:
+  - statement
+  - timeline
+  - process_diagram
+  - map_reveal
+  - quote_highlight
+  - document
+  - line_chart
+  - bullet_list
+  - name_reveal
+  - era_banner
+  - footnote
+avoid_templates:
+  - surveillance
+  - sms_text
+  - breaking_news
+  - radio_dial
+  - call_log
+  - email_screenshot
+  - status_indicator
+  - headline_crawl
+
+chart_style: serif_warm
+map_style:   nautical_chart
+annotation_voice: archival
+accent_rgb: [226, 188, 96]
+
+grade:
+  brightness_lift: {min: -0.02, max: 0.02}
+  saturation_lift: {min: -0.06, max: -0.02}
+  shadow_lift:     {min: 0.02,  max: 0.04}
+  highlight_roll:  {min: -0.02, max: 0.0}
+  warm_shadow_split: 0.018
+
+ai:
+  per_video_floor:   1
+  per_video_ceiling: {min: 3, max: 5}
+  fire_on_roles:     [hook, climax, reveal, name_reveal]
+  fire_on_intensity: 4
+  portrait_style:    magnum_natgeo
+  grain_strength:    {min: 0.06, max: 0.10}
+  diffusion_fallback: true
+
+archival:
+  enabled: true
+  bias_on_dates_before: 1990
+  source_priority: [internet_archive, loc, nara, pexels_historical]
+
+music:
+  category_bias: [history, emotional_piano, dark_investigation]
+  intensity:      {min: 1.05, max: 1.20}
+  density_floor:  {min: 0.55, max: 0.72}
+  swell_on_climax: aggressive
+  cue_min_seconds: 18
+  track_repeat_window_days: 7
+
+silence:
+  tier2_pocket_s: {min: 0.50, max: 0.65}
+  tier3_pocket_s: {min: 1.00, max: 1.25}
+  tier3_stretch_s: {min: 0.40, max: 0.55}
+  pre_roll_t3_s:   {min: 0.50, max: 0.60}
+
+sfx:
+  whoosh_min_gap_s: {min: 11, max: 14}
+  boom_min_gap_s:   {min: 28, max: 34}
+  amplitude:        {min: 0.45, max: 0.62}
+  reveal_stinger:   bell_subdrop
+
+text:
+  emphasis_fire_prob_density:   1.0
+  emphasis_fire_prob_restraint: {min: 0.45, max: 0.60}
+  text_density_target_pct:      {min: 18, max: 28}
+
+fonts:
+  display: [Bricolage Grotesque, Inter, VidloreSans]
+  body:    [Source Serif Pro, Crimson, VidloreSans]
+  weight_bias: bold
+  letter_spacing_caps: 0.04
+
+intro:
+  cold_open_s: 8
+  title_hold_s: 2.4
+  hook_compression: 1.6
+
+climax:
+  hold_s: {min: 8, max: 14}
+  pre_silence_s: {min: 1.2, max: 1.6}
+
+animation:
+  default_easing: ease_out_cubic
+  stagger_ms: {min: 90, max: 160}
+  philosophy: cinematic_restraint
+
+anti_convergence:
+  history_window: 5
+  min_distance: 0.20
+  forced_drift_axes:
+    - music.category_bias
+    - transition_palette
+    - climax.hold_s
+    - chart_style

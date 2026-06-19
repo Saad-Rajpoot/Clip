@@ -1,0 +1,2946 @@
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/__init__.py vidlore/clipstudio/__init__.py
+--- /tmp/clipstudio_backup_pre_fixes/__init__.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/__init__.py	2026-06-10 21:28:41
+@@ -10,6 +10,16 @@
+ """
+ from __future__ import annotations
+ 
++import sys as _sys
++from pathlib import Path as _Path
++
++# isolated deps (yt-dlp, scenedetect, google-genai, rapidocr …) live in .clipstudio_libs to keep
++# the engine venv pristine — register it ONCE here so every entrypoint sees them, not just the
++# modules (llm/ocr) that happened to append it themselves
++_LIBS = _Path(__file__).resolve().parents[2] / ".clipstudio_libs"
++if _LIBS.exists() and str(_LIBS) not in _sys.path:
++    _sys.path.append(str(_LIBS))
++
+ __version__ = "0.1.0"
+ 
+ from .models import (
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/analyze.py vidlore/clipstudio/analyze.py
+--- /tmp/clipstudio_backup_pre_fixes/analyze.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/analyze.py	2026-06-11 12:04:12
+@@ -35,6 +35,9 @@
+     # The 1–3 CORE scenes the whole video is ABOUT, each with the best RAW-footage search string.
+     # For a single-scene video this is the one canonical scene the editor anchors everything on.
+     anchor_scenes: list[dict] = field(default_factory=list)   # [{"name":..., "query":...}]
++    # "S02E09"-style code when the LLM names the episode — used as a high-precision search
++    # variant (the raw-scene uploads are very often titled with it)
++    episode_hint: str = ""
+     actors: list[str] = field(default_factory=list)
+     characters: list[dict] = field(default_factory=list)   # {"name":..., "actor":...}
+     locations: list[str] = field(default_factory=list)
+@@ -113,10 +116,20 @@
+         '"video_type":"single_scene if the ENTIRE video dissects/re-watches ONE specific scene or '
+         "moment (the narration walks through that single scene beat-by-beat); multi_scene if it "
+         'spans many different scenes across the story",'
+-        '"anchor_scenes":[{"name":"the core scene the video is about","query":"the BEST search '
+-        "string to find the RAW in-show footage of THIS exact scene on YouTube — movie + characters "
+-        "+ the specific action/location, the way a clip uploader would title it (e.g. 'Game of "
+-        "Thrones Bronn sings Rains of Castamere tavern Sandor Clegane')\"}],  // 1 for single_scene, "
++        '"anchor_scenes":[{"name":"the CANONICAL name of this scene as fans and clip-uploaders '
++        "call it — the recognized scene + its setting (e.g. 'the Small Council meeting', 'the "
++        "Battle of the Bastards', 'the Red Wedding'), NOT a thematic description you invented\","
++        '"episode":"the exact episode if a TV show, as SxxExx AND its title if known (e.g. '
++        "\\\"S03E03 Walk of Punishment\\\"); '' for a film or if unsure\","
++        '"query":"the BEST YouTube search string for the RAW in-show footage of THIS exact scene '
++        "— movie + the CANONICAL scene/location name + key characters + episode code, the way a "
++        "clip uploader actually titles it (e.g. 'Game of Thrones Small Council scene Walk of "
++        "Punishment S03E03 Littlefinger Tywin'). Use the canonical scene name, never a vague "
++        "theme like 'chair test'\","
++        '"dialogue":["2-5 VERBATIM lines actually SPOKEN in this scene, exactly as said on screen '
++        "(e.g. 'You're just like me, only smaller'). Verbatim only — never paraphrase. NEVER song "
++        "lyrics or sung lines (those appear in every cover/lyric upload and poison the search); "
++        'spoken dialogue between characters only; [] if unsure"]}],  // 1 for single_scene, '
+         "up to 3 for multi_scene — the scenes EVERYTHING should be cut from",
+         '"actors":["full names"],'
+         '"characters":[{"name":"character","actor":"who plays them"}],'
+@@ -171,14 +184,24 @@
+             '"required_kind":"actor|character|object|scene|event|location|","emotion":"one word or '
+             "''\",\"specific\":true}]\n\nBEATS:\n" + json.dumps(numbered, ensure_ascii=False)
+         )
+-        bt = _llm.complete(system=_SYS, messages=[{"role": "user", "content": bu}],
+-                           max_tokens=min(8000, 600 + len(chunk) * 180), eng_cfg=eng_cfg)
+-        mm = re.search(r"\[.*\]", bt, re.S)
+-        if mm:
+-            try:
+-                beat_out.extend(json.loads(mm.group(0)))
+-            except Exception:
+-                pass
++        parsed = None
++        for _try in range(2):                      # one retry — a truncated/invalid/EMPTY reply
++            bt = _llm.complete(system=_SYS, messages=[{"role": "user", "content": bu}],
++                               max_tokens=min(8000, 600 + len(chunk) * 180), eng_cfg=eng_cfg)
++            mm = re.search(r"\[.*\]", bt, re.S)
++            if mm:
++                try:
++                    parsed = json.loads(mm.group(0))
++                except Exception:
++                    parsed = None
++                if isinstance(parsed, list) and parsed:
++                    break
++                parsed = None                      # '[]' is no enrichment — spend the retry
++        if parsed:
++            beat_out.extend(parsed)
++        else:
++            _log(f"analyze: ⚠ beats {start}-{min(start + BATCH, len(beats)) - 1} enrichment "
++                 f"failed (invalid LLM JSON twice) — they fall back to heuristic visuals")
+         _log(f"analyze: per-beat {min(start + BATCH, len(beats))}/{len(beats)}")
+     return {"analysis": analysis, "beats": beat_out}
+ 
+@@ -265,7 +288,10 @@
+         tone=str(a.get("tone", ""))[:40],
+         video_type=("single_scene" if "single" in str(a.get("video_type", "")).lower()
+                     else "multi_scene"),
+-        anchor_scenes=[{"name": str(s.get("name", ""))[:120], "query": str(s.get("query", ""))[:120]}
++        anchor_scenes=[{"name": str(s.get("name", ""))[:120], "query": str(s.get("query", ""))[:140],
++                        "episode": str(s.get("episode", ""))[:40],
++                        "dialogue": [str(d)[:120] for d in (s.get("dialogue") or [])
++                                     if isinstance(d, str) and len(d.split()) >= 3][:5]}
+                        for s in a.get("anchor_scenes", [])
+                        if isinstance(s, dict) and (s.get("query") or s.get("name"))][:3],
+         actors=[str(x) for x in a.get("actors", []) if x][:14],
+@@ -277,7 +303,29 @@
+         emotional_moments=[str(x) for x in a.get("emotional_moments", [])][:14],
+         source=_llm.active_provider(eng_cfg).split()[0],
+     )
+-    by_i = {int(o.get("i", -1)): o for o in data.get("beats", []) if isinstance(o, dict)}
++    # the LLM often returns "Show (Season 2, Episode 9)" — a terrible SEARCH PREFIX (every query
++    # inherits the parenthetical). Split it: clean title for queries + S02E09 episode hint.
++    _em = re.search(r"\(?\s*Season\s*(\d{1,2})\s*,?\s*Episode\s*(\d{1,2})\s*\)?", analysis.movie_title, re.I)
++    if _em:
++        analysis.episode_hint = f"S{int(_em.group(1)):02d}E{int(_em.group(2)):02d}"
++        analysis.movie_title = re.sub(
++            r"\s*\(?\s*Season\s*\d{1,2}\s*,?\s*Episode\s*\d{1,2}\s*\)?", "",
++            analysis.movie_title, flags=re.I).strip(" -–—:") or analysis.movie_title
++    # else pull the SxxExx from the anchor scene's episode field (the LLM now names it there)
++    if not analysis.episode_hint:
++        for sc in analysis.anchor_scenes:
++            m2 = re.search(r"S(\d{1,2})\s*E(\d{1,2})|Season\s*(\d{1,2}).{0,12}Episode\s*(\d{1,2})",
++                           sc.get("episode", ""), re.I)
++            if m2:
++                g = [x for x in m2.groups() if x]
++                analysis.episode_hint = f"S{int(g[0]):02d}E{int(g[1]):02d}"
++                break
++    def _beat_i(o):
++        try:
++            return int(o.get("i", -1))
++        except (TypeError, ValueError):     # a non-numeric index must not crash the whole analyze
++            return -1
++    by_i = {_beat_i(o): o for o in data.get("beats", []) if isinstance(o, dict)}
+     for b in beats:
+         o = by_i.get(b.index)
+         if not o:
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/build.py vidlore/clipstudio/build.py
+--- /tmp/clipstudio_backup_pre_fixes/build.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/build.py	2026-06-11 17:25:02
+@@ -40,7 +40,9 @@
+     # bottom → keep top (y=0); and vice-versa.
+     x = "0" if corner in ("br", "tr") else f"iw*{1 - k:.3f}"
+     y = "0" if corner in ("br", "bl") else f"ih*{1 - k:.3f}"
+-    return f"crop=iw*{k:.3f}:ih*{k:.3f}:{x}:{y},scale=1280:720"
++    # no rescale here: assemble normalizes every clip to 1920x1080 with AR preserved — a hard
++    # scale=1280:720 would soften 1080p sources (720p round-trip) and stretch non-16:9 film
++    return f"crop=iw*{k:.3f}:ih*{k:.3f}:{x}:{y}"
+ 
+ 
+ def _detect_logo_corner(src_path: str, ocr_engine) -> str:
+@@ -70,8 +72,13 @@
+                 if not (_OCR_JUNK.search(txt) or len(_re3.findall(r"[A-Za-z]", txt)) >= 6):
+                     continue
+                 xs = [p[0] for p in box]; ys = [p[1] for p in box]
++                bw = (max(xs) - min(xs)) / max(1, W)
+                 cx = (min(xs) + max(xs)) / 2 / max(1, W); cy = (min(ys) + max(ys)) / 2 / max(1, H)
+-                if cx < 0.3 or cx > 0.7 or cy < 0.3 or cy > 0.7:   # near an edge = logo, not center content
++                if bw > 0.45:
++                    continue        # frame-wide strip = burned subtitle/ticker, never a corner logo
++                # a logo sits in a CORNER: off-center on BOTH axes — bottom-CENTER subtitles
++                # (cy~0.85, cx~0.5) must not vote bl/br on centroid jitter
++                if (cx < 0.3 or cx > 0.7) and (cy < 0.3 or cy > 0.7):
+                     votes[("b" if cy > 0.5 else "t") + ("r" if cx > 0.5 else "l")] += 1
+         except Exception:
+             pass
+@@ -106,31 +113,70 @@
+     return out
+ 
+ 
++# Detail-enhance chain applied to EVERY cut: the "1080p" uploads of TV scenes are mostly SOFT
++# re-encodes (measured Laplacian var 2-18 — fake HD). Light denoise first (so sharpening
++# amplifies real edges, not encode noise), then unsharp + contrast-adaptive sharpen.
++# Empirically 3.3× Laplacian on a soft S03E03 source with no visible halos.
++_CAS = "hqdn3d=1.5:1.5:3:3,unsharp=5:5:0.9:3:3:0.0,cas=0.5"
++
++
++def _ken_burns_filter(dur: float, src_w: int = 0, zoom_to: float = 1.10) -> str:
++    """A slow cinematic push-in (Ken Burns) over the clip — what the competitor does on a held
++    key shot. Pre-upscale (lanczos) so the zoom never reveals soft pixels, then zoompan from
++    1.0→zoom_to across the clip's frames, output 1920x1080@30."""
++    frames = max(1, int(round(max(0.5, dur) * 30)))
++    return (f"scale=2560:1440:force_original_aspect_ratio=increase:flags=lanczos,crop=2560:1440,"
++            f"zoompan=z='min(1.0+{zoom_to - 1.0:.4f}*on/{frames},{zoom_to:.3f})':d=1:"
++            f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080:fps=30,setsar=1,{_CAS}")
++
++
++def _upscale_filter(src_w: int) -> str:
++    """Normalize + sharpen every cut. SD sources get a lanczos upscale first; everything gets
++    contrast-adaptive sharpening (the footage chain is otherwise uniformly soft)."""
++    if src_w and src_w < 1280:
++        return ("scale=1920:1080:force_original_aspect_ratio=increase:flags=lanczos,"
++                f"crop=1920:1080,unsharp=5:5:0.8:3:3:0.4,setsar=1,{_CAS}")
++    return _CAS
++
++
+ def _recut_to_duration(src_path: str, start: float, need: float, src_dur: float,
+-                       dest: Path, crop_filter: str = "") -> Optional[Path]:
++                       dest: Path, crop_filter: str = "", zoom: float = 0.0,
++                       src_w: int = 0) -> Optional[Path]:
+     """Cut a clip of length `need` from the source so it is AT LEAST as long as the narration
+     scene — otherwise the renderer loops a short clip to fill the audio (the 2-second 'same scene
+-    repeating' bug). Extends past the detected shot into continuous source footage as needed."""
++    repeating' bug). Extends past the detected shot into continuous source footage as needed.
++    `zoom` applies a slow Ken Burns push-in (held key shot); `src_w` enables SD sharpen-upscale."""
+     start = max(0.0, start)
+     end = start + need
+     if src_dur and end > src_dur:                     # clamp to the tail, keep full length
+         end = src_dur
+         start = max(0.0, end - need)
+     dur = max(0.5, end - start)
++    # filter chain: watermark crop → (Ken Burns zoom | SD sharpen-upscale). Zoom already
++    # upscales+normalizes to 1080, so it subsumes the SD-upscale step.
++    vf_parts = [crop_filter] if crop_filter else []
++    if zoom:
++        vf_parts.append(_ken_burns_filter(dur, src_w, zoom_to=float(zoom)))
++    else:
++        up = _upscale_filter(src_w)
++        if up:
++            vf_parts.append(up)
+     cmd = [
+         ffmpeg_exe(), "-y", "-ss", f"{start:.3f}", "-i", str(src_path), "-t", f"{dur:.3f}", "-an",
+     ]
+-    if crop_filter:                                   # punch-in zoom to drop a corner watermark
+-        cmd += ["-vf", crop_filter]
++    if vf_parts:
++        cmd += ["-vf", ",".join(vf_parts)]
+     cmd += [
+-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
++        # CRF 18 + medium: the clips are short and re-encoded again by assemble + the letterbox
++        # bake, so start crisp (CRF 20/veryfast compounded into visible softness)
++        "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+         "-movflags", "+faststart", str(dest),
+     ]
+     try:
+-        subprocess.run(cmd, capture_output=True, timeout=120)
++        p = subprocess.run(cmd, capture_output=True, timeout=120)
+     except Exception:
+         return None
+-    return dest if (dest.exists() and dest.stat().st_size > 0) else None
++    return dest if (p.returncode == 0 and dest.exists() and dest.stat().st_size > 0) else None
+ 
+ 
+ def _apply_cinematic_letterbox(mp4: Path, bar_h: int = 132) -> bool:
+@@ -169,12 +215,420 @@
+         "-movflags", "+faststart", str(dest),
+     ]
+     try:
+-        subprocess.run(cmd, capture_output=True, timeout=120)
++        p = subprocess.run(cmd, capture_output=True, timeout=120)
+     except Exception:
+         return clip_path
+-    return dest if (dest.exists() and dest.stat().st_size > 0) else clip_path
++    return dest if (p.returncode == 0 and dest.exists() and dest.stat().st_size > 0) else clip_path
+ 
+ 
++def _freeze_punchline(clip: Path, dest: Path, t1: float, total: float) -> Optional[Path]:
++    """Competitor-style analytical FREEZE: play the beat live until t1, then hold that exact
++    frame for the rest — B&W, grain, contrast lift — the 'screenshot' moment under the key
++    narration line. (Their edit does this on every analytical punchline, with a shutter click.)"""
++    rest = max(0.6, total - t1)
++    nloop = max(1, int(round(rest * 30)))
++    # NOTE: tpad stop_mode=clone silently no-ops in the bundled ffmpeg — the `loop` filter is
++    # the reliable way to hold a frame. Explicit split (an input label can't feed two chains).
++    fc = (f"[0:v]split=2[va][vb];"
++          f"[va]trim=0:{t1:.3f},setpts=PTS-STARTPTS[live];"
++          f"[vb]trim={t1:.3f}:{t1 + 0.12:.3f},setpts=PTS-STARTPTS,"
++          f"loop=loop={nloop}:size=1:start=2,setpts=N/30/TB,"
++          f"hue=s=0,eq=contrast=1.22:brightness=0.06,noise=c0s=6:c0f=t,"
++          f"trim=0:{rest:.3f},setpts=PTS-STARTPTS[frz];"
++          f"[live][frz]concat=n=2:v=1:a=0[out]")
++    cmd = [ffmpeg_exe(), "-y", "-i", str(clip), "-filter_complex", fc, "-map", "[out]",
++           "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
++           "-movflags", "+faststart", str(dest)]
++    try:
++        p = subprocess.run(cmd, capture_output=True, timeout=240)
++    except Exception:
++        return None
++    return dest if (p.returncode == 0 and dest.exists() and dest.stat().st_size > 0) else None
++
++
++# ---------------------------------------------------------------------------
++# REAL-AUDIO BREAKOUTS — the competitor's signature authenticity move: the narration goes
++# QUIET and the source scene plays with its OWN dialogue for ~4-5s, then narration resumes
++# ("evidence" for the claim just made). Used 1-3×/video, only where the narration genuinely
++# references a spoken line (dialogue-locked beats) — natural, never forced.
++# ---------------------------------------------------------------------------
++
++def _extract_breakout(src_path: str, start: float, dur: float, vdest: Path,
++                      adest: Path, src_w: int = 0) -> Optional[float]:
++    """Cut the breakout VIDEO (enhanced, 1080p30, silent) + its AUDIO (loudnorm to narration
++    level, faded) from the source. Returns the exact duration or None."""
++    try:
++        pv = subprocess.run(
++            [ffmpeg_exe(), "-y", "-ss", f"{max(0.0, start):.3f}", "-i", str(src_path),
++             "-t", f"{dur:.3f}", "-an",
++             "-vf", (_upscale_filter(src_w) if src_w and src_w < 1280
++                     else f"scale=1920:1080:force_original_aspect_ratio=increase,"
++                          f"crop=1920:1080,setsar=1,{_CAS}") + ",fps=30",
++             "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
++             "-movflags", "+faststart", str(vdest)],
++            capture_output=True, timeout=300)
++        pa = subprocess.run(
++            [ffmpeg_exe(), "-y", "-ss", f"{max(0.0, start):.3f}", "-i", str(src_path),
++             "-t", f"{dur:.3f}", "-vn",
++             "-af", f"loudnorm=I=-17:TP=-2:LRA=11,afade=t=in:st=0:d=0.12,"
++                    f"afade=t=out:st={max(0.1, dur - 0.15):.3f}:d=0.15",
++             "-ar", "44100", "-ac", "2", str(adest)],
++            capture_output=True, timeout=300)
++        if pv.returncode != 0 or pa.returncode != 0 or not vdest.exists() or not adest.exists():
++            return None
++        from .ingest import probe
++        da = probe(adest).get("duration", 0.0) or dur
++        dv = probe(vdest).get("duration", 0.0) or dur
++        return round(min(da, dv), 3)
++    except Exception:
++        return None
++
++
++def _quote_run_in(qwords: list, twords: list) -> int:
++    """Longest leading-run of the quote spoken in the transcript (1-word ASR drift tolerated
++    via 3-word sub-windows). 0 = not spoken here."""
++    if len(qwords) < 3 or not twords:
++        return 0
++    tstr = " " + " ".join(twords) + " "
++    best = 0
++    for j in range(len(qwords), 2, -1):
++        if (" " + " ".join(qwords[:j]) + " ") in tstr:
++            best = j
++            break
++    if best == 0:
++        for i in range(len(qwords) - 2):
++            if (" " + " ".join(qwords[i:i + 3]) + " ") in tstr:
++                best = 3
++                break
++    return best
++
++
++def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
++    """Pick the 1-3 most NATURAL breakout moments: beats whose narration QUOTES a line, located
++    by searching the line in every source's own ASR — the breakout plays the SHOT where the line
++    is actually spoken (independent of which clip the matcher picked for the beat)."""
++    import re as _re9
++    from . import index as _index
++
++    def _rw(t):
++        return _re9.findall(r"[a-z']+", (t or "").lower())
++
++    # quote pool: per-beat quotes PLUS the analysis' verbatim anchor DIALOGUE lines (per-beat
++    # quotes are often paraphrases; anchor dialogue is demanded verbatim) — each anchor line is
++    # mapped to the beat whose narration overlaps it most (that beat is "about" the line)
++    quote_segs = [(seg, seg.quote) for seg in segments
++                  if len((getattr(seg, "quote", "") or "").split()) >= 3]
++    try:
++        ana = (getattr(proj, "meta", None) or {}).get("analysis", {})
++        seen_q = {q.lower() for _s, q in quote_segs}
++        for sc in (ana.get("anchor_scenes") or []):
++            for dlg in (sc.get("dialogue") or []):
++                if len(dlg.split()) < 3 or dlg.lower() in seen_q:
++                    continue
++                dw = set(_rw(dlg))
++                best_seg, best_ov = None, 0
++                for seg in segments:
++                    if not seg.text:
++                        continue
++                    ov = len(dw & set(_rw(seg.text)))
++                    if ov > best_ov:
++                        best_ov, best_seg = ov, seg
++                if best_seg is not None and best_ov >= 1:
++                    quote_segs.append((best_seg, dlg))
++    except Exception:
++        pass
++    if not quote_segs:
++        return []
++    srcs = [s for s in proj.sources
++            if s.status == "ok" and s.local_path and Path(s.local_path).exists()]
++    shots_of = {}
++    for s in srcs:
++        try:
++            shots_of[s.id] = _index.load_shots(proj, s.id)
++        except Exception:
++            shots_of[s.id] = []
++    cands = []
++    for seg, _q in quote_segs:
++        qw = _rw(_q)[:8]
++        best = None
++        for s in srcs:
++            for sh in shots_of.get(s.id, []):
++                run = _quote_run_in(qw, _rw(getattr(sh, "transcript", "")))
++                if run >= 3:
++                    score = run + (2 if (getattr(s, "extra", None) or {}).get("anchor_verified")
++                                   else 0)
++                    if best is None or score > best[0]:
++                        best = (score, s, sh)
++        if best is not None:
++            cands.append((best[0], seg.index, best[1], best[2], _q))
++    if not cands:
++        # FALLBACK: mine the sources' OWN spoken lines (the LLM quote can be a paraphrase or a
++        # hallucination — the footage's ASR is ground truth). A dialogue-rich shot qualifies
++        # when its words OVERLAP a beat's narration (the show speaks about the same thing the
++        # narration is explaining — exactly when a real-audio breakout feels natural).
++        from .segment import _STOP as _STOP9
++        # restrict mining to ANCHOR-scene sources (episode-code / verified / scene-title match) —
++        # a compilation's unrelated episode dialogue must not become a breakout
++        _ana9 = (getattr(proj, "meta", None) or {}).get("analysis", {})
++        _ep9 = (_ana9.get("episode_hint") or "").lower().replace(" ", "")
++        _tier1, _tier2 = set(), set()
++        _mv9 = {w for w in _rw(_ana9.get("movie_title", "") or "")}
++        for s in srcs:
++            _t9 = (s.title or "").lower()
++            if (getattr(s, "extra", None) or {}).get("anchor_verified") or \
++                    (_ep9 and _ep9 in _t9.replace(" ", "")):
++                _tier1.add(s.id)                       # the EXACT scene/episode — trusted
++                continue
++            for sc9 in (_ana9.get("anchor_scenes") or []):
++                toks9 = {w for w in _rw((sc9.get("name", "") + " " + sc9.get("query", "")))
++                         if len(w) > 3 and w not in _mv9}      # movie-name tokens match EVERY title
++                if sum(1 for w in toks9 if w in _t9) >= 2:
++                    _tier2.add(s.id)                   # scene-titled, but could be another episode
++                    break
++        def _mine_tier(tier_srcs, min_ov):
++            found = []
++            for s in tier_srcs:
++                for sh in shots_of.get(s.id, []):
++                    tw = [w for w in _rw(getattr(sh, "transcript", "")) if len(w) > 2
++                          and w not in _STOP9]
++                    if len(tw) < 4 or not (2.0 <= (sh.end - sh.start) <= 9.0):
++                        continue
++                    tset = set(tw)
++
++                    def _ov_count(bw):
++                        n = 0
++                        for b in bw:
++                            for t in tset:
++                                if b == t or (b.startswith(t) and len(b) - len(t) <= 2) \
++                                        or (t.startswith(b) and len(t) - len(b) <= 2):
++                                    n += 1
++                                    break
++                        return n
++                    best_seg, best_ov = None, -1
++                    for seg in segments:
++                        if not seg.text:
++                            continue
++                        ov = _ov_count({w for w in _rw(seg.text) if len(w) > 2
++                                        and w not in _STOP9})
++                        if ov > best_ov:
++                            best_ov, best_seg = ov, seg
++                    if best_seg is None or best_ov < min_ov:
++                        continue
++                    # score: beat-relevance + how much is actually SPOKEN in the shot
++                    score = best_ov * 2 + min(4, len(tw) // 3)
++                    found.append((score, best_seg.index, s, sh,
++                                  (getattr(sh, "transcript", "") or "")[:60]))
++            return found
++
++        # tier 1 (the EXACT episode/scene): any spoken line is authentic — the whole scene IS
++        # the topic; overlap only picks the best beat to attach to. tier 2 (scene-titled but
++        # maybe another episode): demand real narration overlap (>=2 content words).
++        cands = _mine_tier([s for s in srcs if s.id in _tier1], 0)
++        if not cands:
++            cands = _mine_tier([s for s in srcs if s.id in _tier2], 2)
++    if not cands:
++        log("build: no breakout — no spoken line relates to the narration (natural skip)")
++        return []
++    cands.sort(key=lambda x: -x[0])
++    n_max = 1 if total < 75 else (2 if total < 150 else 3)
++    picked = []
++    for c in cands:
++        if len(picked) >= n_max:
++            break
++        if any(abs(c[1] - p[1]) < 4 for p in picked):
++            continue                                   # spaced out — natural, not forced
++        picked.append(c)
++    out = []
++    for score, idx, src, sh, _q in sorted(picked, key=lambda p: p[1]):
++        dur = min(5.5, max(3.5, float(sh.end - sh.start)))
++        v = work / f"breakout_{idx:03d}.mp4"
++        a = work / f"breakout_{idx:03d}.wav"
++        real = _extract_breakout(src.local_path, float(sh.start), dur, v, a,
++                                 int(getattr(src, "width", 0) or 0))
++        if real and real > 1.5:
++            out.append({"seg_index": idx, "dur": real, "video": v, "audio": a})
++            log(f"build: 🎬 real-audio breakout before scene {idx} ({real:.1f}s · "
++                f"spoken-run={score} · {_q[:42]!r})")
++    return out
++
++
++def _splice_audio(full: Path, splices: list, work: Path) -> Optional[Path]:
++    """Insert audio segments into `full` at the given ORIGINAL-timeline times.
++    splices = [(T_seconds, wav_path, dur), ...] ascending."""
++    if not splices:
++        return None
++    ins, fparts, labels = ["-i", str(full)], [], []
++    prev = 0.0
++    n = 0
++    for i, (t, wav, _d) in enumerate(splices, start=1):
++        ins += ["-i", str(wav)]
++        fparts.append(f"[0:a]atrim={prev:.3f}:{t:.3f},asetpts=PTS-STARTPTS[s{n}]")
++        labels.append(f"[s{n}]")
++        n += 1
++        labels.append(f"[{i}:a]")
++        prev = t
++    fparts.append(f"[0:a]atrim={prev:.3f},asetpts=PTS-STARTPTS[s{n}]")
++    labels.append(f"[s{n}]")
++    fc = ";".join(fparts) + f";{''.join(labels)}concat=n={len(labels)}:v=0:a=1[out]"
++    dest = work / "narration_breakouts.wav"
++    p = subprocess.run([ffmpeg_exe(), "-y", *ins, "-filter_complex", fc, "-map", "[out]",
++                        "-ar", "44100", "-ac", "2", str(dest)],
++                       capture_output=True, timeout=600)
++    return dest if (p.returncode == 0 and dest.exists() and dest.stat().st_size > 0) else None
++
++
++def _apply_breakouts(proj, segments, scenes, narration, picks, work, log):
++    """Insert breakout pseudo-scenes BEFORE their beats: reindex segments/scenes/narration,
++    shift later word timings, splice the breakout audio into the narration track. Returns
++    (segments, scenes, narration, breakout_clip_map, idx_map)."""
++    from vidlore.script_gen import Scene as _EScene
++    from vidlore.tts import NarratedScene as _NScene
++    from .models import ScriptSegment as _CSeg
++    ins_before = {p["seg_index"]: p for p in picks}
++    sc_by_idx = {sc.index: sc for sc in scenes}
++    ns_by_idx = {ns.index: ns for ns in narration.scenes}
++    new_segs, new_scs, new_ns = [], [], []
++    bmap, idx_map, splices = {}, {}, []
++    t_cursor, shift = 0.0, 0.0
++    for seg in list(segments):
++        old = seg.index
++        if old in ins_before:
++            p = ins_before[old]
++            ni = len(new_segs)
++            new_segs.append(_CSeg(index=ni, text="", est_duration=p["dur"]))
++            _sb = _EScene(index=ni, narration="", keywords=[], visual="breakout")
++            _sb.intensity, _sb.role, _sb.shot_type = 1, "evidence", "archival"
++            new_scs.append(_sb)
++            new_ns.append(_NScene(index=ni, audio=Path(p["audio"]),
++                                  duration=p["dur"], words=[]))
++            bmap[ni] = Path(p["video"])
++            splices.append((t_cursor, Path(p["audio"]), p["dur"]))
++            shift += p["dur"]
++        ni = len(new_segs)
++        seg.index = ni
++        new_segs.append(seg)
++        sc = sc_by_idx.get(old)
++        if sc is not None:
++            sc.index = ni
++            new_scs.append(sc)
++        ns = ns_by_idx.get(old)
++        if ns is not None:
++            ns.index = ni
++            if shift:
++                for w in ns.words:
++                    w.start += shift
++                    w.end += shift
++            new_ns.append(ns)
++            t_cursor += ns.duration
++        idx_map[old] = ni
++    full = _splice_audio(Path(narration.audio), splices, work)
++    if full is None:
++        raise RuntimeError("breakout audio splice failed")
++    narration.audio = full
++    narration.scenes = new_ns
++    try:
++        narration.total = float(getattr(narration, "total", 0.0)) + shift
++    except Exception:
++        pass
++    return new_segs, new_scs, narration, bmap, idx_map
++
++
++def _split_clip_sequential(clip: Path, lens: list, out_dir: Path, idx: int) -> list:
++    """Split a breakout clip into sequential sub-clips matching the planned beat lengths
++    (continuous scene playing through — never a replay)."""
++    parts, cum = [], 0.0
++    for m, L in enumerate(lens):
++        dest = out_dir / f"beat_{idx:03d}_{m}_bk.mp4"
++        p = subprocess.run([ffmpeg_exe(), "-y", "-ss", f"{cum:.3f}", "-i", str(clip),
++                            "-t", f"{max(0.6, L):.3f}", "-an", "-c:v", "libx264",
++                            "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
++                            str(dest)], capture_output=True, timeout=120)
++        if p.returncode != 0 or not dest.exists():
++            return []
++        parts.append(dest)
++        cum += max(0.6, L)
++    return parts
++
++
++def _freeze_continuation(frz_clip: Path, dest: Path, duration: float) -> Optional[Path]:
++    """Extend a punchline FREEZE across the scene's remaining beats: hold the SAME frozen frame
++    (with living grain) — competitor freezes run 4-8s, far longer than one beat."""
++    from .ingest import probe
++    d = probe(frz_clip).get("duration", 0.0)
++    if d <= 0.2:
++        return None
++    png = dest.with_suffix(".png")
++    try:
++        p1 = subprocess.run([ffmpeg_exe(), "-y", "-ss", f"{max(0.0, d - 0.08):.3f}",
++                             "-i", str(frz_clip), "-frames:v", "1", str(png)],
++                            capture_output=True, timeout=60)
++        if p1.returncode != 0 or not png.exists():
++            return None
++        p2 = subprocess.run([ffmpeg_exe(), "-y", "-loop", "1", "-i", str(png),
++                             "-t", f"{max(0.5, duration):.3f}",
++                             "-vf", "noise=c0s=6:c0f=t,scale=1920:1080,setsar=1,fps=30",
++                             "-c:v", "libx264", "-preset", "medium", "-crf", "18",
++                             "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(dest)],
++                            capture_output=True, timeout=180)
++        return dest if (p2.returncode == 0 and dest.exists() and dest.stat().st_size > 0) else None
++    finally:
++        try:
++            png.unlink(missing_ok=True)
++        except OSError:
++            pass
++
++
++def _click_wav(work: Path) -> Optional[Path]:
++    """A short camera-shutter-style tick (synthesized — no asset, no license)."""
++    out = work / "shutter_click.wav"
++    if out.exists():
++        return out
++    # mechanical camera-shutter "ka-chak": crisp tick + delayed lower thunk, QUIET
++    # (calibrated to ~-22 dB peak — v1 white-noise at -1.9 dB was far too loud, the first
++    # bandpass rework at -70 dB was inaudible; gains are measured, not guessed)
++    cmd = [ffmpeg_exe(), "-y",
++           "-f", "lavfi", "-i", "anoisesrc=d=0.030:c=pink:a=0.9",
++           "-f", "lavfi", "-i", "anoisesrc=d=0.040:c=brown:a=0.9",
++           "-filter_complex",
++           "[0:a]bandpass=f=2400:w=1800,volume=70,afade=t=out:st=0.008:d=0.022[t1];"
++           "[1:a]bandpass=f=900:w=700,volume=95,afade=t=out:st=0.012:d=0.028,adelay=60|60[t2];"
++           "[t1][t2]amix=inputs=2:normalize=0[out]",
++           "-map", "[out]", "-ar", "44100", "-ac", "2", str(out)]
++    try:
++        p = subprocess.run(cmd, capture_output=True, timeout=60)
++    except Exception:
++        return None
++    return out if (p.returncode == 0 and out.exists()) else None
++
++
++def _mix_clicks(narration, marks: list, work: Path, log) -> None:
++    """Mix the shutter click into the narration track at the freeze moments (assemble muxes
++    narration.audio as the voice track, so this needs no engine change)."""
++    marks = [t for t in marks if t and t > 0.05]
++    if not marks:
++        return
++    click = _click_wav(work)
++    if not click:
++        return
++    try:
++        ins = ["-i", str(Path(narration.audio).resolve())]
++        fparts, mix = [], ["[0:a]"]
++        for i, t in enumerate(marks, start=1):
++            ins += ["-i", str(click)]
++            ms = int(t * 1000)
++            fparts.append(f"[{i}:a]adelay={ms}|{ms}[c{i}]")
++            mix.append(f"[c{i}]")
++        fc = ";".join(fparts) + f";{''.join(mix)}amix=inputs={len(mix)}:normalize=0[out]"
++        dest = Path(narration.audio).with_name("narration_clicks.wav")
++        p = subprocess.run([ffmpeg_exe(), "-y", *ins, "-filter_complex", fc, "-map", "[out]",
++                            "-ar", "44100", str(dest)], capture_output=True, timeout=300)
++        if p.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
++            narration.audio = dest
++            log(f"build: {len(marks)} freeze click(s) mixed into narration")
++    except Exception as e:                                 # noqa: BLE001
++        log(f"build: click mix skipped ({str(e)[:60]})")
++
++
+ def _silent_narration(segments: list[ScriptSegment], work: Path, cfg: ClipConfig):
+     """Build a Narration with per-scene silence — used when TTS is unavailable."""
+     from vidlore.tts import Narration, NarratedScene, _spread_words
+@@ -198,9 +652,13 @@
+ 
+ import re as _re
+ 
+-# theme → engine music-library bucket (assets/music/<bucket>/*.mp3)
++# theme → engine music-library bucket (assets/music/<bucket>/*.mp3).
++# Keys cover the REAL engine theme names (vidlore.themes: crime|history|modern|minimalist|
++# standard) — plus topical aliases for callers that pass a niche keyword instead.
+ _MUSIC_BUCKET = {
+-    "history": "historical_epic", "true_crime": "dark_investigation", "mystery": "mystery",
++    "history": "historical_epic", "crime": "dark_investigation", "modern": "tech_cyber",
++    "minimalist": "neutral", "standard": "neutral",
++    "true_crime": "dark_investigation", "mystery": "mystery",
+     "war": "military_tension", "tech": "tech_cyber", "nature": "emotional_piano",
+     "finance": "financial", "survival": "survival_urgency",
+ }
+@@ -370,6 +828,20 @@
+         narration = _silent_narration(segments, work / "silent", cfg)
+         log(f"build: narration {narration.total:.1f}s (silent fallback)")
+ 
++    # 2b) REAL-AUDIO BREAKOUTS — narration pauses, the source scene plays with its OWN voice
++    #     (cold-open/evidence moments, 1-3 per video, only on dialogue-locked beats)
++    _breakout_clip: dict = {}
++    if os.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUTS", "1").strip() not in ("0", "false", "no"):
++        try:
++            _bks = _select_breakouts(proj, segments, getattr(narration, "total", 0.0), work, log)
++            if _bks:
++                segments, scenes, narration, _breakout_clip, _bidx = _apply_breakouts(
++                    proj, segments, scenes, narration, _bks, work, log)
++                sel_by_idx = {_bidx[s.segment_index]: s for s in proj.selections
++                              if s.segment_index in _bidx}
++        except Exception as e:                            # noqa: BLE001
++            log(f"build: breakouts skipped ({str(e)[:80]})")
++
+     # 3) MULTI-CLIP-PER-SCENE — supply ONE distinct clip per engine sub-beat so an energetic scene
+     #    cuts between DIFFERENT relevant clips instead of looping one (the old loop bug). The beat
+     #    count k per scene is computed with the SAME energies/roles passed to assemble() below.
+@@ -412,6 +884,12 @@
+     import numpy as _np
+     import os as _os3
+     used_at: dict = {}
++    _air_ct: dict = {}        # times each (sid,in) window has AIRED across the whole video
++    # SCENE-WALK: per-source playhead — beats from one source ADVANCE chronologically through
++    # it (the essayist plays the scene FORWARD), instead of cutting back to recycled windows.
++    # This is what kills the "same shot again and again" look structurally.
++    _playhead: dict = {}
++    freeze_marks: list = []   # (scene_index, t1) — analytical B&W freeze moments (+ click SFX)
+     gbeat = 0
+     recent_emb: list = []         # CLIP embeds of the last few cut clips → avoid back-to-back repeats
+     from . import index as _index
+@@ -420,7 +898,8 @@
+     # cosine ≥ this between two shots' CLIP embeds = "shows the same thing" (e.g. another Jon-in-furs
+     # close-up). phash was too composition-sensitive (rated near-identical clips as different); the CLIP
+     # embedding captures SUBJECT/scene similarity, which is what reads as repetition. Env-tunable.
+-    _SIMT = float(_os3.environ.get("VIDLORE_CLIPSTUDIO_VISUAL_SIM", "0.86"))
++    from .config import _f as _cfg_f, _i as _cfg_i      # tolerant env parses (bad value → default)
++    _SIMT = _cfg_f("VIDLORE_CLIPSTUDIO_VISUAL_SIM", 0.86)
+ 
+     def _wkey(sid, in_p):
+         return (sid, round(float(in_p) / 3.0))
+@@ -463,6 +942,57 @@
+                 pass
+         return False
+ 
++    # PIXEL-SPACE spaced repeat guard. CLIP embeds judge SEMANTIC similarity — two wide shots of
++    # the same dark room pass as "different" while the EYE sees the same picture. The guard that
++    # matches perception is a frame hash, with SPACING: a look may return after enough beats
++    # (the competitor re-airs shots ~50s apart), but never near-term. Calibrated on the
++    # competitor's edit: distant tasteful re-airs OK, near repeats killed.
++    _aired_hashes: list = []          # ahash per aired beat, in air order
++    _HASH_WIN = 18                    # a look may not return within this many beats (~45s)
++    import cv2 as _cv2
++
++    def _frame_hash(src_path, t):
++        try:
++            cap = _cv2.VideoCapture(str(src_path))
++            cap.set(_cv2.CAP_PROP_POS_MSEC, max(0.0, float(t)) * 1000)
++            ok, img = cap.read()
++            cap.release()
++            if not ok:
++                return None
++            g = _cv2.cvtColor(_cv2.resize(img, (8, 8)), _cv2.COLOR_BGR2GRAY)
++            return (g > g.mean()).flatten()
++        except Exception:
++            return None
++
++    def _looks_recent(h):
++        if h is None:
++            return False
++        for prev in _aired_hashes[-_HASH_WIN:]:
++            try:
++                if prev is not None and int(_np.sum(prev != h)) <= 8:
++                    return True
++            except Exception:
++                pass
++        return False
++
++    def _next_distinct_shot(sid, after_t):
++        # SHOT-AWARE walk: the next detected shot boundary at/after `after_t` whose LOOK is not
++        # a near-term repeat — raw seconds-walking inside one static take produced visually
++        # identical consecutive beats (a council room doesn't change in 3 seconds; the camera
++        # CUT does). Returns a start time, falling back to after_t.
++        try:
++            src_obj = proj.source(sid)
++            sp = src_obj.local_path if src_obj else None
++            for sh in _shots_b(sid):
++                if sh.end - sh.start < 1.2 or sh.start < after_t - 0.25:
++                    continue
++                if sp and _looks_recent(_frame_hash(sp, min(sh.start + 1.2, sh.end - 0.2))):
++                    continue
++                return max(after_t, sh.start)
++        except Exception:
++            pass
++        return after_t
++
+     # PER-SCENE VISUAL BUDGET (anti-repeat, desync-safe). A scene can show only as many beats as it has
+     # distinct LOOKS — count them by clustering its OWN beat_windows' CLIP-embeds (cosine ≥ _SIMT = 1
+     # cluster). If plan_beats wants more sub-beats than that, the extra beats would otherwise REPLAY the
+@@ -489,17 +1019,49 @@
+             if _e is not None and not any(float(_np.dot(_e, _c)) >= _SIMT for _c in _gclusters):
+                 _gclusters.append(_e)
+     _gbudget = max(len(segments), len(_gclusters) or len(segments))
++
++    # MAIN-MOMENT HOLD + KEN BURNS — like the competitor, the key moments should LINGER (one held
++    # shot for the whole beat) with a slow push-in, instead of fast multi-cutting through everything.
++    # A scene is a "main moment" if it's a dramatic peak (_PEAK_RX) OR a high-confidence pick on
++    # the exact (anchor) scene. Capped to ~1/3 of scenes so the video doesn't drag.
++    _anchor_sids_b = set()
++    try:
++        for _s in proj.selections:
++            if (getattr(proj.source(_s.source_id), "extra", None) or {}).get("anchor_verified"):
++                _anchor_sids_b.add(_s.source_id)
++    except Exception:
++        pass
++    _conf = {i: getattr(s, "confidence", 0.0) for i, s in sel_by_idx.items()}
++    _hold = set()
++    _cand_hold = []
++    for _pos, _seg in enumerate(segments):
++        _sel = sel_by_idx.get(_seg.index)
++        if _PEAK_RX.search(_seg.text):
++            _hold.add(_pos)                                  # dramatic peak always holds
++        elif _sel and _conf.get(_seg.index, 0.0) >= 0.66:
++            _cand_hold.append((_conf[_seg.index], _pos))     # strong pick → hold candidate
++    _cand_hold.sort(reverse=True)
++    for _c, _pos in _cand_hold[: max(1, len(segments) // 3)]:
++        _hold.add(_pos)
++    _hold -= {p for p, _sg in enumerate(segments) if _sg.index in _breakout_clip}
++    hold_pos = _hold                                         # frozen set of "held" scene positions
++    if hold_pos:
++        log(f"build: {len(hold_pos)} main-moment hold+zoom scenes (cinematic dwell)")
++
+     _energies_eff = list(_eng)
+-    for _it in range(40):
+-        _nb = [0] * len(segments)
++    for _p in hold_pos:                                      # held scene = ONE shot for the beat
++        _energies_eff[_p] = 1
++    _nb = list(nbeats)        # plan_beats failing here must fall back to the stage-3 counts,
++    for _it in range(40):     # never to zeros — k=0 would divide-by-zero at slice_dur below
++        _nb_try = [0] * len(segments)
+         try:
+             for _tup in plan_beats(_durs, target=3.4, bmin=2.4, energies=_energies_eff, roles=_rol):
+                 _j = int(_tup[0])
+-                if 0 <= _j < len(_nb):
+-                    _nb[_j] += 1
++                if 0 <= _j < len(_nb_try):
++                    _nb_try[_j] += 1
+         except Exception:
+             break
+-        _nb = [max(1, kk) for kk in _nb]
++        _nb = [max(1, kk) for kk in _nb_try]
+         _over = False
+         # (a) no scene exceeds its OWN distinct looks
+         for _pos, _seg in enumerate(segments):
+@@ -516,43 +1078,111 @@
+                 _over = True
+         if not _over:
+             break
+-    nbeats = [min(_nb[_pos], _D[segments[_pos].index]) for _pos in range(len(segments))]
+     # `scene.energy` is a read-only property, so we pass `_energies_eff` straight to assemble() below
+-    # (instead of [sc.energy ...]) — that makes assemble's plan_beats give the SAME reduced k as our
+-    # nbeats, so no beat falls past our supplied clips into the `item = base` first-clip replay.
+-    if sum(nbeats) < sum(max(1, k) for k in _nb):
+-        log(f"build: visual budget — capped beats to {sum(nbeats)} (per-scene distinct looks) so "
+-            f"assemble never replays a scene's first clip")
++    # — that makes assemble's plan_beats give the SAME k as our nbeats. The energy-lowering loop has
++    # already minimized _nb as far as the distinct-look budget allows; a long low-energy scene can
++    # still plan more beats than its distinct looks, and capping BELOW assemble's k here would make
++    # assemble's excess beats replay the scene's FIRST clip (`item = base`). Supplying k clips with
++    # the LAST one padded is the controlled repeat — so build keeps assemble's count.
++    # FINAL recompute from the FINAL energies: the loop can exit (iteration-40 exhaustion, or an
++    # exception after a lowering) with _energies_eff mutated AFTER the last plan — assemble gets
++    # _energies_eff, so counts AND per-beat lengths must derive from exactly those values.
++    _lens_by_pos: dict = {}
++    try:
++        _nb_fin = [0] * len(segments)
++        for _tup in plan_beats(_durs, target=3.4, bmin=2.4, energies=_energies_eff, roles=_rol):
++            _j = int(_tup[0])
++            if 0 <= _j < len(_nb_fin):
++                _nb_fin[_j] += 1
++                _lens_by_pos.setdefault(_j, []).append(float(_tup[1]))
++        _nb = [max(1, kk) for kk in _nb_fin]
++    except Exception:
++        _lens_by_pos = {}
++    nbeats = [max(1, kk) for kk in _nb]
++    if _energies_eff != _eng:
++        log("build: visual budget — lowered scene energies so plan_beats converges with the "
++            "distinct-look budget (no first-clip replay)")
+ 
+     for pos, seg in enumerate(segments):
+         sel = sel_by_idx.get(seg.index)
+         k = nbeats[pos]
+-        slice_dur = ndur.get(seg.index, seg.est_duration) / k
+-        per_beat = max(cfg.min_clip_sec, slice_dur) + 0.5
++        # cut each beat to its REAL planned length — plan_beats is non-uniform (a reveal's hold
++        # beat is ~2.4x the average), so an average-length cut would stream-loop mid-shot on
++        # exactly the held peak beat
++        _lens = list(_lens_by_pos.get(pos) or [])
++        if len(_lens) != k or sum(_lens) <= 0:
++            _lens = [ndur.get(seg.index, seg.est_duration) / k] * k
+         is_peak = bool(_PEAK_RX.search(seg.text))
++        if seg.index in _breakout_clip:
++            # breakout scene: the prepared clip plays through (split sequentially if the plan
++            # wants multiple beats) — its REAL audio is already spliced into the narration
++            _bclip = _breakout_clip[seg.index]
++            clips_for_scene = (_split_clip_sequential(_bclip, _lens, proj.clips_dir, seg.index)
++                               if k > 1 else [_bclip]) or [_bclip]
++            while len(clips_for_scene) < k:
++                clips_for_scene.append(clips_for_scene[-1])
++            total_clips += len(clips_for_scene)
++            footage.append(FootageItem(index=seg.index, path=clips_for_scene[0], is_video=True))
++            beat_clips[seg.index] = clips_for_scene[:k]
++            gbeat += k
++            continue
+         windows_avail = list(getattr(sel, "beat_windows", []) or [])
+         clips_for_scene = []
+         for m in range(k):
++            per_beat = max(cfg.min_clip_sec, _lens[m]) + 0.5
++            # held scene: beats after the freeze CONTINUE the held frame — the hold spans the
++            # whole scene (one long competitor-style freeze), not just the first beat
++            if (pos in hold_pos and m >= 1 and clips_for_scene
++                    and freeze_marks and freeze_marks[-1][0] == seg.index):
++                _cont = proj.clips_dir / f"beat_{seg.index:03d}_{m}_frzc.mp4"
++                _gotc = _freeze_continuation(clips_for_scene[0], _cont, per_beat)
++                if _gotc:
++                    clips_for_scene.append(Path(_gotc))
++                    gbeat += 1
++                    continue
+             src, start = None, 0.0
+             chosen_w = None
+             if windows_avail:
+-                # prefer a window whose look is (1) NOT like the last few clips, then (2) freshest window
+-                windows_avail.sort(key=lambda w: (1 if _near_recent(_win_embed(w[0], w[1])) else 0,
+-                                                  used_at.get(_wkey(w[0], w[1]), -1)))
+-                chosen_w = windows_avail.pop(0)
++                # a window airs ONCE, ever, AND its picture must not be a NEAR-TERM repeat
++                # (pixel-hash spacing — nearby in-points of a static scene are visual clones
++                # even when the timestamps differ, and CLIP embeds can't see that)
++                _fresh = []
++                for w in windows_avail:
++                    if _air_ct.get(_wkey(w[0], w[1]), 0) >= 1:
++                        continue
++                    _wsrc = proj.source(w[0])
++                    _h = _frame_hash(_wsrc.local_path, float(w[1]) + 1.2) if (
++                        _wsrc and _wsrc.local_path) else None
++                    if _looks_recent(_h):
++                        continue
++                    _fresh.append((w, _h))
++                if _fresh:
++                    _fresh.sort(key=lambda wh: used_at.get(_wkey(wh[0][0], wh[0][1]), -1))
++                    chosen_w, _ch_hash = _fresh[0]
++                    windows_avail.remove(chosen_w)
++                # else: every window aired/looks recent → fall through to the shot-aware walk
++                # below, which finds the next DIFFERENT-looking shot instead of a replay
+             if chosen_w is not None:
+                 sid, in_p = chosen_w[0], float(chosen_w[1])
+                 src = proj.source(sid)
+                 start = max(0.0, in_p - 0.2)
+                 used_at[_wkey(sid, in_p)] = gbeat
++                _air_ct[_wkey(sid, in_p)] = _air_ct.get(_wkey(sid, in_p), 0) + 1
++                _aired_hashes.append(_ch_hash)
+                 _e = _win_embed(sid, in_p)
+                 if _e is not None:
+                     recent_emb.append(_e)
+-            elif sel and sel.source_id:                   # Option B fill: stride the chosen source FAR
++            elif sel and sel.source_id:
++                # fill: SHOT-AWARE walk — continue the chosen source from its playhead, snapped
++                # to the next shot whose look is not a near-term repeat
+                 src = proj.source(sel.source_id)
+-                start = max(0.0, (sel.in_point - 0.2) + (m + 1) * (per_beat + 4.0))
++                sid = sel.source_id
++                start = _next_distinct_shot(sid, max(_playhead.get(sid, 0.0),
++                                                     sel.in_point - 0.2))
+                 if src:
+-                    used_at[_wkey(sel.source_id, start)] = gbeat
++                    used_at[_wkey(sid, start)] = gbeat
++                    _aired_hashes.append(_frame_hash(src.local_path, start + 1.2)
++                                         if src.local_path else None)
+             gbeat += 1
+             if not (src and src.local_path and Path(src.local_path).exists()):
+                 continue
+@@ -560,13 +1190,44 @@
+             src_need = per_beat / factor
+             if src.duration and start + src_need > src.duration:
+                 start = max(0.0, src.duration - src_need)
++            # advance the scene-walk playhead past what this beat consumed (slight overlap
++            # headroom so a hard cut never lands mid-frame of the previous beat's tail)
++            _playhead[src.id] = max(_playhead.get(src.id, 0.0), start + src_need - 0.25)
+             dest = proj.clips_dir / f"beat_{seg.index:03d}_{m}.mp4"
+             _cf = _watermark_crop_filter(wm_corners[src.id]) if src.id in wm_corners else ""
+-            rc = _recut_to_duration(src.local_path, start, src_need, src.duration, dest, crop_filter=_cf)
++            # competitor-style: a push-in on nearly EVERY shot (gentle), stronger on held moments
++            _zoom = 1.10 if pos in hold_pos else 1.055
++            _sw = int(getattr(src, "width", 0) or 0)
++            rc = _recut_to_duration(src.local_path, start, src_need, src.duration, dest,
++                                    crop_filter=_cf, zoom=_zoom, src_w=_sw)
+             if rc and factor != 1.0:
+-                rc = _apply_slow_motion(Path(rc), factor,
++                sm = _apply_slow_motion(Path(rc), factor,
+                                         proj.clips_dir / f"beat_{seg.index:03d}_{m}_sm.mp4")
+-                sm_n += 1
++                if str(sm) == str(rc):
++                    # slow-mo failed — the 1/factor-short cut would visibly loop in its beat;
++                    # re-cut the full beat length un-slowed to a FRESH path (re-encoding onto
++                    # dest would truncate the valid short cut if this attempt also fails)
++                    _full = proj.clips_dir / f"beat_{seg.index:03d}_{m}_full.mp4"
++                    if _recut_to_duration(src.local_path, start, per_beat, src.duration, _full,
++                                          crop_filter=_cf, zoom=_zoom, src_w=_sw):
++                        os.replace(_full, dest)               # same dir — atomic
++                    else:
++                        try:
++                            _full.unlink(missing_ok=True)
++                        except OSError:
++                            pass
++                else:
++                    rc = sm
++                    sm_n += 1
++            if rc and pos in hold_pos and m == 0:
++                # analytical punchline: live → B&W FREEZE under the key line (competitor's
++                # signature move; the shutter click is mixed into the narration below)
++                _t1 = min(max(1.0, per_beat * 0.4), max(0.8, per_beat - 1.2))
++                _frz = proj.clips_dir / f"beat_{seg.index:03d}_{m}_frz.mp4"
++                _got = _freeze_punchline(Path(rc), _frz, _t1, per_beat)
++                if _got:
++                    rc = _got
++                    freeze_marks.append((seg.index, _t1))
+             if rc:
+                 clips_for_scene.append(Path(rc))
+         if not clips_for_scene:
+@@ -608,30 +1269,62 @@
+                 if _total > 0:
+                     a, b = max(0.0, min(a, _total)), max(0.0, min(b, _total))
+                 span_by_idx[ns.index] = (round(a, 2), round(b, 2))
++        # PER-BEAT windows need the engine's REAL beat lengths — plan_beats is deliberately
++        # non-uniform (a hook's beat 0 ~2.3x, a reveal's hold ~2.4x the average), so equal
++        # slices would leave seconds of stacked text on exactly the dramatic beats. Reuse the
++        # final plan computed for the cut stage above (same energies assemble receives).
++        _beat_lens: dict = {segments[_p].index: list(_ls) for _p, _ls in _lens_by_pos.items()}
+         for seg in segments:
+             # OCR the ACTUAL cut clips of this scene — at the cut stage our caption is NOT baked yet,
+             # so ANY readable on-frame text is the SOURCE's own burned-in subtitle/logo (reliable,
+             # unlike the sparse single-keyframe index OCR which missed subtitles that flicker on/off).
+-            has_text = False
+-            for cp in (beat_clips.get(seg.index) or []):
++            # One subtitled beat among clean ones must not silence the caption for the whole scene —
++            # suppress only that beat's REAL slice (+0.3s slack each side).
++            clips = beat_clips.get(seg.index) or []
++            span = span_by_idx.get(seg.index)
++            if not clips or not span:
++                continue
++            a, b = span
++            lens = _beat_lens.get(seg.index) or []
++            if len(lens) != len(clips) or sum(lens) <= 0:
++                lens = [(b - a) / len(clips)] * len(clips)    # fallback: equal slices
++            else:
++                _sc = (b - a) / sum(lens)                     # plan is narration-duration space;
++                lens = [x * _sc for x in lens]                # rescale to the caption word-span
++            t = a
++            for m, cp in enumerate(clips):
++                t2 = t + lens[m]
+                 if _clip_has_burned_text(Path(cp), _ocr_eng):
+-                    has_text = True
+-                    break
+-            if has_text and seg.index in span_by_idx:
+-                suppress_wins.append(span_by_idx[seg.index])
++                    suppress_wins.append((round(max(a, t - 0.3), 2), round(min(b, t2 + 0.3), 2)))
++                t = t2
+         if suppress_wins:
+-            log(f"build: caption-dodge on {len(suppress_wins)}/{len(segments)} text-bearing scenes "
++            suppress_wins.sort()
++            merged = [list(suppress_wins[0])]
++            for a2, b2 in suppress_wins[1:]:
++                if a2 <= merged[-1][1] + 0.05:
++                    merged[-1][1] = max(merged[-1][1], b2)
++                else:
++                    merged.append([a2, b2])
++            suppress_wins = [(round(a2, 2), round(b2, 2)) for a2, b2 in merged]
++            log(f"build: caption-dodge on {len(suppress_wins)} text-bearing window(s) "
+                 f"(no caption over burned subtitles/logos)")
+ 
+     # 4) theme + 5) render
+     th = get_theme(theme_name)
++    # NEUTRAL footage grade for movie-clip videos: the engine themes tint footage (history =
++    # warm/green colorbalance + desat + paper grain), which reads as murky "low quality" next to
++    # reference channels that keep the show's ORIGINAL grade. Keep theme captions/cards; replace
++    # the grade with a gentle neutral pop and drop the tinting overlays. (Env-overridable.)
++    import os as _os9
++    if _os9.environ.get("VIDLORE_CLIPSTUDIO_NEUTRAL_GRADE", "1").strip() not in ("0", "false", "no"):
++        th = {**th, "grade": "eq=contrast=1.05:saturation=1.04", "overlay_effects": []}
+     # CINEMATIC MODE — for a single-scene deep-dive the editor frames the whole video like film:
+     # gentle 2.3:1 letterbox bars + captions lifted clear of the bottom bar. On by default for
+     # single_scene videos (matches the reference competitor's look); override via env.
+     _vtype = (proj.meta.get("analysis", {}) or {}).get("video_type", "")
+     _cine_env = os.environ.get("VIDLORE_CLIPSTUDIO_CINEMATIC", "").strip().lower()
+     cinematic = (_cine_env in ("1", "true", "yes", "on")) or (_cine_env == "" and _vtype == "single_scene")
+-    _bar_h = int(os.environ.get("VIDLORE_CLIPSTUDIO_LETTERBOX_PX", "132") or 132)
++    _bar_h = _cfg_i("VIDLORE_CLIPSTUDIO_LETTERBOX_PX", 132)
+     if cinematic:
+         try:
+             cap = dict(th.get("caption", {}))
+@@ -641,6 +1334,15 @@
+         except Exception as e:                            # noqa: BLE001
+             log(f"build: cinematic caption-lift skipped ({str(e)[:60]})")
+             cinematic = False
++    if freeze_marks:
++        _fstarts = {}
++        for _ns in getattr(narration, "scenes", []):
++            _ws = getattr(_ns, "words", None) or []
++            if _ws:
++                _fstarts[_ns.index] = min(float(_w.start) for _w in _ws)
++        _mix_clicks(narration,
++                    [_fstarts.get(_i, 0.0) + _t for _i, _t in freeze_marks if _i in _fstarts],
++                    work, log)
+     log(f"build: assembling {len(footage)} scenes → {out_path.name}")
+     # assemble() internally does len() on these per-scene lists, so pass them explicitly as
+     # the engine's own pipeline does (its None defaults are a latent bug that never fires there).
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/cli.py vidlore/clipstudio/cli.py
+--- /tmp/clipstudio_backup_pre_fixes/cli.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/cli.py	2026-06-10 16:30:10
+@@ -15,7 +15,7 @@
+ from pathlib import Path
+ 
+ from .ingest import SourceSpec, load_specs
+-from .orchestrate import produce, produce_auto
++from .orchestrate import produce, produce_auto, PipelineError
+ from .models import PERMISSIONS
+ from .download import POLICIES
+ 
+@@ -67,24 +67,33 @@
+     for ref in args.add:
+         specs.append(SourceSpec(ref=ref, permission=args.permission, permission_note=args.note))
+ 
+-    if specs:
+-        # MANUAL mode: user supplied sources
+-        res = produce(
+-            args.project, script_path=args.script, source_specs=specs,
+-            name=(args.name or None), theme=args.theme, voice=args.voice, title=args.title,
+-            captions=not args.no_captions, use_tts=not args.no_tts,
+-            do_build=not args.no_build, enrich=not args.no_enrich,
+-            force_index=args.force_index, progress=_progress,
+-        )
+-    else:
+-        # AUTO mode: discover + download sources from topic + script
+-        res = produce_auto(
+-            args.project, topic=args.topic, script_path=args.script, movie_hint=args.movie,
+-            policy=args.policy, max_sources=args.max_sources, theme=args.theme, voice=args.voice,
+-            title=args.title, captions=not args.no_captions, use_tts=not args.no_tts,
+-            voiceover=(args.voiceover or None),
+-            verify=not args.no_verify, do_build=not args.no_build, progress=_progress,
+-        )
++    try:
++        if specs:
++            # MANUAL mode: user supplied sources
++            res = produce(
++                args.project, script_path=args.script, source_specs=specs,
++                name=(args.name or None), theme=args.theme, voice=args.voice, title=args.title,
++                captions=not args.no_captions, use_tts=not args.no_tts,
++                voiceover=(args.voiceover or None),
++                do_build=not args.no_build, enrich=not args.no_enrich,
++                force_index=args.force_index, progress=_progress,
++            )
++        else:
++            # AUTO mode: discover + download sources from topic + script
++            if args.no_enrich:
++                print("note: --no-enrich applies to manual mode only (auto mode's analyze "
++                      "stage IS the enrichment)", flush=True)
++            res = produce_auto(
++                args.project, topic=args.topic, script_path=args.script, movie_hint=args.movie,
++                policy=args.policy, max_sources=args.max_sources, theme=args.theme, voice=args.voice,
++                title=args.title, captions=not args.no_captions, use_tts=not args.no_tts,
++                voiceover=(args.voiceover or None),
++                verify=not args.no_verify, do_build=not args.no_build,
++                force_index=args.force_index, progress=_progress,
++            )
++    except PipelineError as e:
++        print(f"error: {e}", file=sys.stderr, flush=True)
++        return 2
+ 
+     print("\n=== COMPLIANCE SUMMARY ===")
+     print(json.dumps(res["summary"], indent=2))
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/config.py vidlore/clipstudio/config.py
+--- /tmp/clipstudio_backup_pre_fixes/config.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/config.py	2026-06-10 20:51:05
+@@ -148,14 +148,17 @@
+     """Best-effort ffprobe path. imageio-ffmpeg ships ffmpeg only, so search next to it then
+     common install dirs. PyAV is the primary probe path (see ingest.probe); this is a fallback."""
+     import os.path as _op
++    import sys as _sys
++    exe = ".exe" if _sys.platform.startswith("win") else ""
+     cands = [
+-        _op.join(_op.dirname(ffmpeg_exe()), "ffprobe"),
+-        os.environ.get("VIDLORE_FFPROBE", "").strip(),
+-        "/Users/hussnain/pinokio/bin/miniconda/bin/ffprobe",
++        os.environ.get("VIDLORE_FFPROBE", "").strip(),     # explicit override always wins
++        _op.join(_op.dirname(ffmpeg_exe()), "ffprobe" + exe),
+         "/opt/homebrew/bin/ffprobe",
+         "/usr/local/bin/ffprobe",
++        # the only ffprobe on the original dev machine (existence-checked; inert elsewhere)
++        _op.expanduser("~/pinokio/bin/miniconda/bin/ffprobe"),
+     ]
+     for c in cands:
+         if c and _op.exists(c):
+             return c
+-    return "ffprobe"
++    return "ffprobe" + exe
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/cut.py vidlore/clipstudio/cut.py
+--- /tmp/clipstudio_backup_pre_fixes/cut.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/cut.py	2026-06-10 16:18:45
+@@ -40,10 +40,10 @@
+         str(out),
+     ]
+     try:
+-        subprocess.run(cmd, capture_output=True, timeout=120)
++        p = subprocess.run(cmd, capture_output=True, timeout=120)
+     except Exception:
+         return None
+-    if out.exists() and out.stat().st_size > 0:
++    if p.returncode == 0 and out.exists() and out.stat().st_size > 0:
+         return out
+     return None
+ 
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/discover.py vidlore/clipstudio/discover.py
+--- /tmp/clipstudio_backup_pre_fixes/discover.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/discover.py	2026-06-11 12:04:59
+@@ -62,6 +62,9 @@
+     permission_hint: str = ""          # e.g. "public_domain" for archive.org listings
+     reject_reason: str = ""            # "" = kept
+     download_status: str = "pending"
++    # True = this candidate's own subtitles/captions contain the anchor scene's spoken lines —
++    # content-level proof it IS the exact scene (title matching can't give that)
++    anchor_verified: bool = False
+ 
+     def to_dict(self) -> dict:
+         return asdict(self)
+@@ -77,6 +80,110 @@
+              "one two new got had has have do does did will would can could should may must".split())
+ 
+ 
++def _scene_quotes(segments, analysis=None) -> list[str]:
++    """Distinctive spoken lines to lock onto — the anchor scenes' VERBATIM dialogue first (the
++    LLM is asked for exact lines there; per-beat quotes are often script paraphrases)."""
++    out, seen = [], set()
++
++    def add(qt):
++        qt = (qt or "").strip().strip('"“”')
++        if len(qt) >= 12 and len(qt.split()) >= 3 and qt.lower() not in seen:
++            seen.add(qt.lower())
++            out.append(qt)
++
++    for sc in (getattr(analysis, "anchor_scenes", None) or []) if analysis is not None else []:
++        for d in (sc.get("dialogue") or []):
++            add(d)
++    for s in (segments or []):
++        add(getattr(s, "quote", "") or "")
++    return out
++
++
++def anchor_queries(a: ScriptAnalysis, segments=None) -> list[str]:
++    """MULTI-VARIANT searches for the anchor scene(s). One long verbatim query routinely misses
++    the raw-scene uploads (they're titled 'Bronn and The Hound | S02E09', not the LLM's prose) —
++    so also search character pairs, the scene NAME, the iconic QUOTES, and the episode code."""
++    mv = a.movie_title.strip()
++    ep = (getattr(a, "episode_hint", "") or "").strip()
++    chars = [c.get("name", "").strip() for c in (a.characters or []) if c.get("name")]
++    out: list[str] = []
++
++    def add(s):
++        s = " ".join((s or "").split())
++        if len(s) > 6:
++            out.append(s[:100])
++
++    for sc in (getattr(a, "anchor_scenes", None) or []):
++        sq = (sc.get("query") or sc.get("name") or "").strip()
++        nm = (sc.get("name") or "").strip()
++        if sq:
++            add(sq if mv.lower() in sq.lower() else f"{mv} {sq}")
++        if nm and nm.lower() != sq.lower():
++            add(nm if mv.lower() in nm.lower() else f"{mv} {nm}")
++        # character-pair variants from the anchor text (matches how raw clips are titled)
++        toks = set(re.findall(r"\w+", (sq + " " + nm).lower()))
++        sc_chars = [c for c in chars if any(w in toks for w in re.findall(r"\w+", c.lower()))][:2]
++        if len(sc_chars) == 2:
++            add(f"{mv} {sc_chars[0]} and {sc_chars[1]} scene")
++            if ep:
++                add(f"{mv} {ep} {sc_chars[0]} {sc_chars[1]}")
++        elif sc_chars:
++            add(f"{mv} {sc_chars[0]} scene {' '.join(list(toks)[:2])}")
++        if ep:
++            add(f"{mv} {ep} scene")
++    # iconic dialogue = the sharpest key to the exact upload
++    for qt in _scene_quotes(segments, a)[:3]:
++        add(f"{mv} {qt}")
++    # DATA-DRIVEN canonical scene phrase: the LLM's anchor query is sometimes a vague theme
++    # ("chair test"), but the PER-BEAT scene_queries often name the real scene/setting
++    # ("Small Council", "throne room"). Mine the most frequent multi-word location/scene phrase
++    # across the beats and search it deeply — this finds the raw scene even when the anchor was weak.
++    for ph in _dominant_scene_phrases(segments, a)[:2]:
++        add(f"{mv} {ph} scene")
++        if ep:
++            add(f"{mv} {ep} {ph}")
++    # dedupe preserving order
++    seen, ded = set(), []
++    for x in out:
++        if x.lower() not in seen:
++            seen.add(x.lower())
++            ded.append(x)
++    return ded[:12]
++
++
++# recognized "scene/setting" words that name a canonical GoT-style moment — a multi-word phrase
++# built around one of these, recurring across beats, is the real scene to search for
++_SCENE_NOUNS = re.compile(
++    r"\b(council|throne|tavern|wedding|battle|trial|duel|dungeon|crypt|sept|hall|chamber|"
++    r"meeting|feast|court|arena|pit|cell|brothel|camp|gate|wall|bridge|courtyard|tent|"
++    r"room|table|chair|chairs)\b", re.I)
++
++
++def _dominant_scene_phrases(segments, analysis) -> list[str]:
++    """The most frequent 1-2 word scene/setting phrases across the beats' scene_queries — a
++    data-driven canonical-scene signal independent of the LLM's anchor query."""
++    from collections import Counter
++    mvt = {w for w in re.findall(r"\w+", (getattr(analysis, "movie_title", "") or "").lower())}
++    bigrams: Counter = Counter()
++    unigrams: Counter = Counter()
++    for s in (segments or []):
++        ws = [w for w in re.findall(r"[a-z]+", (getattr(s, "scene_query", "") or "").lower())
++              if w not in mvt and w not in _STOPQ and len(w) > 2]
++        for i, w in enumerate(ws):
++            if _SCENE_NOUNS.search(w):
++                unigrams[w] += 1
++                if i > 0:
++                    bigrams[f"{ws[i-1]} {w}"] += 1
++    out = []
++    for ph, n in bigrams.most_common(4):
++        if n >= 2:
++            out.append(ph)
++    for w, n in unigrams.most_common(4):
++        if n >= 2 and not any(w in p for p in out):
++            out.append(w)
++    return out
++
++
+ def build_queries(a: ScriptAnalysis, segments=None) -> list[str]:
+     """Targeted search queries. The big relevance lever is PER-BEAT queries: search the SPECIFIC
+     scene each narration line needs (e.g. 'Game of Thrones Tyrion kills Tywin crossbow'), plus the
+@@ -84,13 +191,9 @@
+     q: list[str] = []
+     mv = a.movie_title.strip()
+     yr = a.year.strip()
+-    # 0) ANCHOR SCENES come FIRST and verbatim — the core scene(s) the whole video is about. For a
+-    #    single-scene deep-dive the raw footage of THIS scene IS the video, so it must be searched
+-    #    before anything generic (and a trailer is useless for a single-scene dive — skip it).
+-    for sc in (getattr(a, "anchor_scenes", None) or []):
+-        sq = (sc.get("query") or sc.get("name") or "").strip()
+-        if sq and len(sq) > 4:
+-            q.append((sq if mv.lower() in sq.lower() else f"{mv} {sq}").strip()[:100])
++    # 0) ANCHOR SCENES come FIRST — all variants (verbatim, character-pair, scene name, quotes,
++    #    episode code). For a single-scene deep-dive the raw footage of THIS scene IS the video.
++    q.extend(anchor_queries(a, segments))
+     if mv:
+         q.append(f"{mv} {yr} scene".strip())
+         if getattr(a, "video_type", "") != "single_scene":
+@@ -126,8 +229,8 @@
+         if k and k not in seen:
+             seen.add(k)
+             out.append(x)
+-    import os as _os
+-    _qcap = int(_os.environ.get("VIDLORE_CLIPSTUDIO_QUERY_CAP", "60"))
++    from .config import _i as _cfg_i
++    _qcap = _cfg_i("VIDLORE_CLIPSTUDIO_QUERY_CAP", 60)    # tolerant: bad value → default
+     return out[:_qcap]
+ 
+ 
+@@ -190,6 +293,7 @@
+ def _relevance(c: SourceCandidate, a: ScriptAnalysis, anchor_sets: list[set] | None = None) -> float:
+     t = c.title.lower()
+     score = 0.0
++    single = getattr(a, "video_type", "") == "single_scene"
+     mt = [w for w in re.findall(r"\w+", a.movie_title.lower()) if len(w) > 2]
+     abbr = "".join(w[0] for w in a.movie_title.split() if w) if len(a.movie_title.split()) >= 2 else ""  # "game of thrones" -> "got"
+     # 1) MOVIE present — relaxed + DELIBERATELY not dominant. A fan-cut scene clip titled "GOT - Bronn
+@@ -230,6 +334,24 @@
+     #    deep-dive needs, and its fast cuts wreck single-scene continuity. Demote it.
+     if re.search(r"\btrailer\b|\bteaser\b|\bpromo\b", t):
+         score -= 0.12
++    # 5c) a CHARACTER COMPILATION ("all scenes / best scenes / best of / every moment / supercut")
++    #     is a montage spanning the whole show — for a SINGLE-SCENE deep-dive it scatters footage
++    #     across dozens of unrelated moments instead of holding the one scene. Demote hard so the
++    #     raw single-scene upload outranks it. (Harmless for multi_scene, which wants breadth.)
++    if single and re.search(r"\ball scenes?\b|\bbest scenes?\b|\bbest of\b|\bevery (scene|moment|"
++                            r"time)\b|\bsupercut\b|\bcompilation\b|\ball (his|her|their) \w+\b|"
++                            r"\bmoments\b|\bfunniest\b|\bgreatest\b", t):
++        score -= 0.30
++    # 6c) EPISODE-CODE match — a raw-scene upload titled with the exact SxxExx is almost always
++    #     the scene itself, not a compilation. Strong boost.
++    ep = (getattr(a, "episode_hint", "") or "").strip().lower()
++    if ep and ep in t.replace(" ", ""):
++        score += 0.25
++    # 5b) MUSIC-ONLY uploads (lyric videos, covers, OST rips) title-match scene queries that
++    #     contain a song name ("Rains of Castamere") but contain ZERO scene footage — they were
++    #     crowding out the real scene. Hard demotion.
++    if _MUSIC_ONLY_RX.search(t):
++        score -= 0.45
+     if a.year and a.year in t:
+         score += 0.04
+     if c.provider == "archive":
+@@ -261,6 +383,162 @@
+     return re.sub(r"[^a-z0-9]+", " ", t.lower()).strip()
+ 
+ 
++_MUSIC_ONLY_RX = re.compile(
++    r"\blyrics?\b|\bcover\b|\bacoustic\b|\bslowed\b|\breverb\b|\binstrumental\b|"
++    r"\bpiano\b|\bkaraoke\b|\bsoundtrack\b|\bost\b|\btheme song\b|\bmusic video\b|"
++    r"\b(10|1) hours?\b|\bremix\b|\bepic version\b|\bextended version\b|\bbest version\b|"
++    r"\bfull song\b", re.I)
++
++
++# ---------------------------------------------------------------------------
++# CONTENT-LEVEL anchor verification: does a candidate's own subtitle track contain the anchor
++# scene's spoken lines? A title can lie ("Rains of Castamere" fits three different scenes);
++# the dialogue can't. Costs one metadata call + one tiny caption download per candidate.
++# ---------------------------------------------------------------------------
++
++def _fetch_subs_text(url: str, timeout: int = 45) -> str:
++    """Best-effort English subtitle/auto-caption text for a video ('' on any failure).
++    HD runtime FIRST: plain clients no longer receive caption tracks (PO-token gated), so the
++    in-process path below almost always finds none."""
++    import json as _json
++    import urllib.request
++    try:
++        from . import hd_download as _hd
++        if _hd.available() and _hd.is_youtube(url) and _hd.ensure_pot_server():
++            import glob
++            import shutil
++            import subprocess
++            import tempfile
++            d = tempfile.mkdtemp(prefix="cs_subs_")
++            try:
++                cmd = [_hd.HD_PY, "-m", "yt_dlp",
++                       "--cookies-from-browser", _hd.COOKIES_BROWSER,
++                       "--extractor-args",
++                       f"youtubepot-bgutilhttp:base_url=http://127.0.0.1:{_hd.POT_PORT}",
++                       "--skip-download", "--write-auto-subs", "--write-subs",
++                       "--sub-langs", "en.*", "--sub-format", "json3",
++                       "--no-playlist", "--no-warnings", "--quiet",
++                       "-o", f"{d}/s.%(ext)s", url]
++                p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
++                                   env=_hd._env_with_runtimes())
++                files = sorted(glob.glob(f"{d}/s*.json3"))
++                if p.returncode == 0 and files:
++                    data = _json.loads(open(files[0], encoding="utf-8").read())
++                    return " ".join(seg.get("utf8", "") for ev in data.get("events", [])
++                                    for seg in (ev.get("segs") or []))
++            finally:
++                shutil.rmtree(d, ignore_errors=True)
++    except Exception:
++        pass
++    import yt_dlp
++    try:
++        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True,
++                               "noplaylist": True, "socket_timeout": timeout}) as y:
++            info = y.extract_info(url, download=False)
++    except Exception:
++        return ""
++    tracks = {}
++    for pool in (info.get("subtitles") or {}, info.get("automatic_captions") or {}):
++        for lang, entries in pool.items():
++            if lang.startswith("en") and entries and lang not in tracks:
++                tracks[lang] = entries
++    for entries in tracks.values():
++        ent = next((e for e in entries if e.get("ext") == "json3"), None) or \
++              next((e for e in entries if e.get("ext") in ("srv1", "vtt")), None)
++        if not (ent and ent.get("url")):
++            continue
++        try:
++            with urllib.request.urlopen(ent["url"], timeout=timeout) as r:
++                raw = r.read(2 << 20).decode("utf-8", "ignore")
++        except Exception:
++            continue
++        if ent.get("ext") == "json3":
++            try:
++                data = _json.loads(raw)
++                return " ".join(seg.get("utf8", "") for ev in data.get("events", [])
++                                for seg in (ev.get("segs") or []))
++            except Exception:
++                continue
++        # srv1/vtt: strip tags/timing lines
++        txt = re.sub(r"<[^>]+>", " ", raw)
++        txt = "\n".join(l for l in txt.splitlines()
++                        if l.strip() and "-->" not in l and not l.strip().isdigit()
++                        and not l.startswith(("WEBVTT", "Kind:", "Language:")))
++        return txt
++    return ""
++
++
++def _norm_ws(s: str) -> list[str]:
++    return [w for w in re.findall(r"[a-z']+", (s or "").lower()) if w]
++
++
++def _subs_quote_hits(subs: str, quotes: list[str]) -> int:
++    """How many DISTINCT quotes are spoken in this caption text."""
++    if not subs or not quotes:
++        return 0
++    tw = _norm_ws(subs)
++    tstr = " " + " ".join(tw) + " "
++    hits = 0
++    for q in quotes:
++        qw = _norm_ws(q)[:6]                       # leading phrase is enough, ASR drifts later
++        hit = len(qw) >= 3 and (" " + " ".join(qw) + " ") in tstr
++        if not hit and len(qw) >= 4:               # tolerate one-word ASR drift: 3-word sub-runs
++            hit = any((" " + " ".join(qw[i:i + 3]) + " ") in tstr for i in range(len(qw) - 2))
++        if hit:
++            hits += 1
++    return hits
++
++
++def _subs_contain_quote(subs: str, quotes: list[str]) -> bool:
++    """VERIFIED = at least one of the scene's DIALOGUE lines is spoken in the captions. Dialogue
++    is scene-specific (a different scene of the same show won't say "you're just like me, only
++    smaller"), so one solid hit is decisive. The lyric-poisoning guard is NOT a hit-count — it's
++    the music-title exclusion in verify_anchor_candidates (a cover/lyric upload never reaches
++    here), because the LLM occasionally lists only ONE correct line among paraphrased ones, and a
++    2-hit rule then rejected the real scene."""
++    return _subs_quote_hits(subs, quotes) >= 1
++
++
++def verify_anchor_candidates(kept: list, analysis, segments, *, limit: int = 14,
++                             anchor_qset=None, extra=None, progress=None) -> int:
++    """Mark candidates whose captions SPEAK the anchor scene's quotes (anchor_verified) and boost
++    them; candidates that merely echo song/scene words in the title get no boost. `extra` =
++    title-REJECTED essay/breakdown candidates — if one verifies, it carries the exact scene and
++    earns its way back in (its talking-head/text frames are filtered later by the OCR/graphic
++    gates, and ClipStudio strips source audio anyway). Returns verified count."""
++    quotes = _scene_quotes(segments, analysis)
++    if not quotes:
++        return 0
++    anchor_sets = _anchor_token_sets(analysis)
++    aq = {q.lower() for q in (anchor_qset or set())}
++
++    def _tok_hit(c):
++        t = c.title.lower()
++        return any(sum(1 for w in s if w in t) >= 2 for s in anchor_sets) if anchor_sets else False
++
++    pool = []
++    for c in list(kept) + list(extra or []):
++        if c.provider != "youtube":
++            continue
++        if _MUSIC_ONLY_RX.search(c.title):
++            continue                       # a lyric/cover video can't carry the scene
++        if _tok_hit(c) or c.relevance >= 0.55 or (c.query or "").lower() in aq:
++            pool.append(c)
++    # spend the budget on the LIKELIEST first: surfaced by an anchor query, then relevance
++    pool.sort(key=lambda c: (((c.query or "").lower() in aq), _tok_hit(c), c.relevance),
++              reverse=True)
++    n = 0
++    for c in pool[:limit]:
++        subs = _fetch_subs_text(c.url)
++        if _subs_contain_quote(subs, quotes):
++            c.anchor_verified = True
++            c.relevance = min(1.0, round(c.relevance + 0.5, 4))
++            n += 1
++            if progress:
++                progress(f"discover: ✓ anchor VERIFIED by dialogue → {c.title[:56]!r}")
++    return n
++
++
+ def resolve_quality(cands: list[SourceCandidate], cfg: ClipConfig, progress=None) -> None:
+     """Second pass: resolve each top candidate's TRUE max resolution + exact duration. The legacy
+     yt-dlp probe (any in-engine client) only sees YouTube's SABR-collapsed ~360p ladder, so a 1080p
+@@ -305,12 +583,7 @@
+     queries = build_queries(analysis, segments)
+     # the anchor-scene queries are the most important searches — go DEEPER on them (more results) so
+     # the exact raw scene clip can't be missed under the noise of essays/compilations.
+-    anchor_qset = set()
+-    for sc in (getattr(analysis, "anchor_scenes", None) or []):
+-        sq = (sc.get("query") or sc.get("name") or "").strip()
+-        if sq:
+-            mv = analysis.movie_title.strip()
+-            anchor_qset.add((sq if mv.lower() in sq.lower() else f"{mv} {sq}").strip()[:100].lower())
++    anchor_qset = {q.lower() for q in anchor_queries(analysis, segments)}
+     log(f"discover: {len(queries)} queries ({len(anchor_qset)} anchor) · type={getattr(analysis,'video_type','')}")
+     raw: list[SourceCandidate] = []
+     for q in queries:
+@@ -338,22 +611,48 @@
+         c.reject_reason = _reject(c, cfg)
+     kept = sorted([c for c in uniq if not c.reject_reason], key=lambda c: c.relevance, reverse=True)
+ 
++    # CONTENT-LEVEL anchor verification — the title can echo the right words on the WRONG scene
++    # (a "Rains of Castamere" Red Wedding clip is not the Bronn tavern scene); the spoken lines
++    # can't lie. Verified candidates get a decisive boost; check is skippable via env.
++    # Famous scenes often exist ONLY inside essay/breakdown videos — those are title-rejected,
++    # but a dialogue-verified one carries the exact scene, so it earns its way back in.
++    import os as _os4
++    if (getattr(analysis, "anchor_scenes", None) and segments is not None
++            and _os4.environ.get("VIDLORE_CLIPSTUDIO_SUB_VERIFY", "1").strip()
++            not in ("0", "false", "no")):
++        essay_pool = [c for c in uniq
++                      if c.reject_reason == "reaction/review/annotated"
++                      and not _MUSIC_ONLY_RX.search(c.title)]
++        nv = verify_anchor_candidates(kept, analysis, segments, anchor_qset=anchor_qset,
++                                      extra=essay_pool, progress=progress)
++        log(f"discover: dialogue-verified {nv} anchor candidate(s)")
++        if nv:
++            for c in essay_pool:
++                if c.anchor_verified:
++                    c.reject_reason = ""
++                    kept.append(c)
++            kept.sort(key=lambda c: c.relevance, reverse=True)
++
+     # resolve resolution on the top slice, then re-reject on low-res
+     if cfg.discover_resolve_quality and kept:
+         resolve_quality(kept, cfg, progress)
+         for c in kept:
+-            if not c.reject_reason:
++            if not c.reject_reason and not c.anchor_verified:
++                # dialogue-verified candidates are exempt — they carry the exact scene, which
++                # often exists ONLY inside an (otherwise title-rejected) essay/breakdown upload
+                 c.reject_reason = _reject(c, cfg)
+         kept = [c for c in kept if not c.reject_reason]
+ 
+         def _hd_bonus(h):
+             # GRADUATED so 1080p outranks 720p outranks 480p (the old binary bonus gave 720p and
+-            # 1080p the SAME score, so a video ended up a mix — the user wants the crispest available).
+-            if h >= 1080:
+-                return 0.22
+-            if h >= 720:
++            # 1080p the SAME score, so a video ended up a mix — the user wants the crispest
++            # available). Tiers anchor on cfg.discover_prefer_height (default 720 → 1080/720/480).
++            ph = cfg.discover_prefer_height or 720
++            if h >= max(1080, ph):          # raising the knob raises the TOP tier, never
++                return 0.22                  # weakens the lower ones
++            if h >= min(720, ph):
+                 return 0.12
+-            if h >= 480:
++            if h >= max(300, min(480, ph - 240)):
+                 return 0.05
+             return 0.0
+         # rank by relevance + a graduated HD bonus, then by raw height — prefer the crispest source
+@@ -383,17 +682,30 @@
+             e = (getattr(s, "required_entity", "") or "").strip().split()
+             if e and len(e[0]) > 2:
+                 names.append(e[0])
+-        covered = " ".join(c.title.lower() for c in final)
++        # token (word/prefix) matching, not raw substring — "jon" must not count "jonquil"
++        # as coverage, while "dragon" still matches "dragons"
++        def _twords(title):
++            return set(re.findall(r"\w+", (title or "").lower()))
++
++        def _hit(tok, words):
++            # prefix only for short suffixes (plural/possessive): "dragon"→"dragons" yes,
++            # "jon"→"jonquil" no
++            return any(w == tok or (w.startswith(tok) and len(w) - len(tok) <= 2)
++                       for w in words)
++
++        covered = set()
++        for c in final:
++            covered |= _twords(c.title)
+         seen_names, added = set(), 0
+         for nm in names:
+             key = nm.lower()
+-            if key in seen_names or key in covered or key in ("the", "game", "thrones"):
++            if key in seen_names or _hit(key, covered) or key in ("the", "game", "thrones"):
+                 continue
+             seen_names.add(key)
+-            extra = next((c for c in kept if c not in final and key in c.title.lower()), None)
++            extra = next((c for c in kept if c not in final and _hit(key, _twords(c.title))), None)
+             if extra is not None and added < cfg.discover_coverage_extra:
+                 final.append(extra)
+-                covered += " " + extra.title.lower()
++                covered |= _twords(extra.title)
+                 added += 1
+                 log(f"discover: +coverage '{nm}' → {extra.title[:42]!r}")
+ 
+@@ -412,9 +724,15 @@
+             if not stoks:
+                 continue
+             # candidates that share ≥2 scene-specific tokens with this anchor, best relevance first
++            # (token match on title words — prefix only for short plural/possessive suffixes).
++            # Dialogue-VERIFIED candidates qualify regardless of title and outrank everything.
+             matches = sorted(
+-                (c for c in kept if sum(1 for w in set(stoks) if w in c.title.lower()) >= 2),
+-                key=lambda c: c.relevance, reverse=True)
++                (c for c in kept
++                 if c.anchor_verified
++                 or sum(1 for w in set(stoks)
++                        if any(t == w or (t.startswith(w) and len(t) - len(w) <= 2)
++                               for t in re.findall(r"\w+", c.title.lower()))) >= 2),
++                key=lambda c: (c.anchor_verified, c.relevance), reverse=True)
+             added = 0
+             for c in matches:
+                 kk = (c.provider, c.id or c.url)
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/download.py vidlore/clipstudio/download.py
+--- /tmp/clipstudio_backup_pre_fixes/download.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/download.py	2026-06-10 23:18:28
+@@ -20,7 +20,7 @@
+ from .models import SourceVideo, ClipProject, SOURCE_OK, SOURCE_BLOCKED, SOURCE_FAILED
+ from .config import ClipConfig, ffmpeg_exe
+ from .discover import SourceCandidate
+-from .ingest import probe, _sha1_file, _slug, _VIDEO_EXTS
++from .ingest import probe, _sha1_file, _slug, _VIDEO_EXTS, find_produced_video
+ import hashlib
+ 
+ POLICIES = ("block", "open_only", "approved_testing")
+@@ -43,24 +43,34 @@
+ 
+ 
+ def _download_one(cand: SourceCandidate, sid: str, perm: str, note: str,
+-                  proj: ClipProject, cfg: ClipConfig) -> SourceVideo:
++                  proj: ClipProject, cfg: ClipConfig, progress=None) -> SourceVideo:
+     from . import hd_download as _hd
+     sv = SourceVideo(id=sid, url=cand.url, title=cand.title, permission=perm,
+                      permission_note=note, extra={"provider": cand.provider,
+                                                    "relevance": cand.relevance, "query": cand.query})
++    if getattr(cand, "anchor_verified", False):
++        sv.extra["anchor_verified"] = True       # dialogue-proven exact scene — match.py trusts it
+     dest_stem = proj.sources_dir / sid
+     maxh = cfg.max_height
+ 
+     # --- HD-first path: defeat YouTube SABR/PO-token (engine yt-dlp can only see 360p). ---
+     # Uses the user's own logged-in session + YouTube's public player clients (no access bypass).
+-    # Falls through to the legacy in-process downloader below on any failure.
++    # Falls through to the legacy in-process downloader below on any failure — but NEVER silently:
++    # the reason is logged and recorded (a whole run once fell back to 360p with zero trace).
+     if _hd.available() and _hd.is_youtube(cand.url):
++        _hd_msgs: list = []
+         try:
+             hi = _hd.download_hd(cand.url, str(dest_stem), max_height=maxh,
+                                  ffmpeg_dir=str(Path(ffmpeg_exe()).parent),
+-                                 retries=cfg.download_retries)
+-        except Exception:                                  # noqa: BLE001
++                                 retries=cfg.download_retries, progress=_hd_msgs.append)
++        except Exception as e:                             # noqa: BLE001
+             hi = None
++            _hd_msgs.append(f"hd: exception {str(e)[:160]}")
++        if not hi:
++            sv.extra["hd_fallback"] = (_hd_msgs[-1] if _hd_msgs else "hd: no result")[:200]
++            if progress:
++                progress(f"download: {sid} HD path fell back → legacy "
++                         f"({sv.extra['hd_fallback'][:90]})")
+         if hi and hi.get("path") and Path(hi["path"]).exists():
+             sv.local_path = hi["path"]
+             sv.title = cand.title or hi.get("title") or sid
+@@ -112,13 +122,21 @@
+         except Exception as e:                        # noqa: BLE001
+             last_err = str(e)[:300]
+             time.sleep(min(2 ** attempt, 12))
+-    produced = next((p for p in sorted(proj.sources_dir.glob(f"{sid}.*"))
+-                     if p.suffix.lower() in _VIDEO_EXTS), None)
++    produced = find_produced_video(proj.sources_dir, sid)
+     if produced is None:
+         sv.status, sv.error = SOURCE_FAILED, last_err or "download produced no file"
+         return sv
+-    sv.local_path = str(produced)
+     info2 = probe(produced)
++    # unreadable = neither probe nor yt-dlp metadata vouches for it; delete the artifact so the
++    # next run actually re-downloads instead of hitting "already downloaded" on a corrupt file
++    if not (info2.get("duration") or sv.duration) or not (info2.get("width") or sv.width):
++        try:
++            produced.unlink(missing_ok=True)
++        except OSError:
++            pass
++        sv.status, sv.error = SOURCE_FAILED, (last_err or f"unreadable download: {produced.name}")
++        return sv
++    sv.local_path = str(produced)
+     sv.duration = sv.duration or info2.get("duration", 0.0)
+     sv.width = sv.width or info2.get("width", 0)
+     sv.height = sv.height or info2.get("height", 0)
+@@ -141,11 +159,16 @@
+         policy = "block"
+     queue = candidates if not limit else candidates[:limit]
+ 
+-    # split into allowed vs policy-blocked (record both)
++    # split into allowed vs policy-blocked (record both); the same video discovered twice must
++    # be submitted ONCE — two workers would race writing the same <sid>.* files
+     allowed, results = [], []
++    _queued: set[str] = set()
+     for c in queue:
+         perm, ok, note = policy_permission(c, policy)
+         sid = _cand_id(c)
++        if sid in _queued:
++            continue
++        _queued.add(sid)
+         if not ok:
+             results.append(SourceVideo(id=sid, url=c.url, title=c.title, permission=perm,
+                                        permission_note=note, status=SOURCE_BLOCKED, error=note,
+@@ -160,7 +183,7 @@
+         with cf.ThreadPoolExecutor(max_workers=max(1, cfg.download_concurrency)) as ex:
+             futs = {}
+             for (c, sid, perm, note) in allowed:
+-                futs[ex.submit(_download_one, c, sid, perm, note, proj, cfg)] = sid
++                futs[ex.submit(_download_one, c, sid, perm, note, proj, cfg, progress)] = sid
+                 time.sleep(0.5)                       # stagger (per-host politeness)
+             for fut in cf.as_completed(futs):
+                 sv = fut.result()
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/hd_download.py vidlore/clipstudio/hd_download.py
+--- /tmp/clipstudio_backup_pre_fixes/hd_download.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/hd_download.py	2026-06-10 22:02:39
+@@ -27,6 +27,7 @@
+ 
+ import json
+ import os
++import re
+ import shutil
+ import subprocess
+ import time
+@@ -43,19 +44,27 @@
+     return ""
+ 
+ HD_PY = os.environ.get("VIDLORE_HD_PYTHON", "") or _firstpath(
+-    str(_ROOT / ".hdvenv/bin/python"), str(_ROOT / ".hdvenv/bin/python3"))
++    str(_ROOT / ".hdvenv/bin/python"), str(_ROOT / ".hdvenv/bin/python3"),
++    str(_ROOT / ".hdvenv/Scripts/python.exe"))          # Windows venv layout
+ NODE_BIN = os.environ.get("VIDLORE_HD_NODE", "") or _firstpath(
+     str(Path.home() / ".local-node/bin/node"), shutil.which("node") or "")
+ DENO_BIN = os.environ.get("VIDLORE_HD_DENO", "") or _firstpath(
+     str(Path.home() / ".deno/bin/deno"), shutil.which("deno") or "")
+ POT_SERVER_DIR = os.environ.get("VIDLORE_HD_POT_DIR", "") or _firstpath(
+     str(_ROOT / ".pot/server"))
+-POT_PORT = int(os.environ.get("VIDLORE_HD_POT_PORT", "4416"))
++try:
++    POT_PORT = int(os.environ.get("VIDLORE_HD_POT_PORT", "4416"))
++except (TypeError, ValueError):
++    POT_PORT = 4416
+ COOKIES_BROWSER = os.environ.get("VIDLORE_HD_COOKIES_BROWSER", "chrome").strip()
+-# turn the whole HD path off with VIDLORE_HD_DOWNLOAD=0
+-HD_ENABLED = os.environ.get("VIDLORE_HD_DOWNLOAD", "1").strip() not in ("0", "false", "no", "")
++# turn the whole HD path off with VIDLORE_HD_DOWNLOAD=0 (case-insensitive; unset/empty = ON)
++_HD_ENV = os.environ.get("VIDLORE_HD_DOWNLOAD", "").strip().lower()
++HD_ENABLED = (_HD_ENV not in ("0", "false", "no", "off")) if _HD_ENV else True
+ 
++import threading as _threading
++
+ _POT_PROC = None  # bgutil server we started (if any)
++_POT_LOCK = _threading.Lock()
+ 
+ 
+ def is_youtube(url: str) -> bool:
+@@ -77,30 +86,41 @@
+ 
+ 
+ def ensure_pot_server(progress=None) -> bool:
+-    """Make sure the bgutil PO-token server is listening on :POT_PORT — start it if not."""
++    """Make sure the bgutil PO-token server is listening on :POT_PORT — start it if not.
++    Lock-guarded: concurrent download workers must not race the check-then-act and spawn
++    several servers fighting for the port."""
+     global _POT_PROC
+-    if _pot_alive():
+-        return True
+-    if not (DENO_BIN and POT_SERVER_DIR):
+-        return False
+-    try:
+-        log = open(os.path.join("/tmp", f"clipstudio_pot_{POT_PORT}.log"), "ab")
+-        _POT_PROC = subprocess.Popen(
+-            [DENO_BIN, "run", "-A", "--node-modules-dir=auto", "src/main.ts", "--port", str(POT_PORT)],
+-            cwd=POT_SERVER_DIR, stdout=log, stderr=log,
+-            start_new_session=True,                          # detach; survive our process
+-        )
+-    except Exception as e:                                   # noqa: BLE001
+-        if progress:
+-            progress(f"hd: PO server failed to start ({str(e)[:80]})")
+-        return False
+-    for _ in range(30):                                      # up to ~15s for first boot
++    with _POT_LOCK:
+         if _pot_alive():
+-            if progress:
+-                progress(f"hd: PO-token server up on :{POT_PORT}")
+             return True
+-        time.sleep(0.5)
+-    return False
++        if not (DENO_BIN and POT_SERVER_DIR):
++            return False
++        logf = None
++        try:
++            import tempfile as _tf
++            logf = open(os.path.join(_tf.gettempdir(), f"clipstudio_pot_{POT_PORT}.log"), "ab")
++            _POT_PROC = subprocess.Popen(
++                [DENO_BIN, "run", "-A", "--node-modules-dir=auto", "src/main.ts", "--port", str(POT_PORT)],
++                cwd=POT_SERVER_DIR, stdout=logf, stderr=logf,
++                start_new_session=True,                      # detach; survive our process
++            )
++        except Exception as e:                               # noqa: BLE001
++            if progress:
++                progress(f"hd: PO server failed to start ({str(e)[:80]})")
++            return False
++        finally:
++            if logf is not None:                             # child holds its own dup of the fd
++                try:
++                    logf.close()
++                except Exception:
++                    pass
++        for _ in range(30):                                  # up to ~15s for first boot
++            if _pot_alive():
++                if progress:
++                    progress(f"hd: PO-token server up on :{POT_PORT}")
++                return True
++            time.sleep(0.5)
++        return False
+ 
+ 
+ def _env_with_runtimes() -> dict:
+@@ -206,6 +226,11 @@
+             progress("hd: PO server unavailable — falling back to legacy downloader")
+         return None
+ 
++    # ABSOLUTE stem, always: yt-dlp resolves a relative -o template against the subprocess
++    # cwd (set to the stem's dir below), so a relative stem nested the output into
++    # <sources>/<stem-dir>/<stem>.mp4 and the produced-file lookup found nothing — every
++    # download silently fell back to the 360p legacy path.
++    out_stem = str(Path(out_stem).expanduser().resolve())
+     out_tmpl = f"{out_stem}.%(ext)s"
+     info_json = f"{out_stem}.info.json"
+     cmd = [
+@@ -229,11 +254,13 @@
+ 
+     env = _env_with_runtimes()
+     last = ""
++    ok = False
+     for attempt in range(1, retries + 2):
+         try:
+             p = subprocess.run(cmd, cwd=os.path.dirname(out_stem) or ".", env=env,
+                                capture_output=True, text=True, timeout=timeout)
+             if p.returncode == 0:
++                ok = True
+                 break
+             last = (p.stderr or p.stdout or "").strip()[-300:]
+         except subprocess.TimeoutExpired:
+@@ -241,14 +268,39 @@
+         except Exception as e:                               # noqa: BLE001
+             last = str(e)[:300]
+         time.sleep(min(2 ** attempt, 8))
+-    # locate produced file
++    # locate produced file — only on a clean exit, and never a video-only .fNNN fragment
++    # (an interrupted merge leaves <stem>.f616.mp4, which is silent → ASR/dialogue-lock dies)
+     produced = None
+     stem = Path(out_stem)
+-    for f in sorted(stem.parent.glob(stem.name + ".*")):
+-        if f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov"):
+-            produced = f
+-            break
++    if ok:
++        for ext in (".mp4", ".mkv", ".webm", ".mov"):        # exact merge target first
++            c = stem.parent / (stem.name + ext)
++            if c.exists() and c.stat().st_size > 0:
++                produced = c
++                break
++        if produced is None:
++            for f in sorted(stem.parent.glob(stem.name + ".*")):
++                if (f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov")
++                        and not re.search(r"\.f\d+$", f.stem)
++                        and f.stat().st_size > 0):
++                    produced = f
++                    break
+     if produced is None:
++        # sweep the debris this gate just rejected — orphaned multi-GB .fNNN intermediates,
++        # .part/.temp partials and the info.json would otherwise strand in sources/ forever
++        # (the legacy fallback downloader writes to the same <stem>.* namespace next)
++        for f in stem.parent.glob(stem.name + ".*"):
++            try:
++                inner = Path(f.stem)
++                if re.search(r"\.f\d+$", inner.name) or \
++                        f.suffix.lower() in (".part", ".temp", ".ytdl"):
++                    f.unlink(missing_ok=True)
++            except OSError:
++                pass
++        try:
++            os.remove(info_json)
++        except OSError:
++            pass
+         if progress:
+             progress(f"hd: no HD file ({last[:120]}) — fallback")
+         return None
+@@ -262,6 +314,19 @@
+             os.remove(info_json)
+         except Exception:
+             pass
++    # report the produced file's REAL dimensions — info.json describes the format yt-dlp
++    # SELECTED, which mislabels a pre-existing lower-res file it skipped as "already downloaded"
++    try:
++        from .ingest import probe as _probe
++        real = _probe(produced)
++        if real.get("width"):
++            meta["width"], meta["height"] = real["width"], real["height"]
++            if real.get("duration"):
++                meta["duration"] = real["duration"]
++            if real.get("fps"):
++                meta["fps"] = real["fps"]
++    except Exception:
++        pass
+     return {
+         "path": str(produced),
+         "height": int(meta.get("height") or 0),
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/index.py vidlore/clipstudio/index.py
+--- /tmp/clipstudio_backup_pre_fixes/index.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/index.py	2026-06-10 20:53:44
+@@ -66,7 +66,9 @@
+         while t < dur:
+             scenes.append((t, min(dur, t + step)))
+             t += step
+-    return _merge_short(scenes, cfg.min_shot_sec)
++    # floor at min_clip_sec too: a shot shorter than the minimum cuttable clip would force
++    # cut_selection to extend past the shot boundary into the NEXT, unrelated shot
++    return _merge_short(scenes, max(cfg.min_shot_sec, cfg.min_clip_sec))
+ 
+ 
+ def _merge_short(scenes: list[tuple[float, float]], min_sec: float) -> list[tuple[float, float]]:
+@@ -208,10 +210,34 @@
+             progress(m)
+ 
+     shots_file = proj.shots_path(source.id)
++    meta_file = proj.index_dir / f"{source.id}.index.meta.json"
++    # capabilities this call wants — a cache built WITHOUT them (e.g. by the manual pipeline,
++    # roster-less) must not satisfy an auto-mode call that needs Face-ID/OCR signals. "Wanted"
++    # includes availability, else a missing OCR lib would force a futile re-index every run.
++    want_caps = {"faceid": bool(faceid and references), "ocr": False}
++    if cfg.detect_ocr:
++        from . import ocr as _ocr_probe
++        want_caps["ocr"] = _ocr_probe.available()
++    # roster gives ocr_names (name-card corroboration) — a roster-less OCR cache must not
++    # satisfy a roster-bearing auto run; only meaningful when OCR itself can run
++    want_caps["roster"] = bool(roster) and want_caps["ocr"]
+     if shots_file.exists() and not force:
+-        data = json.loads(shots_file.read_text(encoding="utf-8"))
+-        log(f"index: {source.id} cached ({len(data)} shots)")
+-        return [Shot.from_dict(d) for d in data]
++        try:
++            have_caps = json.loads(meta_file.read_text(encoding="utf-8"))
++        except Exception:
++            have_caps = {}
++        if not isinstance(have_caps, dict):      # 'null'/list/string parses fine but isn't caps
++            have_caps = {}
++        missing = [k for k, v in want_caps.items() if v and not have_caps.get(k)]
++        if missing:
++            log(f"index: {source.id} re-indexing (cache lacks {'+'.join(missing)})")
++        else:
++            try:
++                data = json.loads(shots_file.read_text(encoding="utf-8"))
++                log(f"index: {source.id} cached ({len(data)} shots)")
++                return [Shot.from_dict(d) for d in data]
++            except Exception:
++                log(f"index: ⚠ {source.id} cache unreadable — re-indexing")
+ 
+     if source.status != SOURCE_OK or not source.local_path:
+         log(f"index: {source.id} skipped (status={source.status})")
+@@ -224,6 +250,18 @@
+ 
+     # 1) shots
+     bounds = detect_shots(path, cfg, total_dur=source.duration)
++    if not bounds:
++        # zero shots = unreadable/zero-duration media; do NOT cache, so a later run retries.
++        # Reaching here WITH an existing cache means a forced/capability re-index — drop the
++        # stale files too, or match's load_shots silently serves the old index of media that
++        # can no longer be read.
++        for _stale in (shots_file, meta_file):
++            try:
++                _stale.unlink(missing_ok=True)
++            except OSError:
++                pass
++        log(f"index: ⚠ {source.id} produced 0 shots (unreadable media?) — skipped, not cached")
++        return []
+     log(f"index: {source.id} {len(bounds)} shots detected")
+ 
+     # 2) transcript
+@@ -235,7 +273,9 @@
+     use_clip = clip_available()
+     vr = _vr() if use_clip else None
+     do_faceid = bool(faceid and references)
+-    do_ocr = bool(cfg.detect_ocr and roster)
++    # OCR runs whenever enabled — the junk/watermark gates in match.py need ocr_text on EVERY
++    # pipeline (the roster only adds name-card corroboration on top)
++    do_ocr = bool(cfg.detect_ocr)
+     _ocr = None
+     if do_ocr:
+         from . import ocr as _ocr
+@@ -289,10 +329,21 @@
+     _assign_transcript(shots, words)
+     _dedup_shots(shots, cfg.dup_hamming)
+ 
+-    # 4) persist
++    # 4) persist (atomic tmp+replace — an interrupted write must not brick later runs' resume).
++    # embeds first, shots last: shots.json presence gates the cache, and match.py bounds-checks
++    # embed_row, so a kill between the two degrades gracefully instead of pairing a valid cache
++    # with a truncated matrix.
+     if embeds:
+-        np.save(proj.embeds_path(source.id), np.vstack(embeds))
+-    shots_file.write_text(json.dumps([s.to_dict() for s in shots], indent=1), encoding="utf-8")
++        _etmp = proj.embeds_path(source.id).with_suffix(".tmp.npy")
++        np.save(_etmp, np.vstack(embeds))
++        _etmp.replace(proj.embeds_path(source.id))
++    _tmp = shots_file.with_suffix(".json.tmp")
++    _tmp.write_text(json.dumps([s.to_dict() for s in shots], indent=1), encoding="utf-8")
++    _tmp.replace(shots_file)
++    _mtmp = meta_file.with_suffix(".json.tmp")
++    _mtmp.write_text(json.dumps({"faceid": do_faceid, "ocr": do_ocr,
++                                 "roster": bool(roster)}), encoding="utf-8")
++    _mtmp.replace(meta_file)
+     log(f"index: {source.id} done — {len(shots)} shots, {len(embeds)} embeds, clip={use_clip}")
+     return shots
+ 
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/ingest.py vidlore/clipstudio/ingest.py
+--- /tmp/clipstudio_backup_pre_fixes/ingest.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/ingest.py	2026-06-10 20:48:32
+@@ -24,7 +24,29 @@
+ 
+ _VIDEO_EXTS = (".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".flv", ".ts")
+ 
++# yt-dlp writes per-stream intermediates as <stem>.fNNN.<ext> before merging — those are
++# video-only (silent), so picking one kills ASR/dialogue-lock downstream.
++_YTDLP_FRAG_RX = re.compile(r"\.f\d+$")
+ 
++
++def find_produced_video(directory: Path, stem: str) -> Optional[Path]:
++    """The file a yt-dlp run actually produced for `stem`. Prefers the merge target
++    (<stem>.mp4 first) and never returns a video-only .fNNN fragment or a merge temp."""
++    for ext in _VIDEO_EXTS:
++        p = directory / f"{stem}{ext}"
++        if p.exists() and p.stat().st_size > 0:
++            return p
++    for p in sorted(directory.glob(f"{stem}.*")):
++        if p.suffix.lower() not in _VIDEO_EXTS:
++            continue
++        inner = Path(p.stem)             # "<stem>.f616.mp4" -> "<stem>.f616"
++        if _YTDLP_FRAG_RX.search(inner.name) or inner.suffix in (".part", ".temp", ".ytdl"):
++            continue
++        if p.stat().st_size > 0:
++            return p
++    return None
++
++
+ @dataclass
+ class SourceSpec:
+     """User-supplied request for one source. `permission` defaults to the blocking value."""
+@@ -35,8 +57,8 @@
+ 
+     @property
+     def is_local(self) -> bool:
+-        if re.match(r"^[a-z]+://", self.ref):
+-            return False
++        if re.match(r"^[a-z][a-z0-9+.-]*://", self.ref, re.IGNORECASE):
++            return False         # an uppercase-scheme URL must never be probed as a file path
+         return Path(self.ref).expanduser().exists()
+ 
+ 
+@@ -196,19 +218,27 @@
+         except Exception as e:                       # noqa: BLE001 — record + backoff + retry
+             last_err = str(e)[:300]
+             time.sleep(min(2 ** attempt, 10))
+-    # locate the produced file
+-    produced = next((p for p in sorted(proj.sources_dir.glob(f"{sid}.*"))
+-                     if p.suffix.lower() in _VIDEO_EXTS), None)
++    # locate the produced file (merge target preferred; .fNNN fragments never accepted)
++    produced = find_produced_video(proj.sources_dir, sid)
+     if produced is None:
+         sv.status, sv.error = SOURCE_FAILED, last_err or "download produced no video file"
+         return sv
++    info2 = probe(produced)
++    # unreadable = NEITHER the probe NOR yt-dlp's own metadata can vouch for it (a valid .ts
++    # capture may probe without duration — yt-dlp already reported one). Delete the artifact,
++    # or every later run hits yt-dlp's "already downloaded" skip and fails forever.
++    if not (info2.get("duration") or sv.duration) or not (info2.get("width") or sv.width):
++        try:
++            produced.unlink(missing_ok=True)
++        except OSError:
++            pass
++        sv.status, sv.error = SOURCE_FAILED, (last_err or f"unreadable download: {produced.name}")
++        return sv
+     sv.local_path = str(produced)
+-    if not sv.duration or not sv.width:
+-        info2 = probe(produced)
+-        sv.duration = sv.duration or info2.get("duration", 0.0)
+-        sv.width = sv.width or info2.get("width", 0)
+-        sv.height = sv.height or info2.get("height", 0)
+-        sv.fps = sv.fps or info2.get("fps", 0.0)
++    sv.duration = sv.duration or info2.get("duration", 0.0)
++    sv.width = sv.width or info2.get("width", 0)
++    sv.height = sv.height or info2.get("height", 0)
++    sv.fps = sv.fps or info2.get("fps", 0.0)
+     sv.checksum = _sha1_file(produced)
+     sv.status = SOURCE_OK
+     return sv
+@@ -216,16 +246,28 @@
+ 
+ def ingest_one(spec: SourceSpec, proj: ClipProject, cfg: ClipConfig) -> SourceVideo:
+     sid = _source_id(spec)
+-    # --- permission gate FIRST: block before any network/download ---
+-    if spec.permission in PERMISSION_BLOCKS or not spec.permission:
++    # --- permission gate FIRST: block before any network/download. The value must be a KNOWN
++    # assertion — a typo ("fair-use", "yes") must block, not silently land in the ledger ---
++    from .models import PERMISSIONS
++    if spec.permission in PERMISSION_BLOCKS or not spec.permission \
++            or spec.permission not in PERMISSIONS:
+         return SourceVideo(
+             id=sid, url=(f"local:{spec.ref}" if spec.is_local else spec.ref),
+-            title=spec.title, permission=spec.permission or "unverified",
++            title=spec.title,
++            permission=(spec.permission if spec.permission in PERMISSIONS else "unverified"),
+             permission_note=spec.permission_note, status=SOURCE_BLOCKED,
+-            error="permission unverified — set owner|licensed|public_domain|cc|fair_use_claim to ingest",
++            error="permission unverified/unknown — set owner|licensed|public_domain|cc|fair_use_claim to ingest",
+         )
+     if spec.is_local:
+         return _ingest_local(spec, sid)
++    # scheme-less ref that's neither on disk nor URL-shaped = a mistyped local path; handing it
++    # to yt-dlp produces a baffling extractor error instead of "file not found"
++    if not re.match(r"^[a-z][a-z0-9+.-]*://", spec.ref, re.IGNORECASE) and \
++            not re.match(r"^(www\.)?[\w-]+(\.[\w-]+)+(:\d+)?(/|$)", spec.ref):
++        return SourceVideo(
++            id=sid, url=f"local:{spec.ref}", title=spec.title, permission=spec.permission,
++            permission_note=spec.permission_note, status=SOURCE_FAILED,
++            error=f"local file not found: {spec.ref}")
+     return _ingest_url(spec, sid, proj, cfg)
+ 
+ 
+@@ -233,8 +275,15 @@
+                    progress=None) -> list[SourceVideo]:
+     """Ingest all specs (concurrent for URL downloads). Updates proj.sources and saves."""
+     proj.ensure_dirs()
++    # dedup by source-id BEFORE submission (mirrors download.py): the same ref given twice would
++    # put two concurrent workers racing on the same <sid>.* files
+     locals_, urls = [], []
++    _queued: set[str] = set()
+     for sp in specs:
++        sid = _source_id(sp)
++        if sid in _queued:
++            continue
++        _queued.add(sid)
+         (locals_ if sp.is_local else urls).append(sp)
+ 
+     results: list[SourceVideo] = []
+@@ -259,10 +308,22 @@
+                 if progress:
+                     progress(f"ingest: {sv.id} [{sv.status}]")
+ 
+-    # merge into project (replace by id), keep deterministic order by spec
++    # merge into project: PRESERVE pre-existing sources, refresh/append this batch by id in spec
++    # order — replacing the whole list dropped every previously-ingested source (permissions,
++    # checksums, provenance) on an incremental --add
+     by_id = {sv.id: sv for sv in results}
+     order = [_source_id(sp) for sp in specs]
+-    proj.sources = [by_id[i] for i in order if i in by_id]
++    new_in_order = [by_id[i] for i in order if i in by_id]
++    new_ids = {sv.id for sv in new_in_order}
++    # the sid embeds the user-supplied title, so a re-ingest after a title edit gets a NEW id —
++    # also displace kept entries pointing at the same ref or the same content (checksum), or the
++    # project accumulates duplicate copies of one video
++    new_urls = {sv.url for sv in new_in_order if sv.url}
++    new_sums = {sv.checksum for sv in new_in_order if sv.status == SOURCE_OK and sv.checksum}
++    kept = [s for s in proj.sources
++            if s.id not in new_ids and s.url not in new_urls
++            and not (s.status == SOURCE_OK and s.checksum and s.checksum in new_sums)]
++    proj.sources = kept + new_in_order
+     proj.save()
+     return proj.sources
+ 
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/llm.py vidlore/clipstudio/llm.py
+--- /tmp/clipstudio_backup_pre_fixes/llm.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/llm.py	2026-06-10 20:53:40
+@@ -26,11 +26,30 @@
+ if _LIBS.exists() and str(_LIBS) not in sys.path:
+     sys.path.append(str(_LIBS))
+ 
+-_PROVIDER = os.environ.get("VIDLORE_CLIPSTUDIO_LLM_PROVIDER", "anthropic").strip().lower()
+-_GEMINI_MODEL = os.environ.get("VIDLORE_CLIPSTUDIO_GEMINI_MODEL", "gemini-2.5-flash").strip()
+-_GEMINI_LOCATION = os.environ.get("VIDLORE_CLIPSTUDIO_GEMINI_LOCATION", "us-central1").strip()
+-_CLAUDE_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6").strip()
++# every knob reads at CALL time, not import time — the engine loads .env after this module
++# may already have been imported
+ 
++
++def _provider() -> str:
++    return os.environ.get("VIDLORE_CLIPSTUDIO_LLM_PROVIDER", "anthropic").strip().lower()
++
++
++def _gemini_model() -> str:
++    return os.environ.get("VIDLORE_CLIPSTUDIO_GEMINI_MODEL", "").strip() or "gemini-2.5-flash"
++
++
++def _gemini_location() -> str:
++    return os.environ.get("VIDLORE_CLIPSTUDIO_GEMINI_LOCATION", "").strip() or "us-central1"
++
++
++def _claude_model() -> str:
++    return os.environ.get("ANTHROPIC_MODEL", "").strip() or "claude-sonnet-4-6"
++
++
++def _claude_key(eng_cfg=None) -> str:
++    return ((getattr(eng_cfg, "anthropic_api_key", "") if eng_cfg else "")
++            or os.environ.get("ANTHROPIC_API_KEY", ""))
++
+ _CLIENT = None  # cached Gemini client
+ 
+ 
+@@ -64,14 +83,16 @@
+     if _CLIENT is None:
+         from google import genai
+         cred = _gcp_cred()
+-        os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", cred)
++        # cred is verified to exist on disk; a stale env var pointing at a missing file must
++        # not win over it (setdefault would keep the broken value)
++        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred
+         try:
+             proj = json.load(open(cred)).get("project_id", "")
+         except Exception:
+             proj = os.environ.get("VIDLORE_GCP_PROJECT", "")
+         if not proj:
+             raise RuntimeError("no GCP project_id resolved for Gemini/Vertex")
+-        _CLIENT = genai.Client(vertexai=True, project=proj, location=_GEMINI_LOCATION)
++        _CLIENT = genai.Client(vertexai=True, project=proj, location=_gemini_location())
+     return _CLIENT
+ 
+ 
+@@ -112,20 +133,27 @@
+         gcfg["thinking_config"] = types.ThinkingConfig(thinking_budget=int(think))
+     except Exception:
+         pass
++    # callers forward eng_cfg.anthropic_model verbatim — a Claude id must not kill the fallback
++    mdl = (model or "").strip()
++    if not mdl.lower().startswith("gemini"):
++        mdl = _gemini_model()
+     resp = cl.models.generate_content(
+-        model=(model or _GEMINI_MODEL), contents=contents,
++        model=mdl, contents=contents,
+         config=types.GenerateContentConfig(**gcfg))
+     return getattr(resp, "text", None) or ""
+ 
+ 
+ def _claude_complete(system, messages, max_tokens, eng_cfg, model) -> str:
+     import anthropic
+-    key = (getattr(eng_cfg, "anthropic_api_key", "") if eng_cfg else "") \
+-        or os.environ.get("ANTHROPIC_API_KEY", "")
++    key = _claude_key(eng_cfg)
+     if not key:
+         return ""
+     cl = anthropic.Anthropic(api_key=key)
+-    mdl = model or (getattr(eng_cfg, "anthropic_model", "") if eng_cfg else "") or _CLAUDE_MODEL
++    mdl = model or (getattr(eng_cfg, "anthropic_model", "") if eng_cfg else "") or _claude_model()
++    if not mdl.lower().startswith("claude"):     # a Gemini id forwarded by a caller
++        mdl = ((getattr(eng_cfg, "anthropic_model", "") if eng_cfg else "") or _claude_model())
++        if not mdl.lower().startswith("claude"):   # eng_cfg itself misconfigured with a non-Claude id
++            mdl = "claude-sonnet-4-6"
+     resp = cl.messages.create(model=mdl, max_tokens=max_tokens,
+                               system=(system or ""), messages=messages)
+     return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+@@ -134,7 +162,7 @@
+ def _claude_first() -> bool:
+     """Provider default is now ANTHROPIC (Claude primary); Gemini is the fallback. Set
+     VIDLORE_CLIPSTUDIO_LLM_PROVIDER=gemini to flip back to Gemini-primary."""
+-    return _PROVIDER not in ("gemini", "google", "vertex")
++    return _provider() not in ("gemini", "google", "vertex")
+ 
+ 
+ def _retries() -> int:
+@@ -178,6 +206,8 @@
+         return None
+ 
+     def _try_claude():
++        if not _claude_key(eng_cfg):     # keyless: skip instantly — retrying '' burns ~5.6s/call
++            return None
+         return _with_retry(lambda: _claude_complete(system, messages, max_tokens, eng_cfg, model))
+ 
+     def _try_gemini():
+@@ -197,17 +227,15 @@
+     """Is ANY brain available (Gemini or Claude)?"""
+     if gemini_available():
+         return True
+-    return bool((getattr(eng_cfg, "anthropic_api_key", "") if eng_cfg else "")
+-                or os.environ.get("ANTHROPIC_API_KEY", ""))
++    return bool(_claude_key(eng_cfg))
+ 
+ 
+ def active_provider(eng_cfg=None) -> str:
+     """The provider that will actually serve a call (the primary if it's available, else the
+     fallback)."""
+-    has_claude = bool((getattr(eng_cfg, "anthropic_api_key", "") if eng_cfg else "")
+-                      or os.environ.get("ANTHROPIC_API_KEY", ""))
+-    claude_str = f"anthropic ({_CLAUDE_MODEL})"
+-    gemini_str = f"gemini ({_GEMINI_MODEL}, Vertex)"
++    has_claude = bool(_claude_key(eng_cfg))
++    claude_str = f"anthropic ({_claude_model()})"
++    gemini_str = f"gemini ({_gemini_model()}, Vertex)"
+     if _claude_first():
+         if has_claude:
+             return claude_str
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/match.py vidlore/clipstudio/match.py
+--- /tmp/clipstudio_backup_pre_fixes/match.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/match.py	2026-06-11 12:53:52
+@@ -48,6 +48,11 @@
+             val = (sum(px) / len(px)) / 255.0 if px else 0.5
+     except Exception:
+         val = 0.5
++    while len(_BRIGHT_CACHE) >= 4096:    # bounded (portal jobs share this module-global); evict
++        try:                             # oldest-first — clearing ALL would thrash to 0% hits on
++            _BRIGHT_CACHE.pop(next(iter(_BRIGHT_CACHE)))      # pools larger than the bound
++        except (StopIteration, KeyError):
++            break
+     _BRIGHT_CACHE[keyframe_path] = val
+     return val
+ 
+@@ -88,12 +93,15 @@
+     return (near / len(phs)) >= 0.85         # ≥85% of shots look identical → a static image
+ 
+ 
+-def _load_pool(proj: ClipProject, progress=None) -> list[_PoolShot]:
++def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=None) -> list[_PoolShot]:
+     import os
+     gate_on = os.environ.get("VIDLORE_CLIPSTUDIO_OCR_GATE", "1").strip() not in ("0", "false", "no", "")
+     # "crop" (default) KEEPS a watermarked source — build.py punch-in-crops the logo off-frame, so
+     # its footage stays available (relevance). "drop" excludes the whole source from the pool.
+-    wm_mode = os.environ.get("VIDLORE_CLIPSTUDIO_WATERMARK_MODE", "crop").strip().lower()
++    # cfg.watermark_mode already defaults from the same env var, so a programmatic setting wins
++    # and the env flag still works.
++    wm_mode = ((getattr(cfg, "watermark_mode", "") or
++                os.environ.get("VIDLORE_CLIPSTUDIO_WATERMARK_MODE", "crop")).strip().lower())
+     pool: list[_PoolShot] = []
+     for src in proj.sources:
+         if src.status != SOURCE_OK:
+@@ -214,7 +222,7 @@
+ 
+ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipConfig,
+                 face_targets: set, anchor_sids: set | None = None,
+-                anchor_bonus: float = 0.0) -> list[tuple[float, dict, _PoolShot]]:
++                anchor_bonus: float = 0.0) -> list[tuple[float, float, dict, _PoolShot]]:
+     import numpy as np
+     import os
+     gate_on = os.environ.get("VIDLORE_CLIPSTUDIO_OCR_GATE", "1").strip() not in ("0", "false", "no", "")
+@@ -247,9 +255,10 @@
+         # video is about (like a real essayist re-watching it), cutting only between shots WITHIN that
+         # scene — not jumping to an unrelated battle for a transition line. Footage from an anchor
+         # source gets a continuity bonus so the through-line holds, while dialogue-lock / CLIP still
+-        # decide WHICH shot of that scene fits each beat.
+-        if anchor_bonus and anchor_sids and ps.sid in anchor_sids:
+-            base += anchor_bonus
++        # decide WHICH shot of that scene fits each beat. The bonus drives RANKING only — it is kept
++        # out of `base` so a zero-signal anchor shot can't report 0.45 confidence and dodge the
++        # low-confidence review flag.
++        bonus = anchor_bonus if (anchor_bonus and anchor_sids and ps.sid in anchor_sids) else 0.0
+         # SOFT preference for clean frames: a burned-in source dialogue subtitle (readable on-frame
+         # text that survived the junk-gate) clashes with our own narration caption. Small penalty so
+         # a clean frame wins a near-tie, but a subtitled frame still wins if it's clearly more
+@@ -261,8 +270,10 @@
+                "transcript": round(trans, 4), "faceid": round(faceid, 3),
+                "object": round(obj, 3), "dialogue": round(dlg, 3),
+                "quality": round(ps.shot.quality, 3)}
+-        scored.append((base, sig, ps))
+-    scored.sort(key=lambda x: x[0], reverse=True)
++        if bonus:
++            sig["anchor_bonus"] = round(bonus, 3)
++        scored.append((base, bonus, sig, ps))
++    scored.sort(key=lambda x: x[0] + x[1], reverse=True)
+     return scored
+ 
+ 
+@@ -272,7 +283,7 @@
+     `analysis` (ScriptAnalysis) lets the matcher resolve a required character → its actor for
+     Face-ID matching."""
+     import numpy as np
+-    pool = _load_pool(proj, progress=progress)
++    pool = _load_pool(proj, cfg, progress=progress)
+     if not pool:
+         proj.selections = [ClipSelection(segment_index=s.index, source_id="", shot_index=-1,
+                                          in_point=0, out_point=0, confidence=0.0) for s in segments]
+@@ -299,26 +310,103 @@
+                   if len(w) > 2 and w not in mtoks and w not in _STOP}
+             if ts:
+                 atok_sets.append(ts)
++        # entity tokens (character/actor names) — a title-only anchor match must include one,
++        # or a song/location word shared across scenes makes a FALSE anchor (the Red Wedding
++        # "Rains of Castamere" clip hijacked a Bronn-tavern video this way)
++        ent_toks = set()
++        for ch in (getattr(analysis, "characters", None) or []):
++            for w in re.findall(r"\w+", (ch.get("name") or "").lower()):
++                if len(w) > 2 and w not in _STOP:
++                    ent_toks.add(w)
++        for ac in (getattr(analysis, "actors", None) or []):
++            for w in re.findall(r"\w+", (ac or "").lower()):
++                if len(w) > 2 and w not in _STOP:
++                    ent_toks.add(w)
++        # the scene's spoken lines — CONTENT-level anchor proof via each source's own ASR
++        # (anchor dialogue from analysis is VERBATIM; per-beat quotes are often paraphrases)
++        _quotes = []
++        for sc in (getattr(analysis, "anchor_scenes", None) or []):
++            for d in (sc.get("dialogue") or []):
++                if isinstance(d, str) and len(d.split()) >= 3:
++                    _quotes.append(d)
++        for s in segments:
++            qt = (getattr(s, "quote", "") or "").strip().strip('"“”')
++            if len(qt) >= 12 and len(qt.split()) >= 3:
++                _quotes.append(qt)
++        _tr_by_sid: dict = {}
++        for ps in pool:
++            if ps.shot.transcript:
++                _tr_by_sid.setdefault(ps.sid, []).append(ps.shot.transcript)
++
++        def _raw_words(s):
++            # NO stopword filter here: iconic quotes are made of common words
++            # ("you're just like me, only smaller") — filtering would erase them
++            return re.findall(r"[a-z']+", (s or "").lower())
++
++        _ep = (getattr(analysis, "episode_hint", "") or "").strip().lower().replace(" ", "")
+         for src in proj.sources:
+-            tl = (src.title or "").lower()
+-            if any(sum(1 for w in ts if w in tl) >= 2 for ts in atok_sets):
++            # (a) dialogue-verified at discovery time = anchor, full stop
++            if (getattr(src, "extra", None) or {}).get("anchor_verified"):
+                 anchor_sids.add(src.id)
++                continue
++            # (a2) the exact EPISODE CODE in the title = the raw scene itself (a "chair scraping
++            # scene S03E03" upload has no character name but IS the scene) — strong enough alone
++            if _ep and _ep in (src.title or "").lower().replace(" ", ""):
++                anchor_sids.add(src.id)
++                continue
++            # (b) the source's own ASR SPEAKS one of the scene's DIALOGUE lines (scene-specific →
++            # one solid hit is decisive). Music sources are already dropped from the pool upstream.
++            joined = " " + " ".join(_raw_words(" ".join(_tr_by_sid.get(src.id, [])))) + " "
++            spoken = False
++            for qt in _quotes:
++                qw = _raw_words(qt)[:6]
++                if len(qw) >= 3 and (" " + " ".join(qw) + " ") in joined:
++                    spoken = True
++                    break
++            if spoken:
++                anchor_sids.add(src.id)
++                continue
++            # (c) title fallback: ≥2 scene tokens AND at least one is a character/actor name.
++            # Token match, not raw substring — prefix only for short plural/possessive suffixes.
++            twords = set(re.findall(r"\w+", (src.title or "").lower()))
++            for ts in atok_sets:
++                hits = {t for t in ts
++                        if any(w == t or (w.startswith(t) and len(w) - len(t) <= 2)
++                               for w in twords)}
++                if len(hits) >= 2 and (not ent_toks or hits & ent_toks):
++                    anchor_sids.add(src.id)
++                    break
+         anchor_bonus = _f_env("VIDLORE_CLIPSTUDIO_ANCHOR_BONUS", 0.45 if single_scene else 0.12)
+     # DARK-SCENE guard — if the one scene is a night/candlelit/interior moment, a bright daytime shot
+     # is the wrong setting (the daylight-forest Bronn that clashed with a night-tavern narration).
+-    dark_scene = single_scene and bool(_DARK_SCENE.search(
+-        anchor_desc + " " + " ".join((getattr(s, "scene_query", "") or "") for s in segments)))
++    # Scoped to the ANCHOR description with movie-title words blanked IN PLACE — deleting tokens
++    # and re-joining would splice non-adjacent words ("the throne. The room" → "throne room") into
++    # false multi-word matches; and only meaningful title words are blanked ("the" never is).
++    _ttoks = {w for w in re.findall(r"\w+", (getattr(analysis, "movie_title", "") or "").lower())
++              if len(w) > 2 and w not in _STOP}
++    _adesc = anchor_desc.lower()
++    for _t in _ttoks:
++        _adesc = re.sub(rf"\b{re.escape(_t)}\b", " ", _adesc)
++    dark_scene = single_scene and bool(_DARK_SCENE.search(_adesc))
+     if anchor_sids and progress:
+         progress(f"match: {len(anchor_sids)} anchor source(s) · bonus={anchor_bonus} "
+                  f"· dark_scene={dark_scene} · type={getattr(analysis,'video_type','')}")
+ 
++    _src_height = {s.id: int(getattr(s, "height", 0) or 0) for s in proj.sources}
+     source_uses: dict[str, int] = {}
+     shot_uses: dict[tuple[str, int], int] = {}
+     recent_sources: list[str] = []
+     recent: list[dict] = []          # recency window: {pos, key, phash, embed} of recent picks
+     selections: list[ClipSelection] = []
+ 
++    _hist_win = max(cfg.recency_cooldown, cfg.source_recency_window)
+     for seg in segments:
++        # recency/source history only matters within the cooldown window — prune so candidate
++        # scoring stays O(pool × window) instead of O(pool × all prior segments)
++        if recent:
++            recent[:] = [h for h in recent if (seg.index - h["pos"]) < _hist_win]
++        if len(recent_sources) > 4 * max(1, cfg.max_consecutive_same_source):
++            del recent_sources[:-cfg.max_consecutive_same_source]
+         text_vec = None
+         if vr is not None:
+             try:
+@@ -340,12 +428,11 @@
+         scored = _score_pool(seg, pool, text_vec, cfg, face_targets, anchor_sids, anchor_bonus)
+ 
+         # `base` = match QUALITY (drives the reported confidence + flagging).
+-        # `adj`  = base minus diversity penalties (drives only WHICH candidate is picked).
+-        # Decoupled so anti-reuse never makes a good visual match look low-confidence.
++        # `adj`  = base + anchor bonus minus diversity penalties (drives only WHICH is picked).
++        # Decoupled so anti-reuse/anchor-continuity never distort the reported confidence.
+         best = None    # (adj, base, ps, cand)
+-        alternates: list[ClipCandidate] = []
+-        seen_alt_sources: set[str] = set()
+-        for base, sig, ps in scored:
++        alt_best: dict[str, ClipCandidate] = {}    # best candidate per source → alternates
++        for base, bonus, sig, ps in scored:
+             key = (ps.sid, ps.shot.index)
+             # SINGLE-SCENE DEEP-DIVE: the anchor scene IS the video — an expert essayist keeps
+             # cutting BETWEEN that one scene's shots (Bronn → the mug → the Hound → reaction), so the
+@@ -403,19 +490,43 @@
+                     w = cfg.recency_weight * (0.5 if (relax and same_shot) else 1.0)
+                     rec_pen = max(rec_pen, w * (1.0 - gap / cfg.recency_cooldown))
+             pen += rec_pen + src_pen
+-            adj = max(0.0, base - pen + 0.08 * (ps.shot.quality - 0.5))   # mild quality preference
+-            qual = round(min(1.0, base), 4)
++            # RESOLUTION preference (selection only, not reported confidence): among similarly
++            # relevant shots, prefer an HD source — an SD (≤480p) exact-scene upload upscales to
++            # a soft 1080p, so a 1080p clip of the same scene should win more beats.
++            _sh = _src_height.get(ps.sid, 0)
++            hd_pref = 0.06 * min(1.0, _sh / 1080.0) if _sh else 0.0
++            adj = max(0.0, base + bonus - pen + hd_pref
++                      + 0.08 * (ps.shot.quality - 0.5))  # mild quality pref
++            qual = round(max(0.0, min(1.0, base)), 4)
+             in_p, out_p = _trim_window(ps.shot, seg, cfg)
+             cand = ClipCandidate(segment_index=seg.index, source_id=ps.sid,
+                                  shot_index=ps.shot.index, score=qual,
+                                  in_point=in_p, out_point=out_p, signals=sig)
+             if best is None or adj > best[0]:
+-                if best is not None and best[3].source_id not in seen_alt_sources and len(alternates) < cfg.candidates_per_segment:
+-                    alternates.append(best[3]); seen_alt_sources.add(best[3].source_id)
++                if best is not None:
++                    prev = best[3]
++                    cur = alt_best.get(prev.source_id)
++                    if cur is None or prev.score > cur.score:
++                        alt_best[prev.source_id] = prev
+                 best = (adj, base, ps, cand)
+-            elif len(alternates) < cfg.candidates_per_segment and ps.sid not in seen_alt_sources:
+-                alternates.append(cand); seen_alt_sources.add(ps.sid)
++            else:
++                cur = alt_best.get(ps.sid)
++                if cur is None or cand.score > cur.score:
++                    alt_best[ps.sid] = cand
+ 
++        # alternates: best candidate per source, ORDERED best-first — the verifier's repair only
++        # tries the first few, and beat_windows inherit this order. Rank by score PLUS the anchor
++        # bonus (recorded in signals): a single-scene deep-dive's windows must keep leading with
++        # the anchor scene's shots, while the reported score stays pure quality.
++        if best is not None:
++            _ckey = (best[3].source_id, best[3].shot_index)
++            alternates = sorted(
++                (c for c in alt_best.values() if (c.source_id, c.shot_index) != _ckey),
++                key=lambda c: c.score + float((c.signals or {}).get("anchor_bonus", 0.0)),
++                reverse=True)[:cfg.candidates_per_segment]
++        else:
++            alternates = []
++
+         if best is None:
+             sel = ClipSelection(segment_index=seg.index, source_id="", shot_index=-1,
+                                 in_point=0, out_point=0, confidence=0.0)
+@@ -424,7 +535,7 @@
+             sel = ClipSelection(
+                 segment_index=seg.index, source_id=ps.sid, shot_index=ps.shot.index,
+                 in_point=cand.in_point, out_point=cand.out_point,
+-                confidence=round(min(1.0, base_q), 4),
++                confidence=round(max(0.0, min(1.0, base_q)), 4),
+                 signals=cand.signals, reuse_count=source_uses.get(ps.sid, 0),
+                 alternates=alternates[:cfg.candidates_per_segment],
+                 source_url=(proj.source(ps.sid).url if proj.source(ps.sid) else ""),
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/models.py vidlore/clipstudio/models.py
+--- /tmp/clipstudio_backup_pre_fixes/models.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/models.py	2026-06-10 16:32:53
+@@ -292,8 +292,12 @@
+         }
+ 
+     def save(self) -> Path:
++        # atomic tmp+replace — save() runs after EVERY stage; an interrupted write must not
++        # corrupt the manifest the whole project resumes from
+         self.root_path.mkdir(parents=True, exist_ok=True)
+-        self.manifest_path.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
++        tmp = self.manifest_path.with_suffix(".json.tmp")
++        tmp.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
++        tmp.replace(self.manifest_path)
+         return self.manifest_path
+ 
+     @classmethod
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/ocr.py vidlore/clipstudio/ocr.py
+--- /tmp/clipstudio_backup_pre_fixes/ocr.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/ocr.py	2026-06-10 16:32:04
+@@ -58,7 +58,7 @@
+     if not text:
+         return []
+     nt = _norm(text)
+-    return [name for name in roster if len(_norm(name)) >= 6 and _norm(name) in nt]
++    return [name for name in (roster or []) if len(_norm(name)) >= 6 and _norm(name) in nt]
+ 
+ 
+ def names_on_card(img_path, roster: list[str]) -> list[str]:
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/orchestrate.py vidlore/clipstudio/orchestrate.py
+--- /tmp/clipstudio_backup_pre_fixes/orchestrate.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/orchestrate.py	2026-06-10 20:53:53
+@@ -8,7 +8,7 @@
+ from pathlib import Path
+ from typing import Optional
+ 
+-from .models import ClipProject
++from .models import ClipProject, SOURCE_OK
+ from .config import ClipConfig, load_clip_config, engine_config
+ from .ingest import ingest_sources, SourceSpec
+ from .index import index_all
+@@ -19,10 +19,19 @@
+ from .build import build_video
+ 
+ 
++class PipelineError(RuntimeError):
++    """A user-actionable pipeline failure (no sources / no script / nothing discovered).
++
++    Raised instead of SystemExit: SystemExit derives from BaseException, so the web portal's
++    worker thread (`except Exception`) never saw it and the job spun forever. The CLI converts
++    it back to a non-zero exit at its boundary."""
++
++
+ def produce(project_dir, *, script_path: Optional[str] = None, script_text: Optional[str] = None,
+             source_specs: Optional[list[SourceSpec]] = None, name: str = "",
+             cfg: Optional[ClipConfig] = None, theme: str = "history", voice: str = "",
+             title: str = "", captions: bool = True, use_tts: bool = True, enrich: bool = True,
++            voiceover: Optional[str] = None,
+             do_build: bool = True, force_index: bool = False, progress=None) -> dict:
+     cfg = cfg or load_clip_config()
+     eng = engine_config()
+@@ -47,10 +56,12 @@
+     blocked = [s.id for s in proj.sources if s.is_blocked]
+     if blocked:
+         log(f"  ⚠ blocked (permission unverified): {blocked}")
+-    usable = [s for s in proj.sources if not s.is_blocked]
++    # a source must be downloaded ('ok') AND permitted — a permitted source whose download
++    # failed would pass an is_blocked-only gate and the pipeline would render black placeholders
++    usable = [s for s in proj.sources if not s.is_blocked and s.status == SOURCE_OK]
+     if not usable:
+-        raise SystemExit("no usable sources — every source is blocked or failed. "
+-                         "Set a permission (owner|licensed|public_domain|cc|fair_use_claim).")
++        raise PipelineError("no usable sources — every source is blocked or failed. "
++                            "Set a permission (owner|licensed|public_domain|cc|fair_use_claim).")
+ 
+     # 2 — index
+     log("stage 2/6 · index")
+@@ -62,10 +73,11 @@
+         script_text = Path(script_path).read_text(encoding="utf-8")
+         proj.script_path = str(script_path)
+     if not (script_text or "").strip():
+-        raise SystemExit("no narration script provided (--script).")
++        raise PipelineError("no narration script provided (--script).")
+     segs = segment_script(script_text, cfg)
+-    if enrich and getattr(eng, "has_llm", False):
+-        enrich_with_llm(segs, eng, progress=progress)
++    from . import llm as _llm
++    if enrich and _llm.has_llm(eng):     # llm.has_llm counts Gemini too (engine has_llm is
++        enrich_with_llm(segs, eng, progress=progress)     # Anthropic-only — Gemini-only setups skipped enrichment)
+     proj.segments = segs
+     proj.save()
+ 
+@@ -91,7 +103,7 @@
+         log("stage 6/6 · build")
+         out = build_video(proj, segs, cfg, voice=voice, captions=captions,
+                           title=title or proj.name, theme_name=theme, use_tts=use_tts,
+-                          progress=progress)
++                          voiceover=voiceover, progress=progress)
+ 
+     return {
+         "project": str(proj.root),
+@@ -110,7 +122,7 @@
+                  theme: str = "history", voice: str = "", title: str = "", captions: bool = True,
+                  voiceover: Optional[str] = None,
+                  use_tts: bool = True, verify: bool = True, do_build: bool = True,
+-                 progress=None) -> dict:
++                 force_index: bool = False, progress=None) -> dict:
+     """FULL AUTO: topic + script in → finished video out. Discovers + downloads its own sources.
+     analyze → discover → download(policy) → Face-ID refs → deep index → match → cut → AI verify
+     → ledger + QC report → assemble."""
+@@ -141,7 +153,7 @@
+         script_text = Path(script_path).read_text(encoding="utf-8")
+         proj.script_path = str(script_path)
+     if not (script_text or "").strip():
+-        raise SystemExit("no narration script provided.")
++        raise PipelineError("no narration script provided.")
+     analysis, segs = analyze_script(script_text, topic=topic, movie_hint=movie_hint,
+                                     eng_cfg=eng, cfg=cfg, progress=progress)
+     proj.segments = segs
+@@ -149,23 +161,31 @@
+     proj.save()
+     log(f"  movie={analysis.movie_title!r} · {len(analysis.actors)} actors · {len(segs)} beats")
+ 
+-    # 2 — discover (target = the requested source count; entity-coverage may add a small overflow)
++    # 2 — discover. The ranked head of the returned list = the requested download budget;
++    # entity-coverage + anchor force-includes are APPENDED past it by discover, so the
++    # download cap below covers the WHOLE returned list — any prefix cap would cut exactly
++    # the must-download items. cfg is copied, never mutated (callers may share it across runs).
++    # Deliberate: max_sources (the user's budget) overrides cfg.discover_target here — the env
++    # knob still governs direct discover_sources() callers.
+     log("2/9 · discover sources")
+-    cfg.discover_target = max(cfg.discover_target, max_sources)
++    import dataclasses as _dc
++    cfg = _dc.replace(cfg, discover_target=max(4, max_sources))
+     candidates = discover_sources(analysis, cfg, segments=segs, progress=progress)
+     proj.meta["candidates"] = [c.to_dict() for c in candidates]
+     proj.save()
+     if not candidates:
+-        raise SystemExit("source discovery found nothing — check connectivity / movie name.")
++        raise PipelineError("source discovery found nothing — check connectivity / movie name.")
+ 
+-    # 3 — download (permission-policy gated). Download the full discovered set INCLUDING the
+-    # entity-coverage overflow so under-represented characters aren't dropped by the cap.
+-    dl_limit = max_sources + cfg.discover_coverage_extra
++    # 3 — download (permission-policy gated). Download the FULL discovered set: discover's own
++    # construction bounds it (head ≤ max_sources, coverage ≤ coverage_extra, anchors ≤ 4/scene),
++    # and download applies the limit as a PREFIX slice — any smaller cap would slice off the
++    # anchor force-includes appended last.
++    dl_limit = len(candidates)
+     log(f"3/9 · download (policy={policy}, max={max_sources}+coverage)")
+     download_candidates(proj, candidates, cfg, policy=policy, limit=dl_limit, progress=progress)
+     usable = [s for s in proj.sources if s.status == "ok"]
+     if not usable:
+-        raise SystemExit(f"no usable sources under policy={policy}. Use --policy approved_testing "
++        raise PipelineError(f"no usable sources under policy={policy}. Use --policy approved_testing "
+                          "(your explicit testing approval) or open_only (public-domain).")
+     log(f"  {len(usable)} sources downloaded")
+ 
+@@ -180,7 +200,8 @@
+ 
+     # 5 — deep index
+     log("5/9 · deep index (ASR + scenes + CLIP + Face-ID + OCR + quality + dedup)")
+-    index_all(proj, cfg, references=refs, faceid=faceid_obj, roster=roster, progress=progress)
++    index_all(proj, cfg, references=refs, faceid=faceid_obj, roster=roster,
++              force=force_index, progress=progress)
+ 
+     # 6 — match
+     log("6/9 · match")
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/review.py vidlore/clipstudio/review.py
+--- /tmp/clipstudio_backup_pre_fixes/review.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/review.py	2026-06-10 16:30:48
+@@ -55,7 +55,11 @@
+     if v.get("status") == "unavailable":
+         ver_html = '<span class="vna">verifier: off</span>'
+     elif vd == "keep":
+-        ver_html = f'<span class="vok">✓ verified {float(v.get("confidence",0)):.2f}</span>'
++        try:
++            _vc = float(v.get("confidence") or 0.0)
++        except (TypeError, ValueError):      # LLM may emit null/"high" — never kill the QC report
++            _vc = 0.0
++        ver_html = f'<span class="vok">✓ verified {_vc:.2f}</span>'
+     elif vd == "replace":
+         ver_html = '<span class="vbad">✗ verifier replaced/failed</span>'
+     else:
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/segment.py vidlore/clipstudio/segment.py
+--- /tmp/clipstudio_backup_pre_fixes/segment.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/segment.py	2026-06-10 20:51:39
+@@ -166,7 +166,13 @@
+                                 messages=[{"role": "user", "content": prompt}], eng_cfg=engine_cfg)
+             m = re.search(r"\[.*\]", txt, re.S)
+             data = _json.loads(m.group(0)) if m else []
+-            by_i = {int(o.get("i", -1)): o for o in data}
++
++            def _bi(o):
++                try:
++                    return int(o.get("i", -1))
++                except (TypeError, ValueError):    # '"i": null'/"three" must not drop the batch
++                    return -1
++            by_i = {_bi(o): o for o in data if isinstance(o, dict)}
+             for s in chunk:
+                 o = by_i.get(s.index)
+                 if not o:
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/verify.py vidlore/clipstudio/verify.py
+--- /tmp/clipstudio_backup_pre_fixes/verify.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/verify.py	2026-06-10 20:46:55
+@@ -120,6 +120,7 @@
+         if v.get("verdict") == "replace":
+             swapped = False
+             tried = 0
++            failed_wins: list = []      # alternates the verifier explicitly REJECTED on the way
+             for alt in sel.alternates:
+                 if tried >= max_replacements:
+                     break
+@@ -130,8 +131,12 @@
+                 anames = ashot.face_ids or []
+                 av = verify_frame(ashot.keyframe_path, seg.text, seg.required_entity,
+                                   seg.required_kind, anames, eng_cfg, model)
++                if av is not None and av.get("verdict") != "keep":
++                    # an explicit non-keep judgment (av None = transport error, NOT a judgment)
++                    failed_wins.append((alt.source_id, float(alt.in_point)))
+                 if av and av.get("verdict") == "keep":
+                     # promote the alternate into the selection
++                    old_sid, old_in = sel.source_id, sel.in_point
+                     sel.source_id = alt.source_id
+                     sel.shot_index = alt.shot_index
+                     sel.in_point = alt.in_point
+@@ -140,6 +145,17 @@
+                     sel.confidence = alt.score
+                     sel.source_url = (proj.source(alt.source_id).url if proj.source(alt.source_id) else "")
+                     sel.identity = (anames[0] if anames else "")
++                    # build_video plays the scene's beats from beat_windows (rejected pick is
++                    # FIRST there) — drop it AND every alternate the verifier explicitly failed
++                    # on the way here, then lead with the promoted window; otherwise rejected
++                    # footage still airs on the scene's later beats.
++                    new_win = [alt.source_id, round(alt.in_point, 3), round(alt.out_point, 3)]
++                    kept = [w for w in (sel.beat_windows or [])
++                            if not (w and w[0] == old_sid and abs(float(w[1]) - float(old_in)) < 0.05)
++                            and not (w and w[0] == new_win[0] and abs(float(w[1]) - new_win[1]) < 0.05)
++                            and not any(w and w[0] == fs and abs(float(w[1]) - fi) < 0.05
++                                        for fs, fi in failed_wins)]
++                    sel.beat_windows = [new_win] + kept
+                     av["status"] = "ok"
+                     av["replaced_from"] = {"shot": shot.index if shot else -1}
+                     sel.verifier = av
+diff -ru --exclude=__pycache__ /tmp/clipstudio_backup_pre_fixes/web.py vidlore/clipstudio/web.py
+--- /tmp/clipstudio_backup_pre_fixes/web.py	2026-06-10 16:12:14
++++ vidlore/clipstudio/web.py	2026-06-10 20:51:59
+@@ -35,8 +35,28 @@
+ # in-memory job registry  id -> {phase, log[], done, ok, output, error, started}
+ _JOBS: dict = {}
+ _LOCK = threading.Lock()
++_JOBS_KEEP = 60          # newest finished jobs kept in the registry (output files stay on disk)
++_JOBS_TTL = 24 * 3600    # finished jobs older than this are evicted from the registry
+ 
+ 
++def _evict_jobs():
++    """Bound the in-memory registry — a long-lived portal must not grow it forever.
++    Only DONE jobs are evicted; their files remain under the portal dir."""
++    with _LOCK:
++        done = sorted((jid for jid, j in _JOBS.items() if j.get("done")),
++                      key=lambda jid: _JOBS[jid].get("started", 0.0))
++        now = time.time()
++        # TTL anchors on COMPLETION (fallback: start) — a long render must still get its
++        # full download window after finishing
++        drop = [jid for jid in done
++                if now - _JOBS[jid].get("finished", _JOBS[jid].get("started", 0.0)) > _JOBS_TTL]
++        overflow = len(done) - len(drop) - _JOBS_KEEP
++        if overflow > 0:
++            drop += [jid for jid in done if jid not in drop][:overflow]
++        for jid in drop:
++            _JOBS.pop(jid, None)
++
++
+ # ---------------------------------------------------------------------------
+ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint: str,
+              script_text: str, voiceover: str | None, max_sources: int, policy: str,
+@@ -61,17 +81,22 @@
+         with _LOCK:
+             j = _JOBS[jid]
+             j["done"] = True
++            j["finished"] = time.time()
+             j["ok"] = bool(res.get("output"))
+             j["output"] = res.get("output")
+             j["summary"] = res.get("summary", {})
+-    except Exception as e:                                # noqa: BLE001
++    except BaseException as e:                            # noqa: BLE001
++        # BaseException: a stray SystemExit from a dependency dies silently in a thread —
++        # the job would spin "running…" forever with done never set
+         with _LOCK:
+             j = _JOBS[jid]
+             j["done"] = True
++            j["finished"] = time.time()
+             j["ok"] = False
+             j["error"] = str(e)[:600]
+             j["log"].append("FATAL: " + str(e)[:300])
+-            j["log"].append(traceback.format_exc()[-1200:])
++        # full traceback (absolute paths) only to the server console, not the browser
++        traceback.print_exc()
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -200,6 +225,7 @@
+     except Exception:
+         max_sources = 8
+ 
++    _evict_jobs()
+     jid = uuid.uuid4().hex[:10]
+     proj = _ROOT / jid
+     proj.mkdir(parents=True, exist_ok=True)
+@@ -217,7 +243,8 @@
+ 
+     t = threading.Thread(target=_run_job, args=(jid, proj), kwargs=dict(
+         topic=topic, title=topic, movie_hint=movie, script_text=script_text,
+-        voiceover=vo_path, max_sources=max_sources, policy="approved_testing",
++        voiceover=vo_path, max_sources=max_sources,
++        policy=os.environ.get("VIDLORE_CLIPSTUDIO_PORTAL_POLICY", "approved_testing").strip(),
+         theme=theme, verify=verify), daemon=True)
+     t.start()
+     return redirect(url_for("job", jid=jid))

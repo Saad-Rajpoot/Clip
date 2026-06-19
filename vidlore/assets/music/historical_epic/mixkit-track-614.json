@@ -1,0 +1,48 @@
+{
+ "name": "mixkit-track-614",
+ "category": "historical_epic",
+ "title": "Mixkit Track 614",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/614/614.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 160.42,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "historical_epic",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 160.42000000000002,
+   "mean_volume_db": -24.3,
+   "max_volume_db": -5.8,
+   "silence_ratio": 0.12725976810871464,
+   "spectral_centroid_hz": 2094.801105366725,
+   "spectral_flatness": 0.15454813838005066,
+   "energy_arc": "steady",
+   "bpm": 144,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.412,
+   "darkness": 0.295,
+   "orchestral_density": 0.593,
+   "rhythmic_aggression": 0.632
+  }
+ },
+ "doc_quality": {
+  "score": 0.42,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:historical",
+   "+soft:epic"
+  ]
+ }
+}

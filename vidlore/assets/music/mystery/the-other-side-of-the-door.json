@@ -1,0 +1,49 @@
+{
+ "name": "the-other-side-of-the-door",
+ "category": "mystery",
+ "title": "The Other Side of the Door",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 167.81,
+ "tags": [
+  "driving",
+  "mysterious",
+  "mystical"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "mystery",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 167.84,
+   "mean_volume_db": -25.7,
+   "max_volume_db": -7.1,
+   "silence_ratio": 0.0394046353670162,
+   "spectral_centroid_hz": 1457.654938116247,
+   "spectral_flatness": 0.16971097886562347,
+   "energy_arc": "steady",
+   "bpm": 96,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.623,
+   "darkness": 0.598,
+   "orchestral_density": 0.737,
+   "rhythmic_aggression": 0.458
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:mysterious"
+  ]
+ }
+}

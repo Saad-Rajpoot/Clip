@@ -1,0 +1,45 @@
+{
+ "name": "mixkit-track-138",
+ "category": "mystery",
+ "title": "Mixkit Track 138",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/138/138.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 104.05,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "mystery",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 104.07,
+   "mean_volume_db": -25.9,
+   "max_volume_db": -10.5,
+   "silence_ratio": 0.08366033439031421,
+   "spectral_centroid_hz": 2254.9153160369187,
+   "spectral_flatness": 0.3078790307044983,
+   "energy_arc": "steady",
+   "bpm": 161,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.304,
+   "darkness": 0.224,
+   "orchestral_density": 0.5,
+   "rhythmic_aggression": 0.753
+  }
+ },
+ "doc_quality": {
+  "score": 0.0,
+  "verdict": "neutral",
+  "reasons": []
+ }
+}

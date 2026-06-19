@@ -1,0 +1,48 @@
+{
+ "name": "discover",
+ "category": "historical_epic",
+ "title": "Discover",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/680/680.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 102.43,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "historical_epic",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 102.43,
+   "mean_volume_db": -25.2,
+   "max_volume_db": -7.0,
+   "silence_ratio": 0.0797341208630284,
+   "spectral_centroid_hz": 2076.4212167018454,
+   "spectral_flatness": 0.3912864923477173,
+   "energy_arc": "steady",
+   "bpm": 152,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.362,
+   "darkness": 0.275,
+   "orchestral_density": 0.414,
+   "rhythmic_aggression": 0.894
+  }
+ },
+ "doc_quality": {
+  "score": 0.42,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:historical",
+   "+soft:epic"
+  ]
+ }
+}

@@ -1,0 +1,47 @@
+{
+ "name": "mixkit-track-601",
+ "category": "emotional_piano",
+ "title": "Mixkit Track 601",
+ "channel": "Mixkit",
+ "source": "mixkit",
+ "source_url": "https://assets.mixkit.co/music/601/601.mp3",
+ "license": "Mixkit Free License -- free for commercial use, no attribution required",
+ "attribution": "",
+ "dur": 205.9,
+ "tags": [
+  "mixkit"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "emotional_piano",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 205.9,
+   "mean_volume_db": -25.5,
+   "max_volume_db": -11.4,
+   "silence_ratio": 0.08615017969888294,
+   "spectral_centroid_hz": 1079.562899862474,
+   "spectral_flatness": 0.08616440743207932,
+   "energy_arc": "steady",
+   "bpm": 144,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.624,
+   "darkness": 0.735,
+   "orchestral_density": 0.745,
+   "rhythmic_aggression": 0.482
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:piano"
+  ]
+ }
+}

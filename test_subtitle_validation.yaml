@@ -1,0 +1,28 @@
+# Same as test_p0_validation.yaml but captions ON so the subtitle
+# identity work (P-subtitle) is actually visible in the final MP4.
+title: "September 15, 2008: The Day Wall Street Cracked"
+prompt: |
+  Tell the story of September 15, 2008 — the day Lehman Brothers filed
+  for bankruptcy and the global financial system seized.  Center the
+  narrative on Treasury Secretary Henry Paulson and the 96 hours that
+  followed.  Hit these beats:
+
+  • The morning Lehman files Chapter 11 at 1:45am ET.
+  • The trading floor scene in Lower Manhattan at market open.
+  • Paulson's emergency Sunday session at the New York Fed.
+  • The $700B TARP request to Congress.
+  • Capital ratios before vs after (4.2% → 13.1%).
+  • The chain reaction: AIG rescue, money-market freeze, UK
+    nationalisations within 30 days.
+  • Quote from Paulson: "The fundamentals of our economy are strong."
+  • Closing: the regulatory aftermath — Dodd-Frank, stress tests,
+    Basel III.
+
+  Tone: factual, named-source-driven, deliberate.  Cite Reuters,
+  Treasury press releases, Fed minutes where relevant.
+
+fmt: documentary
+duration: "1-2"
+theme: history
+captions: true        # ← ON so subtitle identity shows in MP4
+background: auto

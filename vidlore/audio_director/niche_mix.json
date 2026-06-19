@@ -1,0 +1,103 @@
+{
+ "profiles": [
+  {
+   "niche": "spy",
+   "duck_threshold": 0.09,
+   "duck_ratio": 3.2,
+   "duck_attack_ms": 5,
+   "duck_release_ms": 320,
+   "music_bed_mult": 0.85,
+   "atmos_mult": 0.85,
+   "reveal_duck_scale": 1.2,
+   "reveal_silence_cap_s": 1.2,
+   "resting_bed_categories": [
+    "ambient",
+    "aftermath"
+   ],
+   "description": "Tradecraft intelligibility and taut tension. Threshold 0.090 (-20.9 dBFS) sits near the body of close-mic narration so the suspense/tech_cyber bed itself never trips the duck and only actual voice does; the bed (not the music's own swells) stays out of the way. Gentle 3.2:1 ratio with a fast 5ms attack produces ~10-13 dB of musical ducking on voiced peaks — firm intelligibility without the bed vanishing or pumping. 320ms release recovers cleanly inside inter-word gaps yet still feels coiled. Bed runs lean at 0.85x (~0.136, -17.3 dBFS) as a pulse under whispered stakes. Atmosphere trimmed to 0.85 (~-8.3 dBFS) so surveillance hiss/room tone reads as texture but stays clearly UNDER the bed. Reveals firm (1.20x) for redacted_document and impact stings; tier silence clamped at 1.20s so repeated stings never create dead air."
+  },
+  {
+   "niche": "crime",
+   "duck_threshold": 0.085,
+   "duck_ratio": 3.5,
+   "duck_attack_ms": 6,
+   "duck_release_ms": 480,
+   "music_bed_mult": 0.78,
+   "atmos_mult": 0.8,
+   "reveal_duck_scale": 1.25,
+   "reveal_silence_cap_s": 1.25,
+   "resting_bed_categories": [
+    "ambient",
+    "aftermath",
+    "dark_investigation"
+   ],
+   "description": "Interrogation-room weight where the voice is unquestionably king. Threshold 0.085 (-21.4 dBFS) and 3.5:1 ratio carve a deliberate ~12-14 dB pocket for forensic narration over the dark_investigation bed (0.78x, ~0.125, -18.1 dBFS) — wide but musical, never a 25 dB collapse. The longer 480ms release genuinely holds the duck through clause-length pauses (400-900ms) so the bed does not lurch up mid-sentence, where a 300ms release would have surged. 6ms attack gives dread without choppiness. Atmosphere trimmed to 0.80 (~-8.9 dBFS) to keep cases clean and oppressive, clearly under the bed. ambient/aftermath supply a resting bed for low-intensity passages instead of always-on tension. Strongest reveal scaling (1.25x) lands evidence-thud, stamp and framed_evidence_spotlight with authority; silence clamped at 1.25s."
+  },
+  {
+   "niche": "business",
+   "duck_threshold": 0.13,
+   "duck_ratio": 2.2,
+   "duck_attack_ms": 12,
+   "duck_release_ms": 260,
+   "music_bed_mult": 1.05,
+   "atmos_mult": 0.65,
+   "reveal_duck_scale": 0.95,
+   "reveal_silence_cap_s": 1,
+   "music_categories": [
+    "climax_build",
+    "ambient",
+    "emotional_piano"
+   ],
+   "description": "Confident, momentum-carrying mix where music shares the frame. High threshold 0.130 (-17.7 dBFS) sits at the speech body so genuinely quiet asides ride OVER the bed and only assertive narration triggers; shallow 2.2:1 ratio keeps the duck to ~8-9 dB so the bed stays audibly present at 1.05x (~0.168, -15.5 dBFS) without ever burying VO. Gentle 12ms attack avoids choppiness against faster-paced VO; 260ms release flows briskly between phrases to keep pace. NOTE: 'financial' is empty today, so the bed draws from climax_build with ambient as a resting/neutral bed and emotional_piano for restraint, avoiding a 9-track loop of pure build energy; route to financial once populated. Atmosphere pulled well down (0.65, ~-10.7 dBFS) for a clean corporate-floor sound. Reveals slightly softened (0.95x) so money_flow_empire, growth_curve and statistic_bar feel assured."
+  },
+  {
+   "niche": "history",
+   "duck_threshold": 0.15,
+   "duck_ratio": 2,
+   "duck_attack_ms": 18,
+   "duck_release_ms": 600,
+   "music_bed_mult": 1.1,
+   "atmos_mult": 0.95,
+   "reveal_duck_scale": 0.85,
+   "reveal_silence_cap_s": 1,
+   "music_categories": [
+    "historical_epic",
+    "emotional_piano",
+    "ambient"
+   ],
+   "description": "Warm, unhurried, cinematic narration where the score is a co-storyteller. Threshold 0.150 (-16.5 dBFS) and the gentlest 2.0:1 ratio yield only ~7 dB of ducking — the shallow depth (not the release) is what makes the gain motion genuinely imperceptible, swelling the historical_epic/emotional_piano bed warmly back at 1.10x (~0.176, -15.1 dBFS) under measured VO. Soft 18ms attack and long 600ms release keep the swell smooth into long reflective pauses with no pumping (a deep+slow duck would have been the pumpiest possible combination; shallow+slow is correct here). ambient provides a resting bed for quiet passages. Atmosphere held at 0.95 (~-7.4 dBFS) — present and enveloping but still UNDER the bed, never the loudest layer. Reveals deliberately gentle (0.85x): chronology_timeline, era_band and headline_document_reveal resolve with grace; silence clamped at 1.00s to honor flow."
+  },
+  {
+   "niche": "geopolitics",
+   "duck_threshold": 0.105,
+   "duck_ratio": 2.8,
+   "duck_attack_ms": 8,
+   "duck_release_ms": 300,
+   "music_bed_mult": 0.95,
+   "atmos_mult": 0.8,
+   "reveal_duck_scale": 1.05,
+   "reveal_silence_cap_s": 1.1,
+   "resting_bed_categories": [
+    "ambient"
+   ],
+   "description": "Urgent newsroom-floor energy that stays crystal clear. Threshold 0.105 (-19.6 dBFS) keeps fast briefing narration intelligible while the bed itself does not self-trigger; 2.8:1 ratio gives a controlled ~11 dB duck so the military_tension/suspense bed holds present at 0.95x (~0.152, -16.4 dBFS) to drive stakes without burying rapid VO. 8ms attack with a brisk 300ms release reads alert and forward-moving, recovering between rapid clauses without nervous pumping. Atmosphere trimmed to 0.80 (~-8.9 dBFS) for a clean, authoritative wire-report feel, clearly under the bed. ambient supplies a resting bed for analytical lulls. Reveals crisp but not violent (1.05x) so world_map_arc, map_route_spread and map_heat_spread punctuate decisively; silence clamped at 1.10s."
+  },
+  {
+   "niche": "mystery",
+   "duck_threshold": 0.095,
+   "duck_ratio": 3.2,
+   "duck_attack_ms": 7,
+   "duck_release_ms": 420,
+   "music_bed_mult": 0.8,
+   "atmos_mult": 1,
+   "reveal_duck_scale": 1.25,
+   "reveal_silence_cap_s": 1.25,
+   "resting_bed_categories": [
+    "ambient",
+    "aftermath"
+   ],
+   "description": "Sharp and deep like spy but built around space and silence as design. Threshold 0.095 (-20.4 dBFS) and 3.2:1 ratio open a clean ~12-13 dB pocket for hushed, suggestive narration over the mystery/slow_reveal bed (0.80x, ~0.128, -17.9 dBFS) so emptiness can do the work — without the bed collapsing or pumping back in. 7ms attack reacts quickly; the slightly longer 420ms release lets unease linger and the bed creep back slowly into pauses rather than snapping up. Atmosphere held at 1.00 (~-6.9 dBFS) — ambience/drones/negative space are the genre, but capped at unity so the bed is never quieter than the room tone (no multiplier above 1.0, which would have made atmosphere the loudest layer and muddied the mix). ambient/aftermath provide a resting bed. Top reveal scaling (1.25x) gives slow_reveal tiers and spotlight_object_hold their breath-held stings; silence clamped at 1.25s so repeated reveals never read as dead air."
+  }
+ ],
+ "_doc": "Per-niche mixing/ducking tuning (sidechain threshold/ratio/attack/release + bed/atmos mults + reveal duck scale). Read by assemble.py via music_director.niche_mix(). Verifier-corrected: no pumping, no buried dialogue."
+}

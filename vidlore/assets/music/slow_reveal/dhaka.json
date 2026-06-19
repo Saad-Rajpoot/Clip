@@ -1,0 +1,48 @@
+{
+ "name": "dhaka",
+ "category": "slow_reveal",
+ "title": "Dhaka",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 248.24,
+ "tags": [
+  "mysterious",
+  "mystical"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "slow_reveal",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 248.27,
+   "mean_volume_db": -25.1,
+   "max_volume_db": -3.7,
+   "silence_ratio": 0.015102146856245217,
+   "spectral_centroid_hz": 1620.9667482518207,
+   "spectral_flatness": 0.18050748109817505,
+   "energy_arc": "steady",
+   "bpm": 74,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.65,
+   "darkness": 0.548,
+   "orchestral_density": 0.769,
+   "rhythmic_aggression": 0.421
+  }
+ },
+ "doc_quality": {
+  "score": 0.12,
+  "verdict": "neutral",
+  "reasons": [
+   "+soft:mysterious"
+  ]
+ }
+}

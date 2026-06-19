@@ -1,0 +1,50 @@
+{
+ "name": "our-story-begins",
+ "category": "suspense",
+ "title": "Our Story Begins",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 84.58,
+ "tags": [
+  "epic",
+  "suspenseful",
+  "uplifting"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "suspense",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 84.61,
+   "mean_volume_db": -23.8,
+   "max_volume_db": -8.0,
+   "silence_ratio": 0.04700076823070559,
+   "spectral_centroid_hz": 964.8448225885884,
+   "spectral_flatness": 0.10842593759298325,
+   "energy_arc": "arc",
+   "bpm": 89,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.702,
+   "darkness": 0.8,
+   "orchestral_density": 0.792,
+   "rhythmic_aggression": 0.312
+  }
+ },
+ "doc_quality": {
+  "score": 0.42,
+  "verdict": "prefer",
+  "reasons": [
+   "+strong:suspense",
+   "+soft:epic"
+  ]
+ }
+}

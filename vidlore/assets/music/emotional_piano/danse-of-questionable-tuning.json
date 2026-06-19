@@ -1,0 +1,50 @@
+{
+ "name": "danse-of-questionable-tuning",
+ "category": "emotional_piano",
+ "title": "Danse of Questionable Tuning",
+ "channel": "Kevin MacLeod (incompetech)",
+ "source": "incompetech",
+ "source_url": "https://incompetech.com/music/royalty-free/index.html",
+ "license": "Kevin MacLeod (incompetech.com) -- CC BY 4.0",
+ "attribution": "Music: Kevin MacLeod (incompetech.com), Licensed under Creative Commons: By Attribution 4.0 License -- http://creativecommons.org/licenses/by/4.0/",
+ "dur": 126.2,
+ "tags": [
+  "bouncy",
+  "grooving",
+  "somber"
+ ],
+ "fetched": "2026-05-23",
+ "classify": {
+  "category": "emotional_piano",
+  "confidence": 0.85,
+  "voted_by": [
+   "source_hint",
+   "audio_agree"
+  ],
+  "features": {
+   "duration": 126.22,
+   "mean_volume_db": -24.4,
+   "max_volume_db": -5.0,
+   "silence_ratio": 0.008573015369988909,
+   "spectral_centroid_hz": 1644.1381079390414,
+   "spectral_flatness": 0.12527692317962646,
+   "energy_arc": "steady",
+   "bpm": 129,
+   "is_sparse": false,
+   "is_bright": false,
+   "is_dynamic": true,
+   "tension": 0.637,
+   "darkness": 0.557,
+   "orchestral_density": 0.843,
+   "rhythmic_aggression": 0.566
+  }
+ },
+ "doc_quality": {
+  "score": -0.13,
+  "verdict": "neutral",
+  "reasons": [
+   "-soft:bouncy",
+   "+soft:piano"
+  ]
+ }
+}
