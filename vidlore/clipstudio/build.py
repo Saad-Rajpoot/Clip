@@ -316,6 +316,13 @@ _NARRATION_RX = re.compile(
     r"(?:his|her|their|the|[a-z]+'s)[a-z ]{0,18}(?:brilliance|genius|strateg\w+|cunning|ruthless\w+|"
     r"madness|loyalty|dominance|downfall|character|arc|nature)|"
     r"\b[a-z]+'s (?:strategic|tactical|political) (?:brilliance|genius|mind|prowess)|"
+    # essayist RECAP tells — third-person summary of the SHOW across time, never in-character
+    # dialogue (observed leaking into a breakout window from a 'Cersei's Fatal Mistake' analysis
+    # source: "...walked out untouched. Cersei spent multiple seasons after the purple wedding..."):
+    r"most people (?:think|believe|assume|forget|miss|don'?t)|people (?:think|assume|forget) that|"
+    r"(?:spent|spends|spend|spending) (?:the (?:next|rest|following)|multiple|several|two|three|"
+    r"four|five|years|seasons|episodes)|(?:multiple|several|the next|the following|over \w+) "
+    r"(?:seasons|episodes)|(?:red|purple|green) wedding|"
     r"character('?s)? arc)\b", re.I)
 
 
@@ -518,7 +525,8 @@ _ESSAYISH_RX = re.compile(
     r"psycholog|toxic|the (?:core|meaning|psychology) of|best scenes|supercut|"
     r"featurette|behind the|on playing|interview|reacts?|reaction|"
     # edit/essay/reaction TITLES that slipped onto a Tywin S01E07 video and aired commentary:
-    r"the scene where|almost cries|motivational|tribute|edit\b|amv|"
+    r"the scene where|the scene that|fatal mistake|biggest mistake|costly mistake|"
+    r"lost because|lost (?:her|his|the) [a-z]+ because|almost cries|motivational|tribute|edit\b|amv|"
     r"educat(?:es|ing|ion)|watching|watch ?along|first time|the sack of|the story of|"
     r"vs fan|plot hole|q ?& ?a|explains?|commentary)\b", re.I)
 
@@ -648,7 +656,7 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     # many candidates were found and why each was rejected (commentary / recap-wrong-era /
     # wrong-character / dark / dedup / later-era source).
     _rej = {"later_era_source": 0, "commentary": 0, "recap": 0, "wrong_char": 0,
-            "dark": 0, "burned_text": 0, "dedup": 0, "spacing": 0}
+            "dark": 0, "burned_text": 0, "dedup": 0, "spacing": 0, "window_commentary": 0}
     from .match import _ocr_text_heavy as _txt9
     import os as _os9b
     _tgate9 = _os9b.environ.get("VIDLORE_CLIPSTUDIO_TEXT_GATE", "1").strip() \
@@ -955,13 +963,34 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         a = work / f"breakout_{idx:03d}.wav"
         real = _extract_breakout(src.local_path, float(sh.start), dur, v, a,
                                  int(getattr(src, "width", 0) or 0))
-        if real and real > 1.5:
-            out.append({"seg_index": idx, "dur": real, "video": v, "audio": a})
-            # ACCEPTED breakout provenance — scene index + SOURCE TITLE + source timestamp + the line.
-            # Tag the opening verbatim hook as COLD-OPEN so the audit shows it aired at the start.
-            _cold = "COLD-OPEN " if (idx, src.id, round(float(sh.start), 1)) == _cold_key else ""
-            log(f"[BREAKOUT-OK] #{len(out)} {_cold}before-scene={idx} dur={real:.1f}s "
-                f"src@{float(sh.start):.0f}s src={(src.title or src.id)[:52]!r} line={_q[:42]!r}")
+        if not (real and real > 1.5):
+            continue
+        # POST-EXTRACTION WINDOW-AUDIO gate — the matched SHOT line passed the commentary gate, but
+        # _extract_breakout extends the window to a full spoken line (3-10s), which can BLEED into
+        # adjacent essay/commentary narration from the SAME source (observed: a 'Cersei's Fatal
+        # Mistake ...' analysis source matched the in-character "chaos is a ladder" line, but the
+        # aired window continued into "...Cersei spent multiple seasons after the purple wedding").
+        # Validate the AIRED window's transcript (every shot it spans), not just the matched line.
+        _w0, _w1 = float(sh.start), float(sh.start) + float(real)
+        _wtxt = " ".join(
+            (getattr(s2, "transcript", "") or "").strip()
+            for s2 in shots_of.get(src.id, [])
+            if s2.end > _w0 and s2.start < _w1 and (getattr(s2, "transcript", "") or "").strip())
+        if _wtxt and _is_narration(_wtxt):
+            _rej["window_commentary"] += 1
+            log(f"build: breakout REJECTED post-extract before scene {idx} — aired audio window is "
+                f"commentary/narration, not in-character dialogue "
+                f"(src={(src.title or src.id)[:40]!r})")
+            continue                                   # try the next candidate; none clean → no breakout
+        out.append({"seg_index": idx, "dur": real, "video": v, "audio": a})
+        # ACCEPTED breakout provenance — scene index + SOURCE TITLE + source timestamp + the line.
+        # Tag the opening verbatim hook as COLD-OPEN so the audit shows it aired at the start.
+        _cold = "COLD-OPEN " if (idx, src.id, round(float(sh.start), 1)) == _cold_key else ""
+        log(f"[BREAKOUT-OK] #{len(out)} {_cold}before-scene={idx} dur={real:.1f}s "
+            f"src@{float(sh.start):.0f}s src={(src.title or src.id)[:52]!r} line={_q[:42]!r}")
+    if _rej["window_commentary"]:
+        log(f"[BREAKOUT-AUDIT] post-extract: window_commentary={_rej['window_commentary']} "
+            f"rejected (aired window bled into commentary) → final accepted={len(out)}")
     return out
 
 

@@ -2276,6 +2276,71 @@ def test_intro_coldopen_breakout():
                          src_title="Game of Thrones FINALE Breakdown Explained reaction")[0]))
 
 
+def test_breakout_window_commentary_gate():
+    print("[breakout] essay-title source rejection + post-extraction window-commentary gate")
+    import types
+    from pathlib import Path as _P
+    from vidlore.clipstudio import build as B
+    from vidlore.clipstudio.build import _ESSAYISH_RX, _breakout_src_ok
+    import vidlore.clipstudio.index as _idxmod
+
+    # B.4 — essay-analysis TITLE rejection (the real bad case + the user's listed phrases)
+    check("essay title 'Cersei's Fatal Mistake with Littlefinger' caught",
+          bool(_ESSAYISH_RX.search("Cersei's Fatal Mistake with Littlefinger")))
+    check("_breakout_src_ok rejects the fatal-mistake source",
+          not _breakout_src_ok(types.SimpleNamespace(title="Cersei's Fatal Mistake with Littlefinger"), []))
+    check("'lost ... because' analysis title caught",
+          bool(_ESSAYISH_RX.search("How Cersei Lost Her Throne Because Of Littlefinger")))
+    check("'explained' / 'breakdown' / 'analysis' titles caught",
+          all(bool(_ESSAYISH_RX.search(t)) for t in
+              ("Iron Throne Scene Explained", "Finale Breakdown", "Cersei Power Analysis")))
+    check("clean real-scene source still allowed (not over-blocked)",
+          _breakout_src_ok(types.SimpleNamespace(
+              title="Littlefinger vs Cersei - Knowledge Is Power scene HD"), []))
+
+    # B.1/B.2/B.3 — post-extraction window-audio validation: matched shot line is clean
+    # ("chaos is a ladder"), but the extracted window bleeds into the NEXT shot's commentary.
+    _P("/tmp/x.mp4").write_bytes(b"x")
+    shots = [
+        types.SimpleNamespace(index=0, start=575.0, end=579.0, transcript="",
+                              face_ids=[], local_path="/tmp/x.mp4"),
+        types.SimpleNamespace(index=1, start=581.0, end=584.0,
+                              transcript="chaos isn't a pit chaos is a ladder",
+                              face_ids=[], local_path="/tmp/x.mp4"),
+        types.SimpleNamespace(index=2, start=584.0, end=591.0,
+                              transcript="and she walked out untouched most people think cersei "
+                                         "lost the throne because of this",
+                              face_ids=[], local_path="/tmp/x.mp4"),
+    ]
+    src = types.SimpleNamespace(id="s1", status="ok", local_path="/tmp/x.mp4",
+                               title="Littlefinger Chaos Is A Ladder scene HD", width=1920,
+                               extra={"anchor_verified": True})
+    proj = types.SimpleNamespace(sources=[src], meta={"analysis": {
+        "characters": [{"name": "Petyr Baelish", "actor": "Aidan Gillen"}],
+        "anchor_scenes": [{"name": "chaos is a ladder",
+                           "query": "littlefinger chaos ladder", "dialogue": []}],
+        "movie_title": "Game of Thrones", "episode_hint": ""}})
+    segs = [types.SimpleNamespace(
+                index=i,
+                text=("chaos is a ladder climb the realm" if i == 5 else f"narration filler beat {i} words"),
+                quote=("Chaos isn't a pit. Chaos is a ladder." if i == 5 else "")) for i in range(10)]
+    _orig_ls = _idxmod.load_shots
+    _orig = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text)
+    _idxmod.load_shots = lambda p, sid: shots
+    B._extract_breakout = lambda *a, **k: 7.5            # window [581, 588.5] spans the commentary shot
+    B._breakout_window_luma = lambda *a, **k: 80.0
+    B._frame_has_burned_text = lambda *a, **k: False
+    logs = []
+    try:
+        out = B._select_breakouts(proj, segs, 800.0, _P("/tmp"), lambda m: logs.append(str(m)))
+    finally:
+        _idxmod.load_shots = _orig_ls
+        B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text = _orig
+    lt = "\n".join(logs)
+    check("aired-window commentary rejected post-extraction (matched line was clean)",
+          not out and "window_commentary" in lt and "REJECTED post-extract" in lt)
+
+
 def test_discovery_plural_gates_and_purge():
     print("[discover] PLURAL title-gate fix (reactions/reactors/reviews/...) + cached-source purge")
     from vidlore.clipstudio import discover as D
@@ -2451,6 +2516,7 @@ def main():
     test_discovery_plural_gates_and_purge()
     test_breakout_evidence_mining_reachable()
     test_intro_coldopen_breakout()
+    test_breakout_window_commentary_gate()
     test_breakout_era_scene_gate()
     test_burned_text_black_and_recap_gates()
     print(f"\n{PASS} passed · {FAIL} failed")
