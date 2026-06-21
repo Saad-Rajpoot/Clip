@@ -1008,10 +1008,18 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                 f"commentary/narration, not in-character dialogue "
                 f"(src={(src.title or src.id)[:40]!r})")
             continue                                   # try the next candidate; none clean → no breakout
-        out.append({"seg_index": idx, "dur": real, "video": v, "audio": a})
+        _is_cold = (idx, src.id, round(float(sh.start), 1)) == _cold_key
+        _entry = {"seg_index": idx, "dur": real, "video": v, "audio": a}
+        if _is_cold:
+            # carry the hook quote + the beats it was stitched from, so the (opt-in) VO word-cut
+            # can locate the narrator's rendition of the hook in the voiceover and replace it.
+            _entry["cold_open"] = True
+            _entry["hook_quote"] = _q
+            _entry["hook_beats"] = sorted(_ohook[2]) if _ohook is not None else [idx]
+        out.append(_entry)
         # ACCEPTED breakout provenance — scene index + SOURCE TITLE + source timestamp + the line.
         # Tag the opening verbatim hook as COLD-OPEN so the audit shows it aired at the start.
-        _cold = "COLD-OPEN " if (idx, src.id, round(float(sh.start), 1)) == _cold_key else ""
+        _cold = "COLD-OPEN " if _is_cold else ""
         log(f"[BREAKOUT-OK] #{len(out)} {_cold}before-scene={idx} dur={real:.1f}s "
             f"src@{float(sh.start):.0f}s src={(src.title or src.id)[:52]!r} line={_q[:42]!r}")
     # ALWAYS report the FINAL accepted count after post-extraction (the pre_extract_accepted count
@@ -1119,6 +1127,192 @@ def _refine_pause_times(narration_audio: Path, needs: dict) -> dict:
         if best is not None:
             out[old] = best + 0.12
     return out
+
+
+def _locate_hook_span(vo_path, hook_quote, log, *, max_scan: float = 35.0, max_span: float = 18.0):
+    """Locate the narrator's rendition of the cold-open hook in the uploaded VOICEOVER via WORD-LEVEL
+    whisper timestamps (NOT beat durations). Returns (h0, h1, match_ratio) — start of the first
+    matched hook word, end of the last — or None if the match is weak. The semantic gate: the VO
+    must actually OPEN with the hook words (>=60% matched, in order, near t=0). Word boundaries are
+    the primary source; beat durations are only a downstream reference/fallback."""
+    import re as _re
+    try:
+        from faster_whisper import WhisperModel
+    except Exception:
+        return None
+    hook_w = [w for w in _re.findall(r"[a-z']+", (hook_quote or "").lower()) if len(w) > 1 or w == "i"]
+    if len(hook_w) < 3:
+        return None
+    try:
+        m = WhisperModel("base", device="cpu", compute_type="int8")
+        segs, _ = m.transcribe(str(vo_path), word_timestamps=True, vad_filter=False)
+        vow = []
+        for s in segs:
+            for w in (s.words or []):
+                tok = _re.sub(r"[^a-z']", "", (w.word or "").lower())
+                if tok:
+                    vow.append((tok, float(w.start), float(w.end)))
+            if vow and vow[-1][1] > max_scan:
+                break
+    except Exception:
+        return None
+    if len(vow) < 3:
+        return None
+    # Match the hook words IN ORDER from a VO start position, SKIPPING interleaved narration words
+    # (the opening hook fragments are often split by narration: "Seize him. Cut his throat." [Two
+    # seconds pass...] "Stop. Wait — I've changed my mind."). Bounded by max_span so it never runs
+    # away; gated on coverage + a near-t=0 start so it only fires when the VO genuinely OPENS with it.
+    n = len(hook_w)
+    best = None
+    for s0 in range(min(6, len(vow))):
+        hi, vi, matched, first_t, last_t = 0, s0, 0, None, None
+        while hi < n and vi < len(vow):
+            if first_t is not None and vow[vi][1] - first_t > max_span:
+                break
+            if vow[vi][0] == hook_w[hi]:
+                first_t = vow[vi][1] if first_t is None else first_t
+                last_t = vow[vi][2]
+                matched += 1
+                hi += 1
+            vi += 1
+        if matched >= 3 and first_t is not None and first_t <= 3.0 \
+                and (best is None or matched > best[0]):
+            best = (matched, first_t, last_t)
+    if best is None:
+        return None
+    matched, h0, h1 = best
+    ratio = matched / n
+    if ratio < 0.70 or h1 is None or h1 <= h0:             # semantic gate → caller falls back
+        return None
+    return (h0, h1, ratio)
+
+
+def _audio_trim_prepend(vo_path, h1: float, clip_audio, d_clip: float, work: Path):
+    """New narration track = [cold-open clip audio, trimmed to d_clip] + [voiceover from h1 onward].
+    The prepend MUST be exactly d_clip long — the same quantity used for Δ and the cold-open scene
+    duration — else the clip's own audio/video duration mismatch desyncs the whole remainder."""
+    dest = work / "narration_vocut.wav"
+    fc = (f"[0:a]atrim=0:{d_clip:.3f},asetpts=PTS-STARTPTS[c];"
+          f"[1:a]atrim=start={h1:.3f},asetpts=PTS-STARTPTS[v];"
+          f"[c][v]concat=n=2:v=0:a=1[out]")
+    p = subprocess.run([ffmpeg_exe(), "-y", "-i", str(clip_audio), "-i", str(vo_path),
+                        "-filter_complex", fc, "-map", "[out]", "-ar", "44100", "-ac", "2",
+                        str(dest)], capture_output=True, timeout=600)
+    return dest if (p.returncode == 0 and dest.exists() and dest.stat().st_size > 0) else None
+
+
+def _apply_coldopen_vocut(proj, segments, scenes, narration, co, work, log, protect_idx=None):
+    """OPT-IN cold-open VO WORD-CUT (env VIDLORE_CLIPSTUDIO_VO_CUT, default OFF). REPLACE the
+    narrator's opening-hook words with the real-scene clip: locate the hook in the VOICEOVER by
+    word-level timestamps, cut that span, prepend the clip, DROP the hook beats, shift the rest by
+    Δ. Returns (segments, scenes, narration, bmap, idx_map, dropped_count) on success, or None to
+    fall back to the proven insert behaviour. ANY uncertainty falls back — never breaks a render.
+    Works on COPIES so a fallback leaves the caller's segments/scenes/narration pristine. protect_idx
+    = scene indices that must NOT be dropped/trimmed (mid-video breakout pseudo-scenes) → fall back if
+    the cut would touch one."""
+    import copy as _copy
+    from vidlore.script_gen import Scene as _EScene
+    from vidlore.tts import NarratedScene as _NScene
+    from .models import ScriptSegment as _CSeg
+    protect = set(protect_idx or ())
+    try:
+        clip_audio, clip_video = co.get("audio"), co.get("video")
+        d_clip = float(co.get("dur") or 0.0)
+        hook_q = co.get("hook_quote") or ""
+        if not (clip_audio and clip_video and d_clip > 1.0 and hook_q):
+            return None
+        loc = _locate_hook_span(narration.audio, hook_q, log)
+        if loc is None:
+            log("build: VO-cut fallback — opening hook not confidently located in the voiceover")
+            return None
+        h0, h1, ratio = loc
+        ns_list = list(narration.scenes)
+        cum, _t = {}, 0.0
+        for ns in ns_list:
+            cum[ns.index] = (_t, _t + float(ns.duration))
+            _t += float(ns.duration)
+        tol = 0.30
+        dropped, survive, straddle = [], [], None
+        for ns in ns_list:
+            cs, ce = cum[ns.index]
+            if ce <= h1 + tol:
+                dropped.append(ns.index)               # scene audio fully inside the cut span
+            elif cs >= h1 - tol:
+                survive.append(ns.index)               # scene fully after the cut
+            elif straddle is None:
+                straddle = ns.index                    # the ONE scene crossing the cut point → trim
+                survive.append(ns.index)
+            else:
+                log("build: VO-cut fallback — more than one beat straddles the cut point")
+                return None
+        if not dropped or not survive:
+            log("build: VO-cut fallback — no clean hook/remainder split")
+            return None
+        # never cut/trim a mid-video breakout pseudo-scene (would corrupt that breakout)
+        if protect & (set(dropped) | ({straddle} if straddle is not None else set())):
+            log("build: VO-cut fallback — the cut would touch a mid-video breakout scene")
+            return None
+        new_audio = _audio_trim_prepend(narration.audio, h1, clip_audio, d_clip, work)
+        if new_audio is None:
+            log("build: VO-cut fallback — audio trim/prepend failed")
+            return None
+        delta = d_clip - h1
+        seg_by = {s.index: s for s in segments}
+        sc_by = {s.index: s for s in scenes}
+        ns_by = {n.index: n for n in ns_list}
+        new_segs, new_scs, new_ns, idx_map, bmap, cap_specs = [], [], [], {}, {}, []
+        # cold-open pseudo-scene at index 0 (the real-scene clip replaces the hook narration)
+        new_segs.append(_CSeg(index=0, text="", est_duration=d_clip))
+        _sb = _EScene(index=0, narration="", keywords=[], visual="breakout")
+        _sb.intensity, _sb.role, _sb.shot_type = 1, "evidence", "archival"
+        new_scs.append(_sb)
+        new_ns.append(_NScene(index=0, audio=Path(clip_audio), duration=d_clip, words=[]))
+        bmap[0] = Path(clip_video)
+        cap_specs.append({"start": 0.0, "dur": d_clip, "audio": str(clip_audio)})
+        ni = 1
+        for idx in sorted(survive):
+            seg, sc, ns = seg_by.get(idx), sc_by.get(idx), ns_by.get(idx)
+            if seg is None or ns is None:
+                continue
+            # work on COPIES — leave the caller's objects pristine so any later error/fallback is safe
+            seg = _copy.copy(seg)
+            seg.index = ni
+            new_segs.append(seg)
+            if sc is not None:
+                sc = _copy.copy(sc)
+                sc.index = ni
+                new_scs.append(sc)
+            ns = _copy.copy(ns)
+            ns.index = ni
+            _ws = [_copy.copy(w) for w in (getattr(ns, "words", None) or [])]
+            if idx == straddle:
+                # keep only the TAIL (words after the cut); the leading hook words went with the audio.
+                cs, ce = cum[idx]
+                ns.duration = max(0.1, ce - h1)
+                _ws = [w for w in _ws if float(w.start) >= h1 - 0.05]
+            for w in _ws:
+                w.start = float(w.start) + delta
+                w.end = float(w.end) + delta
+            ns.words = _ws
+            new_ns.append(ns)
+            idx_map[idx] = ni
+            ni += 1
+        # mid-video breakout captions: DROP any inside the cut span (their audio was removed),
+        # shift the rest by Δ; then add the cold-open cap (already at index 0 of cap_specs).
+        for cs in (getattr(narration, "_breakout_caps", None) or []):
+            if float(cs["start"]) < h1 - tol:
+                continue
+            cap_specs.append({"start": round(float(cs["start"]) + delta, 3),
+                              "dur": cs["dur"], "audio": cs["audio"]})
+        narration.audio = new_audio
+        narration.scenes = new_ns
+        narration._breakout_caps = cap_specs               # narration.total is a derived property
+        log(f"build: VO-CUT cold-open — hook in VO [{h0:.2f}-{h1:.2f}s] match={ratio:.0%}; cut the "
+            f"narrator's hook, dropped {len(dropped)} beat(s), prepended {d_clip:.1f}s clip (Δ={delta:+.2f}s)")
+        return new_segs, new_scs, narration, bmap, idx_map, len(dropped)
+    except Exception as e:                                 # noqa: BLE001
+        log(f"build: VO-cut fallback — exception ({str(e)[:90]})")
+        return None
 
 
 def _apply_breakouts(proj, segments, scenes, narration, picks, work, log):
@@ -1912,6 +2106,13 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 from vidlore.tts import narrate_from_file
                 narration = narrate_from_file(script, str(Path(voiceover).resolve()), work / "vo")
                 log(f"build: narration {narration.total:.1f}s (user voiceover, forced-aligned)")
+            if narration is not None:
+                # mark word-aligned uploaded VO — the cold-open VO word-cut needs REAL word
+                # boundaries (whisper-aligned), never the proportional estimates of a TTS render.
+                try:
+                    narration._vo_word_aligned = True
+                except Exception:
+                    pass
         except Exception as e:                            # noqa: BLE001
             log(f"build: voiceover align failed ({str(e)[:90]}) — falling back to TTS")
             narration = None
@@ -1966,10 +2167,42 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         try:
             _bks = _select_breakouts(proj, segments, getattr(narration, "total", 0.0), work, log)
             if _bks:
-                segments, scenes, narration, _breakout_clip, _bidx = _apply_breakouts(
-                    proj, segments, scenes, narration, _bks, work, log)
-                sel_by_idx = {_bidx[s.segment_index]: s for s in proj.selections
-                              if s.segment_index in _bidx}
+                _co = next((b for b in _bks if b.get("cold_open")), None)
+                _mid = [b for b in _bks if not b.get("cold_open")]
+                _bidx = {}
+                # mid-video breakouts first (they don't touch the opening beats) — INSERT as usual
+                if _mid:
+                    segments, scenes, narration, _breakout_clip, _bidx = _apply_breakouts(
+                        proj, segments, scenes, narration, _mid, work, log)
+                # cold-open: OPT-IN VO word-cut (replace) if enabled + the strict hook gate passes;
+                # otherwise the proven INSERT path. Default OFF (VIDLORE_CLIPSTUDIO_VO_CUT).
+                if _co:
+                    _vocut = os.environ.get("VIDLORE_CLIPSTUDIO_VO_CUT", "0").strip() \
+                        not in ("0", "false", "no", "")
+                    _done = False
+                    # only on a word-aligned uploaded voiceover (real word boundaries — never TTS
+                    # proportional estimates), and protect mid-video breakout scenes from the cut
+                    if _vocut and getattr(narration, "_vo_word_aligned", False):
+                        _res = _apply_coldopen_vocut(proj, segments, scenes, narration, _co, work, log,
+                                                     protect_idx=set(_breakout_clip.keys()))
+                        if _res is not None:
+                            segments, scenes, narration, _co_bmap, _co_idx, _drop = _res
+                            # compose old→final index map + remap mid-video clip scenes through the
+                            # cold-open reindex; DROP any key the cold-open removed (never keep stale)
+                            _breakout_clip = {_co_idx[k]: v for k, v in _breakout_clip.items()
+                                              if k in _co_idx}
+                            _breakout_clip.update(_co_bmap)
+                            _bidx = ({o: _co_idx[p] for o, p in _bidx.items() if p in _co_idx}
+                                     if _bidx else dict(_co_idx))
+                            _done = True
+                    if not _done:                          # fallback / flag-off → normal insert
+                        segments, scenes, narration, _b2, _i2 = _apply_breakouts(
+                            proj, segments, scenes, narration, [_co], work, log)
+                        _breakout_clip.update(_b2)
+                        _bidx = ({o: _i2.get(p, p) for o, p in _bidx.items()} if _bidx else _i2)
+                if _bidx:
+                    sel_by_idx = {_bidx[s.segment_index]: s for s in proj.selections
+                                  if s.segment_index in _bidx}
         except Exception as e:                            # noqa: BLE001
             log(f"build: breakouts skipped ({str(e)[:80]})")
 

@@ -2390,6 +2390,78 @@ def test_breakout_window_commentary_gate():
           not out and "window_commentary" in lt and "REJECTED post-extract" in lt)
 
 
+def test_coldopen_vocut():
+    print("[breakout] cold-open VO word-cut (opt-in): replace hook narration, trim straddle, fallback")
+    import types
+    from pathlib import Path as _P
+    from vidlore.clipstudio import build as B
+
+    def _w(word, s, e):
+        return types.SimpleNamespace(word=word, start=s, end=e)
+
+    def _mk():
+        # beat0 [0,2] fully in cut; beat1 [2,5] STRADDLES cut@4 (throat/mind<4 cut, thats/cersei>=4
+        # kept); beat2 [5,9] + beat3 [9,13] survive
+        ns = [types.SimpleNamespace(index=0, duration=2.0, audio=_P("/tmp/x.wav"),
+                  words=[_w("seize", 0.0, 0.5), _w("him", 0.5, 1.0), _w("cut", 1.0, 1.6)]),
+              types.SimpleNamespace(index=1, duration=3.0, audio=_P("/tmp/x.wav"),
+                  words=[_w("throat", 2.0, 2.5), _w("mind", 3.0, 3.6),
+                         _w("thats", 4.2, 4.6), _w("cersei", 4.6, 5.0)]),
+              types.SimpleNamespace(index=2, duration=4.0, audio=_P("/tmp/x.wav"),
+                  words=[_w("queen", 5.2, 5.6), _w("regent", 6.0, 6.6)]),
+              types.SimpleNamespace(index=3, duration=4.0, audio=_P("/tmp/x.wav"),
+                  words=[_w("the", 9.2, 9.4), _w("most", 9.4, 9.9)])]
+        narr = types.SimpleNamespace(audio=_P("/tmp/vo.wav"), scenes=ns, total=13.0, _breakout_caps=[])
+        segs = [types.SimpleNamespace(index=i, text=f"b{i}", est_duration=ns[i].duration, quote="")
+                for i in range(4)]
+        scs = [types.SimpleNamespace(index=i, role="x", visual="") for i in range(4)]
+        co = {"seg_index": 0, "dur": 6.0, "video": _P("/tmp/clip.mp4"), "audio": _P("/tmp/clip.wav"),
+              "cold_open": True, "hook_quote": "seize him cut his throat mind", "hook_beats": [0, 1]}
+        return types.SimpleNamespace(sources=[]), segs, scs, narr, co
+
+    _ol, _oa = B._locate_hook_span, B._audio_trim_prepend
+    B._audio_trim_prepend = lambda *a, **k: _P("/tmp/narration_vocut.wav")
+    B._locate_hook_span = lambda *a, **k: (0.0, 4.0, 1.0)          # cut at 4.0s
+    proj, segs, scs, narr, co = _mk()
+    try:
+        res = B._apply_coldopen_vocut(proj, segs, scs, narr, co, _P("/tmp"), lambda m: None)
+    finally:
+        B._locate_hook_span, B._audio_trim_prepend = _ol, _oa
+    check("VO-cut returns a transform (gate passed)", res is not None)
+    if res:
+        _ns2, _sc2, nnarr, bmap, imap, dropped = res
+        delta = 6.0 - 4.0                                          # D_clip - h1 = 2.0
+        check("cold-open clip is scene 0 (dur=D_clip)",
+              bmap.get(0) is not None and abs(nnarr.scenes[0].duration - 6.0) < 1e-6)
+        check("beat fully inside the cut is dropped (beat0 gone)", dropped == 1 and 0 not in imap)
+        check("straddle beat trimmed to its post-cut tail",
+              [w.word for w in nnarr.scenes[1].words] == ["thats", "cersei"]
+              and abs(nnarr.scenes[1].duration - 1.0) < 1e-6)
+        check("straddle tail word shifted by Δ", abs(nnarr.scenes[1].words[0].start - (4.2 + delta)) < 0.02)
+        check("surviving beat words shifted by Δ", abs(nnarr.scenes[2].words[0].start - (5.2 + delta)) < 0.02)
+        check("idx_map maps surviving originals → new indices", imap.get(2) == 2 and imap.get(3) == 3)
+        check("cold-open caption added at t=0",
+              bool(nnarr._breakout_caps) and nnarr._breakout_caps[0]["start"] == 0.0)
+        check("narration audio replaced by the trimmed+prepended track",
+              str(nnarr.audio).endswith("narration_vocut.wav"))
+
+    # FALLBACK: hook not located → None (caller uses the proven insert path); fresh objects
+    B._locate_hook_span = lambda *a, **k: None
+    proj2, segs2, scs2, narr2, co2 = _mk()
+    try:
+        res2 = B._apply_coldopen_vocut(proj2, segs2, scs2, narr2, co2, _P("/tmp"), lambda m: None)
+    finally:
+        B._locate_hook_span = _ol
+    check("VO-cut falls back (None) when the hook isn't confidently located", res2 is None)
+    # the build wiring is opt-in (default OFF) and falls back
+    bsrc = (Path(__file__).resolve().parent.parent / "vidlore" / "clipstudio" /
+            "build.py").read_text(encoding="utf-8")
+    check("VO-cut is gated by VIDLORE_CLIPSTUDIO_VO_CUT (default OFF)",
+          'os.environ.get("VIDLORE_CLIPSTUDIO_VO_CUT", "0")' in bsrc)
+    check("build falls back to insert when VO-cut returns None",
+          "if not _done:" in bsrc and "_apply_coldopen_vocut(" in bsrc)
+
+
 def test_discovery_plural_gates_and_purge():
     print("[discover] PLURAL title-gate fix (reactions/reactors/reviews/...) + cached-source purge")
     from vidlore.clipstudio import discover as D
@@ -2566,6 +2638,7 @@ def main():
     test_breakout_evidence_mining_reachable()
     test_intro_coldopen_breakout()
     test_breakout_window_commentary_gate()
+    test_coldopen_vocut()
     test_breakout_era_scene_gate()
     test_burned_text_black_and_recap_gates()
     print(f"\n{PASS} passed · {FAIL} failed")
