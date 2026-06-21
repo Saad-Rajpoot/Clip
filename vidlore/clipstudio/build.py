@@ -815,8 +815,16 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     if not cands:
         log("build: no breakout — no spoken line relates to the narration (natural skip)")
         return []
-    cands = [c for c in cands if c[1] >= 1]            # scene 0 carries the title overlay
-    cands.sort(key=lambda x: -x[0])
+    # COLD-OPEN: scene 0 is normally the title overlay, but the OPENING verbatim quote (the hook,
+    # e.g. "Seize him. Cut his throat.") is allowed to air at scene 0 — KEEP a scene-0 candidate only
+    # when it is a strong-verbatim / cold-open match, NEVER a generic evidence-mined one.
+    _cold_key = (_verbatim_first[1] if (_verbatim_first is not None
+                 and _verbatim_first[0] <= max(5, len(segments) // 12)) else None)
+    cands = [c for c in cands
+             if c[1] >= 1 or (c[1], c[2].id, round(float(c[3].start), 1)) in _verbatim_strong]
+    # process the cold-open FIRST (reserve its slot before n_max / spacing fills up), then by score
+    cands.sort(key=lambda x: (0 if (x[1], x[2].id, round(float(x[3].start), 1)) == _cold_key else 1,
+                              -x[0]))
     # competitor density: one real-audio evidence moment every ~28s where material allows
     # (their edit: 13 in 180s on a single-scene essay; ours stays match-gated so sparse
     # scripts naturally get fewer) — was a hard 1-3 cap
@@ -856,6 +864,17 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
             log(f"build: breakout skipped before scene {c[1]} — retrospective recap line "
                 f"(wrong era/scene, not the scene's own dialogue)")
             continue
+        # WRONG-ERA SOURCE gate — verbatim / cold-open candidates are NOT tier-era-filtered (the
+        # evidence-miner pre-filters its sources, the verbatim-quote loop does not), so re-check here:
+        # a source whose title declares ONLY later seasons than the core scene never airs (unless the
+        # script explicitly compares). Applies to all candidates; mined ones already passed, so no-op.
+        if _core_max9 and not _allow_compare9:
+            _css9 = _seasons9((c[2].title or "").lower())
+            if _css9 and min(_css9) > _core_max9:
+                _rej["later_era_source"] += 1
+                log(f"build: breakout skipped before scene {c[1]} — later-era source "
+                    f"(declares season > core scene S{_core_max9})")
+                continue
         # WRONG-CHARACTER gate: a breakout airs an iconic MOMENT, so the shot must feature a confirmed
         # MAIN character (Face-ID). A shot showing no main-cast face (e.g. a bearded man on a boat over
         # a Tyrion/Tywin scene) must not air. Active only when the cast is known; a breakout is optional
@@ -938,9 +957,11 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                                  int(getattr(src, "width", 0) or 0))
         if real and real > 1.5:
             out.append({"seg_index": idx, "dur": real, "video": v, "audio": a})
-            # ACCEPTED breakout provenance — scene index + SOURCE TITLE + source timestamp + the line
-            log(f"[BREAKOUT-OK] #{len(out)} before-scene={idx} dur={real:.1f}s src@{float(sh.start):.0f}s "
-                f"src={(src.title or src.id)[:52]!r} line={_q[:42]!r}")
+            # ACCEPTED breakout provenance — scene index + SOURCE TITLE + source timestamp + the line.
+            # Tag the opening verbatim hook as COLD-OPEN so the audit shows it aired at the start.
+            _cold = "COLD-OPEN " if (idx, src.id, round(float(sh.start), 1)) == _cold_key else ""
+            log(f"[BREAKOUT-OK] #{len(out)} {_cold}before-scene={idx} dur={real:.1f}s "
+                f"src@{float(sh.start):.0f}s src={(src.title or src.id)[:52]!r} line={_q[:42]!r}")
     return out
 
 

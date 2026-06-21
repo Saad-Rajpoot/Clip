@@ -2190,6 +2190,87 @@ def test_breakout_evidence_mining_reachable():
           "if not cands:" in fn)
 
 
+def test_intro_coldopen_breakout():
+    print("[breakout] intro COLD-OPEN: scene-0 verbatim quote aired; generic scene-0 rejected; gates hold")
+    import types
+    from pathlib import Path as _P
+    from vidlore.clipstudio import build as B
+    import vidlore.clipstudio.index as _idxmod
+
+    _P("/tmp/x.mp4").write_bytes(b"x")                  # source path must exist (helpers are mocked)
+
+    def _run(*, quote, asr, face_ids=(), luma=80.0, burned=False,
+             src_title="Cersei vs Littlefinger throne scene HD", n_segs=6):
+        shots = [
+            types.SimpleNamespace(index=0, start=12.0, end=20.0, transcript=asr,
+                                  face_ids=list(face_ids), local_path="/tmp/x.mp4"),
+            types.SimpleNamespace(index=1, start=22.0, end=26.0, transcript="",
+                                  face_ids=[], local_path="/tmp/x.mp4"),
+            types.SimpleNamespace(index=2, start=30.0, end=34.0, transcript="he walks in",
+                                  face_ids=[], local_path="/tmp/x.mp4"),
+        ]
+        src = types.SimpleNamespace(id="s1", status="ok", local_path="/tmp/x.mp4",
+                                    title=src_title, width=1920, extra={"anchor_verified": True})
+        proj = types.SimpleNamespace(sources=[src], meta={"analysis": {
+            "characters": [{"name": "Cersei Lannister", "actor": "Lena Headey"}],
+            "anchor_scenes": [{"name": "Cersei power scene",
+                               "query": "cersei littlefinger power", "dialogue": []}],
+            "movie_title": "Game of Thrones", "episode_hint": ""}})
+        segs = [types.SimpleNamespace(
+                    index=i,
+                    text=("seize him cut his throat power king realm" if i == 0
+                          else f"narration filler beat number {i} words here now"),
+                    quote=(quote if i == 0 else "")) for i in range(n_segs)]
+        _orig_ls = _idxmod.load_shots
+        _orig = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text)
+        _idxmod.load_shots = lambda p, sid: shots
+        B._extract_breakout = lambda *a, **k: 5.0
+        B._breakout_window_luma = lambda *a, **k: luma
+        B._frame_has_burned_text = lambda *a, **k: burned
+        logs = []
+        try:
+            out = B._select_breakouts(proj, segs, 200.0, _P("/tmp"), lambda m: logs.append(str(m)))
+        finally:
+            _idxmod.load_shots = _orig_ls
+            B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text = _orig
+        return out, "\n".join(logs)
+
+    def _has0(out):
+        return any(o["seg_index"] == 0 for o in out)
+
+    VQ = "Seize him. Cut his throat."                    # opening hook quote (5 content words)
+    SC = "seize him cut his throat stop wait i have changed my mind"   # scene ASR contains it verbatim
+
+    # 1) scene-0 verbatim cold-open ACCEPTED + logged as COLD-OPEN
+    out, logs = _run(quote=VQ, asr=SC)
+    check("scene-0 verbatim quote accepted as cold-open", _has0(out))
+    check("[BREAKOUT-OK] logs COLD-OPEN provenance", "COLD-OPEN" in logs)
+
+    # 2) generic / non-verbatim scene-0 candidate REJECTED (no quote → mined-only → dropped at scene 0)
+    out2, _ = _run(quote="", asr="seize him cut his throat power king realm and the crown")
+    check("scene-0 generic (non-verbatim) candidate rejected", not _has0(out2))
+
+    # 3) verbatim cold-open OVERRIDES Face-ID (empty face_ids would normally be wrong-character)
+    out3, logs3 = _run(quote=VQ, asr=SC, face_ids=[])
+    check("verbatim cold-open overrides Face-ID gate",
+          _has0(out3) and "audio-match overrides face guard" in logs3)
+
+    # 4) safety gates STILL reject a verbatim cold-open:
+    check("verbatim cold-open still rejected on near-black",
+          not _has0(_run(quote=VQ, asr=SC, luma=10.0)[0]))
+    check("verbatim cold-open still rejected on burned-in text",
+          not _has0(_run(quote=VQ, asr=SC, burned=True)[0]))
+    _cm = "basically what this scene shows is cersei seize him cut his throat then changes her mind to prove power"
+    check("verbatim cold-open still rejected on commentary audio",
+          not _has0(_run(quote="Seize him. Cut his throat.", asr=_cm)[0]))
+    check("verbatim cold-open still rejected on recap line",
+          not _has0(_run(quote="last time I was here I killed",
+                         asr="last time i was here i killed my father with a crossbow")[0]))
+    check("verbatim cold-open still rejected on later-era / wrong source",
+          not _has0(_run(quote=VQ, asr=SC,
+                         src_title="Game of Thrones FINALE Breakdown Explained reaction")[0]))
+
+
 def test_discovery_plural_gates_and_purge():
     print("[discover] PLURAL title-gate fix (reactions/reactors/reviews/...) + cached-source purge")
     from vidlore.clipstudio import discover as D
@@ -2364,6 +2445,7 @@ def main():
     test_reaction_still_pool_gate()
     test_discovery_plural_gates_and_purge()
     test_breakout_evidence_mining_reachable()
+    test_intro_coldopen_breakout()
     test_breakout_era_scene_gate()
     test_burned_text_black_and_recap_gates()
     print(f"\n{PASS} passed · {FAIL} failed")
