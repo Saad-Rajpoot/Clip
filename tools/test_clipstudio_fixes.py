@@ -1743,8 +1743,14 @@ def test_source_budget_scales_with_script():
     check("181-beat essay budget is much larger than 8", B(8, 181, "essay") >= 30)
     # never below the user's explicit ask
     check("explicit high budget is never lowered", B(40, 60, "essay") == 40)
-    # single-scene deep-dive is NOT scaled (wants one scene's footage, not breadth)
-    check("single_scene is not scaled", B(8, 181, "single_scene") == 8)
+    # SHORT single-scene deep-dive is NOT scaled (wants one scene's footage, not breadth)
+    check("short single_scene is not scaled", B(8, 40, "single_scene") == 8)
+    # LONG single-scene deep-dive gets a >=20 source floor (avoids airing one clip 57x — the Cersei
+    # 20-min render used its top source 57x because single_scene returned base=10)
+    check("long single_scene gets a >=20 floor", B(10, 211, "single_scene") >= 20)
+    check("long single_scene scales gently with length", B(10, 211, "single_scene") == min(32, 20 + (211 - 100) // 15))
+    # long-form floor applies to multi-scene too, but scaling can exceed it
+    check("100-beat video reaches the 20 floor", B(6, 100, "essay") >= 20)
     # capped so it can't explode
     check("budget is capped at 48", B(8, 9999, "essay") == 48)
 

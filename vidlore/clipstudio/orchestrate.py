@@ -34,12 +34,21 @@ def _scaled_source_budget(max_sources: int, n_beats: int, video_type: str = "") 
     generic clips download and most beats fall back to re-using the same handful of footage (observed:
     a 181-beat Daenerys essay aired 14 generic compilations → 37% of beats verifier-flagged as
     wrong-scene). Scale to ~1 source per 5 beats (capped), but NEVER below the user's explicit
-    request, and NEVER scale a single-scene deep-dive (it wants one scene's raw footage, not breadth)."""
+    request.
+
+    LONG-FORM FLOOR: a long video (≈10+ min, 100+ beats) needs real footage BREADTH even when it is a
+    single-scene deep-dive — otherwise the matcher re-airs one clip dozens of times (observed: a
+    211-beat single-scene essay used its top source 57× → 99% of beats were the same scene). So long
+    videos get a ≥20-source floor (scaling gently with length, capped), subject to what discovery can
+    actually find. A SHORT single-scene clip still just wants its own raw footage (no floor)."""
     base = max(4, int(max_sources or 4))
+    n = int(n_beats or 0)
+    longform_floor = min(32, 20 + (n - 100) // 15) if n >= 100 else 0
     if (video_type or "").strip().lower() == "single_scene":
-        return base
-    scaled = min(48, (int(n_beats or 0) + 4) // 5)
-    return max(base, scaled)
+        # short deep-dive → raw scene only; LONG deep-dive → still needs angle/B-roll variety
+        return max(base, longform_floor)
+    scaled = min(48, (n + 4) // 5)
+    return max(base, scaled, longform_floor)
 
 
 def produce(project_dir, *, script_path: Optional[str] = None, script_text: Optional[str] = None,

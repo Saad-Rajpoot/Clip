@@ -654,6 +654,16 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     _tgate9 = _os9b.environ.get("VIDLORE_CLIPSTUDIO_TEXT_GATE", "1").strip() \
         not in ("0", "false", "no", "")
     cands = []
+    # STRONG-VERBATIM set: (seg_idx, src_id, round(start,1)) for matches where 4+ CONSECUTIVE scripted
+    # words are spoken verbatim in the footage's own ASR. The exact scripted line located inside the
+    # footage's audio is a STRONGER scene-identity proof than a face — a wrong scene almost never
+    # contains the same 4-word line. So these are EXEMPT from the wrong-character Face-ID gate (a dim /
+    # profile / over-the-shoulder shot that Face-ID can't confirm still airs IF it speaks the exact
+    # line). Every OTHER gate still applies (era / recap / commentary / burned-text / luma). This is
+    # what lets an iconic quoted line — e.g. an opening "Seize him. Cut his throat." cold-open — air
+    # even when the throne-room shot is too dim for Face-ID. (User's cold-open / "let the scene speak".)
+    _verbatim_strong = set()
+    _verbatim_first = None        # (seg_idx, key) of the EARLIEST verbatim quote = cold-open hook
     for seg, _q in quote_segs:
         qw = _rw(_q)[:8]
         best = None
@@ -670,9 +680,20 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                     score = run + 3 + (2 if (getattr(s, "extra", None) or {}).get("anchor_verified")
                                        else 0)
                     if best is None or score > best[0]:
-                        best = (score, s, sh)
+                        best = (score, s, sh, run)
         if best is not None:
             cands.append((best[0], seg.index, best[1], best[2], _q))
+            _k = (seg.index, best[1].id, round(float(best[2].start), 1))
+            if best[3] >= 4:                           # 4+ exact consecutive words → trust over Face-ID
+                _verbatim_strong.add(_k)
+            if _verbatim_first is None or seg.index < _verbatim_first[0]:
+                _verbatim_first = (seg.index, _k)
+    # COLD-OPEN HOOK: the EARLIEST verbatim quote that falls in the opening stretch is the hook — the
+    # user wants the real scene of the opening quoted line (e.g. "Seize him. Cut his throat.") to air
+    # right at the start. Exempt it from the Face-ID gate too, so a short 3-word opening quote over a
+    # dim throne-room shot still airs (a wrong scene won't speak that exact opening line).
+    if _verbatim_first is not None and _verbatim_first[0] <= max(5, len(segments) // 12):
+        _verbatim_strong.add(_verbatim_first[1])
     if True:
         # EVIDENCE MINING — always runs, not just as a fallback. The competitor's edit uses the
         # scene's OWN spoken lines as evidence every ~15-30s (narration makes a point, the scene
@@ -839,13 +860,19 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         # MAIN character (Face-ID). A shot showing no main-cast face (e.g. a bearded man on a boat over
         # a Tyrion/Tywin scene) must not air. Active only when the cast is known; a breakout is optional
         # polish, so a missed Face-ID just means no breakout there (safe), never a wrong one.
-        if _main_faces9:
+        _verbatim_ok = (c[1], c[2].id, round(float(c[3].start), 1)) in _verbatim_strong
+        if _main_faces9 and not _verbatim_ok:
             _fids9 = {f.lower() for f in (getattr(c[3], "face_ids", None) or [])}
             if not (_fids9 & _main_faces9):
                 _rej["wrong_char"] += 1
                 log(f"build: breakout skipped before scene {c[1]} — shot shows no confirmed main "
                     f"character (wrong-character/scene guard)")
                 continue
+        elif _verbatim_ok and _main_faces9:
+            _fids9b = {f.lower() for f in (getattr(c[3], "face_ids", None) or [])}
+            if not (_fids9b & _main_faces9):
+                log(f"build: breakout before scene {c[1]} — Face-ID unconfirmed but EXACT scripted "
+                    f"line is spoken verbatim in this shot (audio-match overrides face guard)")
         if _tgate9 and getattr(c[2], "local_path", None) and (
                 _frame_has_burned_text(c[2].local_path, float(c[3].start) + 0.8)
                 or _frame_has_burned_text(
@@ -864,6 +891,12 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         # env VIDLORE_CLIPSTUDIO_BREAKOUT_LUMA_FLOOR — 0 disables the gate.
         _lflo9 = float(_os9b.environ.get(
             "VIDLORE_CLIPSTUDIO_BREAKOUT_LUMA_FLOOR", "62") or 62)
+        # A verbatim / cold-open match IS the exact scene we asked for, and many iconic scenes are
+        # LEGITIMATELY dim (candle-lit throne room, night). Don't reject those on the legibility
+        # floor — only on TRUE near-black (subject genuinely invisible). Other breakouts keep the
+        # full floor. This is what lets a dim "Power is power" / "Cut his throat" cold-open air.
+        if _verbatim_ok:
+            _lflo9 = min(_lflo9, 24.0)
         if _lflo9 > 0 and getattr(c[2], "local_path", None):
             _bwin9 = min(9.0, max(2.0, float(c[3].end) - float(c[3].start)))
             _blum9 = _breakout_window_luma(c[2].local_path, float(c[3].start), _bwin9)
