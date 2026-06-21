@@ -970,7 +970,12 @@ def test_breakout_intelligence():
     check("competitor evidence density cap (~1 per 28s, max 8)",
           "n_max = max(1, min(8, 1 + int(total // 28)))" in src)
     check("verbatim quote outranks mined evidence", "run + 3 +" in src)
-    check("scene-0 breakout excluded (title overlay)", "c[1] >= 1" in src)
+    # scene 0 is the title overlay, so a GENERIC scene-0 breakout is excluded — but a verbatim
+    # COLD-OPEN at scene 0 (the opening hook quote) is allowed through this filter (see
+    # test_intro_coldopen_breakout for the behavioral coverage)
+    check("scene-0 allowed only for a verbatim cold-open (generic scene-0 still excluded)",
+          "if c[1] >= 1 or (c[1], c[2].id, round(float(c[3].start), 1)) in _verbatim_strong" in src
+          and "_cold_key" in src)
     check("breakout length is dialogue-aware (3-10s), not a fixed shot-length chop",
           "dur = 10.0" in src and "_dialogue_aware_dur" in src)
     check("breakout look registered in air-guard",
