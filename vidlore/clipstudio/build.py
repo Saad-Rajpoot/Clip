@@ -963,7 +963,7 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
 
     # ── BREAKOUT AUDIT (one greppable line per render) — candidates found, per-reason rejections, kept.
     # Grep: `grep BREAKOUT-AUDIT <log>` for the summary; `grep BREAKOUT-OK <log>` for accepted ones. ──
-    log(f"[BREAKOUT-AUDIT] candidates={len(cands)} accepted={len(picked)} | "
+    log(f"[BREAKOUT-AUDIT] candidates={len(cands)} pre_extract_accepted={len(picked)} | "
         f"rejected commentary={_rej['commentary']} recap/wrong-era={_rej['recap']} "
         f"wrong-character={_rej['wrong_char']} dark={_rej['dark']} burned-text={_rej['burned_text']} "
         f"dedup={_rej['dedup']} spacing={_rej['spacing']} | pre-filtered "
@@ -1014,9 +1014,11 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         _cold = "COLD-OPEN " if (idx, src.id, round(float(sh.start), 1)) == _cold_key else ""
         log(f"[BREAKOUT-OK] #{len(out)} {_cold}before-scene={idx} dur={real:.1f}s "
             f"src@{float(sh.start):.0f}s src={(src.title or src.id)[:52]!r} line={_q[:42]!r}")
-    if _rej["window_commentary"]:
-        log(f"[BREAKOUT-AUDIT] post-extract: window_commentary={_rej['window_commentary']} "
-            f"rejected (aired window bled into commentary) → final accepted={len(out)}")
+    # ALWAYS report the FINAL accepted count after post-extraction (the pre_extract_accepted count
+    # above can shrink here when an aired window is rejected as commentary) — so the audit is never
+    # ambiguous about how many breakouts actually aired.
+    log(f"[BREAKOUT-AUDIT] final accepted={len(out)} (post-extract; "
+        f"window_commentary rejections={_rej['window_commentary']})")
     return out
 
 
