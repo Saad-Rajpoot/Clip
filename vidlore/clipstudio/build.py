@@ -961,6 +961,16 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         picked.append(c)
         _picked_word_sets.append({w for w in _rw(c[4])[:10] if len(w) > 2})
 
+    # COLD-OPEN OWNS THE OPENING: drop any OTHER breakout that lands inside the combined hook beats
+    # (e.g. an evidence-mined "I've changed my mind" at beat 3 that duplicates the cold-open). It is
+    # redundant with the cold-open, AND for the VO word-cut it would splice INSIDE the hook span and
+    # push the hook's tail beyond the locate window — forcing a needless fallback.
+    if _ohook is not None and _cold_key is not None:
+        _hb = _ohook[2]
+        picked = [c for c in picked
+                  if c[1] not in _hb
+                  or (c[1], c[2].id, round(float(c[3].start), 1)) == _cold_key]
+
     # ── BREAKOUT AUDIT (one greppable line per render) — candidates found, per-reason rejections, kept.
     # Grep: `grep BREAKOUT-AUDIT <log>` for the summary; `grep BREAKOUT-OK <log>` for accepted ones. ──
     log(f"[BREAKOUT-AUDIT] candidates={len(cands)} pre_extract_accepted={len(picked)} | "
