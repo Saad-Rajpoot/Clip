@@ -2275,6 +2275,55 @@ def test_intro_coldopen_breakout():
           not _has0(_run(quote=VQ, asr=SC,
                          src_title="Game of Thrones FINALE Breakdown Explained reaction")[0]))
 
+    # A) COLD-OPEN FRAGMENTATION — analyze splits the opening hook into tiny per-beat fragments;
+    # they must combine into ONE scene-0 hook candidate (the user's exact A.4 case).
+    fr = [types.SimpleNamespace(index=0, quote="Seize him.", text="x"),
+          types.SimpleNamespace(index=1, quote="Cut his throat.", text="x"),
+          types.SimpleNamespace(index=2, quote="Stop.", text="x"),
+          types.SimpleNamespace(index=3, quote="Wait — I've changed my mind.", text="x"),
+          types.SimpleNamespace(index=4, quote="", text="x")]
+    hook = B._combine_opening_hook(fr)
+    check("fragmented opening hook combined into one scene-0 candidate",
+          hook is not None and hook[0].index == 0
+          and hook[1] == "Seize him. Cut his throat. Stop. Wait — I've changed my mind."
+          and hook[2] == {0, 1, 2, 3})
+    check("no opening hook when the first beats carry no quotes",
+          B._combine_opening_hook([types.SimpleNamespace(index=i, quote="", text="x")
+                                   for i in range(5)]) is None)
+    # end-to-end: fragmented opening beats + footage carrying the full hook → scene-0 COLD-OPEN airs
+    def _run_frag():
+        shots = [types.SimpleNamespace(index=0, start=10.0, end=20.0,
+                     transcript="seize him cut his throat stop wait i have changed my mind let him go",
+                     face_ids=[], local_path="/tmp/x.mp4"),
+                 types.SimpleNamespace(index=1, start=40.0, end=44.0, transcript="",
+                     face_ids=[], local_path="/tmp/x.mp4"),
+                 types.SimpleNamespace(index=2, start=50.0, end=54.0, transcript="he walks in",
+                     face_ids=[], local_path="/tmp/x.mp4")]
+        src = types.SimpleNamespace(id="s1", status="ok", local_path="/tmp/x.mp4",
+                 title="Knowledge Is Power scene HD", width=1920, extra={"anchor_verified": True})
+        proj = types.SimpleNamespace(sources=[src], meta={"analysis": {
+            "characters": [{"name": "Cersei Lannister", "actor": "Lena Headey"}],
+            "anchor_scenes": [{"name": "power scene", "query": "cersei power", "dialogue": []}],
+            "movie_title": "Game of Thrones", "episode_hint": ""}})
+        segs = [fr[0], fr[1], fr[2], fr[3]] + [types.SimpleNamespace(
+            index=i, quote="", text=f"narration filler beat {i} words here") for i in range(4, 9)]
+        _ls = _idxmod.load_shots
+        _o = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text)
+        _idxmod.load_shots = lambda p, sid: shots
+        B._extract_breakout = lambda *a, **k: 6.0
+        B._breakout_window_luma = lambda *a, **k: 80.0
+        B._frame_has_burned_text = lambda *a, **k: False
+        lg = []
+        try:
+            o = B._select_breakouts(proj, segs, 200.0, _P("/tmp"), lambda m: lg.append(str(m)))
+        finally:
+            _idxmod.load_shots = _ls
+            B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text = _o
+        return o, "\n".join(lg)
+    of, lf = _run_frag()
+    check("fragmented hook airs as a scene-0 COLD-OPEN breakout",
+          any(o["seg_index"] == 0 for o in of) and "COLD-OPEN before-scene=0" in lf)
+
 
 def test_breakout_window_commentary_gate():
     print("[breakout] essay-title source rejection + post-extraction window-commentary gate")

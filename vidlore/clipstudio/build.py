@@ -597,6 +597,24 @@ def _breakout_window_luma(src_path, start: float, dur: float) -> float:
         return -1.0
 
 
+def _combine_opening_hook(segments):
+    """Analyze frequently SPLITS the opening hook into tiny per-beat fragments — e.g.
+    "Seize him." / "Cut his throat." / "Stop." / "Wait — I've changed my mind." — each below the
+    3-word quote floor, so the literal opening line never becomes a cold-open candidate. Stitch the
+    LEADING run of consecutive quoted opening beats (within the first 6) into ONE hook quote mapped
+    to the FIRST beat. Returns (first_seg, combined_quote, {combined_beat_indices}) or None."""
+    frag = []
+    for seg in (segments or [])[:6]:
+        q = (getattr(seg, "quote", "") or "").strip()
+        if q:
+            frag.append((seg, q))
+        elif frag:
+            break                                      # hook ended at the first quote-less beat
+    if len(frag) >= 2 and len(" ".join(q for _s, q in frag).split()) >= 3:
+        return frag[0][0], " ".join(q for _s, q in frag), {s.index for s, _q in frag}
+    return None
+
+
 def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     """Pick the 1-3 most NATURAL breakout moments: beats whose narration QUOTES a line, located
     by searching the line in every source's own ASR — the breakout plays the SHOT where the line
@@ -631,6 +649,14 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                     quote_segs.append((best_seg, dlg))
     except Exception:
         pass
+    # COLD-OPEN HOOK: stitch a fragmented opening hook ("Seize him." / "Cut his throat." / "Stop." /
+    # "Wait — I've changed my mind.") into ONE scene-0 candidate (replacing the individual fragments),
+    # so the literal opening real scene can air as the cold-open instead of just one mid-fragment.
+    _ohook = _combine_opening_hook(segments)
+    if _ohook is not None:
+        _ohs, _ohq, _ohidx = _ohook
+        quote_segs = [(s, q) for (s, q) in quote_segs if s.index not in _ohidx]
+        quote_segs.insert(0, (_ohs, _ohq))
     # Do NOT early-return on an empty quote pool. Per-beat quotes / anchor dialogue are routinely
     # absent for ANALYTICAL/essay scripts (the narrator analyses the scene rather than quoting a line)
     # and the LLM returns anchor dialogue inconsistently under load — so quote_segs can be empty even
