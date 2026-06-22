@@ -116,6 +116,82 @@ def _source_is_nonphotographic(proj, shots, *, sample: int = 6, frac: float = 0.
     return art / max(1, len(chosen)) >= frac
 
 
+# A modern PODCAST / on-camera VLOG / makeup-BTS / interview LOOKS nothing like a medieval-fantasy
+# scene — that VISUAL gap is the reliable signal. (Face-ID cast-MATCHING is NOT: it under-matches
+# real cast badly — on one render only 13% of face-shots matched, so 'few cast hits' flagged real
+# dialogue scenes like Tyrion's trial. Never gate footage on cast-absence.) These CLIP prompts let
+# us tell a modern talking-head from a period scene; the show-agnostic wording keeps it reusable.
+_MODERN_TH_PROMPTS = (
+    "a person talking into a podcast microphone",
+    "a youtuber talking directly to the camera",
+    "two people wearing headphones in a recording studio",
+    "a modern television interview",
+    "behind the scenes makeup with prosthetics being applied",
+    "a person speaking to the camera with a microphone",
+)
+_PERIOD_SCENE_PROMPTS = (
+    "a scene from a medieval fantasy television show",
+    "actors in medieval costumes in a film scene",
+    "a cinematic period drama scene",
+    "a fantasy battle scene",
+    "a dark castle interior scene",
+)
+_TH_TXT_CACHE: dict = {}     # prompt -> L2-normalized text embed (computed once per process)
+
+
+def _source_is_modern_talkinghead(shots, embeds, *, min_face_shots: int = 8,
+                                   min_face_density: float = 0.60, sample: int = 8,
+                                   modern_frac: float = 0.70) -> bool:
+    """The robust backstop for non-scene uploads whose TITLE dodges the keyword gates: a face-DENSE
+    source that VISUALLY reads as a modern talking-head (podcast / vlog / interview / makeup-BTS)
+    rather than a medieval-fantasy scene. Catches the two-host GoT podcast + the White-Walker
+    makeup clip that leaked, while SPARING real dialogue scenes (Tyrion's trial, Old Nan, Hardhome
+    all scored 0.0-0.5 modern vs the 0.70 bar in validation).
+
+    Conservative on purpose — drops only when ALL hold:
+      * face-DENSE (>=60% of shots show a face) — limits the (cheap) CLIP pass to suspicious sources;
+      * enough evidence (>=8 face-bearing shots) — never judge a tiny source;
+      * a strong MAJORITY (>=70%) of sampled face frames look more like a modern talking-head than a
+        period scene under CLIP. If CLIP is unavailable we DON'T guess (return False) — the title
+        gate still applies. `embeds` is the source's per-shot CLIP image-embed array (or None)."""
+    if not shots or embeds is None:
+        return False
+    face_shots = [s for s in shots if int(getattr(s, "faces", 0) or 0) >= 1
+                  and 0 <= getattr(s, "embed_row", -1) < len(embeds)]
+    if len(face_shots) < min_face_shots:
+        return False
+    if len(face_shots) / len(shots) < min_face_density:
+        return False
+    try:
+        import numpy as np
+        from .image_fallback import _vr
+        vr = _vr()
+        if vr is None:
+            return False
+        def _txt(p):
+            v = _TH_TXT_CACHE.get(p)
+            if v is None:
+                v = np.asarray(vr._txt_embed(p), "float32")
+                v = v / (np.linalg.norm(v) + 1e-6)
+                _TH_TXT_CACHE[p] = v
+            return v
+        mods = [_txt(p) for p in _MODERN_TH_PROMPTS]
+        scns = [_txt(p) for p in _PERIOD_SCENE_PROMPTS]
+        step = max(1, len(face_shots) // sample)
+        chosen = face_shots[::step][:sample]
+        modern = 0
+        for s in chosen:
+            ie = np.asarray(embeds[s.embed_row], "float32")
+            ie = ie / (np.linalg.norm(ie) + 1e-6)
+            m = max(float(np.dot(ie, t)) for t in mods)
+            sc = max(float(np.dot(ie, t)) for t in scns)
+            if m > sc + 0.005:
+                modern += 1
+        return (modern / len(chosen)) >= modern_frac
+    except Exception:
+        return False
+
+
 def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=None,
                show_title: str = "") -> list[_PoolShot]:
     import os
@@ -132,6 +208,12 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
     wrongshow_on = os.environ.get("VIDLORE_CLIPSTUDIO_WRONGSHOW_GATE", "1").strip() \
         not in ("0", "false", "no")
     pool: list[_PoolShot] = []
+    # Visual footage gate (kill switch: VIDLORE_CLIPSTUDIO_FACE_FOOTAGE_GATE=0): a face-dense source
+    # that CLIP reads as a modern talking-head (podcast / vlog / interview / makeup-BTS) rather than
+    # a period scene is dropped — the robust backstop for non-scene uploads whose TITLE dodged the
+    # keyword gates. Deliberately NOT based on Face-ID cast-matching, which under-matches real cast.
+    face_gate_on = os.environ.get("VIDLORE_CLIPSTUDIO_FACE_FOOTAGE_GATE", "1").strip() \
+        not in ("0", "false", "no", "")
     for src in proj.sources:
         if src.status != SOURCE_OK:
             continue
@@ -164,6 +246,12 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
                          f"({(src.title or '')[:48]!r})")
             continue
         shots = _index.load_shots(proj, src.id)
+        embeds = _index.load_embeds(proj, src.id)
+        if face_gate_on and _source_is_modern_talkinghead(shots, embeds):
+            if progress:
+                progress(f"match: dropping modern talking-head source {src.id} "
+                         f"(podcast/vlog/interview/makeup-BTS look, not a scene: {(src.title or '')[:48]!r})")
+            continue
         if gate_on and wm_mode == "drop" and _source_is_watermarked(shots):
             if progress:
                 progress(f"match: dropping watermarked source {src.id} (persistent channel logo)")
@@ -177,8 +265,7 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
                 progress(f"match: dropping non-live-action source {src.id} "
                          f"(toy/claymation/AI-render — not real footage)")
             continue
-        embeds = _index.load_embeds(proj, src.id)
-        for sh in shots:
+        for sh in shots:                              # `embeds` loaded once above (reused here)
             vec = None
             if embeds is not None and 0 <= sh.embed_row < len(embeds):
                 vec = embeds[sh.embed_row]

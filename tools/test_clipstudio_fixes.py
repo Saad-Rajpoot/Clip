@@ -2180,6 +2180,114 @@ def test_reaction_still_pool_gate():
           ifsrc.count("_shot_has_overlay_text(shot)") >= 2)
 
 
+def test_nonscene_footage_gate():
+    print("[match] non-scene sources (podcast/BTS-makeup/concert/theory) blocked: title gate + Face-ID footage gate")
+    import types, tempfile, os
+    from datetime import datetime
+    from vidlore.clipstudio import discover as D
+    from vidlore.clipstudio import match as MM
+    from vidlore.clipstudio import models as M
+    from vidlore.clipstudio.models import SOURCE_OK
+
+    # (a) TITLE gate — the EXACT titles that leaked NON-scene footage into the Night-King render
+    #     (a two-host podcast, a White-Walker makeup/BTS clip, an actor retrospective, a table-read,
+    #     a theory upload, a single-song music clip). All must now be rejected.
+    leak_titles = [
+        "Bran's Elaborate Plan to Beat the Night King (Game of Thrones)",
+        "Is The Night King A Targaryen? (SPIRAL SYMBOL Meaning)",
+        "I Got Transformed Into the Night King From Game Of Thrones",
+        "A Decade of Game of Thrones | John Bradley on Samwell Tarly",
+        "GoT8 FINAL Script Reading - ARYA kills Night King!!",
+        "The Long Night Song Game of Thrones Season 8 E03 Song",
+        "Game of Thrones White Walker Makeup Transformation",
+        "Game of Thrones Night King Theme - Live Concert (Ramin Djawadi)",
+        "Game of Thrones Podcast: the Night King vlog",
+    ]
+    missed = [t for t in leak_titles if not D.is_unwanted_source_title(t)]
+    check(f"title gate BLOCKS all leaked non-scene titles (missed={missed})", not missed)
+
+    # legit raw scene clips stay ALLOWED — incl. the \bsong\b lookahead guard so the SHOW's own name
+    # ('A Song of Ice and Fire') never false-trips the new music rule.
+    keep_titles = [
+        "Game of Thrones S06E05 - The Children of the forest",
+        "Arya Stark kills Night King",
+        "Battle of Hardhome - Full Scene | Game of Thrones (S5E8)",
+        "The Night King raises the dead at Hardhome | Game of Thrones",
+        "Game of Thrones: The Night King [1080p HD]",
+        "Game of Thrones - A Song of Ice and Fire (opening scene)",
+    ]
+    wrongly = [t for t in keep_titles if D.is_unwanted_source_title(t)]
+    check(f"title gate KEEPS clean raw scene clips (wrongly blocked={wrongly})", not wrongly)
+
+    # (b) VISUAL footage gate — the robust backstop for non-scene uploads whose TITLE dodges the
+    #     keyword gates: a face-DENSE source that CLIP reads as a modern talking-head (podcast /
+    #     vlog / interview / makeup-BTS) is dropped, a period scene is spared. (NOT cast-matching:
+    #     Face-ID under-matched real cast 87% of the time on the leaked render, so cast-absence
+    #     wrongly flagged Tyrion's trial etc.) CLIP is faked so the math is deterministic:
+    #     modern prompt -> [1,0], period prompt -> [0,1].
+    import numpy as np
+    from vidlore.clipstudio import image_fallback as IF
+
+    class _FakeVR:
+        def _txt_embed(self, p):
+            return [1.0, 0.0] if p in MM._MODERN_TH_PROMPTS else [0.0, 1.0]
+
+    def mk(n_face, n_plain, vec):
+        sh = [types.SimpleNamespace(faces=1, embed_row=i, source_id="x") for i in range(n_face)]
+        sh += [types.SimpleNamespace(faces=0, embed_row=-1, source_id="x") for _ in range(n_plain)]
+        return sh, np.array([list(vec) for _ in range(n_face)], dtype="float32")
+    pod_sh,  pod_emb  = mk(9, 1, (1, 0))     # face-dense, frames look MODERN  -> drop
+    scn_sh,  scn_emb  = mk(7, 3, (0, 1))     # face-dense, frames look PERIOD  -> keep (the FP we must avoid)
+    act_sh,  act_emb  = mk(2, 8, (1, 0))     # 'modern' but NOT face-dense     -> keep
+    tiny_sh, tiny_emb = mk(4, 0, (1, 0))     # 'modern' but too few face shots -> keep
+
+    _savevr = IF._vr
+    MM._TH_TXT_CACHE.clear()
+    try:
+        IF._vr = lambda: _FakeVR()
+        check("visual gate FLAGS a modern talking-head/podcast source (CLIP-modern + face-dense)",
+              MM._source_is_modern_talkinghead(pod_sh, pod_emb))
+        check("visual gate SPARES a real period scene (CLIP-period, even when face-dense)",
+              not MM._source_is_modern_talkinghead(scn_sh, scn_emb))
+        check("visual gate SPARES a non-face-dense source (action/landscape)",
+              not MM._source_is_modern_talkinghead(act_sh, act_emb))
+        check("visual gate never judges a tiny source (<8 face-bearing shots)",
+              not MM._source_is_modern_talkinghead(tiny_sh, tiny_emb))
+        IF._vr = lambda: None
+        check("visual gate is SAFE without CLIP (returns False so the title gate still governs)",
+              not MM._source_is_modern_talkinghead(pod_sh, pod_emb))
+
+        # (c) _load_pool integration — DROP the talking-head source, KEEP the period scene; kill switch.
+        tmp = Path(tempfile.mkdtemp())
+        proj = M.ClipProject(name="t", root=tmp, created_at=datetime.now(),
+                             sources=[], segments=[], selections=[], meta={})
+        proj.sources = [
+            M.SourceVideo(id="pod", url="u", title="neutral title one", local_path="x",
+                          duration=60.0, permission="owner", status=SOURCE_OK),
+            M.SourceVideo(id="scene", url="u", title="neutral title two", local_path="x",
+                          duration=60.0, permission="owner", status=SOURCE_OK),
+        ]
+        shots_by  = {"pod": pod_sh,  "scene": scn_sh}
+        embeds_by = {"pod": pod_emb, "scene": scn_emb}
+        save = (MM._index.load_shots, MM._index.load_embeds, MM._source_is_nonphotographic)
+        try:
+            MM._index.load_shots = lambda p, sid: shots_by.get(sid, [])
+            MM._index.load_embeds = lambda p, sid: embeds_by.get(sid)
+            MM._source_is_nonphotographic = lambda *a, **k: False
+            IF._vr = lambda: _FakeVR()
+            ids = {ps.sid for ps in MM._load_pool(proj)}
+            check("_load_pool DROPS the title-clean modern talking-head source", "pod" not in ids)
+            check("_load_pool KEEPS the period scene source", "scene" in ids)
+            os.environ["VIDLORE_CLIPSTUDIO_FACE_FOOTAGE_GATE"] = "0"
+            ids2 = {ps.sid for ps in MM._load_pool(proj)}
+            check("kill switch VIDLORE_CLIPSTUDIO_FACE_FOOTAGE_GATE=0 disables the visual gate", "pod" in ids2)
+        finally:
+            os.environ.pop("VIDLORE_CLIPSTUDIO_FACE_FOOTAGE_GATE", None)
+            MM._index.load_shots, MM._index.load_embeds, MM._source_is_nonphotographic = save
+    finally:
+        IF._vr = _savevr
+
+
 def test_breakout_evidence_mining_reachable():
     print("[breakout] evidence-mining runs even when the quote pool is empty (essay scripts)")
     src = (Path(__file__).resolve().parent.parent / "vidlore" / "clipstudio" /
@@ -2665,6 +2773,7 @@ def main():
     test_final_image_policy()
     test_image_policy_edge_gaps()
     test_reaction_still_pool_gate()
+    test_nonscene_footage_gate()
     test_discovery_plural_gates_and_purge()
     test_breakout_evidence_mining_reachable()
     test_intro_coldopen_breakout()

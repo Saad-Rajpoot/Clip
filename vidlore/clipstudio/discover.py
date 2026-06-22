@@ -62,6 +62,17 @@ _REJECT_TITLE = re.compile(
     # 'Red Wedding - The clues' (whose red 'the murder of Rob Starks, Catelyn' overlay AIRED).
     r"the clues?\b|(sadder|better|cooler|epic|emotional) with (the )?[a-z' ]{0,20}music|"
     r"with the leftovers|set to [a-z' ]{0,18}music|\bamv\b|music video|"
+    # PODCAST / VLOG / on-camera MAKEUP-BTS / transformation / table-read / retrospective + theory-
+    # analysis uploads: modern people on camera or narration OVER footage, NOT clean scene clips.
+    # Added after a Night-King render leaked a two-host PODCAST ('Bran's Elaborate Plan...'), a
+    # White-Walker MAKEUP/prosthetics BTS clip ('I Got Transformed Into the Night King'), an actor
+    # retrospective ('A Decade of Game of Thrones | John Bradley on...'), a table-read ('... Script
+    # Reading'), and a theory upload ('Is The Night King A Targaryen? (SPIRAL SYMBOL Meaning)') —
+    # all of whose titles dodged the gate. (Inside the \b(...)\b wrapper -> keep alts plural-safe.)
+    r"\bvlog(s|ger|gers)?\b|\bmakeup\b|prosthetics?|"
+    r"transformed into|i got transformed|turn(ed|ing) into (the|a)|becom(e|es|ing) the (night king|character)|"
+    r"script reading|table read(ing|s)?|read[- ]?throughs?|a decade of|"
+    r"elaborate plans?|plan to (beat|defeat|stop|kill|save|destroy)|spiral symbols?|\bsymbolism\b|"
     r"hot/?badass|hot (scene|moment)s? timing|funniest|best moments compilation)\b", re.I)
 
 # REACTION / FACECAM videos. These embed the REAL scene (its audio + a small inset of the show)
@@ -85,6 +96,10 @@ _NONSHOW_TITLE = re.compile(
     r"machinima|minecraft|roblox|fortnite|simulation|simulator|"
     r"two steps from hell|audiomachine|epic music|soundtrack|\bost\b|\bamv\b|gmv|"
     r"music video|lyric video|tribute|fan ?edit|"
+    # live-concert / orchestral / single-SONG music uploads (composer performances, e.g. the
+    # 'The Long Night Song' + 'Ramin Djawadi - The Night King Live Concert' that leaked) — not
+    # scene footage. \bsong\b is lookahead-guarded so 'A Song of Ice and Fire' never false-trips.
+    r"\bconcerts?\b|\bsong\b(?! of ice)|djawadi|orchestra(l)?|symphon(y|ic)|"
     r"animated|animation|cartoon|stick figure|lego|"
     # toy / clay / miniature recreations + AI-generated art — NOT live-action show footage
     r"playmobil|stop ?motion|claymation|plasticine|diorama|figurine|action figure|"
