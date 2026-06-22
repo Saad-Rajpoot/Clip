@@ -9,8 +9,12 @@ nahi chahiye). Sirf yeh launcher chahiye tha — ab maujood hai.
 ZAROORAT (requirements)
 ----------------------------------------------------------
 - Windows 10 / 11
-- Python 3.10 ya us se naya  ->  https://www.python.org/downloads/
+- Python 3.10, 3.11 ya 3.12  ->  https://www.python.org/downloads/release/python-3129/
   (install karte waqt "Add Python to PATH" zaroor TICK karein)
+  ZAROORI: Python 3.13 / 3.14 abhi NAHI chalega - ML libraries (onnxruntime,
+  opencv, numpy, faster-whisper) ki Windows wheels sirf 3.10-3.12 ke liye hain.
+  Agar 3.14 install hai to bhi 3.12 alag se install kar lein; launcher khud
+  3.12 dhoond kar use kar lega.
 - Internet (pehli baar dependencies + footage download ke liye)
 - GPU optional: NVIDIA (NVENC) / Intel (QSV) / AMD (AMF) ho to encode tez,
   warna CPU (libx264) par bhi chalega — bas thoda slow.
@@ -39,6 +43,9 @@ ROZ CHALANA (har baar)
 ----------------------------------------------------------
 KUCH CHAL NA RAHA HO TO
 ----------------------------------------------------------
+- "ML deps install nahi huin" / pip error  ->  99% wajah Python 3.13/3.14.
+    Python 3.12 install karein (upar link), phir launcher dobara chalayein.
+    Launcher purana galat .venv khud hata kar 3.12 se naya bana dega.
 - windows\Diagnose.bat  double-click  ->  "vidlore_diag.txt" banegi; wo bhej dein.
 - GPU/encode check ke liye (optional) "tools" folder mein:
     check_windows_gpu_acceleration.bat   (GPU encode kaam kar raha hai?)
@@ -48,10 +55,16 @@ KUCH CHAL NA RAHA HO TO
 ----------------------------------------------------------
 WINDOWS-SPECIFIC: code mein kya change hua?
 ----------------------------------------------------------
-- KUCH NAHI badla — code pehle se cross-platform hai:
+- App ka code cross-platform pehle se hai (koi vidlore/*.py nahi badli):
     * Encoder khud chunta hai: Windows par NVENC/QSV/AMF, warna CPU libx264
       (vidlore/assemble.py: _pick_video_encoder). macOS par VideoToolbox.
     * ffmpeg "imageio-ffmpeg" se aata hai (pip dependency) — Windows par bhi.
     * ffprobe/venv ke liye ".exe" handling pehle se maujood.
-- Sirf yeh add hua: yeh Windows launcher (run-windows.bat) + yeh folder.
+- Windows setup ke liye yeh add hua:
+    * run-windows.bat launcher + yeh "windows" folder.
+    * requirements-clipstudio.txt — ClipStudio ka ML stack (yt-dlp, onnxruntime,
+      opencv, scenedetect, rapidocr, av, google-genai). macOS par yeh ek alag
+      .clipstudio_libs folder mein hota hai; Windows par launcher ise .venv mein
+      install karta hai. (Isliye .clipstudio_libs ko Windows par copy NAHI karna.)
+    * Launcher Python 3.10-3.12 enforce karta hai (3.13/3.14 par ML wheels nahi).
 ==========================================================

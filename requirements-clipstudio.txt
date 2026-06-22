@@ -1,0 +1,15 @@
+# ClipStudio-only ML stack.
+# On macOS these live in a separate .clipstudio_libs dir (kept off the engine venv); on Windows the
+# launcher installs them straight into .venv. Versions mirror the working macOS setup so behaviour
+# matches; yt-dlp stays unpinned so YouTube extraction keeps working as the site changes.
+#
+# IMPORTANT: these have no prebuilt wheels for Python 3.13/3.14 yet — use Python 3.10-3.12.
+# (run-windows.bat enforces this.)  faster-whisper is already in the base requirements.txt.
+numpy==2.0.2
+onnxruntime==1.19.2
+opencv-python>=4.9,<5
+av>=14,<16
+scenedetect==0.6.7.1
+rapidocr-onnxruntime==1.4.4
+google-genai>=1.40
+yt-dlp
