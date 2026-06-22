@@ -1021,8 +1021,8 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         _is_cold = (idx, src.id, round(float(sh.start), 1)) == _cold_key
         _entry = {"seg_index": idx, "dur": real, "video": v, "audio": a}
         if _is_cold:
-            # carry the hook quote + the beats it was stitched from, so the (opt-in) VO word-cut
-            # can locate the narrator's rendition of the hook in the voiceover and replace it.
+            # carry the hook quote + the beats it was stitched from, so the VO word-cut (default ON
+            # for uploaded voiceover) can locate the narrator's rendition of the hook and replace it.
             _entry["cold_open"] = True
             _entry["hook_quote"] = _q
             _entry["hook_beats"] = sorted(_ohook[2]) if _ohook is not None else [idx]
@@ -1212,7 +1212,9 @@ def _audio_trim_prepend(vo_path, h1: float, clip_audio, d_clip: float, work: Pat
 
 
 def _apply_coldopen_vocut(proj, segments, scenes, narration, co, work, log, protect_idx=None):
-    """OPT-IN cold-open VO WORD-CUT (env VIDLORE_CLIPSTUDIO_VO_CUT, default OFF). REPLACE the
+    """Cold-open VO WORD-CUT — DEFAULT ON for word-aligned uploaded voiceover; kill switch
+    env VIDLORE_CLIPSTUDIO_VO_CUT=0 (the caller also gates on narration._vo_word_aligned, so TTS
+    renders never reach here). REPLACE the
     narrator's opening-hook words with the real-scene clip: locate the hook in the VOICEOVER by
     word-level timestamps, cut that span, prepend the clip, DROP the hook beats, shift the rest by
     Δ. Returns (segments, scenes, narration, bmap, idx_map, dropped_count) on success, or None to
