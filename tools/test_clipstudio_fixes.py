@@ -2453,7 +2453,8 @@ def test_coldopen_vocut():
     finally:
         B._locate_hook_span = _ol
     check("VO-cut falls back (None) when the hook isn't confidently located", res2 is None)
-    # the build wiring is opt-in (default OFF) and falls back
+    # the build wiring is default-ON for word-aligned uploaded voiceover (kill switch VO_CUT=0)
+    # and falls back to insert on any uncertainty
     bsrc = (Path(__file__).resolve().parent.parent / "vidlore" / "clipstudio" /
             "build.py").read_text(encoding="utf-8")
     check("build falls back to insert when VO-cut returns None",
