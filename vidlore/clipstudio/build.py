@@ -2184,11 +2184,13 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 if _mid:
                     segments, scenes, narration, _breakout_clip, _bidx = _apply_breakouts(
                         proj, segments, scenes, narration, _mid, work, log)
-                # cold-open: OPT-IN VO word-cut (replace) if enabled + the strict hook gate passes;
-                # otherwise the proven INSERT path. Default OFF (VIDLORE_CLIPSTUDIO_VO_CUT).
+                # cold-open: VO word-cut (replace) if the strict hook gate passes; otherwise the
+                # proven INSERT path. Default ON, but ONLY for word-aligned UPLOADED voiceover (the
+                # narration._vo_word_aligned check below) — never TTS. Kill switch:
+                # VIDLORE_CLIPSTUDIO_VO_CUT=0 (also false/no) forces the old insert behaviour.
                 if _co:
-                    _vocut = os.environ.get("VIDLORE_CLIPSTUDIO_VO_CUT", "0").strip() \
-                        not in ("0", "false", "no", "")
+                    _vocut = os.environ.get("VIDLORE_CLIPSTUDIO_VO_CUT", "1").strip() \
+                        not in ("0", "false", "no")
                     _done = False
                     # only on a word-aligned uploaded voiceover (real word boundaries — never TTS
                     # proportional estimates), and protect mid-video breakout scenes from the cut

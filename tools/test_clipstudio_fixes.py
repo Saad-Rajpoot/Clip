@@ -2391,7 +2391,7 @@ def test_breakout_window_commentary_gate():
 
 
 def test_coldopen_vocut():
-    print("[breakout] cold-open VO word-cut (opt-in): replace hook narration, trim straddle, fallback")
+    print("[breakout] cold-open VO word-cut (default ON, uploaded-VO only): replace hook, trim straddle, fallback")
     import types
     from pathlib import Path as _P
     from vidlore.clipstudio import build as B
@@ -2456,10 +2456,40 @@ def test_coldopen_vocut():
     # the build wiring is opt-in (default OFF) and falls back
     bsrc = (Path(__file__).resolve().parent.parent / "vidlore" / "clipstudio" /
             "build.py").read_text(encoding="utf-8")
-    check("VO-cut is gated by VIDLORE_CLIPSTUDIO_VO_CUT (default OFF)",
-          'os.environ.get("VIDLORE_CLIPSTUDIO_VO_CUT", "0")' in bsrc)
     check("build falls back to insert when VO-cut returns None",
           "if not _done:" in bsrc and "_apply_coldopen_vocut(" in bsrc)
+
+    # --- default-ON + safety-gate proofs (the env parse + uploaded-VO gate, mirrored from build()) ---
+    check("VO-cut default is ON (env unset → '1')",
+          'os.environ.get("VIDLORE_CLIPSTUDIO_VO_CUT", "1")' in bsrc)
+    check("VO-cut runs ONLY on word-aligned uploaded voiceover (never TTS)",
+          'getattr(narration, "_vo_word_aligned", False)' in bsrc)
+
+    def _vocut_on(val):
+        import os as _os
+        _old = _os.environ.get("VIDLORE_CLIPSTUDIO_VO_CUT")
+        if val is None:
+            _os.environ.pop("VIDLORE_CLIPSTUDIO_VO_CUT", None)
+        else:
+            _os.environ["VIDLORE_CLIPSTUDIO_VO_CUT"] = val
+        try:
+            return _os.environ.get("VIDLORE_CLIPSTUDIO_VO_CUT", "1").strip() not in ("0", "false", "no")
+        finally:
+            if _old is None:
+                _os.environ.pop("VIDLORE_CLIPSTUDIO_VO_CUT", None)
+            else:
+                _os.environ["VIDLORE_CLIPSTUDIO_VO_CUT"] = _old
+    check("default (unset) → VO-cut ON", _vocut_on(None) is True)
+    check("explicit '0' → VO-cut OFF (kill switch)", _vocut_on("0") is False)
+    check("explicit 'false'/'no' → VO-cut OFF", _vocut_on("false") is False and _vocut_on("no") is False)
+    check("explicit '1' → VO-cut ON", _vocut_on("1") is True)
+    # the build gate is (_vocut AND narration._vo_word_aligned) — TTS narration lacks the marker
+    _tts = types.SimpleNamespace()                              # TTS narration: no _vo_word_aligned
+    _vo = types.SimpleNamespace(_vo_word_aligned=True)          # uploaded, word-aligned
+    check("TTS narration → VO-cut gate is False (uses insert)",
+          (_vocut_on(None) and getattr(_tts, "_vo_word_aligned", False)) is False)
+    check("uploaded-VO narration → VO-cut gate is True",
+          bool(_vocut_on(None) and getattr(_vo, "_vo_word_aligned", False)) is True)
 
 
 def test_discovery_plural_gates_and_purge():
