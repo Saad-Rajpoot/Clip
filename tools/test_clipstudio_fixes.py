@@ -958,6 +958,13 @@ def test_breakout_intelligence():
           and "seg = _copy.copy(seg)" in src)
     check("splice handles a t=0 (cold-open) prepend without an empty atrim segment",
           "emit the original slice only if NON-empty" in src)
+    # READ==WRITE: a 2nd splice pass (a cold-open after the mid-breakout pass) fed ffmpeg the same
+    # narration_breakouts.wav as input AND output → it failed, which silently disabled the cold-open
+    # on uploaded voiceover. Now a fresh numbered sibling is used when input == default dest.
+    check("splice never read==writes its input (cold-open can fire after mid-breakouts)",
+          "NEVER read==write" in src
+          and "Path(full).resolve() == dest.resolve()" in src
+          and 'f"narration_breakouts_{k}.wav"' in src)
     # FUNCTIONAL: a failed audio splice must leave the narration word-times PRISTINE (no desync).
     import types as _tt
     from vidlore.clipstudio import build as B

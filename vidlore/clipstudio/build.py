@@ -1060,6 +1060,15 @@ def _splice_audio(full: Path, splices: list, work: Path) -> Optional[Path]:
     labels.append(f"[s{n}]")
     fc = ";".join(fparts) + f";{''.join(labels)}concat=n={len(labels)}:v=0:a=1[out]"
     dest = work / "narration_breakouts.wav"
+    # NEVER read==write: a SECOND splice pass (e.g. a cold-open spliced AFTER the mid-breakout pass,
+    # whose narration.audio is already this exact file) would hand ffmpeg the same path as input -i
+    # AND output → the splice fails. That failure is what silently disabled the cold-open on uploaded
+    # voiceover. Write to a fresh numbered sibling when the input is the default dest.
+    if Path(full).resolve() == dest.resolve():
+        k = 1
+        while (work / f"narration_breakouts_{k}.wav").exists():
+            k += 1
+        dest = work / f"narration_breakouts_{k}.wav"
     p = subprocess.run([ffmpeg_exe(), "-y", *ins, "-filter_complex", fc, "-map", "[out]",
                         "-ar", "44100", "-ac", "2", str(dest)],
                        capture_output=True, timeout=600)
