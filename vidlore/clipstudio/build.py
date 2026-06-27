@@ -1050,9 +1050,10 @@ def _splice_audio(full: Path, splices: list, work: Path) -> Optional[Path]:
     n = 0
     for i, (t, wav, _d) in enumerate(splices, start=1):
         ins += ["-i", str(wav)]
-        fparts.append(f"[0:a]atrim={prev:.3f}:{t:.3f},asetpts=PTS-STARTPTS[s{n}]")
-        labels.append(f"[s{n}]")
-        n += 1
+        if t > prev + 1e-3:                            # emit the original slice only if NON-empty —
+            fparts.append(f"[0:a]atrim={prev:.3f}:{t:.3f},asetpts=PTS-STARTPTS[s{n}]")
+            labels.append(f"[s{n}]")                   # a t=0 splice (a cold-open prepend) would else
+            n += 1                                     # build an empty atrim=0:0 segment that fails concat
         labels.append(f"[{i}:a]")
         prev = t
     fparts.append(f"[0:a]atrim={prev:.3f},asetpts=PTS-STARTPTS[s{n}]")
@@ -1331,6 +1332,7 @@ def _apply_breakouts(proj, segments, scenes, narration, picks, work, log):
     """Insert breakout pseudo-scenes BEFORE their beats: reindex segments/scenes/narration,
     shift later word timings, splice the breakout audio into the narration track. Returns
     (segments, scenes, narration, breakout_clip_map, idx_map)."""
+    import copy as _copy
     from vidlore.script_gen import Scene as _EScene
     from vidlore.tts import NarratedScene as _NScene
     from .models import ScriptSegment as _CSeg
@@ -1427,14 +1429,23 @@ def _apply_breakouts(proj, segments, scenes, narration, picks, work, log):
             shift += p["dur"]
             dur_here = p["dur"]
         ni = len(new_segs)
+        # ATOMIC: reindex + word-shift on COPIES so a `_splice_audio` failure below leaves the
+        # caller's segments/scenes/narration PRISTINE. (Mutating in place then raising on a failed
+        # splice left the word-times shifted but the audio un-spliced → every caption lagged the
+        # voice by the breakout duration. Seen as a constant ~4.4s caption desync when a t=0
+        # cold-open splice failed and the caller swallowed the exception.)
+        seg = _copy.copy(seg)
         seg.index = ni
         new_segs.append(seg)
         sc = sc_by_idx.get(old)
         if sc is not None:
+            sc = _copy.copy(sc)
             sc.index = ni
             new_scs.append(sc)
         ns = ns_by_idx.get(old)
         if ns is not None:
+            ns = _copy.copy(ns)
+            ns.words = [_copy.copy(w) for w in (ns.words or [])]
             ns.index = ni
             _orig_dur = float(ns.duration)
             _pause_t = t_cursor + delta_here

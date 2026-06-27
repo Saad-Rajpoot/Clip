@@ -948,6 +948,45 @@ def test_breakout_intelligence():
     check("breakout audio spliced into narration track", "_splice_audio" in src
           and "narration_breakouts.wav" in src)
     check("words shifted after insertion", "w.start += shift" in src)
+    # ATOMICITY: _apply_breakouts shifts word-times then splices audio. If the splice fails it RAISES,
+    # but it used to have already mutated the words IN PLACE → captions left shifted while the audio
+    # was un-spliced = a constant caption lag (observed ~4.4s on an uploaded-VO render when a t=0
+    # cold-open splice failed and the caller swallowed the exception). Now it works on COPIES.
+    check("breakout apply is ATOMIC — copies so a failed splice can't desync captions",
+          "ATOMIC: reindex + word-shift on COPIES" in src
+          and "ns.words = [_copy.copy(w) for w in" in src
+          and "seg = _copy.copy(seg)" in src)
+    check("splice handles a t=0 (cold-open) prepend without an empty atrim segment",
+          "emit the original slice only if NON-empty" in src)
+    # FUNCTIONAL: a failed audio splice must leave the narration word-times PRISTINE (no desync).
+    import types as _tt
+    from vidlore.clipstudio import build as B
+    from vidlore.tts import WordTiming as _WT, NarratedScene as _NSc, Narration as _Narr
+    _w = lambda t, s, e: _WT(t, s, e)
+    _ns0 = _NSc(index=0, audio=Path("/dev/null"), duration=3.0, words=[_w("hello", 0.0, 0.5), _w("world", 0.5, 1.0)])
+    _ns1 = _NSc(index=1, audio=Path("/dev/null"), duration=3.0, words=[_w("foo", 3.0, 3.5), _w("bar", 3.5, 4.0)])
+    _nar = _Narr(scenes=[_ns0, _ns1], audio=Path("/dev/null"))
+    _segs = [_tt.SimpleNamespace(index=0, text="hello world", est_duration=3.0),
+             _tt.SimpleNamespace(index=1, text="foo bar", est_duration=3.0)]
+    _scs = [_tt.SimpleNamespace(index=0), _tt.SimpleNamespace(index=1)]
+    _pick = [{"seg_index": 1, "dur": 4.0, "audio": "/dev/null", "video": "/dev/null"}]
+    import tempfile as _tf
+    _wd = Path(_tf.mkdtemp(prefix="atom_"))
+    _save_sa, _save_rp = B._splice_audio, B._refine_pause_times
+    B._splice_audio = lambda *a, **k: None              # simulate a splice FAILURE
+    B._refine_pause_times = lambda *a, **k: {}          # no whisper in the test
+    _raised = False
+    try:
+        B._apply_breakouts(_tt.SimpleNamespace(), _segs, _scs, _nar, _pick, _wd, lambda *a: None)
+    except RuntimeError:
+        _raised = True
+    except Exception:
+        _raised = False
+    finally:
+        B._splice_audio, B._refine_pause_times = _save_sa, _save_rp
+    check("failed splice raises AND original word-times stay pristine (no caption desync)",
+          _raised and _nar.scenes[0].words[0].start == 0.0
+          and _nar.scenes[1].words[0].start == 3.0)      # NOT 7.0 (would be the +4.0 corruption)
     # ERA-COHERENCE: a breakout plays a full scene with its own audio; a bearded S7 Tyrion on a beach
     # over an S4E10 privy scene reads as a continuity break. Later-season-only sources are barred from
     # breakouts (earlier seasons stay — the script narrates S1/S3 backstory). Aired on Tyrion render.
