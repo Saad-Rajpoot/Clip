@@ -1884,6 +1884,29 @@ def test_caption_sync_per_scene_tolerant():
     _smooth = [_WT("a", 0.0, 0.3), _WT("b", 0.5, 0.8), _WT("c", 1.0, 1.3)]
     check("normal speech rhythm still groups into one cue (no over-cutting)",
           len(_grp(_smooth)) == 1)
+    # CAPTION-FROM-TRANSCRIPTION: when the pasted script can't be aligned to the uploaded voiceover
+    # (script != voiceover — wrong file / edited draft), captions must come from the voiceover's OWN
+    # transcription (locked to the voice), NOT the engine's drifting proportional split. Seen on a
+    # 22-min Hound render whose script ("chickens") and voiceover ("you want to be like me") were
+    # different content → only 162/2853 align anchors → drift.
+    import vidlore.tts as _ttsmod
+    _save_ss = _ttsmod._slice_scene
+    _ttsmod._slice_scene = lambda *a, **k: None          # no ffmpeg in the unit test
+    try:
+        _hyp = [("hello", 0.0, 0.4), ("world", 0.5, 0.9), ("foo", 1.0, 1.4),
+                ("bar", 1.5, 1.9), ("baz", 2.0, 2.4), ("qux", 2.5, 2.9)]
+        _nar = B._narration_from_hyp(_hyp, 3, 3.0, Path("/dev/null"), Path(tempfile.mkdtemp()))
+    finally:
+        _ttsmod._slice_scene = _save_ss
+    check("transcription-narration: caption words ARE the voiceover transcription at real times",
+          _nar is not None
+          and [w.word for w in _nar.all_words()] == ["hello", "world", "foo", "bar", "baz", "qux"]
+          and abs(_nar.all_words()[0].start) < 0.01 and abs(_nar.all_words()[-1].end - 2.9) < 0.06)
+    check("transcription-narration keeps the scene count (scene->footage mapping intact)",
+          _nar is not None and len(_nar.scenes) == 3)
+    check("aligner captions from transcription (not engine drift) when script != voiceover",
+          "from the voiceover transcription" in bsrc
+          and "_narration_from_hyp(hyp, n, total" in bsrc)
 
 
 def test_final_image_policy():

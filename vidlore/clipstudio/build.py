@@ -1709,6 +1709,42 @@ def _align_words_to_hyp(flat: list, hyp: list):
     return [t if t is not None else (0.0, 0.0) for t in times]
 
 
+def _narration_from_hyp(hyp, n_scenes, total, master, workdir):
+    """Caption from the voiceover's OWN whisper transcription when the pasted script can't be aligned
+    to it (script != voiceover — wrong file / edited draft). The transcription words ARE what is
+    spoken, at real timestamps, so captions stay locked to the voice instead of the engine's drifting
+    proportional split. Keeps n_scenes contiguous scenes so the scene->footage index mapping is
+    unchanged; per-scene audio is sliced from the master exactly like the aligned path."""
+    import math as _math
+    from vidlore.tts import Narration, NarratedScene, WordTiming, _slice_scene
+    ws = [(str(w), float(s), float(e)) for (w, s, e) in (hyp or [])
+          if w and _math.isfinite(s) and _math.isfinite(e) and e >= s]
+    if not ws:
+        return None
+    n_scenes = max(1, int(n_scenes))
+    cut = [round(k * len(ws) / n_scenes) for k in range(n_scenes)] + [len(ws)]
+    scenes, prev_end = [], 0.0
+    for i in range(n_scenes):
+        a, b = cut[i], cut[i + 1]
+        if a >= b:
+            continue
+        start = prev_end
+        end = total if (i == n_scenes - 1 or b >= len(ws)) else min(total, max(start + 0.2, ws[b][1]))
+        end = min(max(end, start + 0.2), total)
+        words = []
+        for k in range(a, b):
+            wstart = min(max(start, ws[k][1]), end)
+            wend = min(max(wstart, ws[k][2]), end)
+            words.append(WordTiming(ws[k][0], wstart, wend))
+        wav = workdir / f"scene_{i:03d}.wav"
+        _slice_scene(master, start, end, total, wav)
+        scenes.append(NarratedScene(i, wav, max(0.2, end - start), words))
+        prev_end = end
+    if not scenes:
+        return None
+    return Narration(scenes=scenes, audio=master, reused=0)
+
+
 def _synced_narration_from_file(script, audio_path: str, workdir: Path, log=None):
     """Caption-sync for an uploaded voiceover — apply Whisper word-alignment PER-SCENE-TOLERANT.
 
@@ -1762,11 +1798,22 @@ def _synced_narration_from_file(script, audio_path: str, workdir: Path, log=None
     # word times stay locally accurate, then sequence-align the script to that dense stream.
     hyp = _chunked_whisper_words(master, total)
     aligned = _align_words_to_hyp(flat, hyp)
-    if not aligned or len(aligned) != len(flat):
-        return None                                       # alignment failed → engine fallback
-    if any(not (math.isfinite(s) and math.isfinite(e)) for s, e in aligned):
-        return None
-    if aligned[-1][1] < 0.5 * total:                      # huge un-anchored tail → unreliable
+    _align_ok = (bool(aligned) and len(aligned) == len(flat)
+                 and all(math.isfinite(s) and math.isfinite(e) for s, e in aligned)
+                 and aligned[-1][1] >= 0.5 * total)
+    if not _align_ok:
+        # The pasted script does NOT align to the uploaded voiceover (far too few sequence anchors —
+        # the script and the voiceover are different content, or a wrong file was uploaded). DON'T
+        # fall through to the engine's proportional split — over a long VO it drifts captions seconds
+        # off the voice. Caption from the voiceover's OWN transcription so on-screen text always
+        # tracks what is actually spoken (the script is used for captions only when it can be matched).
+        if hyp:
+            _log("[caption-sync] pasted script does NOT match the uploaded voiceover — captioning "
+                 "from the voiceover transcription so captions track the VOICE "
+                 "(verify the script and voiceover are the same content)")
+            _nar = _narration_from_hyp(hyp, n, total, master, workdir)
+            if _nar is not None:
+                return _nar
         return None
 
     wcount = [max(1, bounds[i + 1] - bounds[i]) for i in range(n)]
