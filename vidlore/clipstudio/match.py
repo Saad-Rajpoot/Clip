@@ -676,6 +676,13 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         progress(f"match: {len(anchor_sids)} anchor source(s) · bonus={anchor_bonus} "
                  f"· dark_scene={dark_scene} · type={getattr(analysis,'video_type','')}")
 
+    # FOOTAGE-ABUNDANCE GUARD: the per-shot `relax` below lets anchor sources recur freely — right for
+    # a TRUE one-scene deep-dive with only a few uploads, but when the long-form source floor pulls in
+    # MANY anchor sources, relaxing reuse re-airs a few of them dozens of times while equally-relevant
+    # context sources sit unused (observed: a Cleganebowl deep-dive aired one source 26× / one window
+    # 13× with 14 relevant sources never touched). With abundant anchor footage keep the NORMAL
+    # anti-reuse so the cut spreads across what discovery actually found.
+    _anchor_abundant = len(anchor_sids) > int(_f_env("VIDLORE_CLIPSTUDIO_ANCHOR_SCARCE_MAX", 6))
     _src_height = {s.id: int(getattr(s, "height", 0) or 0) for s in proj.sources}
     source_uses: dict[str, int] = {}
     shot_uses: dict[tuple[str, int], int] = {}
@@ -728,7 +735,8 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
             # limited anchor footage must be allowed to recur. We relax reuse/source/recency penalties
             # for anchor sources (but still block the IDENTICAL shot back-to-back via same-shot
             # recency, so it never looks like a freeze/loop).
-            relax = single_scene and bool(anchor_sids) and ps.sid in anchor_sids
+            relax = (single_scene and bool(anchor_sids) and ps.sid in anchor_sids
+                     and not _anchor_abundant)    # abundant anchor footage → normal anti-reuse, spread
             shot_cap = cfg.max_reuse_per_shot * (3 if relax else 1)
             if shot_uses.get(key, 0) >= shot_cap:
                 continue                              # this exact shot is exhausted

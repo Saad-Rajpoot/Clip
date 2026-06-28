@@ -458,6 +458,13 @@ def test_exact_scene_recall_fixes():
     msrc2 = (Path(__file__).resolve().parent.parent / "vidlore" / "clipstudio" /
              "match.py").read_text(encoding="utf-8")
     check("episode-code anchoring in match", "_ep in (src.title" in msrc2)
+    # FOOTAGE-ABUNDANCE GUARD: a long single-scene deep-dive whose long-form floor pulled in MANY anchor
+    # sources must NOT relax anti-reuse — relaxing re-aired one Cleganebowl source 26× / one window 13×
+    # while 14 relevant context sources sat unused. Verified by re-match: 20→26 sources, 26×→13×, 13×→3×.
+    check("single-scene reuse-relax disabled when anchor footage is abundant",
+          "_anchor_abundant" in msrc2
+          and "len(anchor_sids) > int(_f_env" in msrc2
+          and "and not _anchor_abundant" in msrc2)
 
     # pacing + quality: Ken Burns hold/zoom, SD sharpen-upscale, HD selection preference, CRF
     from vidlore.clipstudio.build import _ken_burns_filter, _upscale_filter
