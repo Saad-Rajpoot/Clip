@@ -93,6 +93,11 @@ _REACTION_TITLE = re.compile(
 _NONSHOW_TITLE = re.compile(
     r"\b(total war|three kingdoms|mount ?& ?blade|bannerlord|crusader kings|ck2|ck3|"
     r"gameplay|game ?play|playthrough|mod(ded| showcase| review)?|"
+    # RENDERED / CUT-SCENE GAME footage — the Telltale 'Game of Thrones' game (and other cinematic
+    # games) look cartoonish/rendered, NOT the live-action show, but their cut-scene compilations are
+    # titled 'Telltale' / 'all cutscenes' / 'game movie' with no 'gameplay' word, so they slipped the
+    # gate and flooded a Theon/Ironborn render (the game is set in that exact era). Block them by name.
+    r"telltale|cut[- ]?scenes?|game movie|all cutscenes|walkthrough|longplay|video ?game|"
     r"machinima|minecraft|roblox|fortnite|simulation|simulator|"
     r"two steps from hell|audiomachine|epic music|soundtrack|\bost\b|\bamv\b|gmv|"
     r"music video|lyric video|tribute|fan ?edit|"

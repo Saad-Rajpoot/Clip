@@ -1232,6 +1232,14 @@ def test_character_relevance():
     check("non-show titles rejected (game/AMV/animated/(NNN AC)/house-vs)",
           all(_NONSHOW_TITLE.search(t) for t in nonshow))
     check("real scene titles kept", not any(_NONSHOW_TITLE.search(t) for t in real))
+    # RENDERED/CUT-SCENE GAME footage — the Telltale 'Game of Thrones' game looks cartoonish, not the
+    # live-action show; its cut-scene compilations ('Telltale' / 'all cutscenes' / 'game movie', no
+    # 'gameplay' word) slipped the gate and flooded a Theon/Ironborn render (the game is set in that era).
+    check("Telltale / cut-scene GAME footage rejected (rendered, not the live-action show)",
+          bool(_NONSHOW_TITLE.search("Game of Thrones Telltale - All Cutscenes (Game Movie)"))
+          and bool(_NONSHOW_TITLE.search("GoT Telltale Walkthrough Part 1"))
+          and bool(_NONSHOW_TITLE.search("Game of Thrones video game cutscene"))
+          and not _NONSHOW_TITLE.search("Theon rescues Sansa - Game of Thrones S05E10"))
 
     class _C:
         def __init__(s, title): s.title = title; s.duration = 300; s.height = 1080
