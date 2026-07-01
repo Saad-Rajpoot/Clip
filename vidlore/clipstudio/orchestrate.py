@@ -379,6 +379,23 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
         proj = ClipProject(name=project_dir.name, root=str(project_dir))
     proj.ensure_dirs()
 
+    # VISUAL-FILTER REQUIREMENT (fail-CLOSED). The animated / video-game / toy footage gate
+    # (_source_is_nonphotographic -> _photographic_ok, verified to correctly flag Telltale 'Game of
+    # Thrones' game cut-scenes as art) is CLIP-based. Without the CLIP model it SILENTLY fails open,
+    # so a machine with no CLIP — a fresh Windows box has an EMPTY ~/.cache/vidlore_clip and there is
+    # no auto-download — shipped a render FULL of cartoonish game cut-scenes. Refuse up front rather
+    # than ship footage we cannot visually verify. Escape hatch: VIDLORE_CLIPSTUDIO_ALLOW_NO_CLIP=1.
+    import os as _oscl
+    from .index import clip_available as _clip_ok
+    if not _clip_ok() and _oscl.environ.get("VIDLORE_CLIPSTUDIO_ALLOW_NO_CLIP", "").strip() \
+            not in ("1", "true", "yes"):
+        raise PipelineError(
+            "CLIP visual model not loaded — the animated / video-game / toy footage filter cannot run, "
+            "so this render would silently include cartoon/game footage (e.g. Telltale 'Game of Thrones' "
+            "cut-scenes). Put the CLIP models (clip_vision.onnx, clip_text.onnx, tokenizer.json) in "
+            "~/.cache/vidlore_clip (or set VIDLORE_CLIP_DIR to their folder), then retry. To render anyway "
+            "with degraded footage filtering, set VIDLORE_CLIPSTUDIO_ALLOW_NO_CLIP=1.")
+
     # purge any cached reaction/essay/non-show sources left over from before the title-gate fix
     _purged = _purge_unwanted_sources(proj, log)
     if _purged:

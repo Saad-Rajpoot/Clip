@@ -800,6 +800,23 @@ def test_pipeline_error_and_gates():
 
     check("PipelineError is a normal Exception (catchable by the web worker)",
           issubclass(O.PipelineError, Exception) and not issubclass(O.PipelineError, SystemExit))
+    # VISUAL-FILTER fail-CLOSED: with no CLIP model the animated / video-game / toy footage gate can't
+    # run, so a render would SILENTLY ship cartoon/game footage (a fresh Windows box did — full of
+    # Telltale 'Game of Thrones' game cut-scenes). produce_auto now REFUSES up front, not fails open.
+    import vidlore.clipstudio.index as _ix2
+    _save_clip = _ix2.clip_available
+    _ix2.clip_available = lambda: False
+    _noclip_refused = False
+    try:
+        O.produce_auto(tempfile.mkdtemp(prefix="noclip_"), topic="x", script_text="a b c",
+                       movie_hint="Y", do_build=False)
+    except O.PipelineError as _e:
+        _noclip_refused = "CLIP visual model not loaded" in str(_e)
+    except Exception:
+        _noclip_refused = False
+    finally:
+        _ix2.clip_available = _save_clip
+    check("no-CLIP render fails CLOSED (won't silently ship animated/game footage)", _noclip_refused)
 
     # produce() must abort when every permitted source failed to download
     tmp = Path(tempfile.mkdtemp(prefix="csgate_"))
