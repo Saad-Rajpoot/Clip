@@ -3,6 +3,11 @@ setlocal EnableExtensions EnableDelayedExpansion
 title ClipStudio Portal (Windows)
 cd /d "%~dp0"
 
+REM  CLIP visual model = the animated / video-game / toy footage filter. If the models ship next to
+REM  this launcher (models\clip), point the tool at them so it never falls back to an EMPTY user cache
+REM  (empty cache = filter OFF = cartoon/game footage leaks in; the pipeline now refuses in that case).
+if exist "%~dp0models\clip\clip_vision.onnx" set "VIDLORE_CLIP_DIR=%~dp0models\clip"
+
 echo ==================================================
 echo   ClipStudio - Windows launcher
 echo   (pehli baar setup karega, phir portal chalega)
