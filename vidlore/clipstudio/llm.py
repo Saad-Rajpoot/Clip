@@ -185,10 +185,19 @@ def _gcp_cred() -> str:
     return ""
 
 
+def _gemini_api_key() -> str:
+    """Google AI Studio (Gemini Developer API) key — the simple, CHEAP vision path. When set it is
+    preferred over Vertex, so the image verifier runs on gemini-2.5-flash via a plain API key with no
+    GCP service account needed (~10x cheaper than the Claude vision fallback)."""
+    return (os.environ.get("GEMINI_API_KEY", "").strip()
+            or os.environ.get("GOOGLE_API_KEY", "").strip())
+
+
 def gemini_available() -> bool:
     """Is Gemini USABLE here (creds + SDK)? — independent of which provider is PRIMARY, so Gemini can
-    serve as a fallback. Provider order lives in complete()."""
-    if not _gcp_cred():
+    serve as a fallback. An AI-Studio API key OR a Vertex service account counts. Order lives in
+    complete()."""
+    if not (_gemini_api_key() or _gcp_cred()):
         return False
     try:
         from google import genai  # noqa: F401
@@ -201,7 +210,11 @@ def _gemini_client():
     global _CLIENT
     if _CLIENT is None:
         from google import genai
-        cred = _gcp_cred()
+        key = _gemini_api_key()
+        if key:                                 # AI Studio (Developer API) — the cheap, simple path
+            _CLIENT = genai.Client(api_key=key)
+            return _CLIENT
+        cred = _gcp_cred()                       # else fall back to Vertex (service-account JSON)
         # cred is verified to exist on disk; a stale env var pointing at a missing file must
         # not win over it (setdefault would keep the broken value)
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred
@@ -367,7 +380,8 @@ def active_provider(eng_cfg=None) -> str:
     avail = {
         "deepseek": (bool(_deepseek_key(eng_cfg)), f"deepseek ({_deepseek_model()})"),
         "anthropic": (bool(_claude_key(eng_cfg)), f"anthropic ({_claude_model()})"),
-        "gemini": (gemini_available(), f"gemini ({_gemini_model()}, Vertex)"),
+        "gemini": (gemini_available(),
+                   f"gemini ({_gemini_model()}, {'API key' if _gemini_api_key() else 'Vertex'})"),
     }
     prov = _provider()
     if prov in ("deepseek", "ds"):
