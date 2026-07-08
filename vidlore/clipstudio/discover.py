@@ -530,7 +530,14 @@ _MUSIC_ONLY_RX = re.compile(
 _WRONGSHOW_SIBLINGS = {
     "game of thrones": re.compile(
         r"\bhouse of the dragon\b|\bhotd\b|\bdragon'?s? prequel\b|"
-        r"\bdunk (and|&) egg\b|\bknight of the seven kingdoms\b|\bhedge knight\b", re.I),
+        r"\bdunk (and|&) egg\b|\bknight of the seven kingdoms\b|\bhedge knight\b|"
+        # HotD-exclusive characters/dragons/topics — a sibling clip titled by CHARACTER (not by the
+        # show name) otherwise slips this gate (observed: "Aemond Destroys King Aegon…" aired as the
+        # cold-open of a Daenerys video). Only names that cannot appear in a genuine GoT scene title
+        # (Aegon/Viserys/Rhaenys are shared backstory, so left out to avoid false positives).
+        r"\baemond\b|\brhaenyra\b|\balicent\b|\bdaemon targaryen\b|\botto hightower\b|"
+        r"\bcriston cole\b|\bdance of the dragons\b|\btargaryen civil war\b|"
+        r"\bvhagar\b|\bcaraxes\b|\blucerys\b|\bjacaerys\b|\bgreen council\b", re.I),
     "house of the dragon": re.compile(
         r"\bgame of thrones\b|\bgot s\d|\bgot season\b", re.I),
 }

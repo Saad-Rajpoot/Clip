@@ -1630,6 +1630,21 @@ def test_image_fallback():
           and _wrong_installment("House of the Dragon", "House of the Dragon - Rhaenyra") is False)
     check("wrong-show gate wired at discover + match",
           "_wrong_installment" in dsrc2 and "wrong-show" in dsrc2 and "_wrong_installment" in _msrc)
+    # HotD sibling titled by CHARACTER (not show name) must also be caught — the real miss that put
+    # an Aemond clip in the cold-open of a Daenerys render (title had no "House of the Dragon").
+    check("wrong-show guard catches HotD sibling titled by character (Aemond / High Valyrian)",
+          _wrong_installment("Game of Thrones",
+                             "Aemond Destroys King Aegon at the Small Council Meeting in High Valyrian") is True
+          and _wrong_installment("Game of Thrones", "Rhaenyra claims the Iron Throne") is True)
+    check("wrong-show guard does NOT false-positive on shared-backstory / High Valyrian GoT titles",
+          _wrong_installment("Game of Thrones", "Aegon Targaryen revealed — Jon Snow's real name") is False
+          and _wrong_installment("Game of Thrones", "Daenerys speaks High Valyrian to the Unsullied") is False)
+    # breakout miner must apply the same cross-show gate (it reads proj.sources directly, not the
+    # match-filtered pool) — otherwise an HotD clip that never enters the pool can still open the video.
+    _bsrc_ws = (Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio" /
+                "build.py").read_text(encoding="utf-8")
+    check("breakout selection applies the wrong-show gate on proj.sources",
+          "_wrong_installment" in _bsrc_ws and "breakout wrong-show gate" in _bsrc_ws)
     # hook (dynamic open) + dynamic music arc
     check("hook: opening beats forced dynamic (no slow hold) + stronger push",
           "_hold -= set(range(max(0, _hook_n))" in bsrc and "pos < _hook_n" in bsrc)

@@ -667,6 +667,20 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     # even on a 16-min essay with rich dialogue footage — the Drogon render.)
     srcs = [s for s in proj.sources
             if s.status == "ok" and s.local_path and Path(s.local_path).exists()]
+    # CROSS-SHOW purity for breakouts: a breakout airs a FULL scene with its own audio in the most
+    # prominent slots (the cold-open included), so a franchise sibling (House of the Dragon in a
+    # Game of Thrones video) is the single most jarring possible miss. match.py already drops wrong-
+    # show sources from the regular footage pool, but the breakout miner reads proj.sources directly
+    # — so it must apply the same gate, or an HotD clip that never enters the pool can still open the
+    # video. (Observed: an Aemond/HotD clip aired as the cold-open of a Daenerys render.)
+    from .discover import _wrong_installment as _wrong_show9
+    _bk_show9 = ((getattr(proj, "meta", None) or {}).get("analysis", {}) or {}).get("movie_title", "") or ""
+    if _bk_show9:
+        _bk_n0 = len(srcs)
+        srcs = [s for s in srcs if not _wrong_show9(_bk_show9, s.title or "")]
+        if len(srcs) < _bk_n0:
+            log(f"build: breakout wrong-show gate — dropped {_bk_n0 - len(srcs)} "
+                f"franchise-sibling source(s) (e.g. House of the Dragon in a {_bk_show9} video)")
     shots_of = {}
     for s in srcs:
         try:
