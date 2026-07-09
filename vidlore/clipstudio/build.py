@@ -426,11 +426,13 @@ def _dialogue_aware_dur(src_path: str, start: float, lo: float = 3.0,
 
 
 def _extract_breakout(src_path: str, start: float, dur: float, vdest: Path,
-                      adest: Path, src_w: int = 0) -> Optional[float]:
+                      adest: Path, src_w: int = 0, crop_corner: str = "") -> Optional[float]:
     """Cut the breakout VIDEO (enhanced, 1080p30, silent) + its AUDIO (2-pass loudnorm to
     narration level, faded) from the source. Skips leading scene silence so the narration
     pause never dangles over a mute shot; `dur` is treated as the MAX — the real length is
-    chosen to end on a complete spoken line (3-10s). Returns the exact duration or None."""
+    chosen to end on a complete spoken line (3-10s). Returns the exact duration or None.
+    `crop_corner`: punch-in crop that drops a channel bug's corner — breakout clips are cut
+    directly from the source, so build_video's per-clip watermark crop never touches them."""
     import json as _json10
     import re as _re10
     try:
@@ -466,10 +468,11 @@ def _extract_breakout(src_path: str, start: float, dur: float, vdest: Path,
         if _os10.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_VOICE_GUARD", "1").strip() \
                 not in ("0", "false", "no") and _is_narration(_bk_text):
             return None
+        _wmcrop = (_watermark_crop_filter(crop_corner) + ",") if crop_corner else ""
         pv = subprocess.run(
             [ffmpeg_exe(), "-y", "-ss", f"{max(0.0, start):.3f}", "-i", str(src_path),
              "-t", f"{dur:.3f}", "-an",
-             "-vf", (_upscale_filter(src_w) if src_w and src_w < 1280
+             "-vf", _wmcrop + (_upscale_filter(src_w) if src_w and src_w < 1280
                      else f"scale=1920:1080:force_original_aspect_ratio=increase,"
                           f"crop=1920:1080,setsar=1,{_CAS}") + ",fps=30",
              "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
@@ -723,9 +726,20 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     _rej = {"later_era_source": 0, "commentary": 0, "recap": 0, "wrong_char": 0,
             "dark": 0, "burned_text": 0, "dedup": 0, "spacing": 0, "window_commentary": 0}
     from .match import _ocr_text_heavy as _txt9
+    from .match import _shot_subtitle_band as _sub9
+    from .match import _source_corner_logo as _logo9
     import os as _os9b
     _tgate9 = _os9b.environ.get("VIDLORE_CLIPSTUDIO_TEXT_GATE", "1").strip() \
         not in ("0", "false", "no", "")
+    _sbgate9 = _os9b.environ.get("VIDLORE_CLIPSTUDIO_SUBBAND_GATE", "1").strip() \
+        not in ("0", "false", "no", "")
+    _cngate9 = _os9b.environ.get("VIDLORE_CLIPSTUDIO_CORNER_LOGO_GATE", "1").strip() \
+        not in ("0", "false", "no", "")
+
+    def _texty9(sh):
+        """Burned overlay text on a breakout shot — OCR-readable OR a script-agnostic subtitle
+        band (Arabic/Turkish burned subs OCR to nothing readable but must never open a breakout)."""
+        return (_tgate9 and _txt9(sh)) or (_sbgate9 and _sub9(sh))
     cands = []
     # STRONG-VERBATIM set: (seg_idx, src_id, round(start,1)) for matches where 4+ CONSECUTIVE scripted
     # words are spoken verbatim in the footage's own ASR. The exact scripted line located inside the
@@ -744,7 +758,7 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
             if s.id not in ok_audio:
                 continue
             for sh in shots_of.get(s.id, []):
-                if _tgate9 and _txt9(sh):
+                if _texty9(sh):
                     continue                           # burned-in text never airs
                 run = _quote_run_in(qw, _rw(getattr(sh, "transcript", "")))
                 if run >= 3:
@@ -835,7 +849,7 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
             found = []
             for s in tier_srcs:
                 for sh in shots_of.get(s.id, []):
-                    if _tgate9 and _txt9(sh):
+                    if _texty9(sh):
                         continue                       # burned-in text never airs
                     raw9 = _rw(getattr(sh, "transcript", ""))
                     if not _english_ish(raw9):
@@ -1036,8 +1050,11 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         dur = 10.0
         v = work / f"breakout_{idx:03d}.mp4"
         a = work / f"breakout_{idx:03d}.wav"
+        # corner-bug sources: breakouts are cut straight from the source (build_video's per-clip
+        # watermark crop never sees them), so punch-in-crop the bug corner here (memoized detector)
+        _bk_corner = _logo9(shots_of.get(src.id) or []) if _cngate9 else ""
         real = _extract_breakout(src.local_path, float(sh.start), dur, v, a,
-                                 int(getattr(src, "width", 0) or 0))
+                                 int(getattr(src, "width", 0) or 0), crop_corner=_bk_corner)
         if not (real and real > 1.5):
             continue
         # POST-EXTRACTION WINDOW-AUDIO gate — the matched SHOT line passed the commentary gate, but

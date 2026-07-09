@@ -81,51 +81,79 @@ def _source_is_watermarked(shots, *, min_frac: float = 0.12, min_hits: int = 4) 
     return hits >= min_hits and (hits / len(shots)) >= min_frac
 
 
-def _source_corner_logo(shots, *, samples: int = 12, min_kf: int = 5) -> str:
-    """PIXEL-level static-corner-logo detector — the OCR-independent backstop for
-    _source_is_watermarked. A stylized/graffiti channel bug OCRs as garbage ('BIATO', 'CARTO' —
-    observed on a 'BLACK TRVLLS' logo that aired on 16 beats), so keyword matching can't be the
-    only detector. Instead: a corner patch that stays NEAR-IDENTICAL across keyframes of many
-    DIFFERENT scenes, while the frame centre changes, is a static overlay. Requiring the
-    time-averaged patch to have internal spatial structure excludes flat letterbox/black corners.
+_CORNER_LOGO_CACHE: dict = {}
 
-    Returns the corner name ('tl'|'tr'|'bl'|'br') or '' when clean. Cheap: ≤12 keyframes via PIL.
+
+def _source_corner_logo(shots, *, samples: int = 16, min_kf: int = 6) -> str:
+    """PIXEL-level static-corner-logo detector — the OCR-independent backstop for
+    _source_is_watermarked. A stylized/graffiti/semi-transparent channel bug OCRs as garbage
+    (or not at all), so keyword matching can't be the only detector.
+
+    v3 (calibrated on 38 real sources — 7/7 true bugs found incl. a tiny semi-transparent 'BOC'
+    and a vertical 'SociopathMD' edge bug, 0 false positives): EDGE-PERSISTENCE voting at 2× res.
+    Scene edges move between shots; a logo's edges sit on the SAME pixels. Per keyframe, threshold
+    the corner's edge map; a corner where the edged-pixel mask is PRESENT on ≥25% of keyframes,
+    positionally CONSISTENT (mean IoU vs the majority mask ≥0.45), and 2D-clustered (not a
+    letterbox line) is a bug. The frame centre must vary across shots — a static card is
+    _source_is_static's call, not a logo.
+
+    Returns 'tl'|'tr'|'bl'|'br' or ''. Memoized per source (keyed on the first keyframe path).
     Kill switch: VIDLORE_CLIPSTUDIO_CORNER_LOGO_GATE=0 (checked by callers)."""
     import numpy as np
     from PIL import Image
     kfs = [getattr(sh, "keyframe_path", "") or "" for sh in shots]
-    kfs = [k for k in kfs if k and Path(k).exists()]
+    kfs = [k for k in kfs if k]
+    if len(kfs) < min_kf:
+        return ""
+    ck = (kfs[0], len(kfs))
+    if ck in _CORNER_LOGO_CACHE:
+        return _CORNER_LOGO_CACHE[ck]
+    while len(_CORNER_LOGO_CACHE) >= 256:
+        _CORNER_LOGO_CACHE.pop(next(iter(_CORNER_LOGO_CACHE)))
+    _CORNER_LOGO_CACHE[ck] = ""                       # default while computing (also on early-outs)
+    kfs = [k for k in kfs if Path(k).exists()]
     if len(kfs) < min_kf:
         return ""
     step = max(1, len(kfs) // samples)
-    kfs = kfs[::step][:samples]
     frames = []
-    for k in kfs:
+    for k in kfs[::step][:samples]:
         try:
-            im = Image.open(k).convert("L").resize((320, 180))
-            frames.append(np.asarray(im, dtype="float32"))
+            frames.append(np.asarray(Image.open(k).convert("L").resize((640, 360)),
+                                     dtype="float32"))
         except Exception:
             continue
     if len(frames) < min_kf:
         return ""
-    stack = np.stack(frames)                                   # (n, 180, 320)
-    # centre patch must CHANGE across shots (different scenes) — else the source is a static
-    # card and _source_is_static owns it, not this detector.
-    centre = stack[:, 54:126, 96:224]
-    if float(centre.std(axis=0).mean()) < 18.0:
-        return ""
-    corners = {          # ~26% × 16% patches, flush to each corner (where channel bugs live)
-        "tl": stack[:, 0:29, 0:83],   "tr": stack[:, 0:29, 237:320],
-        "bl": stack[:, 151:180, 0:83], "br": stack[:, 151:180, 237:320],
+    small = np.stack([f[::4, ::4] for f in frames])   # 160×90 for the cheap centre-variance test
+    if float(small[:, 14:76, 24:136].std(axis=0).mean()) < 8.0:
+        return ""                                      # centre never changes → static card, not a bug
+    edges = []
+    for f in frames:
+        gy, gx = np.gradient(f)
+        edges.append(np.hypot(gx, gy))
+    regions = {          # 18% × 12% patches at 640×360, flush to each corner
+        "tl": (slice(0, 44), slice(0, 116)),   "tr": (slice(0, 44), slice(524, 640)),
+        "bl": (slice(316, 360), slice(0, 116)), "br": (slice(316, 360), slice(524, 640)),
     }
     best, best_score = "", 0.0
-    for name, patch in corners.items():
-        temporal = float(patch.std(axis=0).mean())     # small = static over time
-        spatial = float(patch.mean(axis=0).std())      # large = structured (a logo, not a bar)
-        if temporal < 12.0 and spatial > 14.0:
-            score = spatial - temporal
-            if score > best_score:
-                best, best_score = name, score
+    for name, (rs, cs) in regions.items():
+        masks = [(e[rs, cs] > 18.0) for e in edges]
+        present = [m for m in masks if m.mean() > 0.02]
+        pf = len(present) / len(masks)
+        if len(present) < 4 or pf < 0.25:
+            continue
+        maj = np.stack(present).mean(axis=0) >= 0.5   # majority mask = the bug's footprint
+        if maj.sum() < 25 or maj.mean() > 0.85:
+            continue                                   # too small, or the WHOLE corner "persists"
+                                                       # (busy texture/noise, not a bounded logo)
+        iou = float(np.mean([float((m & maj).sum()) / max(1.0, float((m | maj).sum()))
+                             for m in present]))
+        ys, xs = np.nonzero(maj)
+        spread = min(ys.std(), xs.std()) if len(ys) > 12 else 0.0
+        score = pf * iou
+        if pf >= 0.25 and iou >= 0.45 and spread > 2.5 and score >= 0.20 and score > best_score:
+            best, best_score = name, score
+    _CORNER_LOGO_CACHE[ck] = best
     return best
 
 
@@ -420,6 +448,58 @@ def _ocr_is_junk(shot) -> bool:
     return bool(txt) and bool(_OCR_JUNK.search(txt))
 
 
+_SUBBAND_CACHE: dict = {}
+
+
+def _shot_subtitle_band(shot) -> bool:
+    """SCRIPT-AGNOSTIC burned-subtitle detector for one shot's keyframe. The OCR text gate only
+    catches text RapidOCR can read — Arabic/Turkish burned subs sailed through (observed: a
+    Turkish 'Oğlumsun.' aired over the privy scene). Visual heuristic instead: subtitles are a
+    horizontal STRIPE of small high-contrast strokes in the bottom band — high edge density
+    there vs the mid-frame, spanning many columns, concentrated in few rows. Calibrated on real
+    sources (Turkish/Arabic/English-subbed positives, 30+ clean negatives).
+
+    Kill switch: VIDLORE_CLIPSTUDIO_SUBBAND_GATE=0 (checked by callers). Memoized per keyframe."""
+    kf = getattr(shot, "keyframe_path", "") or ""
+    if not kf:
+        return False
+    if kf in _SUBBAND_CACHE:
+        return _SUBBAND_CACHE[kf]
+    while len(_SUBBAND_CACHE) >= 8192:
+        _SUBBAND_CACHE.pop(next(iter(_SUBBAND_CACHE)))
+    _SUBBAND_CACHE[kf] = False
+    if not Path(kf).exists():
+        return False
+    try:
+        import numpy as np
+        from PIL import Image
+        fr = np.asarray(Image.open(kf).convert("L").resize((320, 180)), dtype="float32")
+        gy, gx = np.gradient(fr)
+        E = np.hypot(gx, gy)
+        band = E[137:175, 38:282] > 42.0              # bottom 76–97% height, x 12–88%
+        bf = float(band.mean())
+        mf = float((E[72:126, 38:282] > 42.0).mean())  # mid-frame reference density
+        ys, xs = np.nonzero(band)
+        colcov = len(np.unique(xs // 8)) / (244 // 8) if len(xs) else 0.0
+        rowspread = ys.std() if len(ys) > 20 else 99.0
+        ok = bf > 0.05 and bf > 2.0 * max(mf, 0.008) and colcov >= 0.28 and rowspread < 11.0
+        _SUBBAND_CACHE[kf] = bool(ok)
+        return bool(ok)
+    except Exception:
+        return False
+
+
+def _source_subs_frac(shots) -> float:
+    """Fraction of a source's shots showing a burned-subtitle band — the SOURCE-level cleanliness
+    signal for clean-copy arbitration. Burned subs are intermittent (they appear whenever dialogue
+    plays), so ANY clip from a source with a meaningful fraction risks subs mid-clip even when its
+    own keyframe happens to be clean."""
+    if not shots:
+        return 0.0
+    hits = sum(1 for sh in shots if _shot_subtitle_band(sh))
+    return hits / len(shots)
+
+
 _LOGO_TOKENS = {"HBO", "MAX", "AMC", "FOX", "TNT", "ITV", "SKY", "CW"}
 
 
@@ -456,6 +536,8 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
     import os
     gate_on = os.environ.get("VIDLORE_CLIPSTUDIO_OCR_GATE", "1").strip() not in ("0", "false", "no", "")
     tgate_on = os.environ.get("VIDLORE_CLIPSTUDIO_TEXT_GATE", "1").strip() not in ("0", "false", "no", "")
+    subband_on = os.environ.get("VIDLORE_CLIPSTUDIO_SUBBAND_GATE", "1").strip() \
+        not in ("0", "false", "no", "")
     wrongface_on = os.environ.get("VIDLORE_CLIPSTUDIO_WRONGFACE_GATE", "1").strip() \
         not in ("0", "false", "no", "")
     # BLACK-FRAME floor: a near-black / unusable keyframe (transition fade, outro background, a
@@ -472,6 +554,8 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
             continue                                      # drop ad/news/CTA/watermark frames
         if tgate_on and _ocr_text_heavy(ps.shot):
             continue                                      # readable overlay text NEVER airs
+        if subband_on and _shot_subtitle_band(ps.shot):
+            continue                                      # burned subs (any script) NEVER air
         if _black_floor > 0 and float(getattr(ps.shot, "quality", 1.0) or 1.0) < _black_floor:
             continue                                      # near-black / unusable frame never airs
         clip_cos = 0.0
@@ -539,6 +623,83 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
         scored.append((base, bonus, sig, ps))
     scored.sort(key=lambda x: x[0] + x[1], reverse=True)
     return scored
+
+
+def _res_tier(h: int) -> int:
+    """Resolution TIER (not raw pixels) so a 718p and a 720p copy tie: 1080-class=3, 720-class=2,
+    480-class=1, sub-SD=0, unknown=1 (benefit of the doubt, below HD)."""
+    if h >= 1000:
+        return 3
+    if h >= 640:
+        return 2
+    if h >= 440:
+        return 1
+    return 0 if h else 1
+
+
+def _cleanliness_key(sid: str, shot, src_dirty: dict, src_height: dict) -> tuple:
+    """Sort key for clean-copy arbitration — LOWER is cleaner. Ordered exactly per policy:
+    watermark first, then burned-sub risk, then resolution tier, then luma/sharpness."""
+    d = src_dirty.get(sid) or {}
+    subs_risk = (float(d.get("subs", 0.0)) >= 0.12) or _shot_subtitle_band(shot)
+    return (1 if d.get("corner") else 0,
+            1 if subs_risk else 0,
+            -_res_tier(int(src_height.get(sid, 0) or 0)),
+            -float(getattr(shot, "quality", 0.5) or 0.5))
+
+
+def _clean_copy_swap(seg, best, scored, src_dirty: dict, src_height: dict, cfg,
+                     *, eps: float = 0.03):
+    """SAME-SCENE CLEAN-COPY ARBITRATION. Scene compilations upload the same iconic moment many
+    times — one copy clean 1080p, another with a channel bug / burned Turkish subs / 360p. The
+    greedy pick takes the highest-scoring copy, which is blind to cleanliness (observed: a
+    watermarked copy of the Tywin scene aired 16 beats while a clean 1080p copy of the SAME
+    moment sat unused). When another source holds a NEAR-DUPLICATE of the winning shot
+    (phash/CLIP-embed/ASR overlap) at practically the same relevance (within eps), prefer the
+    cleanest copy: no watermark → no burned subs → higher resolution tier → sharper.
+
+    Relevance-first is preserved by construction: only same-scene duplicates within eps swap —
+    exact relevant footage is never replaced by an irrelevant HD shot.
+    Kill switch: VIDLORE_CLIPSTUDIO_CLEAN_COPY_GATE=0. Returns (best, note|None)."""
+    import numpy as np
+    if best is None:
+        return best, None
+    _adj, base_b, ps_b, cand_b = best
+    key_b = _cleanliness_key(ps_b.sid, ps_b.shot, src_dirty, src_height)
+    if key_b[0] == 0 and key_b[1] == 0 and key_b[2] == -3:
+        return best, None                          # already a clean 1080-class copy — nothing to win
+    tb = (getattr(ps_b.shot, "transcript", "") or "").lower().split()
+    alt, alt_key, alt_base = None, key_b, 0.0
+    for base, bonus, sig, ps in scored:
+        if ps.sid == ps_b.sid:
+            continue                               # a different SOURCE = a different copy
+        if base < base_b - eps:
+            continue                               # relevance-first: never trade relevance away
+        same = False
+        if ps.shot.phash and ps_b.shot.phash:
+            same = _index._hamming(ps.shot.phash, ps_b.shot.phash) <= cfg.dup_hamming
+        if not same and ps.embed is not None and ps_b.embed is not None:
+            same = float(np.dot(ps.embed, ps_b.embed)) >= cfg.near_dup_cos
+        if not same and len(tb) >= 6:
+            ta = (getattr(ps.shot, "transcript", "") or "").lower().split()
+            if len(ta) >= 6:
+                sa, sb = set(ta), set(tb)
+                same = len(sa & sb) / max(1, min(len(sa), len(sb))) >= 0.6
+        if not same:
+            continue
+        k = _cleanliness_key(ps.sid, ps.shot, src_dirty, src_height)
+        if k < alt_key or (k == alt_key and alt is not None and base > alt_base):
+            alt, alt_key, alt_base = (base, bonus, sig, ps), k, base
+    if alt is None:
+        return best, None
+    base, bonus, sig, ps = alt
+    in_p, out_p = _trim_window(ps.shot, seg, cfg)
+    cand = ClipCandidate(segment_index=seg.index, source_id=ps.sid, shot_index=ps.shot.index,
+                         score=round(max(0.0, min(1.0, base)), 4),
+                         in_point=in_p, out_point=out_p, signals=sig)
+    note = (f"match: clean-copy swap seg{seg.index} {ps_b.sid[:28]}→{ps.sid[:28]} "
+            f"(dirty{key_b[:3]}→clean{alt_key[:3]}, Δrel={base_b - base:+.3f})")
+    return (best[0], base, ps, cand), note
 
 
 def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfig,
@@ -735,6 +896,25 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
     # anti-reuse so the cut spreads across what discovery actually found.
     _anchor_abundant = len(anchor_sids) > int(_f_env("VIDLORE_CLIPSTUDIO_ANCHOR_SCARCE_MAX", 6))
     _src_height = {s.id: int(getattr(s, "height", 0) or 0) for s in proj.sources}
+    # CLEANLINESS MAP for same-scene clean-copy arbitration: per-source corner-bug + burned-sub
+    # fraction, computed once over the pooled shots (both detectors are memoized).
+    import os as _os_cc
+    _clean_gate = _os_cc.environ.get("VIDLORE_CLIPSTUDIO_CLEAN_COPY_GATE", "1").strip() \
+        not in ("0", "false", "no")
+    _corner_gate = _os_cc.environ.get("VIDLORE_CLIPSTUDIO_CORNER_LOGO_GATE", "1").strip() \
+        not in ("0", "false", "no")
+    _src_dirty: dict = {}
+    if _clean_gate:
+        _by_src_shots: dict = {}
+        for ps in pool:
+            _by_src_shots.setdefault(ps.sid, []).append(ps.shot)
+        for _sid, _shs in _by_src_shots.items():
+            _src_dirty[_sid] = {"corner": (_source_corner_logo(_shs) if _corner_gate else ""),
+                                "subs": _source_subs_frac(_shs)}
+        _dirty_n = sum(1 for v in _src_dirty.values() if v["corner"] or v["subs"] >= 0.12)
+        if progress and _dirty_n:
+            progress(f"match: cleanliness map — {_dirty_n}/{len(_src_dirty)} source(s) carry a "
+                     f"corner bug or burned subs (clean-copy arbitration active)")
     source_uses: dict[str, int] = {}
     shot_uses: dict[tuple[str, int], int] = {}
     recent_sources: list[str] = []
@@ -868,6 +1048,19 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
                 cur = alt_best.get(ps.sid)
                 if cur is None or cand.score > cur.score:
                     alt_best[ps.sid] = cand
+
+        # SAME-SCENE CLEAN-COPY ARBITRATION: if another source holds a near-duplicate of the
+        # winning shot at ~equal relevance, air the cleanest copy (no watermark → no burned subs →
+        # higher resolution → sharper). The displaced pick stays available as an alternate.
+        if _clean_gate and best is not None:
+            _old_cand = best[3]
+            best, _swap_note = _clean_copy_swap(seg, best, scored, _src_dirty, _src_height, cfg)
+            if _swap_note:
+                _pc = alt_best.get(_old_cand.source_id)
+                if _pc is None or _old_cand.score > _pc.score:
+                    alt_best[_old_cand.source_id] = _old_cand
+                if progress:
+                    progress(_swap_note)
 
         # alternates: best candidate per source, ORDERED best-first — the verifier's repair only
         # tries the first few, and beat_windows inherit this order. Rank by score PLUS the anchor

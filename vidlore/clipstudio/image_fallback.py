@@ -327,7 +327,12 @@ def _shot_has_overlay_text(shot) -> bool:
     if getattr(shot, "ocr_names", None):                       # roster/name cards read off the frame
         return True
     t = (getattr(shot, "ocr_text", "") or "").strip()
-    return len(t) >= 6                                          # any real readable overlay text
+    if len(t) >= 6:                                             # any real readable overlay text
+        return True
+    # script-agnostic visual band check — Arabic/Turkish burned subs OCR to nothing readable but
+    # must never air as a FROZEN still (they'd sit on screen for seconds)
+    from .match import _shot_subtitle_band
+    return _shot_subtitle_band(shot)
 
 
 def pick_source_still(sel, shots_by_key: dict, used_keys: set, used_phash: set,

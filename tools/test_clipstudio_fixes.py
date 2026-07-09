@@ -1206,7 +1206,10 @@ def test_text_gate():
             "build.py").read_text(encoding="utf-8")
     check("window air-check gated", "_shot_has_text(w[0], float(w[1]))" in bsrc)
     check("fill-walk gated", "_TGATE and _txt_heavy(sh)" in bsrc)
-    check("breakout shots gated", bsrc.count("_tgate9 and _txt9(sh)") >= 2)
+    # breakout shots are gated through _texty9 (OCR text gate OR the script-agnostic
+    # subtitle band — Arabic/Turkish burned subs OCR to nothing readable)
+    check("breakout shots gated", bsrc.count("if _texty9(sh):") >= 2
+          and "_tgate9 and _txt9(sh)" in bsrc and "_sbgate9 and _sub9(sh)" in bsrc)
     check("air-time frame OCR probe exists",
           "def _frame_has_burned_text" in bsrc
           and "_frame_has_burned_text(_wsp, float(_wh[0][1]) + _q9)" in bsrc
@@ -2872,20 +2875,28 @@ def test_corner_logo_and_quality_gates():
     from PIL import Image
     from vidlore.clipstudio.match import _source_corner_logo
 
-    def mkshots(tmp, n=8, logo=False, static=False, letterbox=False):
+    from vidlore.clipstudio.match import _CORNER_LOGO_CACHE
+
+    def mkshots(tmp, n=10, logo=False, static=False, letterbox=False):
+        """Smooth low-frequency 'scene' frames (real footage has sparse edges) at the detector's
+        640×360 analysis size; the logo is a bounded structured patch inside the br corner."""
+        _CORNER_LOGO_CACHE.clear()
         rng = np.random.RandomState(7)
-        logo_patch = (rng.rand(30, 84) > 0.5).astype("uint8") * 255   # fixed structured "logo"
+        logo_patch = (np.random.RandomState(3).rand(28, 64) > 0.5).astype("float32") * 255
         shots = []
         for i in range(n):
-            fr = rng.randint(0, 255, (180, 320), dtype="uint8") if not static else \
-                np.full((180, 320), 90, dtype="uint8")
+            base = (rng.rand(5, 8) * 200 + 20).astype("uint8")
+            fr = np.asarray(Image.fromarray(base, "L").resize((640, 360), Image.BILINEAR),
+                            dtype="float32")
+            if static:
+                fr = np.full((360, 640), 90.0, dtype="float32")
             if letterbox:
-                fr[0:30, :] = 0
-                fr[150:180, :] = 0
+                fr[0:36, :] = 0
+                fr[324:360, :] = 0
             if logo:
-                fr[150:180, 236:320] = logo_patch                     # covers the br corner region
-            p = os.path.join(tmp, f"kf_{'lsl'[0]}{i}_{logo}_{static}_{letterbox}.png")
-            Image.fromarray(fr, "L").save(p)
+                fr[326:354, 550:614] = logo_patch                  # bounded patch in br corner
+            p = os.path.join(tmp, f"kf_{i}_{logo}_{static}_{letterbox}.png")
+            Image.fromarray(fr.astype("uint8"), "L").save(p)
             shots.append(types.SimpleNamespace(keyframe_path=p))
         return shots
 
@@ -2926,6 +2937,131 @@ def test_corner_logo_and_quality_gates():
           and "log_lines" in bsrc)
 
 
+# ===========================================================================
+# Clean-copy arbitration (2026-07-10): corner-logo v3 (small/semi-transparent
+# bugs, all corners), script-agnostic subtitle band, same-scene dup arbitration.
+# Test cases mirror the REAL remaining defects of the 70284fa2c7 audit:
+# a tiny semi-transparent 'BOC' bug, a 'SociopathMD' bottom-LEFT edge bug,
+# Arabic/Turkish burned subs, and a clean-HD dup beating a dirty SD dup.
+# ===========================================================================
+
+def _smooth_scene(rng, w=640, h=360):
+    """Low-frequency 'scene' frame (real footage has sparse edges, unlike noise)."""
+    import numpy as np
+    from PIL import Image
+    base = (rng.rand(5, 8) * 200 + 20).astype("uint8")
+    return np.asarray(Image.fromarray(base, "L").resize((w, h), Image.BILINEAR),
+                      dtype="float32")
+
+
+def test_clean_copy_arbitration():
+    print("[clean-copy] corner-logo v3 + subtitle band + same-scene arbitration")
+    import numpy as np
+    from PIL import Image
+    from vidlore.clipstudio.match import (_source_corner_logo, _shot_subtitle_band,
+                                          _clean_copy_swap, _cleanliness_key, _res_tier,
+                                          _CORNER_LOGO_CACHE, _SUBBAND_CACHE)
+    from vidlore.clipstudio.config import load_clip_config
+    from vidlore.clipstudio.models import ScriptSegment
+
+    rng = np.random.RandomState(11)
+
+    def mkcorner(tmp, tag, bug=None, alpha=1.0, n=10):
+        """bug: (rows, cols) region at 640x360; alpha<1 = semi-transparent blend."""
+        _CORNER_LOGO_CACHE.clear()
+        pat = (np.random.RandomState(3).rand(360, 640) > 0.5).astype("float32") * 255
+        shots = []
+        for i in range(n):
+            fr = _smooth_scene(rng)
+            if bug is not None:
+                rs, cs = bug
+                fr[rs, cs] = (1 - alpha) * fr[rs, cs] + alpha * pat[rs, cs]
+            p = os.path.join(tmp, f"cl_{tag}_{i}.png")
+            Image.fromarray(fr.astype("uint8"), "L").save(p)
+            shots.append(types.SimpleNamespace(keyframe_path=p))
+        return shots
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # BOC-style: SMALL, SEMI-TRANSPARENT bottom-right bug (v1/v2 missed exactly this)
+        got = _source_corner_logo(mkcorner(tmp, "boc",
+                                           bug=(slice(330, 352), slice(586, 624)), alpha=0.55))
+        check("BOC-style small semi-transparent br bug detected", got == "br")
+        # SociopathMD-style: narrow VERTICAL strip on the bottom-LEFT edge
+        got = _source_corner_logo(mkcorner(tmp, "socio",
+                                           bug=(slice(318, 358), slice(2, 14)), alpha=1.0))
+        check("SociopathMD-style bottom-left edge bug detected", got == "bl")
+        check("clean smooth scenes → no corner bug",
+              _source_corner_logo(mkcorner(tmp, "clean")) == "")
+
+        # Arabic/Turkish-style burned subs: script-agnostic stroke band (OCR reads nothing here)
+        _SUBBAND_CACHE.clear()
+        fr = _smooth_scene(rng, 320, 180)
+        for k in range(60):                       # dense short strokes across the subtitle band
+            r = 150 + (k % 3) * 6
+            c = 45 + int(rng.rand() * 210)
+            fr[r:r + 2, c:c + 6] = 255 if k % 2 else 5
+        p_sub = os.path.join(tmp, "band_sub.png")
+        Image.fromarray(fr.astype("uint8"), "L").save(p_sub)
+        check("Arabic/Turkish-style stroke band flagged (script-agnostic)",
+              _shot_subtitle_band(types.SimpleNamespace(keyframe_path=p_sub)))
+        p_clean = os.path.join(tmp, "band_clean.png")
+        Image.fromarray(_smooth_scene(rng, 320, 180).astype("uint8"), "L").save(p_clean)
+        check("clean frame not flagged as subtitled",
+              not _shot_subtitle_band(types.SimpleNamespace(keyframe_path=p_clean)))
+
+    # ---- same-scene arbitration: clean HD dup must beat dirty low-res dup ----
+    cfg = load_clip_config()
+    seg = ScriptSegment(index=0, text="tywin dies on the privy", est_duration=4.0)
+
+    def mkps(sid, ph, q=0.8, txt=""):
+        shot = types.SimpleNamespace(index=1, phash=ph, transcript=txt, quality=q,
+                                     start=10.0, end=16.0, duration=6.0, keyframe_path="")
+        return types.SimpleNamespace(sid=sid, shot=shot, embed=None)
+
+    dirty = mkps("dirty_src", "aa" * 8)
+    clean = mkps("clean_src", "aa" * 8)           # identical phash = same scene
+    other = mkps("other_src", "55" * 8, txt="completely different scene words entirely")
+    src_dirty = {"dirty_src": {"corner": "br", "subs": 0.4},
+                 "clean_src": {"corner": "", "subs": 0.0},
+                 "other_src": {"corner": "", "subs": 0.0}}
+    src_height = {"dirty_src": 360, "clean_src": 1080, "other_src": 1080}
+    scored = [(0.80, 0.0, {}, dirty), (0.79, 0.0, {}, clean), (0.95, 0.0, {}, other)]
+    best = (0.80, 0.80, dirty, types.SimpleNamespace(source_id="dirty_src", shot_index=1,
+                                                     score=0.80, in_point=10, out_point=14,
+                                                     signals={}, segment_index=0))
+    new_best, note = _clean_copy_swap(seg, best, scored, src_dirty, src_height, cfg)
+    check("clean 1080p duplicate beats dirty watermarked 360p duplicate",
+          new_best[2].sid == "clean_src" and note is not None)
+    # rule 5: the higher-scoring but DIFFERENT-scene HD shot must NOT hijack the beat
+    check("different-scene HD footage never replaces the exact relevant pick",
+          new_best[2].sid != "other_src")
+    # relevance-first: a same-scene copy far below in relevance never swaps in
+    scored2 = [(0.80, 0.0, {}, dirty), (0.70, 0.0, {}, clean)]
+    nb2, note2 = _clean_copy_swap(seg, best, scored2, src_dirty, src_height, cfg)
+    check("same-scene copy outside the relevance window does not swap",
+          nb2[2].sid == "dirty_src" and note2 is None)
+    # ordering sanity of the cleanliness key itself
+    k_dirty = _cleanliness_key("dirty_src", dirty.shot, src_dirty, src_height)
+    k_clean = _cleanliness_key("clean_src", clean.shot, src_dirty, src_height)
+    check("cleanliness key orders watermark > subs > resolution > sharpness",
+          k_clean < k_dirty and _res_tier(1080) == 3 and _res_tier(718) == 2
+          and _res_tier(360) == 0)
+
+    # wiring: gates + breakout crop + still-pool band check
+    root = Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio"
+    msrc2 = (root / "match.py").read_text(encoding="utf-8")
+    bsrc2 = (root / "build.py").read_text(encoding="utf-8")
+    isrc2 = (root / "image_fallback.py").read_text(encoding="utf-8")
+    check("subtitle-band gate wired into _score_pool",
+          "_shot_subtitle_band(ps.shot)" in msrc2 and "SUBBAND_GATE" in msrc2)
+    check("clean-copy arbitration wired into the selection loop",
+          "_clean_copy_swap(seg, best, scored" in msrc2 and "CLEAN_COPY_GATE" in msrc2)
+    check("breakouts gate subtitle bands + crop corner-bug sources",
+          "_texty9" in bsrc2 and "crop_corner=_bk_corner" in bsrc2)
+    check("still pool rejects visually-subtitled keyframes",
+          "_shot_subtitle_band" in isrc2)
+
+
 def main():
     test_verifier_promotion_rewrites_beat_windows()
     test_budget_loop_survives_plan_beats_failure()
@@ -2964,6 +3100,7 @@ def main():
     test_breakout_era_scene_gate()
     test_burned_text_black_and_recap_gates()
     test_corner_logo_and_quality_gates()
+    test_clean_copy_arbitration()
     print(f"\n{PASS} passed · {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 
