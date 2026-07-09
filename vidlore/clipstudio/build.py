@@ -94,12 +94,17 @@ def _detect_logo_corner(src_path: str, ocr_engine) -> str:
 
 def _watermarked_source_corners(proj, ocr_engine, progress=None) -> dict:
     """{source_id: corner} for every SOURCE_OK source carrying a persistent channel watermark — its
-    clips get a punch-in crop at cut time so the source can be KEPT (relevance) not dropped."""
+    clips get a punch-in crop at cut time so the source can be KEPT (relevance) not dropped.
+
+    Two detectors, OR'd: the OCR-keyword one (needs the logo to OCR into a known junk token) and
+    the PIXEL static-corner one (match._source_corner_logo) — a stylized/graffiti bug OCRs as
+    garbage and slipped the keyword path entirely (observed: 'BLACK TRVLLS' aired on 16 beats)."""
+    import os as _os2
     from . import index as _index
-    from .match import _source_is_watermarked
+    from .match import _source_is_watermarked, _source_corner_logo
+    pixel_on = _os2.environ.get("VIDLORE_CLIPSTUDIO_CORNER_LOGO_GATE", "1").strip() \
+        not in ("0", "false", "no")
     out: dict = {}
-    if ocr_engine is None:
-        return out
     for src in proj.sources:
         if getattr(src, "status", "") != "ok" or not src.local_path or not Path(src.local_path).exists():
             continue
@@ -107,10 +112,17 @@ def _watermarked_source_corners(proj, ocr_engine, progress=None) -> dict:
             shots = _index.load_shots(proj, src.id)
         except Exception:
             continue
-        if _source_is_watermarked(shots):
+        if ocr_engine is not None and _source_is_watermarked(shots):
             out[src.id] = _detect_logo_corner(src.local_path, ocr_engine)
             if progress:
-                progress(f"build: watermark-crop source {src.id} (corner={out[src.id]})")
+                progress(f"build: watermark-crop source {src.id} (corner={out[src.id]}, ocr)")
+            continue
+        if pixel_on:
+            corner = _source_corner_logo(shots)
+            if corner:
+                out[src.id] = corner
+                if progress:
+                    progress(f"build: watermark-crop source {src.id} (corner={corner}, pixel-static)")
     return out
 
 
@@ -622,6 +634,19 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     import re as _re9
     from . import index as _index
 
+    # PERSISTENT BREAKOUT AUDIT (work/breakout_audit.json): the [BREAKOUT-*] lines only reach the
+    # live progress stream, which portal/CLI runs discard — after the render there was no way to
+    # answer "which breakouts were rejected and why". Capture every breakout log line here and
+    # persist alongside the summary counters + accepted entries; _apply_breakouts appends the
+    # final on-timeline air times.
+    _audit_lines: list = []
+    _orig_log = log
+
+    def log(m):                                        # shadows the param for this function body
+        if "breakout" in str(m).lower():
+            _audit_lines.append(str(m))
+        _orig_log(m)
+
     def _rw(t):
         return _re9.findall(r"[a-z']+", (t or "").lower())
 
@@ -1046,11 +1071,25 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         _cold = "COLD-OPEN " if _is_cold else ""
         log(f"[BREAKOUT-OK] #{len(out)} {_cold}before-scene={idx} dur={real:.1f}s "
             f"src@{float(sh.start):.0f}s src={(src.title or src.id)[:52]!r} line={_q[:42]!r}")
+        _entry["_audit"] = {"seg_index": idx, "cold_open": _is_cold, "dur_s": round(real, 2),
+                            "source_id": src.id, "source_title": (src.title or "")[:120],
+                            "source_t": round(float(sh.start), 1), "line": _q[:160]}
     # ALWAYS report the FINAL accepted count after post-extraction (the pre_extract_accepted count
     # above can shrink here when an aired window is rejected as commentary) — so the audit is never
     # ambiguous about how many breakouts actually aired.
     log(f"[BREAKOUT-AUDIT] final accepted={len(out)} (post-extract; "
         f"window_commentary rejections={_rej['window_commentary']})")
+    try:
+        import json as _json9
+        (work / "breakout_audit.json").write_text(_json9.dumps({
+            "candidates": len(cands),
+            "rejected_counts": dict(_rej),
+            "pre_filtered_essay_or_foreign_sources": _src_excluded,
+            "accepted": [e["_audit"] for e in out],
+            "log_lines": _audit_lines,
+        }, indent=1), encoding="utf-8")
+    except Exception:
+        pass                                           # audit persistence must never fail a render
     return out
 
 
@@ -1446,6 +1485,7 @@ def _apply_breakouts(proj, segments, scenes, narration, picks, work, log):
             # FINAL-timeline start = original insert time + breakout durations spliced BEFORE it
             cap_specs.append({"start": round(t_cursor + delta_here + shift_before, 3),
                               "dur": float(p["dur"]), "audio": str(p["audio"])})
+            p.setdefault("_audit", {})["aired_at_s"] = cap_specs[-1]["start"]
             if delta_here and len(new_ns) >= 2:        # [-1] is the pseudo scene itself
                 new_ns[-2].duration = float(new_ns[-2].duration) + delta_here
                 log(f"build:   breakout pause moved +{delta_here:.2f}s to the sentence end")
@@ -1491,6 +1531,20 @@ def _apply_breakouts(proj, segments, scenes, narration, picks, work, log):
         raise RuntimeError("breakout audio splice failed")
     narration.audio = full
     narration.scenes = new_ns
+    # append the FINAL on-timeline air times to the persisted breakout audit (written by
+    # _select_breakouts) — "aired_at_s" answers WHERE in the finished video each breakout plays.
+    try:
+        import json as _json9b
+        _baud = work / "breakout_audit.json"
+        if _baud.exists():
+            _data = _json9b.loads(_baud.read_text(encoding="utf-8"))
+            _times = {p.get("seg_index"): (p.get("_audit") or {}).get("aired_at_s") for p in picks}
+            for e in _data.get("accepted", []):
+                if e.get("seg_index") in _times and _times[e["seg_index"]] is not None:
+                    e["aired_at_s"] = _times[e["seg_index"]]
+            _baud.write_text(_json9b.dumps(_data, indent=1), encoding="utf-8")
+    except Exception:
+        pass                                           # audit persistence must never fail a render
     try:
         narration.total = float(getattr(narration, "total", 0.0)) + shift
     except Exception:

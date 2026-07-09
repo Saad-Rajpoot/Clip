@@ -173,6 +173,21 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log) -> int:
     from . import discover as _discover
     shots_by_key: dict = {}
     _skipped_src = 0
+    _skipped_wm = 0
+    _skipped_lowres = 0
+    # STILL-POOL PURITY: clips from a watermarked source get a punch-in CROP at cut time, but a
+    # STILL is the raw keyframe — the channel bug airs frozen for seconds (observed: a 'BLACK
+    # TRVLLS' logo on Tywin stills). And a sub-SD keyframe blown up to the 1080p canvas is a soft
+    # blur held on screen (observed: 6 aired 360p stills, all judged degraded). Both stay OUT of
+    # the still pool; their MOVING clips remain available (cropped / detail-enhanced) so relevance
+    # is untouched.
+    _corner_on = os.environ.get("VIDLORE_CLIPSTUDIO_CORNER_LOGO_GATE", "1").strip() \
+        not in ("0", "false", "no")
+    try:
+        _still_min_h = int(os.environ.get("VIDLORE_CLIPSTUDIO_STILL_MIN_SRC_HEIGHT", "480") or 480)
+    except (TypeError, ValueError):
+        _still_min_h = 480
+    from .match import _source_is_watermarked as _src_wm, _source_corner_logo as _src_logo
     for s in proj.sources:
         if s.status != SOURCE_OK:
             continue
@@ -184,14 +199,24 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log) -> int:
         if _discover.is_unwanted_source_title(getattr(s, "title", "") or ""):
             _skipped_src += 1
             continue
+        if _still_min_h and 0 < int(getattr(s, "height", 0) or 0) < _still_min_h:
+            _skipped_lowres += 1
+            continue
         try:
-            for sh in _index.load_shots(proj, s.id):
-                shots_by_key[(sh.source_id, sh.index)] = sh
+            _shots = _index.load_shots(proj, s.id)
         except Exception:
-            pass
+            continue
+        if _src_wm(_shots) or (_corner_on and _src_logo(_shots)):
+            _skipped_wm += 1
+            continue
+        for sh in _shots:
+            shots_by_key[(sh.source_id, sh.index)] = sh
     if _skipped_src and log:
         log(f"  [image-pool] excluded {_skipped_src} reaction/essay/non-show source(s) "
             f"from the still-recovery pool")
+    if (_skipped_wm or _skipped_lowres) and log:
+        log(f"  [image-pool] excluded {_skipped_wm} watermarked + {_skipped_lowres} sub-{_still_min_h}p "
+            f"source(s) from the still pool (their moving clips stay available)")
 
     def _phash_of(sel):
         sh = shots_by_key.get((getattr(sel, "source_id", ""), getattr(sel, "shot_index", -1)))

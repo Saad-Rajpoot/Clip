@@ -25,6 +25,10 @@ _REJECT_TITLE = re.compile(
     # right after the stem kills the match. A 'MORE Reactors Reactions' upload slipped through exactly
     # because 'reaction'/'reacts?' missed the plurals. Keep new junk markers plural-safe.
     r"\b(reactions?|reactors?|reacts?|reacting|first time (watching|seeing)|watch ?along|watch party|"
+    # audiobook uploads are a narrator over a static image — zero scene footage, and their ASR is
+    # book narration that could poison quote mining (observed: 'Tyrion kills Tywin || Audiobook'
+    # downloaded + indexed at 360p). Plural-safe per the trailing-\b note above.
+    r"audio ?books?|"
     r"reviews?|reviewers?|review(ed|ing)?|commentar(y|ies)|podcasts?|tier list|ranking every|honest trailer|"
     r"everything wrong|cinemasins|recaps?|recap(ped|ping)?|explained|breakdowns?|easter eggs|"
     r"spoiler talk|let'?s play|live ?stream|full movie|whole movie|"

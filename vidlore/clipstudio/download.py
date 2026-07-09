@@ -199,6 +199,20 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
                         seen_checksums.add(sv.checksum)
                 results.append(sv)
                 log(f"download: {sv.id} [{sv.status}] {sv.height or '?'}p {sv.duration:.0f}s")
+                # QUALITY AUDIT — requested vs ACTUAL height, per source. The format string asks
+                # for >=prefer_height first, so landing below it means the upload simply has no HD
+                # stream (kept anyway: relevance-first). Recorded on the source + one greppable line
+                # so a soft render can be traced to its low-res sources afterwards.
+                if sv.status == SOURCE_OK and sv.height:
+                    sv.extra["quality_audit"] = {
+                        "requested_max": int(cfg.max_height),
+                        "preferred_min": int(cfg.discover_prefer_height),
+                        "actual": int(sv.height),
+                    }
+                    if sv.height < cfg.discover_prefer_height:
+                        sv.extra["quality_audit"]["reason"] = "source_has_no_hd_stream"
+                        log(f"download: {sv.id} LOW-RES {sv.height}p < preferred "
+                            f"{cfg.discover_prefer_height}p (source max — kept for relevance)")
 
     # merge into project: PRESERVE any pre-existing sources, then add/refresh the just-downloaded
     # ones in discovery order. (For a fresh build proj.sources is empty so this is identical to the

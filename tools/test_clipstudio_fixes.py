@@ -2860,6 +2860,72 @@ def test_burned_text_black_and_recap_gates():
           and not RJ.search("Ned Stark Execution Scene Baelor S1E9"))
 
 
+# ===========================================================================
+# Expert-editor quality pass (2026-07-10 audit of the 70284fa2c7 render):
+# pixel corner-logo detector, still-pool purity, sub-SD selection penalty,
+# audiobook gate, download quality audit, persistent breakout audit.
+# ===========================================================================
+
+def test_corner_logo_and_quality_gates():
+    print("[expert-quality] pixel corner-logo detector + quality gates")
+    import numpy as np
+    from PIL import Image
+    from vidlore.clipstudio.match import _source_corner_logo
+
+    def mkshots(tmp, n=8, logo=False, static=False, letterbox=False):
+        rng = np.random.RandomState(7)
+        logo_patch = (rng.rand(30, 84) > 0.5).astype("uint8") * 255   # fixed structured "logo"
+        shots = []
+        for i in range(n):
+            fr = rng.randint(0, 255, (180, 320), dtype="uint8") if not static else \
+                np.full((180, 320), 90, dtype="uint8")
+            if letterbox:
+                fr[0:30, :] = 0
+                fr[150:180, :] = 0
+            if logo:
+                fr[150:180, 236:320] = logo_patch                     # covers the br corner region
+            p = os.path.join(tmp, f"kf_{'lsl'[0]}{i}_{logo}_{static}_{letterbox}.png")
+            Image.fromarray(fr, "L").save(p)
+            shots.append(types.SimpleNamespace(keyframe_path=p))
+        return shots
+
+    with tempfile.TemporaryDirectory() as tmp:
+        check("corner-logo: structured static br logo over changing scenes → 'br'",
+              _source_corner_logo(mkshots(tmp, logo=True)) == "br")
+        check("corner-logo: clean changing scenes → no detection",
+              _source_corner_logo(mkshots(tmp)) == "")
+        check("corner-logo: static-card source (centre never changes) → not this detector's call",
+              _source_corner_logo(mkshots(tmp, static=True)) == "")
+        check("corner-logo: flat letterbox bars are NOT a logo (needs spatial structure)",
+              _source_corner_logo(mkshots(tmp, letterbox=True)) == "")
+
+    root = Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio"
+    bsrc = (root / "build.py").read_text(encoding="utf-8")
+    msrc = (root / "match.py").read_text(encoding="utf-8")
+    osrc = (root / "orchestrate.py").read_text(encoding="utf-8")
+    dsrc = (root / "download.py").read_text(encoding="utf-8")
+    check("watermark-crop ORs the pixel detector (OCR-garbage logos get cropped too)",
+          "_source_corner_logo" in bsrc and "pixel-static" in bsrc)
+    check("match drop-mode also drops pixel-detected corner-logo sources",
+          msrc.count("_source_corner_logo") >= 2)
+    check("still pool excludes watermarked + sub-SD sources (stills bypass the crop)",
+          "_src_wm" in osrc and "STILL_MIN_SRC_HEIGHT" in osrc)
+    check("selection: sub-SD sources pay a small penalty, HD pref stays mild",
+          "hd_pref -= 0.04" in msrc and "_sh < 480" in msrc)
+    # audiobook uploads (narrator over a static image) never enter the pool
+    from vidlore.clipstudio.discover import _REJECT_TITLE
+    check("audiobook titles rejected (singular + plural)",
+          bool(_REJECT_TITLE.search("Tyrion kills Tywin || Audiobook"))
+          and bool(_REJECT_TITLE.search("GoT Audio Books full")))
+    check("legit scene titles still pass the audiobook gate",
+          not _REJECT_TITLE.search("Tyrion kills Tywin - Game of Thrones S04E10"))
+    check("download logs requested vs ACTUAL height with a low-res reason",
+          "LOW-RES" in dsrc and "quality_audit" in dsrc and "source_has_no_hd_stream" in dsrc)
+    check("breakout audit persisted to work/breakout_audit.json with final air times",
+          bsrc.count("breakout_audit.json") >= 2 and "aired_at_s" in bsrc
+          and "log_lines" in bsrc)
+
+
 def main():
     test_verifier_promotion_rewrites_beat_windows()
     test_budget_loop_survives_plan_beats_failure()
@@ -2897,6 +2963,7 @@ def main():
     test_coldopen_vocut()
     test_breakout_era_scene_gate()
     test_burned_text_black_and_recap_gates()
+    test_corner_logo_and_quality_gates()
     print(f"\n{PASS} passed · {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

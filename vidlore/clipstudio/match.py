@@ -81,6 +81,54 @@ def _source_is_watermarked(shots, *, min_frac: float = 0.12, min_hits: int = 4) 
     return hits >= min_hits and (hits / len(shots)) >= min_frac
 
 
+def _source_corner_logo(shots, *, samples: int = 12, min_kf: int = 5) -> str:
+    """PIXEL-level static-corner-logo detector — the OCR-independent backstop for
+    _source_is_watermarked. A stylized/graffiti channel bug OCRs as garbage ('BIATO', 'CARTO' —
+    observed on a 'BLACK TRVLLS' logo that aired on 16 beats), so keyword matching can't be the
+    only detector. Instead: a corner patch that stays NEAR-IDENTICAL across keyframes of many
+    DIFFERENT scenes, while the frame centre changes, is a static overlay. Requiring the
+    time-averaged patch to have internal spatial structure excludes flat letterbox/black corners.
+
+    Returns the corner name ('tl'|'tr'|'bl'|'br') or '' when clean. Cheap: ≤12 keyframes via PIL.
+    Kill switch: VIDLORE_CLIPSTUDIO_CORNER_LOGO_GATE=0 (checked by callers)."""
+    import numpy as np
+    from PIL import Image
+    kfs = [getattr(sh, "keyframe_path", "") or "" for sh in shots]
+    kfs = [k for k in kfs if k and Path(k).exists()]
+    if len(kfs) < min_kf:
+        return ""
+    step = max(1, len(kfs) // samples)
+    kfs = kfs[::step][:samples]
+    frames = []
+    for k in kfs:
+        try:
+            im = Image.open(k).convert("L").resize((320, 180))
+            frames.append(np.asarray(im, dtype="float32"))
+        except Exception:
+            continue
+    if len(frames) < min_kf:
+        return ""
+    stack = np.stack(frames)                                   # (n, 180, 320)
+    # centre patch must CHANGE across shots (different scenes) — else the source is a static
+    # card and _source_is_static owns it, not this detector.
+    centre = stack[:, 54:126, 96:224]
+    if float(centre.std(axis=0).mean()) < 18.0:
+        return ""
+    corners = {          # ~26% × 16% patches, flush to each corner (where channel bugs live)
+        "tl": stack[:, 0:29, 0:83],   "tr": stack[:, 0:29, 237:320],
+        "bl": stack[:, 151:180, 0:83], "br": stack[:, 151:180, 237:320],
+    }
+    best, best_score = "", 0.0
+    for name, patch in corners.items():
+        temporal = float(patch.std(axis=0).mean())     # small = static over time
+        spatial = float(patch.mean(axis=0).std())      # large = structured (a logo, not a bar)
+        if temporal < 12.0 and spatial > 14.0:
+            score = spatial - temporal
+            if score > best_score:
+                best, best_score = name, score
+    return best
+
+
 def _source_is_static(shots, *, min_shots: int = 4) -> bool:
     """A still-image / lyric source — almost every shot is a phash near-duplicate of the others (a
     static portrait + audio, e.g. a 'X sings Rains of Castamere' card). It's not scene footage and,
@@ -252,7 +300,10 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
                 progress(f"match: dropping modern talking-head source {src.id} "
                          f"(podcast/vlog/interview/makeup-BTS look, not a scene: {(src.title or '')[:48]!r})")
             continue
-        if gate_on and wm_mode == "drop" and _source_is_watermarked(shots):
+        if gate_on and wm_mode == "drop" and \
+                (_source_is_watermarked(shots)
+                 or (os.environ.get("VIDLORE_CLIPSTUDIO_CORNER_LOGO_GATE", "1").strip()
+                     not in ("0", "false", "no") and _source_corner_logo(shots))):
             if progress:
                 progress(f"match: dropping watermarked source {src.id} (persistent channel logo)")
             continue
@@ -790,9 +841,15 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
             pen += rec_pen + src_pen
             # RESOLUTION preference (selection only, not reported confidence): among similarly
             # relevant shots, prefer an HD source — an SD (≤480p) exact-scene upload upscales to
-            # a soft 1080p, so a 1080p clip of the same scene should win more beats.
+            # a soft 1080p, so a 1080p clip of the same scene should win more beats. Sub-SD
+            # (<480p) additionally pays a small flat penalty: a 360p stream on the 1080p canvas
+            # is visibly soft even after detail-enhance (observed: 17% of beats aired 360p while
+            # HD alternates existed). Both terms stay SMALL — an exact scene at 360p must still
+            # beat an irrelevant 1080p shot (relevance-first policy).
             _sh = _src_height.get(ps.sid, 0)
             hd_pref = 0.06 * min(1.0, _sh / 1080.0) if _sh else 0.0
+            if 0 < _sh < 480:
+                hd_pref -= 0.04
             adj = max(0.0, base + bonus - pen + hd_pref
                       + 0.08 * (ps.shot.quality - 0.5))  # mild quality pref
             qual = round(max(0.0, min(1.0, base)), 4)
