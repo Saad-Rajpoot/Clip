@@ -206,13 +206,30 @@ def gemini_available() -> bool:
         return False
 
 
+def _gemini_http_options():
+    """A hard per-request timeout: the SDK's default is NO deadline, so one hung TLS
+    connection froze a 157-call verify pass for 2 hours. Timed-out calls raise, the
+    retry wrapper already classes 'timeout' as retryable, and the brain fallback chain
+    (gemini → claude) covers persistent failure. Env VIDLORE_GEMINI_TIMEOUT_SEC (default
+    120 — vision verdicts normally return in <15s, essays' long analyze calls in <90s)."""
+    from google.genai import types
+    try:
+        sec = float(os.environ.get("VIDLORE_GEMINI_TIMEOUT_SEC", "").strip() or 120.0)
+        ms = int(sec * 1000)                                 # SDK expects milliseconds
+        if ms <= 0:                                          # 0/negative = no deadline → footgun
+            ms = 120000
+    except (TypeError, ValueError, OverflowError):           # 'nan' fails at int(), 'inf' overflows
+        ms = 120000
+    return types.HttpOptions(timeout=ms)
+
+
 def _gemini_client():
     global _CLIENT
     if _CLIENT is None:
         from google import genai
         key = _gemini_api_key()
         if key:                                 # AI Studio (Developer API) — the cheap, simple path
-            _CLIENT = genai.Client(api_key=key)
+            _CLIENT = genai.Client(api_key=key, http_options=_gemini_http_options())
             return _CLIENT
         cred = _gcp_cred()                       # else fall back to Vertex (service-account JSON)
         # cred is verified to exist on disk; a stale env var pointing at a missing file must
@@ -224,7 +241,8 @@ def _gemini_client():
             proj = os.environ.get("VIDLORE_GCP_PROJECT", "")
         if not proj:
             raise RuntimeError("no GCP project_id resolved for Gemini/Vertex")
-        _CLIENT = genai.Client(vertexai=True, project=proj, location=_gemini_location())
+        _CLIENT = genai.Client(vertexai=True, project=proj, location=_gemini_location(),
+                               http_options=_gemini_http_options())
     return _CLIENT
 
 

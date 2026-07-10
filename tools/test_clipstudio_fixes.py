@@ -3516,6 +3516,27 @@ def test_wqc_moment_preservation():
           "never relocates the aired moment" in csrc)
 
 
+def test_gemini_timeout_hardening():
+    print("[llm] gemini hard timeout — env parsing never crashes the client build")
+    from vidlore.clipstudio.llm import _gemini_http_options
+    key = "VIDLORE_GEMINI_TIMEOUT_SEC"
+    old = os.environ.get(key)
+    try:
+        got = {}
+        for val in ("", "abc", "nan", "inf", "-5", "0", "30", "1.5"):
+            os.environ[key] = val
+            got[val] = _gemini_http_options().timeout
+        check("garbage / nan / inf / non-positive env values fall back to the 120s default",
+              all(got[v] == 120000 for v in ("", "abc", "nan", "inf", "-5", "0")))
+        check("valid env values convert seconds → SDK milliseconds",
+              got["30"] == 30000 and got["1.5"] == 1500)
+    finally:
+        if old is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old
+
+
 def main():
     test_verifier_promotion_rewrites_beat_windows()
     test_budget_loop_survives_plan_beats_failure()
@@ -3558,6 +3579,7 @@ def main():
     test_multiframe_shot_flags()
     test_cut_window_validation()
     test_wqc_moment_preservation()
+    test_gemini_timeout_hardening()
     print(f"\n{PASS} passed · {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 
