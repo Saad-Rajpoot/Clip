@@ -29,6 +29,27 @@ def cut_selection(proj: ClipProject, sel: ClipSelection, cfg: ClipConfig) -> Opt
     if src.duration:
         in_p = min(in_p, max(0.0, src.duration - cfg.min_clip_sec))
         dur = min(dur, max(cfg.min_clip_sec, src.duration - in_p))
+    # CUT-WINDOW FLAG VALIDATION (safety net): padding a short window to min_clip_sec can bleed
+    # into an adjacent shot carrying burned subs / a logo / murk (observed: a 1.4s clean shot
+    # padded straight into the next shot's Turkish subtitle). If the PADDED window is dirty but
+    # the selection's own window is clean and long enough, don't pad into the dirt.
+    import os as _os_w
+    if _os_w.environ.get("VIDLORE_CLIPSTUDIO_WINDOW_QC", "1").strip() not in ("0", "false", "no") \
+            and dur > (sel.out_point - sel.in_point) + 1e-3:
+        try:
+            from . import index as _index
+            from .match import clean_cut_window
+            _shots = _index.load_shots(proj, sel.source_id)
+            _own = max(0.0, sel.out_point - sel.in_point)
+            _, _, _act, _why = clean_cut_window(_shots, in_p, in_p + dur, cfg.min_clip_sec,
+                                                anchor=(in_p, in_p + max(0.1, _own)))
+            if _act != "ok" and _own >= 1.0:
+                _, _, _act2, _ = clean_cut_window(_shots, in_p, in_p + _own, 0.0,
+                                                  anchor=(in_p, in_p + _own))
+                if _act2 == "ok":
+                    dur = _own                     # own window is clean — don't pad into dirt
+        except Exception:
+            pass                                   # QC must never break the cut itself
     out = proj.clips_dir / f"seg_{sel.segment_index:03d}.mp4"
     out.parent.mkdir(parents=True, exist_ok=True)
     cmd = [

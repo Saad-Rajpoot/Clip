@@ -40,7 +40,11 @@ for src in proj.sources:
         continue
     if not shots:
         continue
-    if not args.force and all(int(getattr(sh, "subs_flag", -1) or -1) >= 0 for sh in shots):
+    def _flagged(sh):
+        v = getattr(sh, "subs_flag", -1)
+        return (-1 if v is None else int(v)) >= 0     # NOTE: `v or -1` turns a valid clean 0 into -1
+
+    if not args.force and all(_flagged(sh) for sh in shots):
         skipped += 1
         continue
     n = I.compute_shot_flags(src.local_path, shots)

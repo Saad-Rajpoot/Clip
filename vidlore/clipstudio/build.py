@@ -1074,6 +1074,27 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                 f"commentary/narration, not in-character dialogue "
                 f"(src={(src.title or src.id)[:40]!r})")
             continue                                   # try the next candidate; none clean → no breakout
+        # CUT-WINDOW FLAG VALIDATION on the aired breakout window — _extract_breakout extends
+        # the cut to a full spoken line, which can cross into an adjacent shot carrying burned
+        # subs or unreadable murk (the full-source corner bug is already punch-in-cropped via
+        # crop_corner, so it is NOT a reject reason here).
+        if _os9b.environ.get("VIDLORE_CLIPSTUDIO_WINDOW_QC", "1").strip() \
+                not in ("0", "false", "no"):
+            from .match import _shot_unreadable as _dark9
+            _bk_dirty = ""
+            for _s9 in shots_of.get(src.id, []):
+                if _s9.end > _w0 + 0.05 and _s9.start < _w1 - 0.05:
+                    if _sbgate9 and _sub9(_s9):
+                        _bk_dirty = f"subs(shot {_s9.index})"
+                        break
+                    if _dark9(_s9):
+                        _bk_dirty = f"unreadable(shot {_s9.index})"
+                        break
+            if _bk_dirty:
+                _rej["window_commentary"] += 0        # tracked separately in the log line
+                log(f"window-qc: rejected breakout before scene {idx} — aired window overlaps "
+                    f"{_bk_dirty} (src={(src.title or src.id)[:40]!r})")
+                continue                               # try the next candidate
         _is_cold = (idx, src.id, round(float(sh.start), 1)) == _cold_key
         _entry = {"seg_index": idx, "dur": real, "video": v, "audio": a}
         if _is_cold:
@@ -2151,7 +2172,8 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None) -> Optional[Path]
             for w in (s.words or []):
                 wt = (w.word or "").strip()
                 if wt:
-                    words.append((wt, float(w.start), float(w.end)))
+                    words.append((wt, float(w.start), float(w.end),
+                                  float(getattr(w, "probability", 1.0) or 1.0)))
         if not words:
             continue
         base = float(cap["start"])
@@ -2164,13 +2186,27 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None) -> Optional[Path]
                 grp.append(cur); cur = []
         if cur:
             grp.append(cur)
+        # ASR-CONFIDENCE floor per line: whisper mishears movie audio occasionally ("...poison
+        # your SON" transcribed as "poison your three."), and a wrong word burned on screen
+        # reads like a third-party subtitle. A missing caption line beats a wrong one — drop
+        # any line whose weakest word is below the floor.
+        _pfloor = 0.45
+        _kept = []
+        for line in grp:
+            _minp = min(w[3] for w in line)
+            if _minp >= _pfloor:
+                _kept.append(line)
+            elif log:
+                log(f"build: breakout caption line dropped (ASR word confidence "
+                    f"{_minp:.2f} < {_pfloor}): {' '.join(w[0] for w in line)!r}")
+        grp = _kept
         for line in grp:
             ws = base + line[0][1]
             we = min(base + dur, base + line[-1][2] + 0.10)
             if we <= ws:
                 continue
             txt = ""
-            for (wt, a, b) in line:
+            for (wt, a, b, _p4) in line:
                 cs = max(6, int(round((b - a) * 100)))     # karaoke fill centiseconds
                 safe = wt.replace("{", "(").replace("}", ")").replace("\\", "")
                 txt += f"{{\\kf{cs}}}{safe} "
@@ -2448,6 +2484,41 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # covers windows from OLDER selections and verify-promoted alternates.
     from .match import _ocr_text_heavy as _txt_heavy
     _TGATE = os.environ.get("VIDLORE_CLIPSTUDIO_TEXT_GATE", "1").strip() not in ("0", "false", "no", "")
+
+    # CUT-WINDOW FLAG VALIDATION at render time — the playhead walk / lead-in snapping computes
+    # the DEFINITIVE aired window [start, start+need] here, after every earlier stage. Shift the
+    # start into a clean same-scene span when the window overlaps a flagged shot (persisted
+    # multi-frame flags: burned subs / unreadable murk / partial corner-logo evidence).
+    from .match import clean_cut_window as _ccw
+    _WQC = os.environ.get("VIDLORE_CLIPSTUDIO_WINDOW_QC", "1").strip() not in ("0", "false", "no")
+    _wqc_render_stats = {"shifted": 0, "kept-dirty": 0}
+
+    def _wqc_render_start(sid, start, need, seg_idx):
+        if not _WQC or need <= 0:
+            return start
+        shots = _shots_b(sid)
+        if not shots:
+            return start
+        # partial-corner evidence deliberately excluded (candle-sconce FP — see match.py)
+        nt0, _nt1, act, why = _ccw(shots, start, start + need, need,
+                                   anchor=(start, start + need))
+        if act == "ok":
+            return start
+        if act != "shortened":
+            # no clean span INSIDE the window — widen the search to the immediate neighbourhood
+            # (same source, and the span must still OVERLAP the original window so the aired
+            # moment stays in the chosen scene's vicinity). Observed: a beat @93.9 padded into
+            # the next shot's Turkish sub while a 4.8s clean span sat directly BEFORE it.
+            nt0, _nt1, act, why = _ccw(shots, max(0.0, start - need), start + 2.0 * need, need,
+                                       anchor=(start, start + need))
+        if act == "shortened":                     # a clean span ≥ need exists → SHIFT into it
+            _wqc_render_stats["shifted"] += 1
+            log(f"window-qc: shifted beat={seg_idx} src={sid[:28]} "
+                f"{start:.1f}→{nt0:.1f} reason={why}")
+            return nt0
+        _wqc_render_stats["kept-dirty"] += 1
+        log(f"window-qc: kept-dirty beat={seg_idx} src={sid[:28]} @{start:.1f} reason={why}")
+        return start
 
     def _shot_has_text(sid, t):
         if not _TGATE:
@@ -2806,6 +2877,9 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 continue
             factor = 1.30 if (is_peak and m == k - 1 and k >= 2) else 1.0   # held "land" = slow-mo
             src_need = per_beat / factor
+            if src.duration and start + src_need > src.duration:
+                start = max(0.0, src.duration - src_need)
+            start = _wqc_render_start(sid, start, src_need, seg.index)
             if src.duration and start + src_need > src.duration:
                 start = max(0.0, src.duration - src_need)
             # advance the scene-walk playhead past what this beat consumed (slight overlap

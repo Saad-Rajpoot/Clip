@@ -195,12 +195,12 @@ def _flags_from_frames(frames: list) -> dict:
     if not frames:
         out["subs_flag"] = -1
         return out
-    lumas, p95s, confs = [], [], []
+    lumas, hi_vals, confs = [], [], []
     corner_or = {k: None for k in _CORNER_REGIONS}
     subs_any = False
     for fr in frames:
         lumas.append(float(fr.mean()))
-        p95s.append(float(np.percentile(fr, 99.8)))
+        hi_vals.append(float(np.percentile(fr, 99.8)))
         # subtitle band on the 320×180 downsample — SAME calibrated geometry/thresholds as
         # match._shot_subtitle_band (Turkish/Arabic/English positives, 30+ clean negatives)
         small = fr[::2, ::2]
@@ -215,6 +215,14 @@ def _flags_from_frames(frames: list) -> dict:
         confs.append(bf / max(mf, 0.008))
         if bf > 0.05 and bf > 2.0 * max(mf, 0.008) and colcov >= 0.28 and rowspread < 11.0:
             subs_any = True
+        elif len(ys) >= 80 and mf <= 0.004 and rowspread < 8.0:
+            # SHORT-LINE branch (calibrated on a leaked 2-word Turkish sub over a dark scene,
+            # 0 FPs on 180 clean frames): a sparse but WIDE, row-tight stroke box in an
+            # otherwise-empty band — too few edge pixels for the density path above.
+            _h = ys.max() - ys.min() + 1
+            _w = xs.max() - xs.min() + 1
+            if _w >= 150 and _h <= 34:
+                subs_any = True
         # corner edge masks at full 640×360 (same threshold as the source-level detector)
         gy2, gx2 = np.gradient(fr)
         E2 = np.hypot(gx2, gy2)
@@ -225,15 +233,57 @@ def _flags_from_frames(frames: list) -> dict:
     out["subs_flag"] = 1 if subs_any else 0
     out["text_conf"] = round(max(confs), 2) if confs else 0.0
     out["luma_avg"] = round(float(np.mean(lumas)), 1)
-    out["luma_hi"] = round(float(max(p95s)), 1)
+    out["luma_hi"] = round(float(max(hi_vals)), 1)
     for name, g in corner_or.items():
         if g is not None and g.sum() >= 2:            # store only corners with real edge content
             out["corner_masks"][name] = _mask_to_hex(g)
     return out
 
 
+def _sample_times(start: float, end: float) -> list:
+    """Sample timestamps for one shot's flag pass. SHORT shots (<2s) get FIVE spread samples —
+    they are exactly where a brief burned sub / bug flash slips between 3 samples (observed: a
+    rare Turkish sub inside a 1.4s shot missed by 3 samples), and where the render pads the cut
+    past the shot boundary, so their verdict must be the most reliable. Longer shots keep 3.
+    Never returns a single mid-frame-only sample."""
+    d = max(0.0, end - start)
+    fr = (0.1, 0.3, 0.5, 0.7, 0.9) if d < 2.0 else (0.15, 0.5, 0.85)
+    return [start + f * d for f in fr]
+
+
+def _band_ocr_hit(pil_frame) -> bool:
+    """OCR the SUBTITLE BAND of one full-colour sample frame — the definitive catch for THIN
+    Latin subs the edge-density heuristic under-detects at 320×180 (observed: a thin yellow
+    'poison your three.' slipped both the density and short-line branches). ≥2 readable words
+    of ≥3 letters in the band = burned text. Non-Latin scripts stay covered by the visual
+    heuristic; OCR-unavailable environments simply skip this (fail-open)."""
+    try:
+        from . import ocr as _ocr
+        if not _ocr.available():
+            return False
+        import re as _re
+        import tempfile
+        import os as _os
+        w, h = pil_frame.size
+        band = pil_frame.crop((int(w * 0.10), int(h * 0.74), int(w * 0.90), int(h * 0.99)))
+        band = band.resize((band.width * 2, band.height * 2))
+        fd, tmp = tempfile.mkstemp(suffix=".jpg")
+        _os.close(fd)
+        try:
+            band.save(tmp, quality=88)
+            txt = _ocr.read_text(tmp) or ""
+        finally:
+            try:
+                _os.remove(tmp)
+            except OSError:
+                pass
+        return len(_re.findall(r"[A-Za-zÀ-ÿĀ-žğışöüçÇĞİŞÖÜ]{3,}", txt)) >= 2
+    except Exception:
+        return False
+
+
 def compute_shot_flags(path, shots: list, *, progress=None) -> int:
-    """Decode 3 frames per shot (start/mid/end) via PyAV and persist multi-frame flags on each
+    """Decode 3-5 frames per shot (start..end) via PyAV and persist multi-frame flags on each
     Shot. Returns the number of shots flagged. Tolerant: a source that can't be decoded leaves
     the sentinel values (-1) in place and every gate falls back to keyframe heuristics."""
     import numpy as np
@@ -248,13 +298,10 @@ def compute_shot_flags(path, shots: list, *, progress=None) -> int:
         return 0
     try:
         for k, sh in enumerate(shots):
-            d = max(0.0, sh.end - sh.start)
-            if d < 0.8:
-                ts = [sh.start + d / 2.0]
-            else:
-                ts = [sh.start + 0.15 * d, sh.start + 0.5 * d, sh.start + 0.85 * d]
+            ts = _sample_times(sh.start, sh.end)
             frames = []
-            for t in ts:
+            pil_mid = None
+            for j, t in enumerate(ts):
                 try:
                     c.seek(int(t * 1e6))
                     got = None
@@ -263,11 +310,22 @@ def compute_shot_flags(path, shots: list, *, progress=None) -> int:
                         if float(fr.time or 0.0) >= t - 0.05:
                             break
                     if got is not None:
-                        im = got.to_image().convert("L").resize((640, 360))
+                        pim = got.to_image()
+                        if j == len(ts) // 2:
+                            pil_mid = pim
+                        im = pim.convert("L").resize((640, 360))
                         frames.append(np.asarray(im, dtype="float32"))
                 except Exception:
                     continue
             flags = _flags_from_frames(frames)
+            # band OCR on the mid sample — catches thin Latin subs the edge heuristic misses.
+            # Only consulted when the visual pass reads clean AND the shot has dialogue (burned
+            # subs track speech), keeping the OCR cost to the shots that can actually leak.
+            if flags["subs_flag"] == 0 and pil_mid is not None \
+                    and (getattr(sh, "transcript", "") or "").strip() \
+                    and _band_ocr_hit(pil_mid):
+                flags["subs_flag"] = 1
+                flags["text_conf"] = max(flags["text_conf"], 9.9)
             sh.subs_flag = flags["subs_flag"]
             sh.text_conf = flags["text_conf"]
             sh.luma_avg = flags["luma_avg"]

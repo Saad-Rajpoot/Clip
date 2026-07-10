@@ -375,6 +375,24 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
             if progress:
                 progress(f"match: dropping watermarked source {src.id} (persistent channel logo)")
             continue
+        # HEAVILY-SUBTITLED COPY: when ≥20% of a source's shots carry a burned-sub band, subs
+        # appear on ANY dialogue moment — per-shot flags and window QC keep missing lines that
+        # flash between samples (observed: three different Turkish lines aired across three
+        # renders from such copies). These uploads are re-subtitled COPIES of scenes that clean
+        # duplicates cover, so drop the whole source. VIDLORE_CLIPSTUDIO_SUBBED_SOURCE_MAX_FRAC
+        # tunes the threshold (1 disables).
+        try:
+            _sub_max = float(os.environ.get("VIDLORE_CLIPSTUDIO_SUBBED_SOURCE_MAX_FRAC",
+                                            "0.20") or 0.20)
+        except (TypeError, ValueError):
+            _sub_max = 0.20
+        if _sub_max < 1.0:
+            _sf = _source_subs_frac(shots)
+            if _sf >= _sub_max:
+                if progress:
+                    progress(f"match: dropping subtitled-copy source {src.id} "
+                             f"({_sf:.0%} of shots carry a burned-sub band)")
+                continue
         if _source_is_static(shots):              # still-image / lyric card — not scene footage
             if progress:
                 progress(f"match: dropping static-image source {src.id} (repeating still, not footage)")
@@ -531,6 +549,11 @@ def _shot_subtitle_band(shot) -> bool:
         colcov = len(np.unique(xs // 8)) / (244 // 8) if len(xs) else 0.0
         rowspread = ys.std() if len(ys) > 20 else 99.0
         ok = bf > 0.05 and bf > 2.0 * max(mf, 0.008) and colcov >= 0.28 and rowspread < 11.0
+        if not ok and len(ys) >= 80 and mf <= 0.004 and rowspread < 8.0:
+            # SHORT-LINE branch — see index._flags_from_frames (kept in sync)
+            _h = ys.max() - ys.min() + 1
+            _w = xs.max() - xs.min() + 1
+            ok = _w >= 150 and _h <= 34
         _SUBBAND_CACHE[kf] = bool(ok)
         return bool(ok)
     except Exception:
@@ -540,8 +563,8 @@ def _shot_subtitle_band(shot) -> bool:
 def _shot_unreadable(shot) -> bool:
     """UNREADABLE-DARK shot — near-black across its WHOLE span, not just at one instant.
     Uses the persisted multi-frame luma (start/mid/end samples): `luma_avg` low AND even the
-    brightest sample's 95th-percentile pixel (`luma_hi`) dim. A valid dark cinematic scene
-    (candlelit privy, torch in the catacombs) keeps bright highlights → high p95 → passes.
+    brightest sample's ~99.8th-percentile pixel (`luma_hi`) dim. A valid dark cinematic scene
+    (candlelit privy, torch in the catacombs) keeps bright highlights → high luma_hi → passes.
     Old indexes (sentinel -1) are never gated here — the quality floor still applies.
     Env: VIDLORE_CLIPSTUDIO_UNREADABLE_GATE=0 disables; _AVG/_HI tune thresholds."""
     import os as _os_u
@@ -560,6 +583,128 @@ def _shot_unreadable(shot) -> bool:
     except (TypeError, ValueError):
         t_avg, t_hi = 11.0, 90.0
     return la < t_avg and lh < t_hi
+
+
+# ---------------------------------------------------------------------------
+# CUT-WINDOW FLAG VALIDATION — the rendered cut can extend past the selected
+# shot's boundaries (cut_selection pads short shots to min_clip_sec; build's
+# beat-window walk advances a playhead), so a shot that is clean at its own
+# sampled frames can still AIR an adjacent shot's burned subs / logo / murk
+# (observed: a 1.4s clean shot padded into the next shot's Turkish subtitle).
+# Validate the ENTIRE final [t0, t1] window against every overlapping indexed
+# shot's persisted flags; prefer SHORTENING to a clean sub-window that still
+# contains the chosen moment; never trade the exact scene for unrelated filler.
+# ---------------------------------------------------------------------------
+
+_PARTIAL_CORNER_CACHE: dict = {}
+
+
+def _partial_corner_shots(shots) -> dict:
+    """{shot_index: corner} for shots carrying POSITIONALLY-CONSISTENT corner-logo evidence even
+    when the source-level detector stays below its 25% presence threshold (an intermittent bug
+    that fades in on a minority of shots — observed airing on a STILL). A cluster of ≥3 shots
+    whose masks for the same corner mutually agree (IoU vs the cluster majority ≥0.45, bounded
+    footprint, 2D-clustered) marks exactly THOSE shots dirty — not the whole source."""
+    import numpy as np
+    if not shots:
+        return {}
+    ck = (getattr(shots[0], "keyframe_path", "") or getattr(shots[0], "source_id", ""), len(shots))
+    if ck in _PARTIAL_CORNER_CACHE:
+        return _PARTIAL_CORNER_CACHE[ck]
+    while len(_PARTIAL_CORNER_CACHE) >= 256:
+        _PARTIAL_CORNER_CACHE.pop(next(iter(_PARTIAL_CORNER_CACHE)))
+    _PARTIAL_CORNER_CACHE[ck] = {}
+    if _source_is_static(shots):
+        return {}
+    from .index import _mask_from_hex
+    out: dict = {}
+    for corner in ("tl", "tr", "bl", "br"):
+        members = []
+        for sh in shots:
+            h = (getattr(sh, "corner_masks", None) or {}).get(corner)
+            m = _mask_from_hex(h) if h else None
+            if m is not None and m.mean() > 0.02:
+                members.append((sh.index, m))
+        if len(members) < 3:
+            continue
+        maj = np.stack([m for _, m in members]).mean(axis=0) >= 0.5
+        if maj.sum() < 3 or maj.mean() > 0.85:
+            continue
+        ys, xs = np.nonzero(maj)
+        if len(ys) <= 2 or min(ys.std(), xs.std()) <= 0.6:
+            continue
+        ious = [(idx, float((m & maj).sum()) / max(1.0, float((m | maj).sum())))
+                for idx, m in members]
+        consistent = [idx for idx, i in ious if i >= 0.45]
+        if len(consistent) >= 3 and float(np.mean([i for _, i in ious])) >= 0.40:
+            for idx in consistent:
+                out.setdefault(idx, corner)
+    _PARTIAL_CORNER_CACHE[ck] = out
+    return out
+
+
+def _shot_dirty_reason(sh, partial_corner: dict | None = None) -> str:
+    """'' when the shot may air, else the reason it must not — persisted-first, no image IO on
+    a flagged index. Mirrors the _score_pool hard gates so window validation and candidate
+    gating can never disagree."""
+    if _shot_subtitle_band(sh):
+        return "subs"
+    if _shot_unreadable(sh):
+        return "unreadable"
+    if _ocr_is_junk(sh) or _ocr_text_heavy(sh):
+        return "ocr-text"
+    if partial_corner:
+        c = partial_corner.get(getattr(sh, "index", -1))
+        if c:
+            return f"logo-{c}"
+    return ""
+
+
+def clean_cut_window(shots, t0: float, t1: float, min_len: float,
+                     anchor: tuple | None = None, partial_corner: dict | None = None):
+    """Validate the FINAL render window [t0, t1] against all overlapping indexed shots.
+    Returns (nt0, nt1, action, reason):
+      action 'ok'        — window clean as-is
+             'shortened' — [nt0, nt1] is the longest clean sub-window (≥ min_len) that still
+                           overlaps `anchor` (the chosen shot's span → the exact scene survives)
+             'rejected'  — no clean anchor-overlapping sub-window of ≥ min_len exists
+    Old indexes (no flags) report every shot clean → 'ok' (fail-open, keyframe gates still ran)."""
+    anchor = anchor or (t0, t1)
+    over = [sh for sh in shots if sh.end > t0 + 0.05 and sh.start < t1 - 0.05]
+    dirty = []
+    for sh in over:
+        r = _shot_dirty_reason(sh, partial_corner)
+        if r:
+            dirty.append((max(t0, float(sh.start)), min(t1, float(sh.end)),
+                          f"{r}(shot {getattr(sh, 'index', '?')})"))
+    if not dirty:
+        return t0, t1, "ok", ""
+    dirty.sort()
+    reasons = ", ".join(r for _, _, r in dirty)
+    # subtract dirty spans → candidate clean spans
+    spans, cur = [], t0
+    for ds, de, _r in dirty:
+        if ds - cur >= 0.2:
+            spans.append((cur, ds))
+        cur = max(cur, de)
+    if t1 - cur >= 0.2:
+        spans.append((cur, t1))
+    # best clean span: must overlap the anchor (the exact chosen moment) and fit min_len
+    best = None
+    for s0, s1 in spans:
+        if s1 <= anchor[0] + 0.05 or s0 >= anchor[1] - 0.05:
+            continue                                   # doesn't contain the chosen moment
+        if (s1 - s0) < min_len - 1e-6:
+            continue
+        if best is None or (s1 - s0) > (best[1] - best[0]):
+            best = (s0, s1)
+    if best is None:
+        return t0, t1, "rejected", reasons
+    # keep the original duration when the span allows; stay centred on the anchor overlap
+    want = min(t1 - t0, best[1] - best[0])
+    mid = (max(best[0], anchor[0]) + min(best[1], anchor[1])) / 2.0
+    nt0 = max(best[0], min(mid - want / 2.0, best[1] - want))
+    return round(nt0, 3), round(nt0 + want, 3), "shortened", reasons
 
 
 def _source_subs_frac(shots) -> float:
@@ -979,11 +1124,13 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         not in ("0", "false", "no")
     _corner_gate = _os_cc.environ.get("VIDLORE_CLIPSTUDIO_CORNER_LOGO_GATE", "1").strip() \
         not in ("0", "false", "no")
+    _by_src_shots: dict = {}
+    _ps_by_key: dict = {}
+    for ps in pool:
+        _by_src_shots.setdefault(ps.sid, []).append(ps.shot)
+        _ps_by_key[(ps.sid, ps.shot.index)] = ps
     _src_dirty: dict = {}
     if _clean_gate:
-        _by_src_shots: dict = {}
-        for ps in pool:
-            _by_src_shots.setdefault(ps.sid, []).append(ps.shot)
         for _sid, _shs in _by_src_shots.items():
             _src_dirty[_sid] = {"corner": (_source_corner_logo(_shs) if _corner_gate else ""),
                                 "subs": _source_subs_frac(_shs)}
@@ -991,6 +1138,28 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         if progress and _dirty_n:
             progress(f"match: cleanliness map — {_dirty_n}/{len(_src_dirty)} source(s) carry a "
                      f"corner bug or burned subs (clean-copy arbitration active)")
+    _wqc_gate = _os_cc.environ.get("VIDLORE_CLIPSTUDIO_WINDOW_QC", "1").strip() \
+        not in ("0", "false", "no")
+    _wqc_stats = {"shortened": 0, "fallback": 0, "kept-dirty": 0, "windows-dropped": 0}
+
+    def _validate_cand_window(cand, shot):
+        """Window-QC one candidate against its source's indexed shots. The validated window is
+        the PADDED render window (cut_selection pads short shots to min_clip_sec). Returns
+        (action, reason) and mutates cand in/out on 'shortened'."""
+        shs = _by_src_shots.get(cand.source_id) or []
+        if not shs:
+            return "ok", ""
+        # partial-corner evidence is deliberately NOT a window-dirty reason: measured on real
+        # footage it fires on scene-static elements (a candle sconce framed identically across
+        # a scene's shots) — shrinking exact-scene cuts around those is a relevance regression.
+        # Full-source corner bugs are handled by the punch-in crop instead.
+        pad_end = cand.in_point + max(cfg.min_clip_sec, cand.out_point - cand.in_point)
+        nt0, nt1, act, why = clean_cut_window(
+            shs, cand.in_point, pad_end, cfg.min_clip_sec,
+            anchor=(float(shot.start), float(shot.end)) if shot is not None else None)
+        if act == "shortened":
+            cand.in_point, cand.out_point = nt0, nt1
+        return act, why
     source_uses: dict[str, int] = {}
     shot_uses: dict[tuple[str, int], int] = {}
     recent_sources: list[str] = []
@@ -1151,6 +1320,45 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         else:
             alternates = []
 
+        # CUT-WINDOW FLAG VALIDATION — the rendered cut pads/extends past shot bounds, so the
+        # FULL final window must be clean, not just the chosen shot's own samples. Prefer
+        # shortening to a clean sub-window containing the chosen moment; else fall back to the
+        # first (already relevance-ranked) alternate whose window validates; else keep the
+        # original (a dirty exact scene still beats unrelated footage — verifier/still recovery
+        # may replace it later).
+        if _wqc_gate and best is not None:
+            _adjq, _baseq, _psq, _candq = best
+            _act, _why = _validate_cand_window(_candq, _psq.shot)
+            if _act == "shortened":
+                _wqc_stats["shortened"] += 1
+                if progress:
+                    progress(f"window-qc: shortened seg={seg.index} src={_candq.source_id[:28]} "
+                             f"→[{_candq.in_point:.1f}-{_candq.out_point:.1f}] reason={_why}")
+            elif _act == "rejected":
+                _swapped = False
+                for _alt in alternates:
+                    _aps = _ps_by_key.get((_alt.source_id, _alt.shot_index))
+                    if _aps is None:
+                        continue
+                    _a_act, _a_why = _validate_cand_window(_alt, _aps.shot)
+                    if _a_act != "rejected":
+                        if progress:
+                            progress(f"window-qc: fallback seg={seg.index} "
+                                     f"{_candq.source_id[:24]}→{_alt.source_id[:24]} "
+                                     f"[{_alt.in_point:.1f}-{_alt.out_point:.1f}] reason={_why}")
+                        _wqc_stats["fallback"] += 1
+                        best = (_adjq, float(_alt.score), _aps, _alt)
+                        alternates = [c for c in alternates
+                                      if (c.source_id, c.shot_index) != (_alt.source_id,
+                                                                         _alt.shot_index)]
+                        _swapped = True
+                        break
+                if not _swapped:
+                    _wqc_stats["kept-dirty"] += 1
+                    if progress:
+                        progress(f"window-qc: rejected seg={seg.index} src={_candq.source_id[:28]} "
+                                 f"kept-dirty (no clean sub-window/alternate) reason={_why}")
+
         if best is None:
             sel = ClipSelection(segment_index=seg.index, source_id="", shot_index=-1,
                                 in_point=0, out_point=0, confidence=0.0)
@@ -1176,6 +1384,15 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
                 if wk in seen_w:
                     continue
                 seen_w.add(wk)
+                # window-QC every beat_window too — build plays these directly (the chosen cand
+                # at wins[0] is already validated; alternates' windows get the same treatment:
+                # shorten in place, or drop the window when no clean sub-window exists)
+                if _wqc_gate and wk != (cand.source_id, cand.shot_index):
+                    _wps = _ps_by_key.get(wk)
+                    _w_act, _ = _validate_cand_window(c, _wps.shot if _wps else None)
+                    if _w_act == "rejected":
+                        _wqc_stats["windows-dropped"] += 1
+                        continue
                 wins.append([c.source_id, round(c.in_point, 3), round(c.out_point, 3)])
             sel.beat_windows = wins
             source_uses[ps.sid] = source_uses.get(ps.sid, 0) + 1
@@ -1188,5 +1405,9 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         if progress and (seg.index % 20 == 0):
             progress(f"match: {seg.index+1}/{len(segments)} conf={sel.confidence}")
 
+    if _wqc_gate and progress and any(_wqc_stats.values()):
+        progress(f"window-qc: summary — {_wqc_stats['shortened']} shortened, "
+                 f"{_wqc_stats['fallback']} fallback, {_wqc_stats['kept-dirty']} kept-dirty, "
+                 f"{_wqc_stats['windows-dropped']} beat-windows dropped")
     proj.selections = selections
     return selections

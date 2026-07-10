@@ -3171,6 +3171,132 @@ def test_multiframe_shot_flags():
           "_mask_from_hex" in msrc)
 
 
+
+
+# ===========================================================================
+# Cut-window flag validation (2026-07-10 finalization): the rendered cut can
+# extend past the selected shot (min_clip padding, playhead walks, breakout
+# line-extension) — validate the ENTIRE final window against every overlapping
+# shot's persisted flags. Shorten > fallback-to-relevant-alternate > keep;
+# never swap the exact scene for unrelated footage.
+# ===========================================================================
+
+def test_cut_window_validation():
+    print("[window-qc] final-cut window validation across shot boundaries")
+    from vidlore.clipstudio.match import clean_cut_window, _partial_corner_shots
+    from vidlore.clipstudio.index import _sample_times, _flags_from_frames
+    import numpy as np
+    from PIL import Image
+
+    def shot(i, s, e, subs=0, la=60.0, lh=200.0, masks=None):
+        return types.SimpleNamespace(index=i, start=s, end=e, subs_flag=subs,
+                                     luma_avg=la, luma_hi=lh, corner_masks=masks or {},
+                                     ocr_text="", ocr_names=[], keyframe_path="")
+
+    MINL = 1.2
+    # (1) clean selected shot; PADDED extension overlaps a subtitle-flagged adjacent shot
+    A, B = shot(0, 0.0, 1.4), shot(1, 1.4, 4.0, subs=1)
+    n0, n1, act, why = clean_cut_window([A, B], 0.0, 2.4, MINL, anchor=(0.0, 1.4))
+    check("extension into subtitle-flagged neighbour → shortened",
+          act == "shortened" and "subs" in why)
+    check("shortening preserves the exact-scene cut (stays inside the chosen shot)",
+          n0 >= -1e-6 and n1 <= 1.4 + 1e-6 and (n1 - n0) >= MINL - 1e-6)
+    # (2) corner-logo evidence only in the extension window (fresh CLEAN neighbour — the
+    # partial-corner dict alone must dirty it)
+    B_logo = shot(1, 1.4, 4.0)
+    _, _, act2, why2 = clean_cut_window([A, B_logo], 0.0, 2.4, MINL, anchor=(0.0, 1.4),
+                                        partial_corner={1: "br"})
+    check("corner-logo in the extension window → shortened with logo reason",
+          act2 == "shortened" and "logo-br" in why2)
+    # (3) unreadable-black adjacent shot
+    C = shot(1, 1.4, 4.0, la=5.0, lh=30.0)
+    _, _, act3, why3 = clean_cut_window([A, C], 0.0, 2.4, MINL, anchor=(0.0, 1.4))
+    check("unreadable-black neighbour → shortened with unreadable reason",
+          act3 == "shortened" and "unreadable" in why3)
+    # (4) window entirely clean → untouched
+    D = shot(1, 1.4, 4.0)
+    r = clean_cut_window([A, D], 0.0, 2.4, MINL, anchor=(0.0, 1.4))
+    check("clean window passes unchanged", r[2] == "ok" and r[0] == 0.0 and r[1] == 2.4)
+    # (5) NO clean anchor window → rejected — a clean NON-anchor span must never be returned
+    #     (that would swap the exact scene for a different moment; fallback flow handles it)
+    A_dirty = shot(0, 0.0, 1.4, subs=1)
+    _, _, act5, _ = clean_cut_window([A_dirty, D], 0.0, 2.4, MINL, anchor=(0.0, 1.4))
+    check("anchor itself dirty → rejected (clean non-anchor span NOT hijacked)",
+          act5 == "rejected")
+    # old index (sentinels) → every shot reads clean → fail-open
+    old = types.SimpleNamespace(index=0, start=0.0, end=4.0, subs_flag=-1, luma_avg=-1.0,
+                                luma_hi=-1.0, corner_masks={}, ocr_text="", ocr_names=[],
+                                keyframe_path="")
+    check("old index without flags fails open", clean_cut_window([old], 0, 2.4, MINL)[2] == "ok")
+
+    # (6) short <2s shots get FIVE distinct sample timestamps (never mid-only)
+    ts_short = _sample_times(10.0, 11.4)
+    ts_long = _sample_times(10.0, 16.0)
+    check("<2s shot sampled at 5 DISTINCT timestamps",
+          len(ts_short) == 5 and len(set(round(t, 4) for t in ts_short)) == 5
+          and all(10.0 <= t <= 11.4 for t in ts_short))
+    check(">=2s shot keeps 3 samples", len(ts_long) == 3)
+
+    # partial-corner evidence: an intermittent bug on a MINORITY of shots flags those shots only
+    rng = np.random.RandomState(23)
+
+    def scene640():
+        base = (rng.rand(5, 8) * 200 + 20).astype("uint8")
+        return np.asarray(Image.fromarray(base, "L").resize((640, 360), Image.BILINEAR),
+                          dtype="float32")
+
+    pat = (np.random.RandomState(3).rand(28, 64) > 0.5).astype("float32") * 255
+
+    def bugged(fr):
+        fr = fr.copy()
+        fr[326:354, 550:614] = pat
+        return fr
+
+    def mk(i, dirty):
+        fl = _flags_from_frames([bugged(scene640()) if dirty else scene640()
+                                 for _ in range(3)])
+        return types.SimpleNamespace(index=i, start=float(i), end=float(i + 1),
+                                     subs_flag=fl["subs_flag"], corner_masks=fl["corner_masks"],
+                                     luma_avg=fl["luma_avg"], luma_hi=fl["luma_hi"],
+                                     ocr_text="", ocr_names=[], keyframe_path=f"/x/pc_{i}.jpg",
+                                     phash=f"{(i * 2654435761) % (2 ** 64):016x}")
+    shots_pc = [mk(i, dirty=(i >= 9)) for i in range(12)]      # bug only on the last 3 (25%<thr)
+    pc = _partial_corner_shots(shots_pc)
+    check("partial-corner: exactly the bugged minority shots flagged",
+          set(pc.keys()) == {9, 10, 11} and set(pc.values()) == {"br"})
+
+    # (7) upgrade tool counts clean subs_flag=0 as ALREADY upgraded (falsy-zero bug fixed)
+    tool = (Path(__file__).resolve().parents[1] / "tools" / "upgrade_index_flags.py").read_text(
+        encoding="utf-8")
+    check("upgrade tool skip-logic is falsy-zero safe",
+          "all(_flagged(sh) for sh in shots)" in tool
+          and 'subs_flag", -1) or -1' not in tool)
+
+    # (8) all four paths wired: normal selection, verifier repair, still pool, breakouts (+cut)
+    root = Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio"
+    msrc = (root / "match.py").read_text(encoding="utf-8")
+    vsrc = (root / "verify.py").read_text(encoding="utf-8")
+    csrc = (root / "cut.py").read_text(encoding="utf-8")
+    bsrc = (root / "build.py").read_text(encoding="utf-8")
+    osrc = (root / "orchestrate.py").read_text(encoding="utf-8")
+    isrc = (root / "index.py").read_text(encoding="utf-8")
+    check("normal selections window-validated (+fallback to relevance-ranked alternates)",
+          "_validate_cand_window" in msrc and "window-qc: fallback" in msrc
+          and "window-qc: summary" in msrc)
+    check("verifier promotions window-validated",
+          "window-qc: rejected verify-promotion" in vsrc
+          and "window-qc: shortened verify-promotion" in vsrc)
+    check("cut padding never bleeds into a dirty neighbour",
+          "clean_cut_window" in csrc and "don't pad into dirt" in csrc)
+    check("build render windows + breakout extension window-validated",
+          "_wqc_render_start" in bsrc and "window-qc: rejected breakout" in bsrc)
+    check("partial-corner deliberately NOT a production dirty-reason (candle-sconce FP)",
+          "candle sconce" in msrc and "_pcs_o" not in osrc
+          and "partial_corner=_pcs" not in bsrc)
+    check("stale p95 naming gone from luma implementation",
+          "p95s" not in isrc and "luma_hi" in isrc)
+
+
 def main():
     test_verifier_promotion_rewrites_beat_windows()
     test_budget_loop_survives_plan_beats_failure()
@@ -3211,6 +3337,7 @@ def main():
     test_corner_logo_and_quality_gates()
     test_clean_copy_arbitration()
     test_multiframe_shot_flags()
+    test_cut_window_validation()
     print(f"\n{PASS} passed · {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

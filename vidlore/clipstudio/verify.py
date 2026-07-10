@@ -88,6 +88,15 @@ def _shot_lookup(proj: ClipProject):
         if source_id not in cache:
             cache[source_id] = {s.index: s for s in _index.load_shots(proj, source_id)}
         return cache[source_id].get(shot_index)
+
+    def all_shots(source_id):
+        if not source_id:
+            return []
+        if source_id not in cache:
+            cache[source_id] = {s.index: s for s in _index.load_shots(proj, source_id)}
+        return list(cache[source_id].values())
+
+    get.all_shots = all_shots
     return get
 
 
@@ -156,6 +165,32 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     # an explicit non-keep judgment (av None = transport error, NOT a judgment)
                     failed_wins.append((alt.source_id, float(alt.in_point)))
                 if av and av.get("verdict") == "keep":
+                    # CUT-WINDOW FLAG VALIDATION on the promotion — the repair must not swap a
+                    # rejected clip for one whose PADDED render window airs an adjacent shot's
+                    # burned subs / logo / murk. Shorten to a clean sub-window when possible,
+                    # skip this alternate when none exists.
+                    import os as _os_w
+                    if _os_w.environ.get("VIDLORE_CLIPSTUDIO_WINDOW_QC", "1").strip() \
+                            not in ("0", "false", "no"):
+                        from .match import clean_cut_window
+                        # stub-tolerant: tests monkeypatch _shot_lookup with a bare function —
+                        # no shot list then means nothing to validate (fail-open)
+                        _wshots = getattr(get_shot, "all_shots", lambda _s: [])(alt.source_id)
+                        _pad_end = alt.in_point + max(cfg.min_clip_sec,
+                                                      alt.out_point - alt.in_point)
+                        _n0, _n1, _wact, _wwhy = clean_cut_window(
+                            _wshots, alt.in_point, _pad_end, cfg.min_clip_sec,
+                            anchor=(float(getattr(ashot, "start", alt.in_point)),
+                                    float(getattr(ashot, "end", alt.out_point))))
+                        if _wact == "rejected":
+                            log(f"window-qc: rejected verify-promotion seg{sel.segment_index} "
+                                f"alt={alt.source_id[:28]} reason={_wwhy}")
+                            failed_wins.append((alt.source_id, float(alt.in_point)))
+                            continue
+                        if _wact == "shortened":
+                            alt.in_point, alt.out_point = _n0, _n1
+                            log(f"window-qc: shortened verify-promotion seg{sel.segment_index} "
+                                f"→[{_n0:.1f}-{_n1:.1f}] reason={_wwhy}")
                     # promote the alternate into the selection
                     old_sid, old_in = sel.source_id, sel.in_point
                     sel.source_id = alt.source_id
