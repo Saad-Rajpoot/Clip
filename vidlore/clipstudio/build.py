@@ -1092,8 +1092,11 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                         break
             if _bk_dirty:
                 _rej["window_commentary"] += 0        # tracked separately in the log line
-                log(f"window-qc: rejected breakout before scene {idx} — aired window overlaps "
-                    f"{_bk_dirty} (src={(src.title or src.id)[:40]!r})")
+                # breakouts are quote-locked (policy=exact by definition): the aired window is
+                # NEVER shifted to a different moment — reject and try the next candidate
+                log(f"window-qc: rejected breakout before scene {idx} policy=exact — aired "
+                    f"window overlaps {_bk_dirty} (never shifted; trying next candidate) "
+                    f"(src={(src.title or src.id)[:40]!r})")
                 continue                               # try the next candidate
         _is_cold = (idx, src.id, round(float(sh.start), 1)) == _cold_key
         _entry = {"seg_index": idx, "dur": real, "video": v, "audio": a}
@@ -2261,6 +2264,118 @@ def _burn_breakout_captions(video: Path, caps: list, work: Path, log=None) -> bo
     return False
 
 
+def wqc_render_window(shots, start: float, need: float, seg=None, moment=None,
+                      src_dur=None):
+    """PRODUCTION render-window QC (module-level so tests drive the real path). Validates the
+    definitive aired window [start, start+need] against the source's indexed shots; when dirty,
+    searches the immediate same-source neighbourhood for a clean span of the full length.
+
+    Moment policy (match.wqc_moment_policy): 'exact' beats pass `moment` — the ORIGINALLY
+    SELECTED candidate range [in, out], NOT the padded render window — as `preserve`: a
+    shifted window must keep that moment's midpoint or a strong overlap, else the answer is
+    kept-dirty (a dirty exact moment beats a clean DIFFERENT moment). With no `moment` (the
+    playhead-walk fill — a mechanical start, not a selected moment) and for 'generic' beats,
+    any clean span overlapping the original window may air.
+
+    Partial-corner evidence deliberately excluded (candle-sconce FP — see match.py).
+    Returns (new_start, action, why, meta); action ∈ ok / shifted / kept-dirty.
+    meta audit fields: `candidate` = the originally SELECTED [in, out] (None on walk-fill),
+    `render_request` = the padded/full requested aired window [start, start+need],
+    `final` = what actually airs, `preserved` = does the FINAL aired window still show the
+    candidate moment — ALWAYS computed against the candidate, never the padded request, and
+    None (logged n-a) whenever the exact-moment guarantee does not apply (generic policy or
+    no candidate). kept-dirty therefore means cleanliness failed, NOT that the moment was
+    lost: an unchanged dirty window that still contains its candidate reports preserved=True."""
+    from .match import clean_cut_window as _ccw, wqc_moment_policy as _wpol, _moment_kept
+    pol = _wpol(seg)
+    orig = (float(start), float(start) + float(need))
+    cand = tuple(moment) if moment is not None else None
+    preserve = cand if (pol == "exact" and cand is not None) else None
+    meta = {"policy": pol, "candidate": cand, "render_request": orig, "final": orig,
+            "preserved": (_moment_kept(orig[0], orig[1], preserve)
+                          if preserve is not None else None)}
+    if not shots:
+        return start, "ok", "", meta           # nothing indexed → fail-open
+    nt0, nt1, act, why = _ccw(shots, start, start + need, need, anchor=orig,
+                              preserve=preserve)
+    if act == "ok":
+        return start, "ok", "", meta
+    if act != "shortened":
+        # no clean span INSIDE the window — widen the search to the immediate neighbourhood
+        # (same source, and the span must still OVERLAP the original window so the aired
+        # moment stays in the chosen scene's vicinity). Observed: a beat @93.9 padded into
+        # the next shot's Turkish sub while a 4.8s clean span sat directly BEFORE it.
+        # The search end is CLAMPED to the indexed extent: clean_cut_window counts
+        # un-indexed time as clean, so an unclamped search could "shift" past the last
+        # shot (≈ the source's end) and the caller's duration clamp would drag the aired
+        # window straight back into the dirt it just dodged — while the log claimed a
+        # clean shift. Never clamped below the original window's end: the caller already
+        # bounds that to the source duration, and a partially-indexed tail stays fail-open.
+        idx_end = max(float(sh.end) for sh in shots)
+        nt0, nt1, act, why = _ccw(shots, max(0.0, start - need),
+                                  min(start + 2.0 * need, max(idx_end, start + need)),
+                                  need, anchor=orig, preserve=preserve)
+    if act == "shortened":                     # a clean moment-keeping span ≥ need → SHIFT
+        if preserve is not None:
+            # the validated clean window [nt0, nt1] can be LONGER than `need`, but only
+            # [ns, ns+need] airs — position the aired slice INSIDE the clean window so it
+            # still shows the selected moment, and re-check on the aired length
+            pm = (preserve[0] + preserve[1]) / 2.0
+            ns = max(nt0, min(pm - need / 2.0, nt1 - need))
+            if not _moment_kept(ns, ns + need, preserve):
+                # shift REFUSED — the ORIGINAL window airs, and meta['preserved'] already
+                # says whether THAT window shows the candidate (the refused shift never airs)
+                return start, "kept-dirty", f"moment-lost: {why}", meta
+        else:
+            # generic / walk-fill: the anchor-overlap rule was checked against the FULL
+            # clean span — airing the span's raw head could miss the original window
+            # entirely. Position the aired slice at the span point nearest the original
+            # start so what AIRS still overlaps the window it was cleared against.
+            ns = min(max(nt0, orig[0]), nt1 - need)
+        # mirror the caller's post-QC duration clamp so `final=` is what actually AIRS:
+        # indexed shot ends can exceed the integer-rounded source-duration metadata, so a
+        # shift into the index's tail gets dragged back by the caller — the un-mirrored
+        # log claimed a clean shift ([ns, ns+need]) that never aired. The mirror is
+        # DECISION-NEUTRAL: the caller applies the identical clamp to whatever we return.
+        _d = float(src_dur or 0.0)
+        if _d > 0 and ns + need > _d:
+            ns = max(0.0, _d - need)
+            why = f"{why}; duration-clamped"
+            if abs(ns - orig[0]) <= 1e-9:
+                # the shift evaporated to EXACTLY the original start — the ORIGINAL
+                # (dirty) window airs unchanged: that is a kept-dirty in truth, whatever
+                # the span search found (exact equality only — the caller returns the
+                # original start on kept-dirty, so anything else would change the aired
+                # value; near-misses stay 'shifted' with the truthful clamped final)
+                if preserve is not None:
+                    meta["preserved"] = _moment_kept(orig[0], orig[1], preserve)
+                return start, "kept-dirty", why, meta
+        if preserve is not None:
+            # recompute on the slice that ACTUALLY airs (the clamp may have moved it)
+            meta["preserved"] = _moment_kept(ns, ns + need, preserve)
+        meta["final"] = (ns, ns + need)
+        return ns, "shifted", why, meta
+    # kept-dirty: the unchanged original window airs — meta['preserved'] keeps the honest
+    # answer computed against the candidate (cleanliness failed ≠ moment lost)
+    return start, "kept-dirty", why, meta
+
+
+def wqc_render_log_line(act: str, meta: dict, why: str) -> str:
+    """Build-stage window-QC audit tail with DISTINCT truthful fields:
+    candidate= the originally selected [in, out] (none on walk-fill) ·
+    render-request= the padded/full requested aired window ·
+    final= what actually airs ·
+    moment-preserved= yes|no|n-a — computed against the CANDIDATE, never the padded
+    request; n-a whenever the exact-moment guarantee does not apply · action=."""
+    c, r, f = meta["candidate"], meta["render_request"], meta["final"]
+    kept = meta["preserved"]
+    return (f"policy={meta['policy']} "
+            f"candidate={f'[{c[0]:.1f}-{c[1]:.1f}]' if c is not None else 'none'} "
+            f"render-request=[{r[0]:.1f}-{r[1]:.1f}] final=[{f[0]:.1f}-{f[1]:.1f}] "
+            f"moment-preserved={'n-a' if kept is None else ('yes' if kept else 'no')} "
+            f"action={act} reason={why}")
+
+
 def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfig, *,
                 voice: str = "", captions: bool = True, title: str = "",
                 theme_name: str = "history", music: Optional[str] = None,
@@ -2489,35 +2604,28 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # the DEFINITIVE aired window [start, start+need] here, after every earlier stage. Shift the
     # start into a clean same-scene span when the window overlaps a flagged shot (persisted
     # multi-frame flags: burned subs / unreadable murk / partial corner-logo evidence).
-    from .match import clean_cut_window as _ccw
     _WQC = os.environ.get("VIDLORE_CLIPSTUDIO_WINDOW_QC", "1").strip() not in ("0", "false", "no")
     _wqc_render_stats = {"shifted": 0, "kept-dirty": 0}
 
-    def _wqc_render_start(sid, start, need, seg_idx):
+    def _wqc_render_start(sid, start, need, seg, moment=None):
         if not _WQC or need <= 0:
             return start
         shots = _shots_b(sid)
         if not shots:
             return start
-        # partial-corner evidence deliberately excluded (candle-sconce FP — see match.py)
-        nt0, _nt1, act, why = _ccw(shots, start, start + need, need,
-                                   anchor=(start, start + need))
+        _sdur = float(getattr(proj.source(sid), "duration", 0) or 0)
+        nstart, act, why, meta = wqc_render_window(shots, start, need, seg, moment, _sdur)
         if act == "ok":
             return start
-        if act != "shortened":
-            # no clean span INSIDE the window — widen the search to the immediate neighbourhood
-            # (same source, and the span must still OVERLAP the original window so the aired
-            # moment stays in the chosen scene's vicinity). Observed: a beat @93.9 padded into
-            # the next shot's Turkish sub while a 4.8s clean span sat directly BEFORE it.
-            nt0, _nt1, act, why = _ccw(shots, max(0.0, start - need), start + 2.0 * need, need,
-                                       anchor=(start, start + need))
-        if act == "shortened":                     # a clean span ≥ need exists → SHIFT into it
+        seg_idx = getattr(seg, "index", "?")
+        if act == "shifted":
             _wqc_render_stats["shifted"] += 1
             log(f"window-qc: shifted beat={seg_idx} src={sid[:28]} "
-                f"{start:.1f}→{nt0:.1f} reason={why}")
-            return nt0
+                f"{wqc_render_log_line(act, meta, why)}")
+            return nstart
         _wqc_render_stats["kept-dirty"] += 1
-        log(f"window-qc: kept-dirty beat={seg_idx} src={sid[:28]} @{start:.1f} reason={why}")
+        log(f"window-qc: kept-dirty beat={seg_idx} src={sid[:28]} "
+            f"{wqc_render_log_line(act, meta, why)}")
         return start
 
     def _shot_has_text(sid, t):
@@ -2846,6 +2954,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                         windows_avail.remove(chosen_w)
                 # else: every window aired/looks recent → fall through to the shot-aware walk
                 # below, which finds the next DIFFERENT-looking shot instead of a replay
+            _wqc_moment = None       # the ORIGINALLY SELECTED range this beat must keep airing
             if chosen_w is not None:
                 sid, in_p = chosen_w[0], float(chosen_w[1])
                 src = proj.source(sid)
@@ -2855,6 +2964,12 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 _csh = next((s9 for s9 in _shots_b(sid)
                              if s9.start <= in_p < s9.end), None)
                 start = max(0.0, in_p - 0.2, (float(_csh.start) if _csh else 0.0))
+                # window-QC moment = the chosen window's OWN [in, out] — the padding that
+                # stretches it to src_need is NOT part of the selected moment, so a shift
+                # only has to keep [in, out] on screen (observed: a 1.4s chosen moment
+                # padded to 4.4s refused a clean shift because the PADDING was treated as
+                # the moment)
+                _wqc_moment = (in_p, float(chosen_w[2]))
                 used_at[_wkey(sid, in_p)] = gbeat
                 _air_ct[_wkey(sid, in_p)] = _air_ct.get(_wkey(sid, in_p), 0) + 1
                 _aired_hashes.append(_ch_hash)
@@ -2863,7 +2978,9 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                     recent_emb.append(_e)
             elif sel and sel.source_id:
                 # fill: SHOT-AWARE walk — continue the chosen source from its playhead, snapped
-                # to the next shot whose look is not a near-term repeat
+                # to the next shot whose look is not a near-term repeat. The walk start is
+                # MECHANICAL (not a selected moment), so no _wqc_moment: any clean span
+                # overlapping the window is as relevant as the window itself.
                 src = proj.source(sel.source_id)
                 sid = sel.source_id
                 start = _next_distinct_shot(sid, max(_playhead.get(sid, 0.0),
@@ -2879,7 +2996,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             src_need = per_beat / factor
             if src.duration and start + src_need > src.duration:
                 start = max(0.0, src.duration - src_need)
-            start = _wqc_render_start(sid, start, src_need, seg.index)
+            start = _wqc_render_start(sid, start, src_need, seg, _wqc_moment)
             if src.duration and start + src_need > src.duration:
                 start = max(0.0, src.duration - src_need)
             # advance the scene-walk playhead past what this beat consumed (slight overlap

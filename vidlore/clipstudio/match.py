@@ -660,14 +660,36 @@ def _shot_dirty_reason(sh, partial_corner: dict | None = None) -> str:
     return ""
 
 
+def _moment_kept(nt0: float, nt1: float, moment: tuple) -> bool:
+    """Does the window [nt0, nt1] still SHOW the originally selected moment? Primary arm:
+    the window contains the moment's midpoint. The overlap arm (keep ≥ OVERLAP × the
+    moment's range, VIDLORE_CLIPSTUDIO_WQC_MOMENT_OVERLAP default 0.6) only participates
+    for env values < 0.5: a window that misses the midpoint lies entirely on one side of
+    it, so it can keep at most HALF the moment — at the strict default the midpoint rule
+    governs alone. Deliberate: strict is the relevance-safe direction; lower the env
+    below 0.5 to accept midpoint-less partial overlaps."""
+    pm = (moment[0] + moment[1]) / 2.0
+    if nt0 - 0.05 <= pm <= nt1 + 0.05:
+        return True
+    pdur = max(0.2, moment[1] - moment[0])
+    ov = min(nt1, moment[1]) - max(nt0, moment[0])
+    return ov >= _f_env("VIDLORE_CLIPSTUDIO_WQC_MOMENT_OVERLAP", 0.6) * pdur
+
+
 def clean_cut_window(shots, t0: float, t1: float, min_len: float,
-                     anchor: tuple | None = None, partial_corner: dict | None = None):
+                     anchor: tuple | None = None, partial_corner: dict | None = None,
+                     preserve: tuple | None = None):
     """Validate the FINAL render window [t0, t1] against all overlapping indexed shots.
     Returns (nt0, nt1, action, reason):
       action 'ok'        — window clean as-is
              'shortened' — [nt0, nt1] is the longest clean sub-window (≥ min_len) that still
                            overlaps `anchor` (the chosen shot's span → the exact scene survives)
              'rejected'  — no clean anchor-overlapping sub-window of ≥ min_len exists
+    `preserve` — the ORIGINAL candidate range for a moment-locked beat (exact scene / quote /
+    character-specific). A shortened window must still SHOW that moment (_moment_kept — the
+    moment's midpoint at the default threshold); a clean span elsewhere in the same shot is
+    'rejected' with a 'moment-lost:' reason so the caller falls back to relevance-ranked
+    alternates instead of silently airing a DIFFERENT moment of the same shot.
     Old indexes (no flags) report every shot clean → 'ok' (fail-open, keyframe gates still ran)."""
     anchor = anchor or (t0, t1)
     over = [sh for sh in shots if sh.end > t0 + 0.05 and sh.start < t1 - 0.05]
@@ -691,20 +713,124 @@ def clean_cut_window(shots, t0: float, t1: float, min_len: float,
         spans.append((cur, t1))
     # best clean span: must overlap the anchor (the exact chosen moment) and fit min_len
     best = None
+    moment_lost = False
     for s0, s1 in spans:
         if s1 <= anchor[0] + 0.05 or s0 >= anchor[1] - 0.05:
             continue                                   # doesn't contain the chosen moment
         if (s1 - s0) < min_len - 1e-6:
             continue
+        if preserve is not None and not _moment_kept(s0, s1, preserve):
+            moment_lost = True                         # clean, but a DIFFERENT moment
+            continue
         if best is None or (s1 - s0) > (best[1] - best[0]):
             best = (s0, s1)
     if best is None:
-        return t0, t1, "rejected", reasons
-    # keep the original duration when the span allows; stay centred on the anchor overlap
-    want = min(t1 - t0, best[1] - best[0])
-    mid = (max(best[0], anchor[0]) + min(best[1], anchor[1])) / 2.0
-    nt0 = max(best[0], min(mid - want / 2.0, best[1] - want))
-    return round(nt0, 3), round(nt0 + want, 3), "shortened", reasons
+        return t0, t1, "rejected", (f"moment-lost: {reasons}" if moment_lost else reasons)
+    # 'shortened' returns the FULL best clean span: spans are built strictly inside [t0, t1],
+    # so the span never exceeds the requested duration and no sub-positioning happens here.
+    # When `preserve` is set the span already passed _moment_kept in the loop above; a caller
+    # that airs a SHORTER slice of this span (build.wqc_render_window) positions that slice
+    # on the moment and re-checks it there.
+    return round(best[0], 3), round(best[1], 3), "shortened", reasons
+
+
+def wqc_moment_policy(seg) -> str:
+    """Window-QC MOMENT policy for a beat. 'exact' — the beat is locked to the originally
+    selected moment (exact_scene / character_specific / any dialogue-quote beat): QC may trim
+    around that moment but never slide to a different one. 'generic' — filler/abstract beats
+    may shift within the same on-topic shot when that improves cleanliness. Unknown beats
+    (seg=None) protect the moment — the safe default."""
+    if seg is None:
+        return "exact"
+    p = _policy.policy_of(seg)
+    if p in (_policy.EXACT, _policy.CHARACTER) or _policy.is_breakout_candidate(seg):
+        return "exact"
+    return "generic"
+
+
+def validate_candidate_window(cand, shot, shots, cfg, seg=None):
+    """PRODUCTION candidate window-QC — the single path behind match selections, beat windows
+    AND the verifier's promotion repair. Validates cand's PADDED render window (cut_selection
+    pads short shots to min_clip_sec) against the source's indexed `shots`; mutates cand
+    in/out on 'shortened'. The original range is captured BEFORE any mutation.
+
+    Moment policy (wqc_moment_policy): 'exact' anchors QC to the ORIGINAL candidate range and
+    requires any shortened window to keep that moment (midpoint or strong overlap) — otherwise
+    'rejected' so the caller uses relevance-ranked alternates or keeps the dirty exact scene,
+    never a silently different moment. 'generic' keeps the whole-shot anchor.
+
+    Returns (action, reason, meta) — meta = {policy, orig, final, preserved} for audit logs."""
+    orig = (float(cand.in_point), float(cand.out_point))
+    pol = wqc_moment_policy(seg)
+    meta = {"policy": pol, "orig": orig, "final": orig, "preserved": True}
+    if not shots:
+        return "ok", "", meta                          # nothing indexed → fail-open
+    pad_end = cand.in_point + max(cfg.min_clip_sec, cand.out_point - cand.in_point)
+    if pol == "exact":
+        anchor, preserve = orig, orig
+    else:
+        # stub-tolerant: verifier tests promote bare SimpleNamespace shots without spans
+        _ss, _se = getattr(shot, "start", None), getattr(shot, "end", None)
+        anchor = (float(_ss), float(_se)) if _ss is not None and _se is not None else None
+        preserve = None
+    nt0, nt1, act, why = clean_cut_window(shots, cand.in_point, pad_end, cfg.min_clip_sec,
+                                          anchor=anchor, preserve=preserve)
+    if act == "shortened":
+        cand.in_point, cand.out_point = nt0, nt1
+        meta["final"] = (nt0, nt1)
+    meta["preserved"] = (act != "rejected") if pol == "exact" else True
+    return act, why, meta
+
+
+def _wqc_log_line(act: str, meta: dict, why: str) -> str:
+    """Uniform audit tail: policy + original candidate range + final range + preservation."""
+    o, f = meta["orig"], meta["final"]
+    return (f"policy={meta['policy']} orig=[{o[0]:.1f}-{o[1]:.1f}] "
+            f"final=[{f[0]:.1f}-{f[1]:.1f}] moment-preserved="
+            f"{'yes' if meta['preserved'] else 'NO'} reason={why}")
+
+
+def wqc_arbitrate_selection(best, alternates, by_src_shots, ps_by_key, cfg, seg,
+                            stats=None, progress=None):
+    """PRODUCTION selection-level window-QC arbitration, one beat at a time (module-level so
+    tests drive the real path). Validates the winning candidate's final window; on 'rejected'
+    scans the relevance-ranked `alternates` for the first whose window validates (fallback);
+    when none does, the original stays (a dirty exact scene still beats unrelated footage).
+    Returns (best, alternates) — best is (adj, base, ps, cand)."""
+    stats = stats if stats is not None else {}
+    _adjq, _baseq, _psq, _candq = best
+    shs = by_src_shots.get(_candq.source_id) or []
+    act, why, meta = validate_candidate_window(_candq, _psq.shot, shs, cfg, seg)
+    seg_i = getattr(seg, "index", _candq.segment_index)
+    if act == "shortened":
+        stats["shortened"] = stats.get("shortened", 0) + 1
+        if progress:
+            progress(f"window-qc: shortened seg={seg_i} src={_candq.source_id[:28]} "
+                     f"{_wqc_log_line(act, meta, why)}")
+    elif act == "rejected":
+        for _alt in alternates:
+            _aps = ps_by_key.get((_alt.source_id, _alt.shot_index))
+            if _aps is None:
+                continue
+            _a_shs = by_src_shots.get(_alt.source_id) or []
+            _a_act, _a_why, _a_meta = validate_candidate_window(_alt, _aps.shot, _a_shs, cfg, seg)
+            if _a_act != "rejected":
+                stats["fallback"] = stats.get("fallback", 0) + 1
+                if progress:
+                    progress(f"window-qc: fallback seg={seg_i} "
+                             f"{_candq.source_id[:24]}→{_alt.source_id[:24]} "
+                             f"{_wqc_log_line(_a_act, _a_meta, why)}")
+                best = (_adjq, float(_alt.score), _aps, _alt)
+                alternates = [c for c in alternates
+                              if (c.source_id, c.shot_index) != (_alt.source_id,
+                                                                 _alt.shot_index)]
+                return best, alternates
+        stats["kept-dirty"] = stats.get("kept-dirty", 0) + 1
+        if progress:
+            progress(f"window-qc: rejected seg={seg_i} src={_candq.source_id[:28]} "
+                     f"kept-dirty (no clean window keeping the moment, no valid alternate) "
+                     f"{_wqc_log_line(act, meta, why)}")
+    return best, alternates
 
 
 def _source_subs_frac(shots) -> float:
@@ -1142,24 +1268,14 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         not in ("0", "false", "no")
     _wqc_stats = {"shortened": 0, "fallback": 0, "kept-dirty": 0, "windows-dropped": 0}
 
-    def _validate_cand_window(cand, shot):
-        """Window-QC one candidate against its source's indexed shots. The validated window is
-        the PADDED render window (cut_selection pads short shots to min_clip_sec). Returns
-        (action, reason) and mutates cand in/out on 'shortened'."""
-        shs = _by_src_shots.get(cand.source_id) or []
-        if not shs:
-            return "ok", ""
-        # partial-corner evidence is deliberately NOT a window-dirty reason: measured on real
-        # footage it fires on scene-static elements (a candle sconce framed identically across
-        # a scene's shots) — shrinking exact-scene cuts around those is a relevance regression.
-        # Full-source corner bugs are handled by the punch-in crop instead.
-        pad_end = cand.in_point + max(cfg.min_clip_sec, cand.out_point - cand.in_point)
-        nt0, nt1, act, why = clean_cut_window(
-            shs, cand.in_point, pad_end, cfg.min_clip_sec,
-            anchor=(float(shot.start), float(shot.end)) if shot is not None else None)
-        if act == "shortened":
-            cand.in_point, cand.out_point = nt0, nt1
-        return act, why
+    # partial-corner evidence is deliberately NOT a window-dirty reason: measured on real
+    # footage it fires on scene-static elements (a candle sconce framed identically across
+    # a scene's shots) — shrinking exact-scene cuts around those is a relevance regression.
+    # Full-source corner bugs are handled by the punch-in crop instead.
+    def _validate_cand_window(cand, shot, seg=None):
+        """Thin adapter over the module-level PRODUCTION validator (tests call that directly)."""
+        return validate_candidate_window(cand, shot, _by_src_shots.get(cand.source_id) or [],
+                                         cfg, seg)
     source_uses: dict[str, int] = {}
     shot_uses: dict[tuple[str, int], int] = {}
     recent_sources: list[str] = []
@@ -1321,43 +1437,15 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
             alternates = []
 
         # CUT-WINDOW FLAG VALIDATION — the rendered cut pads/extends past shot bounds, so the
-        # FULL final window must be clean, not just the chosen shot's own samples. Prefer
-        # shortening to a clean sub-window containing the chosen moment; else fall back to the
-        # first (already relevance-ranked) alternate whose window validates; else keep the
-        # original (a dirty exact scene still beats unrelated footage — verifier/still recovery
-        # may replace it later).
+        # FULL final window must be clean, not just the chosen shot's own samples. Moment-locked
+        # beats (exact/quote/character) anchor to the ORIGINAL candidate range — shorten only
+        # around that moment; else fall back to the first (already relevance-ranked) alternate
+        # whose window validates; else keep the original (a dirty exact scene still beats
+        # unrelated footage — verifier/still recovery may replace it later).
         if _wqc_gate and best is not None:
-            _adjq, _baseq, _psq, _candq = best
-            _act, _why = _validate_cand_window(_candq, _psq.shot)
-            if _act == "shortened":
-                _wqc_stats["shortened"] += 1
-                if progress:
-                    progress(f"window-qc: shortened seg={seg.index} src={_candq.source_id[:28]} "
-                             f"→[{_candq.in_point:.1f}-{_candq.out_point:.1f}] reason={_why}")
-            elif _act == "rejected":
-                _swapped = False
-                for _alt in alternates:
-                    _aps = _ps_by_key.get((_alt.source_id, _alt.shot_index))
-                    if _aps is None:
-                        continue
-                    _a_act, _a_why = _validate_cand_window(_alt, _aps.shot)
-                    if _a_act != "rejected":
-                        if progress:
-                            progress(f"window-qc: fallback seg={seg.index} "
-                                     f"{_candq.source_id[:24]}→{_alt.source_id[:24]} "
-                                     f"[{_alt.in_point:.1f}-{_alt.out_point:.1f}] reason={_why}")
-                        _wqc_stats["fallback"] += 1
-                        best = (_adjq, float(_alt.score), _aps, _alt)
-                        alternates = [c for c in alternates
-                                      if (c.source_id, c.shot_index) != (_alt.source_id,
-                                                                         _alt.shot_index)]
-                        _swapped = True
-                        break
-                if not _swapped:
-                    _wqc_stats["kept-dirty"] += 1
-                    if progress:
-                        progress(f"window-qc: rejected seg={seg.index} src={_candq.source_id[:28]} "
-                                 f"kept-dirty (no clean sub-window/alternate) reason={_why}")
+            best, alternates = wqc_arbitrate_selection(
+                best, alternates, _by_src_shots, _ps_by_key, cfg, seg,
+                stats=_wqc_stats, progress=progress)
 
         if best is None:
             sel = ClipSelection(segment_index=seg.index, source_id="", shot_index=-1,
@@ -1386,10 +1474,11 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
                 seen_w.add(wk)
                 # window-QC every beat_window too — build plays these directly (the chosen cand
                 # at wins[0] is already validated; alternates' windows get the same treatment:
-                # shorten in place, or drop the window when no clean sub-window exists)
+                # shorten in place — moment-locked beats only around their own moment — or drop
+                # the window when no clean moment-keeping sub-window exists)
                 if _wqc_gate and wk != (cand.source_id, cand.shot_index):
                     _wps = _ps_by_key.get(wk)
-                    _w_act, _ = _validate_cand_window(c, _wps.shot if _wps else None)
+                    _w_act, _, _ = _validate_cand_window(c, _wps.shot if _wps else None, seg)
                     if _w_act == "rejected":
                         _wqc_stats["windows-dropped"] += 1
                         continue

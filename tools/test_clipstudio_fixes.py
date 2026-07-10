@@ -3297,6 +3297,225 @@ def test_cut_window_validation():
           "p95s" not in isrc and "luma_hi" in isrc)
 
 
+def test_wqc_moment_preservation():
+    print("[window-qc] exact-moment preservation — policy-anchored PRODUCTION validation paths")
+    from vidlore.clipstudio.match import (validate_candidate_window, wqc_arbitrate_selection,
+                                          wqc_moment_policy)
+    from vidlore.clipstudio.build import wqc_render_window, wqc_render_log_line
+    from vidlore.clipstudio.models import ClipCandidate
+    from vidlore.clipstudio.config import ClipConfig
+    cfg = ClipConfig()
+
+    def shot(i, s, e, subs=0):
+        return types.SimpleNamespace(index=i, start=s, end=e, subs_flag=subs,
+                                     luma_avg=60.0, luma_hi=200.0, corner_masks={},
+                                     ocr_text="", ocr_names=[], keyframe_path="")
+
+    def seg_of(policy, quote="", idx=3):
+        return types.SimpleNamespace(index=idx, text="Tywin tells Tyrion the truth",
+                                     quote=quote, required_kind="", required_entity="",
+                                     is_specific_claim=False, visual_policy=policy,
+                                     breakout_candidate=bool(quote))
+
+    def cand_of(sid="srcA", si=0, inp=2.0, outp=8.0, score=0.8):
+        return ClipCandidate(segment_index=3, source_id=sid, shot_index=si, score=score,
+                             in_point=inp, out_point=outp)
+
+    # (0) policy resolution: exact/character/quote → moment-locked; filler/abstract → generic
+    check("policy: exact_scene / character_specific / dialogue-quote → moment-locked",
+          wqc_moment_policy(seg_of("exact_scene")) == "exact"
+          and wqc_moment_policy(seg_of("character_specific")) == "exact"
+          and wqc_moment_policy(seg_of("generic_filler", quote="I am your son")) == "exact"
+          and wqc_moment_policy(None) == "exact")
+    check("policy: generic_filler / abstract_effect → may shift within the shot",
+          wqc_moment_policy(seg_of("generic_filler")) == "generic"
+          and wqc_moment_policy(seg_of("abstract_effect")) == "generic")
+
+    # Geometry: candidate [2,8] (moment mid=5); head of the window dirty (subs shot to 6.5),
+    # a clean span [6.5,8] exists — big enough to air, but it is a DIFFERENT moment (25%
+    # overlap, no midpoint). Selected shot spans the whole window.
+    D, C = shot(0, 0.0, 6.5, subs=1), shot(1, 6.5, 10.0)
+    S_sel = shot(9, 0.0, 10.0)
+
+    # (1) exact beat: same-shot clean span that loses the moment → REJECTED, cand untouched
+    c1 = cand_of()
+    act1, why1, m1 = validate_candidate_window(c1, S_sel, [D, C], cfg, seg_of("exact_scene"))
+    check("exact beat NEVER shifts to a different moment in the same shot",
+          act1 == "rejected" and why1.startswith("moment-lost")
+          and c1.in_point == 2.0 and c1.out_point == 8.0
+          and m1["policy"] == "exact" and m1["preserved"] is False)
+    # (2) SAME inputs, generic beat → whole-shot anchor allows the shift (mutates in place)
+    c2 = cand_of()
+    act2, _, m2 = validate_candidate_window(c2, S_sel, [D, C], cfg, seg_of("generic_filler"))
+    check("generic filler MAY shift within the same shot (same inputs, other policy)",
+          act2 == "shortened" and c2.in_point >= 6.5 - 1e-6
+          and m2["policy"] == "generic" and m2["preserved"] is True)
+    # (3) exact beat may still SHORTEN when the original moment survives
+    D1, C1 = shot(0, 0.0, 3.0, subs=1), shot(1, 3.0, 10.0)
+    c3 = cand_of()
+    act3, _, m3 = validate_candidate_window(c3, S_sel, [D1, C1], cfg, seg_of("exact_scene"))
+    check("exact beat shortens ONLY around its own moment (midpoint kept)",
+          act3 == "shortened" and c3.in_point <= 5.0 <= c3.out_point
+          and m3["preserved"] is True)
+
+    # (4) selection-level arbitration (REAL production function): contaminated exact beat
+    # falls back to the first relevance-ranked alternate whose window validates ...
+    by_src = {"srcA": [D, C], "srcB": [shot(0, 0.0, 10.0)], "srcC": [shot(0, 0.0, 10.0, subs=1)]}
+    psA = types.SimpleNamespace(shot=S_sel, sid="srcA")
+    psB = types.SimpleNamespace(shot=shot(0, 0.0, 10.0), sid="srcB")
+    psC = types.SimpleNamespace(shot=shot(0, 0.0, 10.0, subs=1), sid="srcC")
+    ps_by_key = {("srcB", 0): psB, ("srcC", 0): psC}
+    altB = cand_of(sid="srcB", si=0, inp=1.0, outp=4.0, score=0.7)
+    stats = {}
+    best, alts = wqc_arbitrate_selection((0.9, 0.8, psA, cand_of()), [altB], by_src,
+                                         ps_by_key, cfg, seg_of("exact_scene"), stats=stats)
+    check("exact beat w/ contaminated moment → falls back to a VALID alternate",
+          best[3] is altB and stats.get("fallback") == 1 and altB not in alts)
+    # ... and stays (dirty) on the ORIGINAL when no alternate validates
+    altC = cand_of(sid="srcC", si=0, inp=1.0, outp=4.0, score=0.7)
+    cA, stats2 = cand_of(), {}
+    best2, _ = wqc_arbitrate_selection((0.9, 0.8, psA, cA), [altC], by_src,
+                                       ps_by_key, cfg, seg_of("exact_scene"), stats=stats2)
+    check("exact beat w/ NO valid alternate → kept-dirty on the original moment",
+          best2[3] is cA and stats2.get("kept-dirty") == 1
+          and cA.in_point == 2.0 and cA.out_point == 8.0)
+
+    # (5) build render-window (REAL production function): neighbourhood shift obeys policy.
+    # `moment` = the chosen window's OWN [in, out]; here it fills the whole render window.
+    # Window [10,14] dirty; the only clean span keeps just 0.5s of the moment.
+    sh_b = [shot(0, 9.0, 13.5, subs=1), shot(1, 13.5, 30.0)]
+    ns_g, act_g, _, mg = wqc_render_window(sh_b, 10.0, 4.0, seg_of("generic_filler"),
+                                           (10.0, 14.0))
+    ns_e, act_e, _, me = wqc_render_window(sh_b, 10.0, 4.0, seg_of("exact_scene"),
+                                           (10.0, 14.0))
+    check("build shift: generic beat may slide to the clean neighbour span",
+          act_g == "shifted" and ns_g >= 13.4)
+    # kept-dirty = cleanliness failed, NOT moment lost: the unchanged final window still
+    # contains the candidate, so moment-preserved reports the honest yes
+    check("build shift: exact beat REFUSES a moment-losing slide → kept-dirty at the original",
+          act_e == "kept-dirty" and ns_e == 10.0 and me["preserved"] is True)
+    kd_line = wqc_render_log_line(act_e, me, "subs(shot 0)")
+    check("audit log: kept-dirty exact beat that still airs its candidate says preserved=yes",
+          "moment-preserved=yes" in kd_line and "action=kept-dirty" in kd_line
+          and "candidate=[10.0-14.0]" in kd_line and "render-request=[10.0-14.0]" in kd_line)
+    # playhead-walk fill (NO selected moment) → even an exact beat may take the clean span
+    ns_w, act_w, _, mw = wqc_render_window(sh_b, 10.0, 4.0, seg_of("exact_scene"), None)
+    check("build shift: walk-fill window (no selected moment) may slide even on exact beats",
+          act_w == "shifted" and ns_w >= 13.4)
+    wf_line = wqc_render_log_line(act_w, mw, "subs(shot 0)")
+    check("audit log: walk-fill (no candidate) logs moment-preserved=n-a, never yes/no",
+          mw["preserved"] is None and "moment-preserved=n-a" in wf_line
+          and "candidate=none" in wf_line and "action=shifted" in wf_line)
+    g_line = wqc_render_log_line(act_g, mg, "subs(shot 0)")
+    check("audit log: generic beat (guarantee not applicable) also logs n-a",
+          mg["preserved"] is None and "moment-preserved=n-a" in g_line)
+    # a moment-KEEPING shift is still allowed for exact beats (dirt only at the head)
+    sh_b2 = [shot(0, 9.5, 11.0, subs=1), shot(1, 11.0, 30.0)]
+    ns_e2, act_e2, _, me2 = wqc_render_window(sh_b2, 10.0, 4.0, seg_of("exact_scene"),
+                                              (10.0, 14.0))
+    check("build shift: exact beat shifts when the aired window still shows the moment",
+          act_e2 == "shifted" and abs(ns_e2 - 11.0) < 0.2 and me2["preserved"] is True)
+    # the AIRED slice (need-length) must show the moment — not just the longer clean span.
+    # Clean span [6,13] contains the moment mid (12) but a span-start aired slice [6,10]
+    # would NOT: the aired start must slide forward inside the clean span to cover it.
+    sh_b3 = [shot(0, 5.0, 6.0, subs=1), shot(1, 6.0, 13.0), shot(2, 13.0, 14.0, subs=1),
+             shot(3, 14.0, 30.0)]
+    ns_e3, act_e3, _, me3 = wqc_render_window(sh_b3, 10.0, 4.0, seg_of("exact_scene"),
+                                              (10.0, 14.0))
+    check("build shift: exact beat positions the AIRED slice on the moment inside the span",
+          act_e3 == "shifted" and ns_e3 <= 12.0 <= ns_e3 + 4.0 and me3["preserved"] is True)
+    # REGRESSION (observed beat 127): a SHORT chosen moment [93.9-95.3] padded to a 4.4s
+    # render window [93.9-98.3]; subs sit in the PADDING. Preserving the padded window
+    # refused the clean shift — preserving the chosen MOMENT takes the clean span before
+    # it and keeps the full moment on screen.
+    sh_b4 = [shot(0, 85.0, 95.3), shot(1, 95.3, 96.5, subs=1), shot(2, 96.5, 97.0),
+             shot(3, 97.0, 98.5, subs=1), shot(4, 98.5, 110.0)]
+    ns_e4, act_e4, _, me4 = wqc_render_window(sh_b4, 93.9, 4.4, seg_of("exact_scene"),
+                                              (93.9, 95.3))
+    check("build shift: padding is NOT the moment — short chosen moment shifts clean",
+          act_e4 == "shifted" and ns_e4 <= 93.9 and ns_e4 + 4.4 >= 95.25
+          and me4["preserved"] is True)
+    e4_line = wqc_render_log_line(act_e4, me4, "subs(shot 1)")
+    check("audit log: exact shift logs candidate and render-request as DISTINCT fields",
+          "candidate=[93.9-95.3]" in e4_line and "render-request=[93.9-98.3]" in e4_line
+          and "moment-preserved=yes" in e4_line and "action=shifted" in e4_line
+          and me4["candidate"] == (93.9, 95.3)
+          and abs(me4["render_request"][0] - 93.9) < 1e-6
+          and abs(me4["render_request"][1] - 98.3) < 1e-6)
+
+    # (5b) pre-commit adversarial-review fixes for the shift machinery.
+    # The widened neighbourhood search must NOT "shift" past the indexed extent:
+    # clean_cut_window counts un-indexed time as clean, so an unclamped search proposed a
+    # span past the last shot (≈ source end) and the caller's duration clamp dragged the
+    # aired window straight back into the dirt while the log claimed a clean shift.
+    sh_b5 = [shot(0, 0.0, 9.0, subs=1), shot(1, 9.0, 10.5)]     # index ends at 10.5
+    ns_x, act_x, _, _ = wqc_render_window(sh_b5, 8.0, 4.0, seg_of("generic_filler"), None)
+    check("build shift: widened search clamped to the indexed extent (no phantom-clean tail)",
+          act_x == "kept-dirty" and ns_x == 8.0)
+    # Generic/walk-fill shifts: the AIRED need-slice — not just the validated span — must
+    # overlap the original window. Span [96,101] vs orig [100,104]: airing the span head
+    # [96,100] misses the original window entirely; the slice must sit at [97,101].
+    sh_b6 = [shot(0, 96.0, 101.0), shot(1, 101.0, 112.0, subs=1)]
+    ns_y, act_y, _, my = wqc_render_window(sh_b6, 100.0, 4.0, seg_of("generic_filler"), None)
+    check("build shift: generic AIRED slice positioned to overlap the original window",
+          act_y == "shifted" and abs(ns_y - 97.0) < 1e-6 and my["final"][1] > 100.0 + 1e-6)
+    # Module-level callers may pass an empty shot list → explicit fail-open.
+    ns_z, act_z, _, _ = wqc_render_window([], 5.0, 4.0, seg_of("exact_scene"), (5.0, 9.0))
+    check("build shift: empty shot list fails open", act_z == "ok" and ns_z == 5.0)
+
+    # (5c) duration-clamp mirror: indexed shot ends can exceed the integer-rounded source
+    # duration metadata, so a shift into the index's tail gets dragged back by the caller's
+    # duration clamp — `final=` must describe what actually AIRS, not the phantom shift.
+    # Decision-neutral: the caller applies the identical clamp to whatever is returned.
+    sh_b7 = [shot(0, 80.0, 91.9, subs=1), shot(1, 91.9, 95.9)]     # index ends past dur=95
+    ns_d, act_d, why_d, md = wqc_render_window(sh_b7, 91.0, 4.0, seg_of("generic_filler"),
+                                               None, 95.0)
+    check("audit log: duration-clamped evaporated shift reports kept-dirty (final = request)",
+          act_d == "kept-dirty" and ns_d == 91.0 and md["final"] == (91.0, 95.0)
+          and "duration-clamped" in why_d)
+    ns_d2, act_d2, _, md2 = wqc_render_window(sh_b7, 91.0, 4.0, seg_of("exact_scene"),
+                                              (92.0, 94.0), 95.0)
+    check("audit log: duration-clamped exact beat still reports the honest moment answer",
+          act_d2 == "kept-dirty" and md2["preserved"] is True
+          and "moment-preserved=yes" in wqc_render_log_line(act_d2, md2, "x"))
+    ns_d3, act_d3, _, md3 = wqc_render_window(sh_b7, 90.5, 4.0, seg_of("generic_filler"),
+                                              None, 95.0)
+    check("audit log: partially clamped shift logs the clamped aired window as final",
+          act_d3 == "shifted" and abs(ns_d3 - 91.0) < 1e-6
+          and abs(md3["final"][1] - 95.0) < 1e-6)
+
+    # (6) verifier promotion path uses the SAME production validator (stub shots tolerated)
+    alt_v = cand_of(sid="srcA", si=0)
+    ashot_bare = types.SimpleNamespace(index=0)          # verify stubs may lack start/end
+    act_v, why_v, _ = validate_candidate_window(alt_v, ashot_bare, [D, C], cfg,
+                                                seg_of("exact_scene"))
+    check("verify-promotion path: contaminated exact moment rejected (alternate skipped)",
+          act_v == "rejected" and why_v.startswith("moment-lost"))
+    act_v2, _, _ = validate_candidate_window(cand_of(), ashot_bare, [D, C], cfg,
+                                             seg_of("generic_filler"))
+    check("verify-promotion path: span-less stub shot fails open to the window anchor",
+          act_v2 in ("shortened", "rejected"))
+
+    # (7) wiring: every path routes through the policy-aware production functions
+    root = Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio"
+    msrc = (root / "match.py").read_text(encoding="utf-8")
+    vsrc = (root / "verify.py").read_text(encoding="utf-8")
+    bsrc = (root / "build.py").read_text(encoding="utf-8")
+    csrc = (root / "cut.py").read_text(encoding="utf-8")
+    check("match selections arbitrate via wqc_arbitrate_selection (policy audit logs)",
+          "wqc_arbitrate_selection(" in msrc and "moment-preserved=" in msrc)
+    check("verifier promotions use validate_candidate_window",
+          "validate_candidate_window(" in vsrc)
+    check("build render shifts use wqc_render_window with the beat's seg + chosen moment",
+          "wqc_render_window(shots, start, need, seg, moment, _sdur)" in bsrc
+          and "_wqc_render_start(sid, start, src_need, seg, _wqc_moment)" in bsrc
+          and "_wqc_moment = (in_p, float(chosen_w[2]))" in bsrc)
+    check("breakouts reject, never shift (quote-locked = exact by definition)",
+          "never shifted; trying next candidate" in bsrc)
+    check("cut padding never relocates the moment (refuse-the-pad only)",
+          "never relocates the aired moment" in csrc)
+
+
 def main():
     test_verifier_promotion_rewrites_beat_windows()
     test_budget_loop_survives_plan_beats_failure()
@@ -3338,6 +3557,7 @@ def main():
     test_clean_copy_arbitration()
     test_multiframe_shot_flags()
     test_cut_window_validation()
+    test_wqc_moment_preservation()
     print(f"\n{PASS} passed · {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

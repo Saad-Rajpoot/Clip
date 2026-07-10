@@ -33,6 +33,8 @@ def cut_selection(proj: ClipProject, sel: ClipSelection, cfg: ClipConfig) -> Opt
     # into an adjacent shot carrying burned subs / a logo / murk (observed: a 1.4s clean shot
     # padded straight into the next shot's Turkish subtitle). If the PADDED window is dirty but
     # the selection's own window is clean and long enough, don't pad into the dirt.
+    # EXACT-MOMENT protection is inherent here: this path only ever REFUSES the pad and keeps
+    # the selection's own [in, out] — it never relocates the aired moment, so no policy split.
     import os as _os_w
     if _os_w.environ.get("VIDLORE_CLIPSTUDIO_WINDOW_QC", "1").strip() not in ("0", "false", "no") \
             and dur > (sel.out_point - sel.in_point) + 1e-3:

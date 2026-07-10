@@ -167,30 +167,27 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 if av and av.get("verdict") == "keep":
                     # CUT-WINDOW FLAG VALIDATION on the promotion — the repair must not swap a
                     # rejected clip for one whose PADDED render window airs an adjacent shot's
-                    # burned subs / logo / murk. Shorten to a clean sub-window when possible,
-                    # skip this alternate when none exists.
+                    # burned subs / logo / murk. Same PRODUCTION validator as match selections:
+                    # moment-locked beats (exact/quote/character) may only shorten around the
+                    # alternate's own selected moment — never slide to a different moment —
+                    # else this alternate is skipped for the next relevance-ranked one.
                     import os as _os_w
                     if _os_w.environ.get("VIDLORE_CLIPSTUDIO_WINDOW_QC", "1").strip() \
                             not in ("0", "false", "no"):
-                        from .match import clean_cut_window
+                        from .match import validate_candidate_window, _wqc_log_line
                         # stub-tolerant: tests monkeypatch _shot_lookup with a bare function —
                         # no shot list then means nothing to validate (fail-open)
                         _wshots = getattr(get_shot, "all_shots", lambda _s: [])(alt.source_id)
-                        _pad_end = alt.in_point + max(cfg.min_clip_sec,
-                                                      alt.out_point - alt.in_point)
-                        _n0, _n1, _wact, _wwhy = clean_cut_window(
-                            _wshots, alt.in_point, _pad_end, cfg.min_clip_sec,
-                            anchor=(float(getattr(ashot, "start", alt.in_point)),
-                                    float(getattr(ashot, "end", alt.out_point))))
+                        _wact, _wwhy, _wmeta = validate_candidate_window(
+                            alt, ashot, _wshots, cfg, seg)
                         if _wact == "rejected":
                             log(f"window-qc: rejected verify-promotion seg{sel.segment_index} "
-                                f"alt={alt.source_id[:28]} reason={_wwhy}")
+                                f"alt={alt.source_id[:28]} {_wqc_log_line(_wact, _wmeta, _wwhy)}")
                             failed_wins.append((alt.source_id, float(alt.in_point)))
                             continue
                         if _wact == "shortened":
-                            alt.in_point, alt.out_point = _n0, _n1
                             log(f"window-qc: shortened verify-promotion seg{sel.segment_index} "
-                                f"→[{_n0:.1f}-{_n1:.1f}] reason={_wwhy}")
+                                f"{_wqc_log_line(_wact, _wmeta, _wwhy)}")
                     # promote the alternate into the selection
                     old_sid, old_in = sel.source_id, sel.in_point
                     sel.source_id = alt.source_id
