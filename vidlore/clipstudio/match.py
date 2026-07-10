@@ -98,7 +98,11 @@ def _source_corner_logo(shots, *, samples: int = 16, min_kf: int = 6) -> str:
     _source_is_static's call, not a logo.
 
     Returns 'tl'|'tr'|'bl'|'br' or ''. Memoized per source (keyed on the first keyframe path).
-    Kill switch: VIDLORE_CLIPSTUDIO_CORNER_LOGO_GATE=0 (checked by callers)."""
+    Kill switch: VIDLORE_CLIPSTUDIO_CORNER_LOGO_GATE=0 (checked by callers).
+
+    PERSISTED-FIRST: when the index computed multi-frame corner masks (3 samples/shot, OR'd),
+    aggregate THOSE — no image IO, and intermittent bugs that fade in mid-shot are visible in
+    the OR'd masks. Keyframe decoding below is the fallback for old indexes only."""
     import numpy as np
     from PIL import Image
     kfs = [getattr(sh, "keyframe_path", "") or "" for sh in shots]
@@ -111,6 +115,42 @@ def _source_corner_logo(shots, *, samples: int = 16, min_kf: int = 6) -> str:
     while len(_CORNER_LOGO_CACHE) >= 256:
         _CORNER_LOGO_CACHE.pop(next(iter(_CORNER_LOGO_CACHE)))
     _CORNER_LOGO_CACHE[ck] = ""                       # default while computing (also on early-outs)
+    def _pfv(sh):
+        v = getattr(sh, "subs_flag", -1)
+        return -1 if v is None else int(v)             # NOTE: `v or -1` would turn a valid 0 into -1
+
+    flagged = [sh for sh in shots if _pfv(sh) >= 0]
+    if len(flagged) >= min_kf:                        # multi-frame flags present → mask aggregation
+        # static-card guard (ports the keyframe path's centre-variance early-out): a static
+        # image + audio source has identical masks everywhere — that's _source_is_static's
+        # call, not a corner bug (observed FP: the audiobook card fired 'br' here).
+        if _source_is_static(shots):
+            return ""
+        from .index import _mask_from_hex
+        best, best_score = "", 0.0
+        for name in ("tl", "tr", "bl", "br"):
+            masks = []
+            for sh in flagged:
+                h = (getattr(sh, "corner_masks", None) or {}).get(name)
+                m = _mask_from_hex(h) if h else None
+                masks.append(m)
+            present = [m for m in masks if m is not None and m.mean() > 0.02]
+            pf = len(present) / max(1, len(masks))
+            if len(present) < 4 or pf < 0.25:
+                continue
+            maj = np.stack(present).mean(axis=0) >= 0.5
+            if maj.sum() < 3 or maj.mean() > 0.85:
+                continue
+            iou = float(np.mean([float((m & maj).sum()) / max(1.0, float((m | maj).sum()))
+                                 for m in present]))
+            ys, xs = np.nonzero(maj)
+            spread = min(ys.std(), xs.std()) if len(ys) > 2 else 0.0
+            score = pf * iou
+            if pf >= 0.25 and iou >= 0.45 and spread > 0.6 and score >= 0.20 \
+                    and score > best_score:
+                best, best_score = name, score
+        _CORNER_LOGO_CACHE[ck] = best
+        return best
     kfs = [k for k in kfs if Path(k).exists()]
     if len(kfs) < min_kf:
         return ""
@@ -459,7 +499,15 @@ def _shot_subtitle_band(shot) -> bool:
     there vs the mid-frame, spanning many columns, concentrated in few rows. Calibrated on real
     sources (Turkish/Arabic/English-subbed positives, 30+ clean negatives).
 
-    Kill switch: VIDLORE_CLIPSTUDIO_SUBBAND_GATE=0 (checked by callers). Memoized per keyframe."""
+    Kill switch: VIDLORE_CLIPSTUDIO_SUBBAND_GATE=0 (checked by callers). Memoized per keyframe.
+
+    PERSISTED-FIRST: when the index computed multi-frame flags (3 samples/shot), trust them —
+    they see subs that appear MID-shot which the keyframe instant misses (the remaining Turkish
+    'Gel, geçip odamda konuşalım.' leak was exactly this). Keyframe heuristic is the fallback
+    for old indexes only."""
+    _pf = int(getattr(shot, "subs_flag", -1) if getattr(shot, "subs_flag", -1) is not None else -1)
+    if _pf >= 0:
+        return bool(_pf)
     kf = getattr(shot, "keyframe_path", "") or ""
     if not kf:
         return False
@@ -487,6 +535,31 @@ def _shot_subtitle_band(shot) -> bool:
         return bool(ok)
     except Exception:
         return False
+
+
+def _shot_unreadable(shot) -> bool:
+    """UNREADABLE-DARK shot — near-black across its WHOLE span, not just at one instant.
+    Uses the persisted multi-frame luma (start/mid/end samples): `luma_avg` low AND even the
+    brightest sample's 95th-percentile pixel (`luma_hi`) dim. A valid dark cinematic scene
+    (candlelit privy, torch in the catacombs) keeps bright highlights → high p95 → passes.
+    Old indexes (sentinel -1) are never gated here — the quality floor still applies.
+    Env: VIDLORE_CLIPSTUDIO_UNREADABLE_GATE=0 disables; _AVG/_HI tune thresholds."""
+    import os as _os_u
+    if _os_u.environ.get("VIDLORE_CLIPSTUDIO_UNREADABLE_GATE", "1").strip() in ("0", "false", "no"):
+        return False
+    la = float(getattr(shot, "luma_avg", -1.0) or -1.0)
+    lh = float(getattr(shot, "luma_hi", -1.0) or -1.0)
+    if la < 0 or lh < 0:
+        return False                                   # not computed (old index) → fail open
+    # CONSERVATIVE by design (measured on real GoT footage): the readable dark privy/crossbow
+    # shots sit at avg 12-14 / hi 127-147, true murk at avg 6-10 / hi 46-98. Overlap exists, so
+    # the gate only fires on clear murk — a borderline dark scene stays (relevance-first).
+    try:
+        t_avg = float(_os_u.environ.get("VIDLORE_CLIPSTUDIO_UNREADABLE_AVG", "11") or 11)
+        t_hi = float(_os_u.environ.get("VIDLORE_CLIPSTUDIO_UNREADABLE_HI", "90") or 90)
+    except (TypeError, ValueError):
+        t_avg, t_hi = 11.0, 90.0
+    return la < t_avg and lh < t_hi
 
 
 def _source_subs_frac(shots) -> float:
@@ -558,6 +631,9 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
             continue                                      # burned subs (any script) NEVER air
         if _black_floor > 0 and float(getattr(ps.shot, "quality", 1.0) or 1.0) < _black_floor:
             continue                                      # near-black / unusable frame never airs
+        if _shot_unreadable(ps.shot):
+            continue                                      # near-black across the WHOLE shot span
+                                                          # (multi-frame luma; keeps candlelit scenes)
         clip_cos = 0.0
         clip01 = 0.0
         if text_vec is not None and ps.embed is not None:

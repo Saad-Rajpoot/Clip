@@ -363,6 +363,9 @@ def pick_source_still(sel, shots_by_key: dict, used_keys: set, used_phash: set,
             continue
         if float(getattr(shot, "quality", 1.0) or 0.0) < min_quality:   # skip blurry/dark frames
             continue
+        from .match import _shot_unreadable
+        if _shot_unreadable(shot):                 # near-black across the shot (multi-frame luma)
+            continue
         if _shot_has_overlay_text(shot):           # logo / title card / reactor-name / burned subtitle
             continue
         if key == assigned or key in used_keys:   # different than the moving clip + still-dedup
@@ -399,6 +402,9 @@ def pick_pool_still(seg, shots_by_key: dict, used_keys: set, used_phash: set,
         if not kf or not Path(kf).exists():
             continue
         if float(getattr(shot, "quality", 1.0) or 0.0) < min_quality:
+            continue
+        from .match import _shot_unreadable
+        if _shot_unreadable(shot):                 # near-black across the shot (multi-frame luma)
             continue
         if _shot_has_overlay_text(shot):           # logo / title card / reactor-name / burned subtitle
             continue

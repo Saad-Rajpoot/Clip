@@ -13,6 +13,7 @@ cheap. Re-indexing is skipped when shots.json already exists (resume), unless fo
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -146,6 +147,142 @@ def extract_keyframe(path: Path, t: float, dest: Path) -> bool:
         return dest.exists() and dest.stat().st_size > 0
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# MULTI-FRAME shot flags (start/mid/end samples) — the single keyframe misses
+# INTERMITTENT defects: burned subs that appear mid-shot (observed: a Turkish
+# "Gel, geçip odamda konuşalım." aired although the shot's keyframe was clean),
+# fading channel bugs, and shots that are readable at the keyframe instant but
+# near-black for most of their span. Computed once at index time, persisted on
+# the Shot, and reused by every gate (match/build/stills/breakouts) without
+# re-running detection.
+# ---------------------------------------------------------------------------
+
+# corner-bug mask geometry — MUST stay in sync with match._source_corner_logo (v3, calibrated):
+# analysis at 640×360, 4 corner regions of 44×116 px, edge threshold 18, presence >2% of pixels.
+_CORNER_REGIONS = {"tl": (slice(0, 44), slice(0, 116)), "tr": (slice(0, 44), slice(524, 640)),
+                   "bl": (slice(316, 360), slice(0, 116)), "br": (slice(316, 360), slice(524, 640))}
+_MASK_GRID = (11, 29)          # 44×116 region → 4×4 blocks
+
+
+def _mask_to_hex(mask) -> str:
+    import numpy as np
+    bits = np.packbits(mask.astype("uint8").flatten())
+    return bits.tobytes().hex()
+
+
+def _mask_from_hex(h: str):
+    import numpy as np
+    try:
+        bits = np.unpackbits(np.frombuffer(bytes.fromhex(h), dtype="uint8"))
+        n = _MASK_GRID[0] * _MASK_GRID[1]
+        if len(bits) < n:
+            return None
+        return bits[:n].reshape(_MASK_GRID).astype(bool)
+    except Exception:
+        return None
+
+
+def _flags_from_frames(frames: list) -> dict:
+    """Pure flag computation from up to 3 grayscale 640×360 float arrays (start/mid/end).
+    Returns {subs_flag, text_conf, luma_avg, luma_hi, corner_masks}. Deterministic and
+    frame-source-agnostic so it is unit-testable without video files."""
+    import numpy as np
+    out = {"subs_flag": 0, "text_conf": 0.0, "luma_avg": -1.0, "luma_hi": -1.0,
+           "corner_masks": {}}
+    frames = [f for f in frames if f is not None]
+    if not frames:
+        out["subs_flag"] = -1
+        return out
+    lumas, p95s, confs = [], [], []
+    corner_or = {k: None for k in _CORNER_REGIONS}
+    subs_any = False
+    for fr in frames:
+        lumas.append(float(fr.mean()))
+        p95s.append(float(np.percentile(fr, 99.8)))
+        # subtitle band on the 320×180 downsample — SAME calibrated geometry/thresholds as
+        # match._shot_subtitle_band (Turkish/Arabic/English positives, 30+ clean negatives)
+        small = fr[::2, ::2]
+        gy, gx = np.gradient(small)
+        E = np.hypot(gx, gy)
+        band = E[137:175, 38:282] > 42.0
+        bf = float(band.mean())
+        mf = float((E[72:126, 38:282] > 42.0).mean())
+        ys, xs = np.nonzero(band)
+        colcov = len(np.unique(xs // 8)) / (244 // 8) if len(xs) else 0.0
+        rowspread = ys.std() if len(ys) > 20 else 99.0
+        confs.append(bf / max(mf, 0.008))
+        if bf > 0.05 and bf > 2.0 * max(mf, 0.008) and colcov >= 0.28 and rowspread < 11.0:
+            subs_any = True
+        # corner edge masks at full 640×360 (same threshold as the source-level detector)
+        gy2, gx2 = np.gradient(fr)
+        E2 = np.hypot(gx2, gy2)
+        for name, (rs, cs) in _CORNER_REGIONS.items():
+            m = (E2[rs, cs] > 18.0)
+            grid = m.reshape(_MASK_GRID[0], 4, _MASK_GRID[1], 4).mean(axis=(1, 3)) > 0.25
+            corner_or[name] = grid if corner_or[name] is None else (corner_or[name] | grid)
+    out["subs_flag"] = 1 if subs_any else 0
+    out["text_conf"] = round(max(confs), 2) if confs else 0.0
+    out["luma_avg"] = round(float(np.mean(lumas)), 1)
+    out["luma_hi"] = round(float(max(p95s)), 1)
+    for name, g in corner_or.items():
+        if g is not None and g.sum() >= 2:            # store only corners with real edge content
+            out["corner_masks"][name] = _mask_to_hex(g)
+    return out
+
+
+def compute_shot_flags(path, shots: list, *, progress=None) -> int:
+    """Decode 3 frames per shot (start/mid/end) via PyAV and persist multi-frame flags on each
+    Shot. Returns the number of shots flagged. Tolerant: a source that can't be decoded leaves
+    the sentinel values (-1) in place and every gate falls back to keyframe heuristics."""
+    import numpy as np
+    try:
+        import av
+    except Exception:
+        return 0
+    done = 0
+    try:
+        c = av.open(str(path))
+    except Exception:
+        return 0
+    try:
+        for k, sh in enumerate(shots):
+            d = max(0.0, sh.end - sh.start)
+            if d < 0.8:
+                ts = [sh.start + d / 2.0]
+            else:
+                ts = [sh.start + 0.15 * d, sh.start + 0.5 * d, sh.start + 0.85 * d]
+            frames = []
+            for t in ts:
+                try:
+                    c.seek(int(t * 1e6))
+                    got = None
+                    for fr in c.decode(video=0):
+                        got = fr
+                        if float(fr.time or 0.0) >= t - 0.05:
+                            break
+                    if got is not None:
+                        im = got.to_image().convert("L").resize((640, 360))
+                        frames.append(np.asarray(im, dtype="float32"))
+                except Exception:
+                    continue
+            flags = _flags_from_frames(frames)
+            sh.subs_flag = flags["subs_flag"]
+            sh.text_conf = flags["text_conf"]
+            sh.luma_avg = flags["luma_avg"]
+            sh.luma_hi = flags["luma_hi"]
+            sh.corner_masks = flags["corner_masks"]
+            if flags["subs_flag"] >= 0:
+                done += 1
+            if progress and (k % 50 == 0) and k:
+                progress(f"index: multi-frame flags {k}/{len(shots)}")
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+    return done
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +469,18 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
 
     _assign_transcript(shots, words)
     _dedup_shots(shots, cfg.dup_hamming)
+
+    # 3b) MULTI-FRAME flags (start/mid/end sample per shot) — catches intermittent burned subs /
+    # corner bugs / mid-shot darkness the single keyframe misses. Persisted on the Shot so every
+    # downstream gate reuses them without re-decoding. env VIDLORE_CLIPSTUDIO_MULTIFRAME_FLAGS=0
+    # disables (gates then fall back to keyframe heuristics).
+    if os.environ.get("VIDLORE_CLIPSTUDIO_MULTIFRAME_FLAGS", "1").strip() \
+            not in ("0", "false", "no"):
+        try:
+            _nf = compute_shot_flags(path, shots, progress=(log if progress else None))
+            log(f"index: {source.id} multi-frame flags on {_nf}/{len(shots)} shots")
+        except Exception as _e:
+            log(f"index: {source.id} multi-frame flags skipped ({type(_e).__name__})")
 
     # 4) persist (atomic tmp+replace — an interrupted write must not brick later runs' resume).
     # embeds first, shots last: shots.json presence gates the cache, and match.py bounds-checks

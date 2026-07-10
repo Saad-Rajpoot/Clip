@@ -107,6 +107,16 @@ class Shot:
     dup_of: int = -1              # shot index this duplicates within the source (-1 = unique)
     motion: float = 0.0           # mean frame motion (0..1) — static stills score low
     scores: dict = field(default_factory=dict)          # cached relevance sub-scores
+    # MULTI-FRAME flags (index-time, 3 samples/shot: start/mid/end) — the keyframe alone misses
+    # intermittent burned subs / corner bugs / mid-shot darkness. Sentinels (-1) mark an OLD index
+    # where flags were never computed; gates fall back to keyframe heuristics then.
+    subs_flag: int = -1           # 1 = subtitle band on ANY sampled frame, 0 = clean, -1 = unknown
+    text_conf: float = 0.0        # subtitle-band confidence (max band/mid edge-density ratio)
+    luma_avg: float = -1.0        # mean of sample mean-lumas (0..255); -1 = not computed
+    luma_hi: float = -1.0         # max over samples of the ~99.8th-percentile pixel — the
+                              # "brightest real content" level that separates a readable
+                              # candlelit scene (lit face/candle ≥120) from true murk (<90)
+    corner_masks: dict = field(default_factory=dict)    # per-corner hex edge-bitmask (11x29 grid)
 
     @property
     def duration(self) -> float:

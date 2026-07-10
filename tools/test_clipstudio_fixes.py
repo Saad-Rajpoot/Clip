@@ -3062,6 +3062,115 @@ def test_clean_copy_arbitration():
           "_shot_subtitle_band" in isrc2)
 
 
+# ===========================================================================
+# Multi-frame shot sampling (2026-07-10): 3 frames/shot at index time persist
+# subs_flag / luma / corner masks so gates catch INTERMITTENT defects the
+# keyframe instant misses (the t=258 Turkish sub aired from a clean-keyframe
+# shot). Cases: mid-shot subtitle, late-appearing corner bug, valid dark
+# cinematic scene vs unreadable black, and persisted-flag reuse without IO.
+# ===========================================================================
+
+def test_multiframe_shot_flags():
+    print("[multi-frame] index-time flags: mid-shot subs, late bugs, luma, persistence")
+    import numpy as np
+    from vidlore.clipstudio.index import _flags_from_frames, _mask_from_hex, _mask_to_hex
+    from vidlore.clipstudio.match import (_shot_subtitle_band, _shot_unreadable,
+                                          _source_corner_logo, _CORNER_LOGO_CACHE,
+                                          _SUBBAND_CACHE)
+    from PIL import Image
+
+    rng = np.random.RandomState(19)
+
+    def scene():
+        base = (rng.rand(5, 8) * 200 + 20).astype("uint8")
+        return np.asarray(Image.fromarray(base, "L").resize((640, 360), Image.BILINEAR),
+                          dtype="float32")
+
+    def with_sub(fr):
+        fr = fr.copy()
+        r2 = rng.rand(220)
+        for k in range(60):                     # stroke band at 320x180-scale rows 150-168 → ×2
+            r = 300 + (k % 3) * 12
+            c = 90 + int(r2[k] * 420)
+            fr[r:r + 4, c:c + 12] = 255 if k % 2 else 5
+        return fr
+
+    def with_bug(fr):
+        fr = fr.copy()
+        pat = (np.random.RandomState(3).rand(28, 64) > 0.5).astype("float32") * 255
+        fr[326:354, 550:614] = pat
+        return fr
+
+    # (a) clean keyframe, subtitle appears MID-SHOT (start sample carries it)
+    f = _flags_from_frames([with_sub(scene()), scene(), scene()])
+    check("mid-shot subtitle flagged although the (mid) keyframe instant is clean",
+          f["subs_flag"] == 1 and f["text_conf"] > 2.0)
+    f2 = _flags_from_frames([scene(), scene(), scene()])
+    check("all-clean samples → subs_flag=0", f2["subs_flag"] == 0)
+    check("no frames → sentinel -1 (gates fall back to keyframe heuristics)",
+          _flags_from_frames([])["subs_flag"] == -1)
+
+    # persisted-first: flag wins over the keyframe file (nonexistent path proves ZERO IO)
+    _SUBBAND_CACHE.clear()
+    sub_shot = types.SimpleNamespace(subs_flag=1, keyframe_path="/nonexistent/kf.jpg")
+    clean_shot = types.SimpleNamespace(subs_flag=0, keyframe_path="/nonexistent/kf2.jpg")
+    check("persisted subs_flag reused with no keyframe IO (file doesn't exist)",
+          _shot_subtitle_band(sub_shot) and not _shot_subtitle_band(clean_shot))
+
+    # (b) corner bug appears only in the LATER shots (intermittent across the source)
+    _CORNER_LOGO_CACHE.clear()
+    def shot_of(frames, i):
+        fl = _flags_from_frames(frames)
+        return types.SimpleNamespace(index=i, keyframe_path=f"/x/kf_{i}.jpg",
+                                     subs_flag=fl["subs_flag"], corner_masks=fl["corner_masks"],
+                                     luma_avg=fl["luma_avg"], luma_hi=fl["luma_hi"])
+    shots = [shot_of([scene(), scene(), scene()], i) for i in range(6)] + \
+            [shot_of([scene(), with_bug(scene()), with_bug(scene())], 6 + i) for i in range(4)]
+    check("corner bug appearing only in later shots detected from persisted masks",
+          _source_corner_logo(shots) == "br")
+    _CORNER_LOGO_CACHE.clear()
+    clean_shots = [shot_of([scene(), scene(), scene()], i) for i in range(10)]
+    check("clean source → no corner bug from persisted masks",
+          _source_corner_logo(clean_shots) == "")
+    # mask hex round-trip
+    m = np.zeros((11, 29), dtype=bool); m[3:6, 4:9] = True
+    check("corner mask hex round-trip", (_mask_from_hex(_mask_to_hex(m)) == m).all())
+
+    # (c) valid dark cinematic scene vs unreadable black (multi-frame luma). The candle case
+    # sits BELOW the avg threshold (~9.5 mean) so it exercises the luma_hi discriminator:
+    # a lit face/candle covering ~3.5% of the frame keeps the 99.8th-percentile pixel bright
+    # (mirrors the measured real privy/crossbow shots: avg 12-14, hi 127-147).
+    candle = np.full((360, 640), 3.0, dtype="float32")                   # dark base
+    candle[130:190, 280:415] = 190.0                                     # lit region ~3.5%
+    murk = np.full((360, 640), 5.0, dtype="float32")
+    murk += rng.rand(360, 640) * 6.0                                     # near-black noise
+    fc = _flags_from_frames([candle, candle, candle])
+    fm = _flags_from_frames([murk, murk, murk])
+    cand_shot = types.SimpleNamespace(luma_avg=fc["luma_avg"], luma_hi=fc["luma_hi"])
+    murk_shot = types.SimpleNamespace(luma_avg=fm["luma_avg"], luma_hi=fm["luma_hi"])
+    check("valid dark cinematic scene (bright highlights) NOT gated",
+          not _shot_unreadable(cand_shot))
+    check("unreadable near-black shot gated across its whole span",
+          _shot_unreadable(murk_shot))
+    old_shot = types.SimpleNamespace(luma_avg=-1.0, luma_hi=-1.0)
+    check("old index without flags fails OPEN (never gated here)",
+          not _shot_unreadable(old_shot))
+
+    # wiring: index integration + pool gate + stills
+    root = Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio"
+    isrc = (root / "index.py").read_text(encoding="utf-8")
+    msrc = (root / "match.py").read_text(encoding="utf-8")
+    fsrc = (root / "image_fallback.py").read_text(encoding="utf-8")
+    check("index_source computes multi-frame flags (env-gated)",
+          "compute_shot_flags(path, shots" in isrc and "MULTIFRAME_FLAGS" in isrc)
+    check("_score_pool gates unreadable-dark shots via persisted luma",
+          "_shot_unreadable(ps.shot)" in msrc)
+    check("still pickers gate unreadable-dark shots",
+          fsrc.count("_shot_unreadable(shot)") >= 2)
+    check("corner detector consumes persisted masks before touching keyframes",
+          "_mask_from_hex" in msrc)
+
+
 def main():
     test_verifier_promotion_rewrites_beat_windows()
     test_budget_loop_survives_plan_beats_failure()
@@ -3101,6 +3210,7 @@ def main():
     test_burned_text_black_and_recap_gates()
     test_corner_logo_and_quality_gates()
     test_clean_copy_arbitration()
+    test_multiframe_shot_flags()
     print(f"\n{PASS} passed · {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 
