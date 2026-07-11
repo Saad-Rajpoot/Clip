@@ -3716,17 +3716,123 @@ def test_breakout_atomic_composition():
               abs(_fin.get("aired_at_s", 0) - 152.6) < 1e-6 and _fin.get("final_index") == 8
               and abs(_fin.get("aired_end_s", 0) - 160.1) < 1e-6)
 
-        # CASE 8 — post-render QA catches a BLACK breakout window; passes on real footage
-        _blk = tmp / "blackclip.mp4"
-        _mk_mp4(_blk, 4.0, black=True)
-        _prob = _postrender_breakout_qa(_blk, [{"start": 0.5, "dur": 3.0, "line": "audio over black"}],
-                                        tmp, log=_NULL)
-        check("post-render QA: a sustained-black breakout window is flagged", len(_prob) == 1)
-        _wht = tmp / "whiteclip.mp4"
-        _mk_mp4(_wht, 4.0, black=False)
-        _prob2 = _postrender_breakout_qa(_wht, [{"start": 0.5, "dur": 3.0, "line": "real footage"}],
-                                         tmp, log=_NULL)
-        check("post-render QA: a real (non-black) breakout window passes", _prob2 == [])
+        # CASE 8 — post-render QA + HARD gate: black / wrong / undecodable fail; correct passes.
+        from vidlore.clipstudio.build import _breakout_qa_gate
+
+        def _mk_pat(p, d=4.0, kind="testsrc"):
+            _sp.run([FF, "-y", "-f", "lavfi", "-i", f"{kind}=size=320x180:rate=10:duration={d}",
+                     "-pix_fmt", "yuv420p", str(p)], capture_output=True)
+
+        # (a) a BLACK breakout window is flagged (luma gate) even when the "source" is also black
+        _blk = tmp / "qa_black.mp4"; _mk_mp4(_blk, 4.0, black=True)
+        _pb = _postrender_breakout_qa(_blk, [{"start": 0.5, "dur": 3.0, "line": "over black",
+                                              "video": str(_blk)}], tmp, log=_NULL)
+        check("post-render QA: a sustained-black breakout window is flagged",
+              len(_pb) == 1 and "BLACK" in _pb[0]["reason"])
+        # (b) CORRECT footage (final == prepared clip, patterned) passes
+        _pat = tmp / "qa_pat.mp4"; _mk_pat(_pat, 4.0, "testsrc")
+        _pc = _postrender_breakout_qa(_pat, [{"start": 0.5, "dur": 3.0, "line": "real",
+                                              "video": str(_pat)}], tmp, log=_NULL)
+        check("post-render QA: a correct non-black breakout (final matches prepared clip) passes",
+              _pc == [])
+        # (c) WRONG footage — final is a different pattern than the prepared clip → gross mismatch
+        _pat2 = tmp / "qa_pat2.mp4"; _mk_pat(_pat2, 4.0, "testsrc2")
+        _pw = _postrender_breakout_qa(_pat, [{"start": 0.5, "dur": 3.0, "line": "wrong",
+                                              "video": str(_pat2)}], tmp, log=_NULL)
+        check("post-render QA: wrong (grossly different) footage fails",
+              len(_pw) == 1 and "does NOT match" in _pw[0]["reason"])
+        # (d) UNDECODABLE final frames fail CLOSED (not a silent valid=[] pass)
+        _junk = tmp / "qa_junk.mp4"; _junk.write_bytes(b"not a video" * 50)
+        _pd = _postrender_breakout_qa(_junk, [{"start": 0.5, "dur": 3.0, "line": "junk",
+                                               "video": str(_pat)}], tmp, log=_NULL)
+        check("post-render QA: undecodable final frames fail closed (probe error)",
+              len(_pd) == 1 and "decoded" in _pd[0]["reason"] and _pd[0].get("probe_errors"))
+        # (e) MISSING prepared clip fails closed
+        _pm = _postrender_breakout_qa(_pat, [{"start": 0.5, "dur": 3.0, "line": "nosrc",
+                                              "video": str(tmp / "missing.mp4")}], tmp, log=_NULL)
+        check("post-render QA: missing prepared clip fails closed",
+              len(_pm) == 1 and "could not verify" in _pm[0]["reason"])
+        # (f) FLAT non-black final vs FLAT source (both near-uniform) must NOT false-match — the
+        # low-texture crops can't be trusted, so it fails closed (review finding #2).
+        _flat_a = tmp / "qa_flat_a.mp4"; _mk_mp4(_flat_a, 4.0, black=False)   # solid white
+        _flat_b = tmp / "qa_flat_b.mp4"
+        _sp.run([FF, "-y", "-f", "lavfi", "-i", "color=c=gray:s=320x180:d=4",
+                 "-pix_fmt", "yuv420p", "-r", "10", str(_flat_b)], capture_output=True)
+        _pf = _postrender_breakout_qa(_flat_a, [{"start": 0.5, "dur": 3.0, "line": "flat",
+                                                 "video": str(_flat_b)}], tmp, log=_NULL)
+        check("post-render QA: flat non-black final vs flat source fails closed (no false-match)",
+              len(_pf) == 1 and "could not verify" in _pf[0]["reason"])
+        # (g) BLACK check fails CLOSED when luma is unmeasurable (review finding #1) — monkeypatch
+        # _qa_crop_stats to return an unreadable luma on a decodable frame.
+        _orig_stats = B._qa_crop_stats
+        B._qa_crop_stats = lambda img: (12345, -1.0, 200)   # decodes, hash ok, luma unreadable
+        try:
+            _pg = _postrender_breakout_qa(_pat, [{"start": 0.5, "dur": 3.0, "line": "nolum",
+                                                  "video": str(_pat)}], tmp, log=_NULL)
+        finally:
+            B._qa_crop_stats = _orig_stats
+        check("post-render QA: unmeasurable luma on decoded frames fails closed (no fail-open)",
+              len(_pg) == 1 and "could not measure luma" in _pg[0]["reason"])
+
+        # HARD GATE — a failing QA quarantines the final and raises; final.mp4 no longer exists.
+        # Mirror the real layout: work=<out>/work, final + failures json live in <out> (work.parent).
+        import shutil as _sh
+        _out = tmp / "gateout"; _wd = _out / "work"; _wd.mkdir(parents=True)
+        _final = _out / "gate_final.mp4"; _sh.copy(_blk, _final)
+        (_wd / "breakout_audit.json").write_text(json.dumps({"accepted": [
+            {"seg_index": 4, "source_id": "s", "source_t": 1.0, "line": "x"}]}), encoding="utf-8")
+        _raised = False
+        try:
+            _breakout_qa_gate(_final, [{"start": 0.5, "dur": 3.0, "line": "over black",
+                                        "video": str(_blk)}], _wd, log=_NULL)
+        except RuntimeError:
+            _raised = True
+        check("hard gate: black breakout RAISES and quarantines (final.mp4 not publishable)",
+              _raised and not _final.exists()
+              and (_out / "gate_final.FAILED_BREAKOUT_QA.mp4").exists()
+              and (_out / "breakout_qa_failures.json").exists())
+        _qp = json.loads((_wd / "breakout_audit.json").read_text())
+        check("hard gate: audit stamped qa_passed=false on failure", _qp.get("qa_passed") is False)
+        # a wrong (non-black) clip also RAISES via the gate
+        _final2 = _out / "gate_final2.mp4"; _sh.copy(_pat, _final2)
+        _r2 = False
+        try:
+            _breakout_qa_gate(_final2, [{"start": 0.5, "dur": 3.0, "line": "wrong",
+                                         "video": str(_pat2)}], _wd, log=_NULL)
+        except RuntimeError:
+            _r2 = True
+        check("hard gate: wrong-footage breakout RAISES and quarantines",
+              _r2 and not _final2.exists())
+        # a CORRECT render returns normally and stays publishable
+        _final3 = _out / "gate_final3.mp4"; _sh.copy(_pat, _final3)
+        _ret = _breakout_qa_gate(_final3, [{"start": 0.5, "dur": 3.0, "line": "real",
+                                            "video": str(_pat)}], _wd, log=_NULL)
+        check("hard gate: a valid render returns the result and stays publishable",
+              _ret == _final3 and _final3.exists())
+
+        # CROSS-WIRED caption (right count, wrong final_index/video) fails the invariant
+        _sc_bk = [types.SimpleNamespace(index=3, visual="breakout"),
+                  types.SimpleNamespace(index=6, visual="breakout")]
+        _nr_bk = types.SimpleNamespace(scenes=[
+            types.SimpleNamespace(index=3, audio=str(tmp / "a3.wav")),
+            types.SimpleNamespace(index=6, audio=str(tmp / "a6.wav"))])
+        for _p9 in (tmp / "v3.mp4", tmp / "v6.mp4"):
+            _mk_pat(_p9, 2.0)
+        for _a9 in (tmp / "a3.wav", tmp / "a6.wav"):
+            _a9.write_bytes(b"x")
+        _cm_ok = {3: tmp / "v3.mp4", 6: tmp / "v6.mp4"}
+        _caps_ok = [{"final_index": 3, "video": str(tmp / "v3.mp4"), "audio": str(tmp / "a3.wav")},
+                    {"final_index": 6, "video": str(tmp / "v6.mp4"), "audio": str(tmp / "a6.wav")}]
+        _ok9, _ = _validate_breakout_assembly(_sc_bk, _nr_bk, _cm_ok, _caps_ok, True)
+        check("invariant: correctly-wired captions pass", _ok9)
+        _caps_xwire = [{"final_index": 3, "video": str(tmp / "v6.mp4"), "audio": str(tmp / "a3.wav")},
+                       {"final_index": 6, "video": str(tmp / "v3.mp4"), "audio": str(tmp / "a6.wav")}]
+        _okx, _px = _validate_breakout_assembly(_sc_bk, _nr_bk, _cm_ok, _caps_xwire, True)
+        check("invariant: cross-wired caption video (count correct) FAILS", not _okx and _px)
+        _caps_dupidx = [{"final_index": 3, "video": str(tmp / "v3.mp4"), "audio": str(tmp / "a3.wav")},
+                        {"final_index": 3, "video": str(tmp / "v3.mp4"), "audio": str(tmp / "a3.wav")}]
+        _okd, _ = _validate_breakout_assembly(_sc_bk, _nr_bk, _cm_ok, _caps_dupidx, True)
+        check("invariant: duplicate caption final_index FAILS", not _okd)
     finally:
         B._splice_audio = _orig_splice
 
@@ -3740,8 +3846,12 @@ def test_breakout_atomic_composition():
     check("black-frame repair receives breakout windows (never preserves them as fades)",
           "breakout_windows=" in bsrc and "breakout_window_black" in
           (Path(__file__).resolve().parents[1] / "vidlore" / "assemble.py").read_text(encoding="utf-8"))
-    check("post-render breakout QA gates the finished video",
-          "_postrender_breakout_qa(result" in bsrc)
+    check("post-render breakout QA is a HARD gate (quarantine + raise on failure)",
+          "_breakout_qa_gate(result" in bsrc and "FAILED_BREAKOUT_QA" in bsrc
+          and "raise RuntimeError(" in bsrc)
+    check("final audit persists explicit counts (accepted/validated/qa_passed)",
+          'data["accepted_count"]' in bsrc and 'data["validated_count"]' in bsrc
+          and '"qa_passed"' in bsrc)
 
 
 def main():

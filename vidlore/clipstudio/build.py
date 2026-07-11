@@ -1761,12 +1761,36 @@ def _validate_breakout_assembly(scenes, narration, clip_map, caps, captions_on, 
         _au = getattr(_ns, "audio", None) if _ns is not None else None
         if _au is None or not Path(str(_au)).exists():
             problems.append(f"breakout scene={_idx} missing its spliced audio ({_au})")
-    # 4) captions: exactly one spec per breakout scene when captions are enabled
+    # 4) captions must be EXACTLY WIRED to the breakout scenes (captions on): one per scene, each
+    # caption's final_index a unique breakout pseudo-scene, and each caption's own video equal to
+    # that scene's mapped clip — so a caption can never suppress narration over ordinary footage nor
+    # burn the wrong line over a breakout (missing / duplicate / cross-wired all caught here).
     if captions_on:
-        if len(caps or []) != len(bk_scene_idx):
-            problems.append(f"caption specs ({len(caps or [])}) != breakout scenes "
-                            f"({len(bk_scene_idx)}) — a breakout would lose its caption or a stale "
-                            f"caption would suppress narration over ordinary footage")
+        _caps = list(caps or [])
+        _fis = [c.get("final_index") for c in _caps]
+        if len(_caps) != len(bk_scene_idx):
+            problems.append(f"caption specs ({len(_caps)}) != breakout scenes ({len(bk_scene_idx)}) "
+                            f"— a breakout would lose its caption or a stale caption would suppress "
+                            f"narration over ordinary footage")
+        if any(_f is None for _f in _fis):
+            problems.append("a breakout caption has no final_index (unwired caption)")
+        elif len(set(_fis)) != len(_fis):
+            problems.append(f"breakout caption final_index values are not unique ({_fis}) — "
+                            f"two captions target one scene / a scene is unwired")
+        elif set(_fis) != bk_scene_idx:
+            problems.append(f"caption final_index set {sorted(set(_fis))} != breakout scenes "
+                            f"{sorted(bk_scene_idx)} (cross-wired or missing caption)")
+        for _c in _caps:
+            _fi = _c.get("final_index")
+            if _fi in clip_map and str(_c.get("video", "")) != str(clip_map[_fi]):
+                problems.append(f"caption at scene {_fi} video {Path(str(_c.get('video',''))).name} "
+                                f"!= clip_map video {Path(str(clip_map[_fi])).name} (cross-wired)")
+            # provenance: the caption's audio must be THIS pseudo-scene's spliced narration audio
+            _ns2 = ns_by_idx.get(_fi)
+            _sa = getattr(_ns2, "audio", None) if _ns2 is not None else None
+            if _sa is not None and _c.get("audio") and str(_c.get("audio")) != str(_sa):
+                problems.append(f"caption at scene {_fi} audio {Path(str(_c.get('audio'))).name} "
+                                f"!= pseudo-scene audio {Path(str(_sa)).name} (provenance mismatch)")
     # 5) no two breakout scenes point at the SAME video (a stale/mis-composed key would alias one
     # clip onto two scenes, leaving the other's real clip unaired)
     _vids = [str(v) for v in clip_map.values()]
@@ -1788,7 +1812,7 @@ def _finalize_breakout_audit(work: Path, caps, clip_map, narration, *, log=None)
         import json as _json
         _baud = work / "breakout_audit.json"
         if not _baud.exists():
-            return
+            return 0, 0                                     # no audit file (e.g. unit test) → no-op
         data = _json.loads(_baud.read_text(encoding="utf-8"))
         # reverse clip_map: final scene index -> video path, to attach the final index by caption
         _vid_to_final = {str(v): k for k, v in (clip_map or {}).items()}
@@ -1816,54 +1840,217 @@ def _finalize_breakout_audit(work: Path, caps, clip_map, narration, *, log=None)
                 e["final_index"] = _fi
             e["video"] = str(c.get("video", "")) or e.get("video", "")
             e["validated"] = bool(_fi is not None and str(c.get("video", "")) in _vid_to_final)
+        _acc = data.get("accepted", [])
+        _val = sum(1 for e in _acc if e.get("validated"))
+        # explicit top-level final counts (accepted_count was previously null). qa_passed is written
+        # by build_video AFTER the post-render QA gate runs (unknown here → left as-is / None).
+        data["accepted_count"] = len(_acc)
+        data["validated_count"] = _val
+        data.setdefault("qa_passed", None)
         data["final_timeline_seconds"] = round(float(getattr(narration, "total", 0.0)), 2)
         _baud.write_text(_json.dumps(data, indent=1), encoding="utf-8")
         if log:
-            log(f"build: breakout audit finalized — {len(data.get('accepted', []))} accepted, "
+            log(f"build: breakout audit finalized — {len(_acc)} accepted, {_val} validated, "
                 f"aired times keyed to stable identity")
+        return _val, len(_acc)
     except Exception as _e:                                # noqa: BLE001
         if log:
             log(f"build: breakout audit finalize skipped ({str(_e)[:70]})")
+    return 0, 0
+
+
+def _qa_extract_frame(ff, src, t: float, out: Path) -> bool:
+    """Extract ONE frame from `src` at time `t` to a PNG and confirm it DECODES (file exists and
+    PIL can open it). Returns False on any extraction/decode failure — the QA gate treats that as a
+    probe FAILURE (fail closed), never a silent pass."""
+    try:
+        out.unlink(missing_ok=True)
+        subprocess.run([ff, "-y", "-v", "error", "-ss", f"{max(0.0, t):.3f}", "-i", str(src),
+                        "-frames:v", "1", str(out)], check=True, timeout=30)
+        if not out.exists() or out.stat().st_size < 67:     # smaller than a 1x1 PNG → truncated/empty
+            return False
+        from PIL import Image
+        with Image.open(out) as _im:
+            _im.load()                                      # FULLY decode the pixels (a solid-colour
+        return True                                         # frame is tiny but valid; truncation raises)
+    except Exception:
+        return False
+
+
+def _qa_crop_stats(img: Path):
+    """From a decoded frame's CENTER region (drops the top/bottom letterbox bars AND the bottom
+    caption band) return (dhash256, mean_luma, texture_bits):
+      • dhash256   — 256-bit horizontal-gradient hash, grade-tolerant; used to confirm the FINAL
+                     aired footage is the SAME scene as the prepared breakout clip;
+      • mean_luma  — 0-255 average over the SAME center crop (NOT the full frame), so the black
+                     check is never diluted by the letterbox bars and is always available whenever
+                     the frame decoded (closing the 'luma unmeasurable -> black check skipped' gap);
+      • texture_bits — popcount of the hash. A near-uniform (flat) crop hashes to ~0 bits, which
+                     would false-MATCH any other flat crop, so callers treat a low-texture frame as
+                     'cannot compare' rather than a match.
+    Returns (None, -1.0, 0) if the frame can't be read."""
+    try:
+        from PIL import Image
+        with Image.open(img) as _im:
+            im = _im.convert("L")
+        w, h = im.size
+        box = (int(0.10 * w), int(0.14 * h), int(0.90 * w), int(0.70 * h))  # center, no bars/caption
+        crop = im.crop(box)
+        px_full = list(crop.getdata())
+        mean_luma = (sum(px_full) / len(px_full)) if px_full else -1.0
+        sm = crop.resize((17, 16))                         # 17x16 -> 16*16 = 256 horizontal-gradient bits
+        px = list(sm.getdata())
+        bits = 0
+        for r in range(16):
+            row = r * 17
+            for c in range(16):
+                bits = (bits << 1) | (1 if px[row + c] > px[row + c + 1] else 0)
+        return bits, mean_luma, bin(bits).count("1")
+    except Exception:
+        return None, -1.0, 0
+
+
+def _qa_ham(a, b) -> int:
+    return bin(a ^ b).count("1")
 
 
 def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list:
-    """POST-RENDER visual gate: for every accepted breakout, sample the FINAL video at its aired
-    start/mid/end and confirm real picture is on screen (not sustained black) while the breakout
-    audio plays. This is the last line against the audio-over-black class. Returns a list of
-    problem strings (empty = all breakouts show real footage)."""
+    """POST-RENDER visual gate — the last line before publication. For every accepted breakout,
+    sample the FINAL video AND the prepared source breakout clip at the same relative positions and
+    verify ALL of (each dimension FAILS CLOSED — an unverifiable probe is a failure, never a pass):
+      • the final frames DECODE — a missing/unreadable/truncated probe is a FAILURE, never a silent
+        skip; at least MIN_OK of the sampled positions must decode on the final video;
+      • the final footage is not sustained black — center-crop mean luma < BLACK (18; limited-range
+        black is Y=16). Measured on the SAME center crop as the hash so the letterbox bars never
+        dilute it, and it is always available when the frame decoded (no fail-open);
+      • the final footage MATCHES the prepared clip — center-crop 256-bit dHash Hamming <= MAXHAM at
+        its best position. A bright but WRONG ordinary scene hashes far away and FAILS. A near-uniform
+        (flat, low-texture) crop is NOT trusted for matching (it would false-match any other flat
+        crop) → treated as 'cannot compare' → fail closed.
+    Returns a list of problem DICTS (empty = every breakout shows its correct real scene)."""
+    from .config import _i as _cfg_i
     problems = []
     ff = ffmpeg_exe()
+    maxham = _cfg_i("VIDLORE_CLIPSTUDIO_BREAKOUT_QA_MAXHAM", 100)
+    black_floor = float(_cfg_i("VIDLORE_CLIPSTUDIO_BREAKOUT_QA_BLACK", 18))
+    min_texture = 16                                       # hash bits below this = flat/untrustworthy
+    rels = (0.25, 0.4, 0.55, 0.7)                          # middle positions (avoid fade in/out edges)
+    min_ok = 2
     for c in (caps or []):
         s, d = float(c.get("start", 0.0)), float(c.get("dur", 0.0))
-        if d <= 0:
+        line = (c.get("line", "") or "")[:44]
+        src = c.get("video", "")
+        if d <= 0.2:
+            problems.append({"breakout": line, "start": round(s, 2),
+                             "reason": "zero/degenerate breakout window duration"})
             continue
-        offs = [min(s + 0.4, s + d * 0.15), s + d / 2.0, max(s + d - 0.5, s + d * 0.85)]
-        lumas = []
-        for t in offs:
-            probe = work / f"_bkqa_{int(t*100)}.jpg"
-            try:
-                subprocess.run([ff, "-y", "-v", "quiet", "-ss", f"{t:.2f}", "-i", str(result),
-                                "-frames:v", "1", "-q:v", "5", str(probe)], check=True, timeout=30)
-                r = subprocess.run([ff, "-hide_banner", "-i", str(probe), "-vf",
-                                    "signalstats,metadata=print:key=lavfi.signalstats.YAVG",
-                                    "-f", "null", "-"], capture_output=True, text=True, timeout=30)
-                mm = re.findall(r"YAVG=(\d+\.?\d*)", r.stderr)
-                lumas.append(float(mm[0]) if mm else -1.0)
-                probe.unlink(missing_ok=True)
-            except Exception:
-                lumas.append(-1.0)
-        valid = [x for x in lumas if x >= 0]
-        # sustained black = every sampled frame near-black (YAVG < 16) across the whole window
-        if valid and max(valid) < 16.0:
-            problems.append(f"breakout @ {s:.1f}s ({c.get('line','')[:40]!r}) airs BLACK "
-                            f"(YAVG max {max(valid):.1f} over start/mid/end) while its audio plays")
+        lumas, hams, decoded, probe_errs = [], [], 0, []
+        for rp in rels:
+            ft = s + rp * d
+            fimg = work / f"_bkqa_f_{int(ft * 100)}.png"
+            simg = work / f"_bkqa_s_{int(ft * 100)}.png"
+            if not _qa_extract_frame(ff, result, ft, fimg):
+                probe_errs.append(f"final@{ft:.1f}s undecodable")
+                continue
+            decoded += 1
+            fh, fl, ftex = _qa_crop_stats(fimg)            # hash, center-crop luma, texture bits
+            lumas.append(fl)
+            sh = stex = None
+            if src and Path(str(src)).exists() and _qa_extract_frame(ff, Path(str(src)), rp * d, simg):
+                sh, _sl, stex = _qa_crop_stats(simg)
+            elif src:
+                probe_errs.append(f"source@{rp * d:.1f}s undecodable")
+            # only a MATCH between two textured crops is trustworthy: a flat crop hashes to ~0 bits
+            # and would false-match any other flat crop, so skip low-texture comparisons.
+            if (fh is not None and sh is not None
+                    and ftex >= min_texture and (stex or 0) >= min_texture):
+                hams.append(_qa_ham(fh, sh))
+            fimg.unlink(missing_ok=True)
+            simg.unlink(missing_ok=True)
+        # (a) fail closed — too few final frames decoded to trust anything
+        if decoded < min_ok:
+            problems.append({"breakout": line, "start": round(s, 2),
+                             "reason": f"only {decoded}/{len(rels)} final frames decoded "
+                                       f"(need >= {min_ok}) — cannot verify, failing closed",
+                             "probe_errors": probe_errs})
+            continue
+        # (b) sustained black — luma is always available when a frame decoded, so fail CLOSED if it
+        # somehow isn't (rather than the old fail-open skip).
+        valid_l = [x for x in lumas if x >= 0]
+        if len(valid_l) < min_ok:
+            problems.append({"breakout": line, "start": round(s, 2),
+                             "reason": f"could not measure luma on the decoded final frames "
+                                       f"({len(valid_l)}/{decoded}) — failing closed",
+                             "probe_errors": probe_errs})
+            continue
+        if max(valid_l) < black_floor:
+            problems.append({"breakout": line, "start": round(s, 2),
+                             "reason": f"airs BLACK (center-crop luma max {max(valid_l):.1f} < "
+                                       f"{black_floor:.0f}) while its audio plays",
+                             "lumas": [round(x, 1) for x in valid_l]})
+            continue
+        # (c) wrong footage — could not compare (fail closed) OR grossly different scene aired
+        if not hams:
+            problems.append({"breakout": line, "start": round(s, 2),
+                             "reason": "could not verify final footage against the prepared breakout "
+                                       "clip (source frame undecodable or too flat to match) — "
+                                       "failing closed",
+                             "source": str(src), "probe_errors": probe_errs})
+            continue
+        if min(hams) > maxham:
+            problems.append({"breakout": line, "start": round(s, 2),
+                             "reason": f"final footage does NOT match the prepared breakout clip "
+                                       f"(best dHash distance {min(hams)}/256 > {maxham} — a wrong "
+                                       f"scene aired over the breakout audio)",
+                             "hamming": hams, "source": str(src)})
     if log:
         if problems:
             for _p in problems:
-                log(f"build: breakout POST-RENDER QA FAIL — {_p}")
+                log(f"build: breakout POST-RENDER QA FAIL — @{_p.get('start')}s "
+                    f"{_p.get('reason', '')}")
         else:
-            log(f"build: breakout post-render QA passed — {len(caps or [])} breakout(s) show real footage")
+            log(f"build: breakout post-render QA passed — {len(caps or [])} breakout(s) show their "
+                f"correct real footage (decoded, non-black, matched to the prepared clip)")
     return problems
+
+
+def _breakout_qa_gate(result: Path, caps, work: Path, *, log) -> Path:
+    """HARD publication gate. Runs the post-render breakout QA on the finished video and stamps the
+    verdict into breakout_audit.json (qa_passed). On ANY QA failure it: writes breakout_qa_failures.
+    json, QUARANTINES the final video (renames it to *.FAILED_BREAKOUT_QA.* so the normal final.mp4
+    no longer exists and cannot be published/downloaded), and RAISES — so the portal/rerender caller
+    finishes with ok=false and no output, and 'build: done' is never logged. Returns the (unchanged)
+    result path only when every breakout passes."""
+    import json as _json_qa
+    problems = _postrender_breakout_qa(result, caps, work, log=log)
+    try:
+        _baud = work / "breakout_audit.json"
+        if _baud.exists():
+            _bd = _json_qa.loads(_baud.read_text(encoding="utf-8"))
+            _bd["qa_passed"] = (not problems)
+            _baud.write_text(_json_qa.dumps(_bd, indent=1), encoding="utf-8")
+    except Exception:
+        pass
+    if not problems:
+        return result
+    try:
+        (work.parent / "breakout_qa_failures.json").write_text(
+            _json_qa.dumps({"failures": problems, "video": str(result)}, indent=1), encoding="utf-8")
+    except Exception:
+        pass
+    # QUARANTINE the failed render so nothing downstream can publish it
+    _quar = result.with_name(result.stem + ".FAILED_BREAKOUT_QA" + result.suffix)
+    try:
+        if _quar.exists():
+            _quar.unlink()
+        result.rename(_quar)
+    except Exception:
+        _quar = result                                     # rename failed; still refuse to publish
+    log(f"build: ⛔ RELEASE-BLOCKED — {len(problems)} breakout(s) failed post-render QA; quarantined "
+        f"the final video → {_quar.name} (NOT published). See breakout_qa_failures.json.")
+    raise RuntimeError(
+        f"breakout post-render QA failed for {len(problems)} breakout(s) — refusing to publish a "
+        f"video that airs audio over black/wrong footage (quarantined at {_quar.name})")
 
 
 def _compose_breakouts(proj, segments, scenes, narration, bks, work, captions, *, log):
@@ -1960,7 +2147,15 @@ def _compose_breakouts(proj, segments, scenes, narration, bks, work, captions, *
                 f"breakouts back; publishing a clean breakout-free video")
             _s, _c, _n = _rollback()
             return _s, _c, _n, {}, {}, []
-        _finalize_breakout_audit(work, _caps_now, clip_map, narration, log=log)
+        _val, _acc = _finalize_breakout_audit(work, _caps_now, clip_map, narration, log=log)
+        # every finalized audit entry must be validated=true (its clip is in the clip-map). If the
+        # audit file was present and any entry failed to validate, the composition is not trustworthy
+        # → roll the whole feature back rather than ship a mislabelled/unmapped breakout.
+        if _acc and _val != _acc:
+            log(f"build: breakout audit validation FAILED ({_val}/{_acc} validated) — rolling "
+                f"breakouts back; publishing a clean breakout-free video")
+            _s, _c, _n = _rollback()
+            return _s, _c, _n, {}, {}, []
         return segments, scenes, narration, clip_map, bidx, entries
     except Exception as e:                                # noqa: BLE001
         log(f"build: breakouts skipped ({str(e)[:80]})")
@@ -3585,21 +3780,10 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         _caps = list(getattr(narration, "_breakout_caps", None) or [])
         if _caps and _burn_breakout_captions(result, _caps, work, log):
             log(f"build: word-by-word breakout captions burned ({len(_caps)} scene-line(s))")
-    # POST-RENDER BREAKOUT VISUAL QA — the last line against the audio-over-black class: confirm
-    # every accepted breakout actually shows real picture in the FINISHED video while its audio
-    # plays. A sustained-black breakout is release-blocking — surface it loudly (the mapping fix +
-    # invariant should already guarantee this passes; it never publishes a silent regression).
+    # POST-RENDER BREAKOUT VISUAL QA — the HARD publication gate (see _breakout_qa_gate).
     _final_caps = list(getattr(narration, "_breakout_caps", None) or [])
     if _final_caps and os.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_QA", "1").strip() \
             not in ("0", "false", "no"):
-        _qa = _postrender_breakout_qa(result, _final_caps, work, log=log)
-        if _qa:
-            log(f"build: ⚠ RELEASE-BLOCKING — {len(_qa)} breakout(s) air over black in the final "
-                f"video; see the POST-RENDER QA FAIL lines above")
-            try:
-                (work.parent / "breakout_qa_failures.json").write_text(
-                    __import__("json").dumps({"failures": _qa}, indent=1), encoding="utf-8")
-            except Exception:
-                pass
+        result = _breakout_qa_gate(result, _final_caps, work, log=log)
     log(f"build: done → {result}")
     return result

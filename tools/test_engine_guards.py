@@ -177,10 +177,11 @@ def test_niche_palette():
     ok(niche_palette.normalize_niche("true_crime") == "crime", "true_crime→crime")
     ok(niche_palette.normalize_niche("spy_intel") == "spy", "spy_intel→spy")
     ok(niche_palette.normalize_niche("Mossad") == "spy", "Mossad→spy")
-    # multiple distinct crime topics shouldn't all be identical
-    topics = [niche_palette.select_palette("crime", hash(t) & 0xffff)[0]
-              for t in ("Capone", "Escobar", "Zodiac", "Gotti", "Dillinger")]
-    ok(len(set(topics)) >= 2, f"distinct crime topics should differ somewhat: {topics}")
+    # multiple distinct crime topics shouldn't all be identical. Use a DETERMINISTIC spread of
+    # seeds (0..19) — the old `hash(t)` on topic strings was randomized per-process by
+    # PYTHONHASHSEED, so occasionally all five hashed to ember_red-picking seeds and this flaked.
+    topics = [niche_palette.select_palette("crime", s)[0] for s in range(20)]
+    ok(len(set(topics)) >= 2, f"distinct crime seeds should differ somewhat: {set(topics)}")
 
 
 # ── 4. card_style_guard ──────────────────────────────────────────────────────
