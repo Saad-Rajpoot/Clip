@@ -2699,11 +2699,11 @@ def _ass_ts(t: float) -> str:
     return f"{h}:{m:02d}:{s:05.2f}"
 
 
-def _breakout_caption_ass(caps: list, out_ass: Path, log=None) -> Optional[Path]:
+def _breakout_caption_ass(caps: list, out_ass: Path, log=None, *, preset=None) -> Optional[Path]:
     """Build an ASS overlay that captions the SPOKEN dialogue during each real-audio breakout,
-    word-by-word (karaoke fill) — large, bold, gold, distinct from the white narration caption,
-    so when the scene's own voice plays the viewer reads exactly what's said. Word timings come
-    from whispering each breakout's audio (its own dialogue)."""
+    word-by-word (karaoke fill) — distinct from the white narration caption but in the SAME
+    selected design family (`preset`), so when the scene's own voice plays the viewer reads exactly
+    what's said. Word timings come from whispering each breakout's audio (its own dialogue)."""
     try:
         from faster_whisper import WhisperModel
     except Exception:
@@ -2766,18 +2766,20 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None) -> Optional[Path]
                          f"{{\\fad(120,120)}}{txt.strip()}")
     if not lines:
         return None
-    # bold gold karaoke, heavy black outline, lower-centre but lifted; the unsung (secondary)
-    # colour is a dim white that fills to bright gold word-by-word as each word is spoken.
+    # The BK Style line comes from the selected preset (same design family as the narration
+    # caption), karaoke fill from unsung → sung. Falls back to the professional preset if none given
+    # so a stray call still produces a valid, on-brand overlay.
+    if preset is None:
+        from .caption_presets import resolve_style as _rs
+        preset = _rs(None)[0]
+    _bk_style = preset.breakout_style_line()
     header = (
         "[Script Info]\nScriptType: v4.00+\nWrapStyle: 2\nPlayResX: 1920\nPlayResY: 1080\n"
         "ScaledBorderAndShadow: yes\n\n[V4+ Styles]\n"
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
         "BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, "
         "MarginV, Encoding\n"
-        # PrimaryColour = filled/sung = bright gold (&H0023C8FF BGR); Secondary = dim white;
-        # Outline = black; Alignment 2 = bottom-centre, big MarginV lifts it above the bar.
-        "Style: BK,Arial Black,66,&H0023C8FF,&H00C8C8C8,&H00000000,&H64000000,-1,0,1,4,2,2,"
-        "120,120,150,1\n\n[Events]\n"
+        f"{_bk_style}\n\n[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
     try:
         Path(out_ass).write_text(header + "\n".join(lines) + "\n", encoding="utf-8")
@@ -2788,11 +2790,12 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None) -> Optional[Path]
         return None
 
 
-def _burn_breakout_captions(video: Path, caps: list, work: Path, log=None) -> bool:
-    """Burn the word-by-word breakout captions onto the final video (engine untouched)."""
+def _burn_breakout_captions(video: Path, caps: list, work: Path, log=None, *, preset=None) -> bool:
+    """Burn the word-by-word breakout captions onto the final video (engine untouched). `preset`
+    (a CaptionPreset) styles the burn to match the selected design family."""
     if not caps:
         return False
-    ass = _breakout_caption_ass(caps, work / "breakout_caps.ass", log)
+    ass = _breakout_caption_ass(caps, work / "breakout_caps.ass", log, preset=preset)
     if ass is None:
         return False
     out = video.with_name(video.stem + "_bkcap.mp4")
@@ -2929,9 +2932,15 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 voice: str = "", captions: bool = True, title: str = "",
                 theme_name: str = "history", music: Optional[str] = None,
                 voiceover: Optional[str] = None, voice_provider: str = "",
-                voice_preset: str = "",
+                voice_preset: str = "", caption_style: str = "",
                 use_tts: bool = True, progress=None) -> Path:
-    """Render the matched clips into a final MP4 via the engine's assemble()."""
+    """Render the matched clips into a final MP4 via the engine's assemble().
+
+    `captions` toggles ALL visible caption burn (narration + breakout); `caption_style` names the
+    caption PRESET (professional|minimal|cinematic|documentary|focus — see caption_presets). Both
+    fall back safely: env VIDLORE_CLIPSTUDIO_CAPTIONS / _CAPTION_STYLE override, an unknown style
+    logs a warning and uses 'professional'. Captions OFF removes every visible caption layer but
+    NEVER touches breakout timing / suppression / audit / QA metadata."""
     from vidlore.script_gen import Script, Scene
     from vidlore.footage import FootageItem
     from vidlore.themes import theme as get_theme
@@ -2949,6 +2958,25 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     work.mkdir(parents=True, exist_ok=True)
     out_path = proj.output_dir / "final.mp4"
     sel_by_idx = {s.segment_index: s for s in proj.selections}
+
+    # CAPTION PRESET + ON/OFF (single resolution point for the whole render — every downstream
+    # caption gate reads _cap_on / _cap_preset, never the raw args). Env can force either.
+    from .caption_presets import resolve_style as _resolve_cap_style
+    _cap_env = os.environ.get("VIDLORE_CLIPSTUDIO_CAPTIONS", "").strip().lower()
+    _cap_on = (_cap_env not in ("0", "false", "no", "off")) if _cap_env in \
+        ("0", "1", "true", "false", "yes", "no", "on", "off") else bool(captions)
+    _cap_preset, _cap_invalid = _resolve_cap_style(caption_style)
+    if _cap_invalid:
+        # the offending value may have come from the arg OR the env — report whichever was set
+        _bad = caption_style if (caption_style and str(caption_style).strip()) \
+            else os.environ.get("VIDLORE_CLIPSTUDIO_CAPTION_STYLE", "")
+        log(f"build: invalid caption style {str(_bad)!r} — using {_cap_preset.name}")
+    log(f"build: captions={'on' if _cap_on else 'off'} "
+        f"style={_cap_preset.name if _cap_on else 'none'}")
+    try:                                                    # persist so the project can rebuild same
+        proj.meta["caption_settings"] = {"enabled": bool(_cap_on), "style": _cap_preset.name}
+    except Exception:
+        pass
 
     # 1) engine Script from our segments (narration text per scene)
     scenes = [Scene(index=seg.index, narration=seg.text,
@@ -3037,7 +3065,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         # ONE tested composition entrypoint (mids → cold-open, artifact composition, invariant,
         # rollback). Everything downstream keys off its return values; nothing composes maps inline.
         segments, scenes, narration, _breakout_clip, _bidx, _breakout_entries = _compose_breakouts(
-            proj, segments, scenes, narration, _bks, work, captions, log=log)
+            proj, segments, scenes, narration, _bks, work, _cap_on, log=log)
         if _bidx:
             sel_by_idx = {_bidx[s.segment_index]: s for s in proj.selections
                           if s.segment_index in _bidx}
@@ -3631,7 +3659,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 f"freeze-replaced (never airs)")
 
     suppress_wins = []
-    if captions and _suppress_on:
+    if _cap_on and _suppress_on:
         # reuse the OCR engine initialized for watermark-crop above
         # Map each scene to its EXACT caption time-span straight from the aligned word timings —
         # `narration.scenes[i].words[j].start/end` are absolute on the final timeline, the SAME times
@@ -3691,7 +3719,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # _burn_breakout_captions). The main narration caption must not show over that window:
     # `_group`'s gap-cut already stops a cue from spanning it, and marking the window here
     # guarantees no boundary word bleeds in. Independent of the OCR caption-dodge above.
-    if captions:
+    if _cap_on:
         _bk_added = 0
         for _bc in (getattr(narration, "_breakout_caps", None) or []):
             try:
@@ -3707,6 +3735,14 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
 
     # 4) theme + 5) render
     th = get_theme(theme_name)
+    # CAPTION PRESET — the selected preset OWNS the narration caption look (font / size / weight /
+    # primary + active-word colour / outline / shadow / backplate / vertical margin). Override the
+    # theme's caption dict, and set a caption-SCOPED `caption_accent` for the active word — NOT the
+    # theme's global `accent` (which colours title/graphic overlays and the key-phrase stabs, so a
+    # caption-style choice must never recolour those; the stabs even fire only when captions are
+    # OFF). The cinematic letterbox lift below still raises margin_v on top (all presets clear bars).
+    _cap_dict, _cap_accent = _cap_preset.theme_caption()
+    th = {**th, "caption": {**th.get("caption", {}), **_cap_dict}, "caption_accent": _cap_accent}
     # NEUTRAL footage grade for movie-clip videos: the engine themes tint footage (history =
     # warm/green colorbalance + desat + paper grain), which reads as murky "low quality" next to
     # reference channels that keep the show's ORIGINAL grade. Keep theme captions/cards; replace
@@ -3744,7 +3780,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # the engine's own pipeline does (its None defaults are a latent bug that never fires there).
     result = assemble(
         footage, narration, th, work, out_path,
-        beat_clips=beat_clips, captions=captions,
+        beat_clips=beat_clips, captions=_cap_on,
         # music: a real cinematic bed. The engine's full sidechain-duck chain only fires when a valid
         # track PATH is passed (the bare call earlier passed None after a revert). We generate/select
         # one here; build_video's caller verifies it's actually audible in the rendered audio.
@@ -3773,13 +3809,15 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         else:
             log("build: cinematic letterbox post-pass failed — kept flat frame")
     # WORD-BY-WORD BREAKOUT CAPTIONS — during real-audio breakouts the narration caption is
-    # silent, so caption the SCENE's own spoken line (large, bold, gold karaoke). Engine
-    # untouched; burned as a clipstudio post-pass. (env VIDLORE_CLIPSTUDIO_BREAKOUT_CAPS)
-    if captions and os.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_CAPS", "1").strip() \
+    # silent, so caption the SCENE's own spoken line (karaoke fill, styled to match the SAME
+    # selected preset family). Engine untouched; burned as a clipstudio post-pass. Skipped when
+    # captions are OFF — but the breakout _caps metadata (suppression/audit/QA) always stays.
+    if _cap_on and os.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_CAPS", "1").strip() \
             not in ("0", "false", "no"):
         _caps = list(getattr(narration, "_breakout_caps", None) or [])
-        if _caps and _burn_breakout_captions(result, _caps, work, log):
-            log(f"build: word-by-word breakout captions burned ({len(_caps)} scene-line(s))")
+        if _caps and _burn_breakout_captions(result, _caps, work, log, preset=_cap_preset):
+            log(f"build: word-by-word breakout captions burned ({len(_caps)} scene-line(s), "
+                f"style={_cap_preset.name})")
     # POST-RENDER BREAKOUT VISUAL QA — the HARD publication gate (see _breakout_qa_gate).
     _final_caps = list(getattr(narration, "_breakout_caps", None) or [])
     if _final_caps and os.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_QA", "1").strip() \

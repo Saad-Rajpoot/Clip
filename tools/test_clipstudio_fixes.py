@@ -1509,10 +1509,14 @@ def test_image_fallback():
     check("image fallback dedups across beats (no reuse)",
           "seen_hashes" in ifsrc and "seen_hashes.add" in ifsrc
           and "seen_hashes=seen_hashes" in osrc)
-    # word-by-word breakout captions (engine untouched, clipstudio ASS post-pass)
+    # word-by-word breakout captions (engine untouched, clipstudio ASS post-pass). The BK Style
+    # line now comes from the caption-preset registry (breakout_style_line) — same design family.
+    _cpsrc = (Path(__file__).resolve().parent.parent / "vidlore" / "clipstudio"
+              / "caption_presets.py").read_text(encoding="utf-8")
     check("breakout caption ASS builder (word-by-word karaoke)",
           "_breakout_caption_ast" not in bsrc and "_breakout_caption_ass" in bsrc
-          and "\\\\kf" in bsrc and "Style: BK," in bsrc)
+          and "\\\\kf" in bsrc and "preset.breakout_style_line()" in bsrc
+          and "Style: BK," in _cpsrc)
     check("breakout captions burned after assemble",
           "_burn_breakout_captions" in bsrc and "_breakout_caps" in bsrc)
     check("breakout caption start = original + prior-breakout shift",
@@ -3854,6 +3858,154 @@ def test_breakout_atomic_composition():
           and '"qa_passed"' in bsrc)
 
 
+def test_caption_presets():
+    print("[captions] preset system — 5 designs, ON/OFF, ASS validity, wiring, OFF-safety")
+    import tempfile
+    from pathlib import Path as _P
+    from vidlore.clipstudio import caption_presets as CP
+    from vidlore.captions import write_ass
+    from vidlore.tts import WordTiming
+
+    # (1) every valid preset resolves to itself; (2) invalid falls back + flags invalid
+    for name in CP.VALID_STYLES:
+        p, inv = CP.resolve_style(name)
+        check(f"preset '{name}' resolves to itself", p.name == name and inv is False)
+    _pf, _invf = CP.resolve_style("totally-bogus-value")
+    check("invalid style falls back to professional and is flagged",
+          _pf.name == "professional" and _invf is True)
+    # (3) existing projects / no settings → safe defaults
+    check("no style (None/'') → professional, not flagged invalid",
+          CP.resolve_style(None)[0].name == "professional" and CP.resolve_style(None)[1] is False
+          and CP.resolve_style("")[0].name == "professional")
+    check("captions enabled defaults ON; explicit False honoured",
+          CP.captions_enabled(None) is True and CP.captions_enabled(False) is False
+          and CP.captions_enabled(True) is True)
+    check("exactly five presets, professional is the default",
+          len(CP.VALID_STYLES) == 5 and CP.DEFAULT_STYLE == "professional"
+          and set(CP.VALID_STYLES) == {"professional", "minimal", "cinematic", "documentary", "focus"})
+
+    # env fallback: VIDLORE_CLIPSTUDIO_CAPTION_STYLE + _CAPTIONS
+    _oldS = os.environ.get("VIDLORE_CLIPSTUDIO_CAPTION_STYLE")
+    _oldC = os.environ.get("VIDLORE_CLIPSTUDIO_CAPTIONS")
+    try:
+        os.environ["VIDLORE_CLIPSTUDIO_CAPTION_STYLE"] = "cinematic"
+        check("env VIDLORE_CLIPSTUDIO_CAPTION_STYLE used when no explicit style",
+              CP.resolve_style(None)[0].name == "cinematic"
+              and CP.resolve_style("focus")[0].name == "focus")   # explicit still wins
+        os.environ["VIDLORE_CLIPSTUDIO_CAPTIONS"] = "0"
+        check("env VIDLORE_CLIPSTUDIO_CAPTIONS=0 → captions off (fallback path)",
+              CP.captions_enabled(None) is False)
+    finally:
+        for k, v in (("VIDLORE_CLIPSTUDIO_CAPTION_STYLE", _oldS), ("VIDLORE_CLIPSTUDIO_CAPTIONS", _oldC)):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    # (9) every preset produces VALID ASS for BOTH narration and breakout captions.
+    _words = [WordTiming("Power", 0.0, 0.4), WordTiming("is", 0.4, 0.6),
+              WordTiming("never", 0.6, 1.1), WordTiming("given", 1.1, 1.7),
+              WordTiming("to", 1.7, 1.9), WordTiming("the", 1.9, 2.1),
+              WordTiming("patient", 2.1, 2.7)]   # long-ish → two-line wrap territory
+    tmp = _P(tempfile.mkdtemp(prefix="captest_"))
+    _req_keys = {"font", "size", "primary", "outline", "back", "bold",
+                 "border_style", "outline_w", "shadow", "margin_v"}
+    for name in CP.VALID_STYLES:
+        preset = CP.CAPTION_PRESETS[name]
+        capd, accent = preset.theme_caption()
+        # theme caption dict carries every key write_ass reads
+        check(f"preset '{name}' theme-caption dict has all write_ass keys",
+              _req_keys.issubset(set(capd.keys())) and isinstance(accent, tuple) and len(accent) == 3)
+        # drive the REAL engine caption writer with this preset's style
+        _ass = write_ass(_words, tmp / f"{name}.ass", style=capd, accent=accent,
+                         emphasis_words={"never"})
+        _txt = _ass.read_text(encoding="utf-8")
+        check(f"preset '{name}' → valid narration ASS (header + Main style + events)",
+              "[V4+ Styles]" in _txt and "Style: Main," in _txt and "[Events]" in _txt
+              and capd["primary"] in _txt and "Dialogue:" in _txt)
+        # breakout Style line: the 17 ASS columns (Name..Encoding), Name=BK
+        _bk = preset.breakout_style_line()
+        _fields = _bk[len("Style: "):].split(",")
+        check(f"preset '{name}' → valid breakout BK style (17 ASS fields, sung≠unsung)",
+              _bk.startswith("Style: BK,") and len(_fields) == 17
+              and CP._ass_color(preset.bk_sung_rgb) != CP._ass_color(preset.bk_unsung_rgb))
+
+    # (10) MAIN + BREAKOUT captions come from the SAME preset family (documentary box → both boxed)
+    _doc = CP.CAPTION_PRESETS["documentary"]
+    check("documentary: both narration + breakout use the translucent-box border (family match)",
+          _doc.theme_caption()[0]["border_style"] == 3 and _doc.bk_border_style == 3)
+    _min = CP.CAPTION_PRESETS["minimal"]
+    check("minimal: quiet accent close to white (least distracting emphasis)",
+          _min.accent_rgb[0] > 230 and _min.accent_rgb[1] > 220)
+    check("focus: bright energetic active-word gold (strong word-sync emphasis)",
+          CP.CAPTION_PRESETS["focus"].accent_rgb == (255, 178, 40))
+
+    # (15/16) presets stay within a lower safe region and clear the cinematic letterbox bars.
+    for name in CP.VALID_STYLES:
+        capd = CP.CAPTION_PRESETS[name].theme_caption()[0]
+        check(f"preset '{name}' margin_v in a sane lower-safe range + max 2 lines",
+              40 <= capd["margin_v"] <= 220 and capd["max_lines"] == 2)
+
+    # portal preview payload is well-formed for every preset
+    _choices = CP.preset_choices()
+    check("portal preset_choices lists all five with preview typography",
+          [c["name"] for c in _choices] == list(CP.VALID_STYLES)
+          and all({"color", "accent", "weight", "backplate", "text_shadow", "family"}
+                  <= set(c["preview"].keys()) for c in _choices))
+
+    # (4/20) portal validation: unknown/manipulated preset value falls back to the default; the
+    # server never forwards a raw value. Drive the REAL portal card generator + validation constants.
+    from vidlore.clipstudio import web as _web
+    _cards = _web._caption_cards()
+    check("portal renders a selectable card for every preset with a sample + accent word",
+          all(f'data-name="{n}"' in _cards for n in CP.VALID_STYLES)
+          and _cards.count("Power is") == 5 and _cards.count("never") == 5)
+    # the /create route clamps caption_style to VALID_STYLES (mirror its logic on a hostile value)
+    _hostile = "professional; DROP TABLE"
+    check("portal clamps an unknown/hostile caption_style to the default",
+          (_hostile.strip().lower() if _hostile.strip().lower() in CP.VALID_STYLES
+           else CP.DEFAULT_STYLE) == CP.DEFAULT_STYLE)
+
+    # (5) per-job settings do not leak across jobs (the registry/resolver is pure — no shared state)
+    _a = CP.resolve_style("minimal")[0]
+    _b = CP.resolve_style("focus")[0]
+    check("resolver is stateless — two jobs keep independent presets",
+          _a.name == "minimal" and _b.name == "focus" and _a is not _b)
+
+    # wiring greps: OFF removes visible layers but NEVER the breakout safety metadata.
+    root = _P(__file__).resolve().parents[1] / "vidlore" / "clipstudio"
+    bsrc = (root / "build.py").read_text(encoding="utf-8")
+    wsrc = (root / "web.py").read_text(encoding="utf-8")
+    osrc = (root / "orchestrate.py").read_text(encoding="utf-8")
+    check("build resolves ONE caption on/off + preset and logs it",
+          "_cap_on" in bsrc and "_cap_preset" in bsrc
+          and 'log(f"build: captions=' in bsrc and "invalid caption style" in bsrc)
+    check("narration + breakout burn + compose all gate on the resolved _cap_on",
+          "captions=_cap_on" in bsrc and "if _cap_on and os.environ" in bsrc
+          and "work, _cap_on, log=log)" in bsrc)
+    check("selected preset drives BOTH narration theme caption AND breakout burn",
+          '"caption": {**th.get("caption", {}), **_cap_dict}' in bsrc
+          and "_burn_breakout_captions(result, _caps, work, log, preset=_cap_preset)" in bsrc)
+    # the active-word colour is caption-SCOPED (caption_accent) so it never recolours title/graphic
+    # overlays or the key-phrase stabs (which fire only when captions are OFF).
+    asmsrc = (Path(__file__).resolve().parents[1] / "vidlore" / "assemble.py").read_text(encoding="utf-8")
+    check("caption accent is caption-scoped (theme['accent'] not clobbered → no overlay recolour)",
+          '"caption_accent": _cap_accent' in bsrc and '"accent": _cap_accent' not in bsrc
+          and 'theme.get("caption_accent", theme.get("accent"' in asmsrc)
+    check("OFF-safety: breakout metadata (_breakout_caps) + QA gate are NOT gated on captions",
+          "_final_caps = list(getattr(narration, \"_breakout_caps\", None) or [])" in bsrc
+          and "_breakout_qa_gate(result, _final_caps, work, log=log)" in bsrc)
+    check("caption settings persisted to project meta for rebuild",
+          'proj.meta["caption_settings"]' in bsrc)
+    check("portal threads captions_enabled + caption_style to the worker (validated)",
+          "captions_enabled=captions_enabled, caption_style=caption_style" in wsrc
+          and "if caption_style not in VALID_STYLES" in wsrc)
+    check("portal status page shows Captions: <Style> / Off",
+          'Captions: {_p.label' in wsrc and '"Captions: Off"' in wsrc)
+    check("caption_style threaded through produce_auto + produce",
+          osrc.count("caption_style=caption_style") >= 2)
+
+
 def main():
     test_verifier_promotion_rewrites_beat_windows()
     test_budget_loop_survives_plan_beats_failure()
@@ -3898,6 +4050,7 @@ def main():
     test_wqc_moment_preservation()
     test_gemini_timeout_hardening()
     test_breakout_atomic_composition()
+    test_caption_presets()
     print(f"\n{PASS} passed · {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

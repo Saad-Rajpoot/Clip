@@ -9560,7 +9560,10 @@ def assemble(
             cap_words = [w for w in words if not _under_card(w)]
         ass = write_ass(
             cap_words or words, workdir / "captions.ass",
-            style=theme["caption"], accent=theme.get("accent", (255, 210, 90)),
+            style=theme["caption"],
+            # captions use `caption_accent` when set (a per-caption active-word colour that must
+            # NOT recolour title/graphic overlays or key-phrase stabs), else the theme accent.
+            accent=theme.get("caption_accent", theme.get("accent", (255, 210, 90))),
             emphasis_words=emph,
         )
         vfilters.append("subtitles=filename=%s" % ass.name)

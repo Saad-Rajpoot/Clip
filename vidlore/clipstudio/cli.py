@@ -50,6 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "warm_male_explainer, dark_investigative_narrator, "
                          "mature_female_documentary, calm_female_storyteller")
     ap.add_argument("--no-captions", action="store_true", help="disable burned-in captions")
+    ap.add_argument("--caption-style", default="",
+                    help="caption design preset: professional (default) | minimal | cinematic | "
+                         "documentary | focus")
     ap.add_argument("--no-tts", action="store_true", help="silent narration (skip edge-tts)")
     ap.add_argument("--no-build", action="store_true", help="stop after ledger; do not render")
     ap.add_argument("--no-enrich", action="store_true", help="skip the Claude visual-director pass")
@@ -80,8 +83,8 @@ def main(argv=None) -> int:
             res = produce(
                 args.project, script_path=args.script, source_specs=specs,
                 name=(args.name or None), theme=args.theme, voice=args.voice, title=args.title,
-                captions=not args.no_captions, use_tts=not args.no_tts,
-                voiceover=(args.voiceover or None),
+                captions=not args.no_captions, caption_style=args.caption_style,
+                use_tts=not args.no_tts, voiceover=(args.voiceover or None),
                 do_build=not args.no_build, enrich=not args.no_enrich,
                 force_index=args.force_index, progress=_progress,
             )
@@ -93,7 +96,8 @@ def main(argv=None) -> int:
             res = produce_auto(
                 args.project, topic=args.topic, script_path=args.script, movie_hint=args.movie,
                 policy=args.policy, max_sources=args.max_sources, theme=args.theme, voice=args.voice,
-                title=args.title, captions=not args.no_captions, use_tts=not args.no_tts,
+                title=args.title, captions=not args.no_captions,
+                caption_style=args.caption_style, use_tts=not args.no_tts,
                 voiceover=(args.voiceover or None),
                 voice_provider=args.voice_provider, voice_preset=args.voice_preset,
                 verify=not args.no_verify, do_build=not args.no_build,

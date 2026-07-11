@@ -66,7 +66,8 @@ def _evict_jobs():
 def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint: str,
              script_text: str, voiceover: str | None, max_sources: int, policy: str,
              theme: str, verify: bool, voice_provider: str = "", voice_preset: str = "",
-             provider: str = "", ds_model: str = "", turbo: bool = True):
+             provider: str = "", ds_model: str = "", turbo: bool = True,
+             captions_enabled: bool = True, caption_style: str = "professional"):
     # FULL render log persisted to the project dir — the in-memory buffer keeps only the last 400
     # lines, so window-QC / breakout selection / composed index maps / caption merge / audit remap /
     # assembly-invariant / post-render QA lines scroll off and can never be audited after the fact.
@@ -116,7 +117,8 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
             res = produce_auto(
                 str(project_dir), topic=topic, script_text=script_text, movie_hint=movie_hint,
                 policy=policy, max_sources=max_sources, theme=theme, title=title,
-                captions=True, voiceover=voiceover, use_tts=True, verify=verify, do_build=True,
+                captions=bool(captions_enabled), caption_style=caption_style,
+                voiceover=voiceover, use_tts=True, verify=verify, do_build=True,
                 voice_provider=voice_provider, voice_preset=voice_preset,
                 progress=log,
             )
@@ -180,6 +182,22 @@ _PAGE = """<!doctype html><html><head><meta charset=utf-8>
  a.dl{display:inline-block;background:var(--ok);color:#06210f;text-decoration:none;
    padding:13px 22px;border-radius:9px;font-weight:700;margin-top:6px}
  .phase{font-weight:600;color:var(--acc)}
+ /* caption design selector */
+ .capwrap.off .capgrid{opacity:.35;pointer-events:none;filter:grayscale(.6)}
+ .capgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:9px;margin-top:6px}
+ .capcard{cursor:pointer;border:2px solid var(--bd);border-radius:10px;overflow:hidden;
+   background:#0d1117;transition:border-color .15s,transform .1s}
+ .capcard:hover{transform:translateY(-1px)}
+ .capcard.sel{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}
+ .capcard input{position:absolute;opacity:0;width:0;height:0}
+ .capsample{display:flex;align-items:flex-end;justify-content:center;min-height:66px;padding:10px 8px;
+   text-align:center;line-height:1.15;
+   background:linear-gradient(135deg,#2a2f3a 0%,#3a3324 55%,#1c1f27 100%)}
+ .capsample .cw{display:inline-block}
+ .capname{font-size:12px;font-weight:600;padding:6px 6px 7px;text-align:center;color:var(--mut);
+   border-top:1px solid var(--bd)}
+ .capcard.sel .capname{color:var(--acc)}
+ .capblurb{font-size:11px;color:var(--mut);margin-top:4px;min-height:28px}
 </style></head><body><div class=wrap>
 <h1>🎬 ClipStudio</h1>
 <p class=sub>Script + (optional) voiceover → finished movie-clip video. __BRAIN__</p>
@@ -228,19 +246,55 @@ __BRAIN_OPTS__
   <div><label>Turbo <span class=hint>(use all __NCPU__ CPU cores — faster render)</span></label>
    <select name=turbo>__TURBO_OPTS__</select></div>
  </div>
+ <div class=capwrap id=capWrap>
+  <div class=row>
+   <div style="max-width:150px"><label>Captions</label>
+    <select name=captions id=capOn><option value="1">On</option><option value="0">Off</option></select></div>
+   <div><label>Caption design <span class=hint>(one style for the whole video)</span></label>
+    <div class=capgrid id=capGrid>__CAPTION_CARDS__</div>
+    <input type=hidden name=caption_style id=capStyle value="professional"></div>
+  </div>
+ </div>
  <button type=submit id=go>Create video</button>
  <div class=brain>Sources are downloaded under your own approved-for-testing policy. Verify rights before publishing.</div>
 </form>
 <script>
  f.addEventListener('submit',function(){go.disabled=true;go.textContent='Starting…'});
+ // caption design: click-to-select cards + ON/OFF toggle hides the grid
+ (function(){
+   var grid=document.getElementById('capGrid'), hid=document.getElementById('capStyle'),
+       on=document.getElementById('capOn'), wrap=document.getElementById('capWrap');
+   if(!grid)return;
+   function sel(name){
+     hid.value=name;
+     grid.querySelectorAll('.capcard').forEach(function(c){
+       c.classList.toggle('sel', c.dataset.name===name);
+       var r=c.querySelector('input'); if(r) r.checked=(c.dataset.name===name);
+     });
+   }
+   grid.querySelectorAll('.capcard').forEach(function(c){
+     c.addEventListener('click',function(){sel(c.dataset.name);});
+   });
+   function toggle(){ wrap.classList.toggle('off', on.value==='0'); }
+   on.addEventListener('change',toggle);
+   sel(hid.value||'professional'); toggle();
+ })();
 </script>"""
 
 
 def _job_page(jid: str) -> str:
+    j = _JOBS.get(jid) or {}
+    if j.get("captions_enabled", True):
+        from .caption_presets import CAPTION_PRESETS, DEFAULT_STYLE
+        _p = CAPTION_PRESETS.get(j.get("caption_style", DEFAULT_STYLE))
+        _cap_txt = f"Captions: {_p.label if _p else 'Professional'}"
+    else:
+        _cap_txt = "Captions: Off"
     body = f"""
 <div class=card>
  <div>Status: <span class=phase id=ph>starting…</span></div>
  <div class=bar><i id=pbar></i></div>
+ <div class=brain>{_cap_txt}</div>
  <div id=dl></div>
  <pre id=log>working…</pre>
 </div>"""
@@ -318,6 +372,30 @@ def _turbo_options() -> str:
             f'<option value="0"{" selected" if not on else ""}>off — leave a core free</option>')
 
 
+def _caption_cards() -> str:
+    """Build the caption-design selector cards from the preset registry — each card shows a compact,
+    realistic sample ('Power is never given.') approximating the preset's real typography, colour,
+    weight, outline/shadow and active-word treatment (the word 'never' takes the accent colour)."""
+    from html import escape
+    from .caption_presets import preset_choices
+    cards = []
+    for p in preset_choices():
+        pv = p["preview"]
+        # the sample text sits on the sample gradient; backplate presets get a translucent box
+        box = ("" if pv["backplate"] == "transparent"
+               else f"background:{pv['backplate']};padding:3px 9px;border-radius:4px;")
+        sample_style = (f"font-family:{escape(pv['family'])},Arial,sans-serif;"
+                        f"font-weight:{pv['weight']};color:{pv['color']};"
+                        f"text-shadow:{pv['text_shadow']};{box}")
+        cards.append(
+            f'<label class=capcard data-name="{p["name"]}" title="{escape(p["blurb"])}">'
+            f'<input type=radio name=_capr value="{p["name"]}">'
+            f'<div class=capsample><span class=cw style="{sample_style}">'
+            f'Power is <span style="color:{pv["accent"]}">never</span> given.</span></div>'
+            f'<div class=capname>{escape(p["label"])}</div></label>')
+    return "".join(cards)
+
+
 def _shell(body: str) -> str:
     prov = "?"
     try:
@@ -332,6 +410,7 @@ def _shell(body: str) -> str:
 def index():
     return _shell(_FORM.replace("__BRAIN_OPTS__", _brain_options())
                        .replace("__TURBO_OPTS__", _turbo_options())
+                       .replace("__CAPTION_CARDS__", _caption_cards())
                        .replace("__NCPU__", str(_NCPU)))
 
 
@@ -364,6 +443,15 @@ def create():
     except Exception:
         max_sources = 8
 
+    # CAPTION settings — validated server-side against the preset registry (the portal is
+    # unauthenticated, so an unknown/manipulated value must never reach the worker raw). ON by
+    # default; an unknown style safely falls back to the default preset.
+    from .caption_presets import VALID_STYLES, DEFAULT_STYLE
+    captions_enabled = (request.form.get("captions") or "1").strip() not in ("0", "false", "off", "no")
+    caption_style = (request.form.get("caption_style") or DEFAULT_STYLE).strip().lower()
+    if caption_style not in VALID_STYLES:
+        caption_style = DEFAULT_STYLE
+
     _evict_jobs()
     jid = uuid.uuid4().hex[:10]
     proj = _ROOT / jid
@@ -378,7 +466,9 @@ def create():
 
     with _LOCK:
         _JOBS[jid] = {"phase": "queued", "log": [], "done": False, "ok": False,
-                      "output": None, "error": "", "summary": {}, "started": time.time()}
+                      "output": None, "error": "", "summary": {}, "started": time.time(),
+                      # per-job caption settings (shown on the status page; no cross-job leakage)
+                      "captions_enabled": captions_enabled, "caption_style": caption_style}
 
     t = threading.Thread(target=_run_job, args=(jid, proj), kwargs=dict(
         topic=topic, title=topic, movie_hint=movie, script_text=script_text,
@@ -386,7 +476,8 @@ def create():
         policy=os.environ.get("VIDLORE_CLIPSTUDIO_PORTAL_POLICY", "approved_testing").strip(),
         theme=theme, verify=verify,
         voice_provider=voice_provider, voice_preset=voice_preset,
-        provider=provider, ds_model=ds_model, turbo=turbo), daemon=True)
+        provider=provider, ds_model=ds_model, turbo=turbo,
+        captions_enabled=captions_enabled, caption_style=caption_style), daemon=True)
     t.start()
     return redirect(url_for("job", jid=jid))
 

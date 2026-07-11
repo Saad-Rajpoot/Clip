@@ -92,7 +92,11 @@ try:
 
     log("5/5 build")
     vo = os.path.join(PD, "voiceover.mp3")
-    out = build_video(proj, segs, cfg, captions=True,
+    # respect the project's persisted caption settings so a re-render keeps the same design
+    _capset = (proj.meta.get("caption_settings") or {}) if hasattr(proj, "meta") else {}
+    out = build_video(proj, segs, cfg,
+                      captions=bool(_capset.get("enabled", True)),
+                      caption_style=str(_capset.get("style", "") or ""),
                       title=(analysis.movie_title or proj.name),
                       theme_name=args.theme,
                       voiceover=(vo if os.path.exists(vo) else None),
