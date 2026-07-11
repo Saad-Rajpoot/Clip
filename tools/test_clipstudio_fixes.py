@@ -1173,7 +1173,8 @@ def test_breakout_audio_gate():
     check("breakout passes 10s max cap (not a hard 5.5s chop)",
           "dur = 10.0" in src and "_dialogue_aware_dur(str(src_path), start, lo=3.0" in src)
     check("breakout content dedup (no repeated spoken line)",
-          "_picked_word_sets" in src and "wouldn't repeat" in src)
+          "_picked_word_sets" in src and "never airs the SAME moment twice" in src
+          and "_same_src_win" in src and "_substr" in src)
 
 
 # ===========================================================================
@@ -3537,6 +3538,212 @@ def test_gemini_timeout_hardening():
             os.environ[key] = old
 
 
+def test_breakout_atomic_composition():
+    print("[breakout] atomic composition — clip-map/bidx/captions/audit stay in lockstep")
+    import tempfile
+    import subprocess as _sp
+    import vidlore.clipstudio.build as B
+    from vidlore.tts import NarratedScene
+    from vidlore.script_gen import Scene
+    from vidlore.clipstudio.models import ScriptSegment
+    from vidlore.clipstudio.build import (_compose_breakout_state, _compose_breakouts,
+                                          _validate_breakout_assembly, _finalize_breakout_audit,
+                                          _postrender_breakout_qa)
+
+    tmp = Path(tempfile.mkdtemp(prefix="bktest_"))
+    FF = B.ffmpeg_exe()
+
+    def _mk_mp4(p, d=2.0, black=False):
+        col = "black" if black else "white"
+        _sp.run([FF, "-y", "-f", "lavfi", "-i", f"color=c={col}:s=160x90:d={d}",
+                 "-pix_fmt", "yuv420p", "-r", "10", str(p)], capture_output=True)
+
+    def _mk_wav(p, d=2.0):
+        _sp.run([FF, "-y", "-f", "lavfi", "-i", f"sine=frequency=300:duration={d}",
+                 str(p)], capture_output=True)
+
+    # ── Part A: _compose_breakout_state — the CORE remap fix (pure logic) ──────────────────────
+    cm, bx = _compose_breakout_state({}, {}, None, {5: "v"}, {4: 5})
+    check("compose: mid-only merges new clip/bidx unchanged", cm == {5: "v"} and bx == {4: 5})
+    # THE BUG: a later insertion reindexes every scene → the prior mid clip key MUST be remapped
+    _idxmap = {i: i + 1 for i in range(12)}            # cold-open shifted every scene by +1
+    cm2, bx2 = _compose_breakout_state({5: "midvid"}, {4: 5}, _idxmap, {0: "covid"}, {2: 0})
+    check("compose: cold-open reindex remaps the mid clip key (no stale audio-over-black)",
+          5 not in cm2 and cm2.get(6) == "midvid" and cm2.get(0) == "covid"
+          and bx2.get(4) == 6 and bx2.get(2) == 0)
+    _logs = []
+    cm3, _ = _compose_breakout_state({9: "gone"}, {}, {0: 0, 1: 1}, {}, {}, log=_logs.append)
+    check("compose: a dropped-scene clip key is removed and logged",
+          cm3 == {} and any("stale" in L.lower() for L in _logs))
+
+    # ── factories for the REAL _apply_breakouts / _compose_breakouts path ─────────────────────
+    dummy_proj = types.SimpleNamespace()
+
+    def _state(n=10):
+        segs = [ScriptSegment(index=i, text=f"beat {i}") for i in range(n)]
+        scs = [Scene(index=i, narration=f"beat {i}", visual="footage") for i in range(n)]
+        nss = [NarratedScene(index=i, audio=tmp / f"n{i}.wav", duration=4.0, words=[])
+               for i in range(n)]
+        narr = types.SimpleNamespace(scenes=nss, audio=str(tmp / "narr.wav"), total=n * 4.0)
+        return segs, scs, narr
+
+    _bkn = [0]
+
+    def _pick(beat, cold=False, line=None, dur=2.0, black=False, make=True):
+        _bkn[0] += 1
+        tag = f"bk{_bkn[0]}"
+        v, a = tmp / f"{tag}.mp4", tmp / f"{tag}.wav"
+        if make:
+            _mk_mp4(v, dur, black=black)
+            _mk_wav(a, dur)
+        p = {"seg_index": beat, "dur": dur, "video": str(v), "audio": str(a),
+             "_audit": {"seg_index": beat, "source_id": f"src{beat}", "source_t": 1.0,
+                        "line": line or f"line {beat}"}}
+        if cold:
+            p["cold_open"] = True
+            p["hook_quote"] = "the opening hook line"
+            p["hook_beats"] = [beat]
+        return p
+
+    _orig_splice = B._splice_audio
+    B._splice_audio = lambda full, splices, work: Path(full)   # skip the ffmpeg concat
+    _NULL = lambda m: None
+    try:
+        # CASE 1 — mids only
+        s, sc, nr = _state()
+        s2, sc2, nr2, cm, bx, ents = _compose_breakouts(
+            dummy_proj, s, sc, nr, [_pick(4), _pick(7)], tmp, True, log=_NULL)
+        _bk = {x.index for x in sc2 if getattr(x, "visual", "") == "breakout"}
+        check("mids-only: clip-map keys == breakout pseudo-scenes (2)",
+              set(cm.keys()) == _bk and len(_bk) == 2)
+        _ok, _ = _validate_breakout_assembly(sc2, nr2, cm, nr2._breakout_caps, True)
+        check("mids-only: assembly invariant passes", _ok)
+
+        # CASE 2 — cold-open + mids via VO-cut FALLBACK (insert): the exact production bug
+        s, sc, nr = _state()
+        nr._vo_word_aligned = False                    # no word alignment → insert fallback
+        picks = [_pick(4, line="mid four"), _pick(7, line="mid seven"),
+                 _pick(2, cold=True, line="cold hook")]
+        s2, sc2, nr2, cm, bx, ents = _compose_breakouts(
+            dummy_proj, s, sc, nr, picks, tmp, True, log=_NULL)
+        _bk = {x.index for x in sc2 if getattr(x, "visual", "") == "breakout"}
+        check("cold-open+mids (fallback): all 3 breakout scenes mapped, keys == scenes, videos exist",
+              set(cm.keys()) == _bk and len(_bk) == 3 and all(Path(cm[k]).exists() for k in cm))
+        _ok, _probs = _validate_breakout_assembly(sc2, nr2, cm, nr2._breakout_caps, True)
+        check("cold-open+mids (fallback): invariant passes (WAS audio-over-black)", _ok and not _probs)
+        _caps = nr2._breakout_caps
+        check("cold-open+mids: all 3 captions preserved (mids NOT overwritten by cold-open)",
+              len(_caps) == 3 and len({round(c["start"], 2) for c in _caps}) == 3)
+        # every caption's video points at a real breakout scene in the clip-map
+        check("cold-open+mids: every caption maps to a mapped breakout video",
+              all(str(c.get("video")) in {str(v) for v in cm.values()} for c in _caps))
+        # REGRESSION (review finding #1): bidx must NOT map the cold-open's "insert-before" beat to
+        # the pseudo-scene — that beat is a REAL narration beat that keeps its own footage. Every
+        # bidx value must be a DISTINCT scene, and no bidx value may point at a breakout pseudo-scene
+        # (breakouts are consumed via the clip-map, never proj.selections).
+        check("cold-open+mids: bidx preserves ordinary beats (no clip-map key stolen from footage)",
+              len(set(bx.values())) == len(bx)
+              and not (set(bx.values()) & set(cm.keys())))
+        check("cold-open+mids: cold-open's insert-before beat still maps to a real (non-breakout) scene",
+              bx.get(2) is not None and bx.get(2) not in cm)
+
+        # CASE 3 — cold-open + mids with VO_CUT=0 (env off → insert path)
+        os.environ["VIDLORE_CLIPSTUDIO_VO_CUT"] = "0"
+        try:
+            s, sc, nr = _state()
+            nr._vo_word_aligned = True                 # even aligned, env off forces insert
+            s2, sc2, nr2, cm, bx, ents = _compose_breakouts(
+                dummy_proj, s, sc, nr,
+                [_pick(4), _pick(7), _pick(2, cold=True)], tmp, True, log=_NULL)
+            _bk = {x.index for x in sc2 if getattr(x, "visual", "") == "breakout"}
+            _ok, _ = _validate_breakout_assembly(sc2, nr2, cm, nr2._breakout_caps, True)
+            check("VO_CUT=0: cold-open takes the insert path, all mapped, invariant passes",
+                  set(cm.keys()) == _bk and len(_bk) == 3 and _ok)
+        finally:
+            os.environ.pop("VIDLORE_CLIPSTUDIO_VO_CUT", None)
+
+        # CASE 4 — cold-open + mids via VO-cut SUCCESS (word-aligned uploaded VO)
+        _orig_loc, _orig_trim = B._locate_hook_span, B._audio_trim_prepend
+        B._locate_hook_span = lambda vo, q, log, **k: (2.0, 10.0, 0.92)
+        B._audio_trim_prepend = lambda vo, h1, ca, d, work: Path(vo)
+        try:
+            s, sc, nr = _state(12)
+            nr._vo_word_aligned = True
+            picks = [_pick(6, line="mid six"), _pick(9, line="mid nine"),
+                     _pick(3, cold=True, line="cold hook")]
+            s2, sc2, nr2, cm, bx, ents = _compose_breakouts(
+                dummy_proj, s, sc, nr, picks, tmp, True, log=_NULL)
+            _bk = {x.index for x in sc2 if getattr(x, "visual", "") == "breakout"}
+            _ok, _probs = _validate_breakout_assembly(sc2, nr2, cm, nr2._breakout_caps, True)
+            check("cold-open+mids (VO-cut success): all mapped, keys==scenes, invariant passes",
+                  set(cm.keys()) == _bk and len(_bk) == 3 and _ok and not _probs)
+            check("VO-cut success: cold-open pseudo-scene is index 0 (replaces the hook)",
+                  0 in cm)
+        finally:
+            B._locate_hook_span, B._audio_trim_prepend = _orig_loc, _orig_trim
+
+        # CASE 5 — captions OFF: invariant does not require a caption per scene
+        s, sc, nr = _state()
+        nr._vo_word_aligned = False
+        s2, sc2, nr2, cm, bx, ents = _compose_breakouts(
+            dummy_proj, s, sc, nr, [_pick(4), _pick(2, cold=True)], tmp, False, log=_NULL)
+        _ok, _ = _validate_breakout_assembly(sc2, nr2, cm, [], False)
+        check("captions OFF: invariant passes without caption specs", _ok)
+
+        # CASE 6 — MISSING breakout video blocks publication → whole feature rolled back
+        s, sc, nr = _state()
+        nr._vo_word_aligned = False
+        _bad = _pick(5, make=False)                    # video/audio files never created
+        Path(_bad["audio"]).write_bytes(b"")           # audio exists but video is missing
+        s2, sc2, nr2, cm, bx, ents = _compose_breakouts(
+            dummy_proj, s, sc, nr, [_bad], tmp, True, log=_NULL)
+        _bk = [x for x in sc2 if getattr(x, "visual", "") == "breakout"]
+        check("missing breakout video → rolled back (no breakout scene, no audio-over-black)",
+              cm == {} and ents == [] and not _bk)
+
+        # CASE 7 — audit finalized to FINAL aired times keyed by stable identity
+        _baud = tmp / "breakout_audit.json"
+        _baud.write_text(json.dumps({"accepted": [
+            {"seg_index": 4, "source_id": "srcX", "source_t": 1.0, "line": "the exact quote"}]}),
+            encoding="utf-8")
+        _caps = [{"start": 152.6, "dur": 7.5, "audio": str(tmp / "x.wav"),
+                  "video": str(tmp / "x.mp4"), "final_index": 8,
+                  "source_id": "srcX", "source_t": 1.0, "line": "the exact quote"}]
+        _finalize_breakout_audit(tmp, _caps, {8: tmp / "x.mp4"},
+                                 types.SimpleNamespace(total=800.0), log=_NULL)
+        _fin = json.loads(_baud.read_text(encoding="utf-8"))["accepted"][0]
+        check("audit finalized: aired_at_s/end + final_index from stable identity",
+              abs(_fin.get("aired_at_s", 0) - 152.6) < 1e-6 and _fin.get("final_index") == 8
+              and abs(_fin.get("aired_end_s", 0) - 160.1) < 1e-6)
+
+        # CASE 8 — post-render QA catches a BLACK breakout window; passes on real footage
+        _blk = tmp / "blackclip.mp4"
+        _mk_mp4(_blk, 4.0, black=True)
+        _prob = _postrender_breakout_qa(_blk, [{"start": 0.5, "dur": 3.0, "line": "audio over black"}],
+                                        tmp, log=_NULL)
+        check("post-render QA: a sustained-black breakout window is flagged", len(_prob) == 1)
+        _wht = tmp / "whiteclip.mp4"
+        _mk_mp4(_wht, 4.0, black=False)
+        _prob2 = _postrender_breakout_qa(_wht, [{"start": 0.5, "dur": 3.0, "line": "real footage"}],
+                                         tmp, log=_NULL)
+        check("post-render QA: a real (non-black) breakout window passes", _prob2 == [])
+    finally:
+        B._splice_audio = _orig_splice
+
+    # ── wiring: the production build routes breakouts through the single tested entrypoint ──────
+    bsrc = (Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio"
+            / "build.py").read_text(encoding="utf-8")
+    check("build_video composes breakouts via _compose_breakouts (no inline .update())",
+          "_compose_breakouts(" in bsrc
+          and "segments, scenes, narration, _breakout_clip, _bidx, _breakout_entries = _compose_breakouts("
+          in bsrc)
+    check("black-frame repair receives breakout windows (never preserves them as fades)",
+          "breakout_windows=" in bsrc and "breakout_window_black" in
+          (Path(__file__).resolve().parents[1] / "vidlore" / "assemble.py").read_text(encoding="utf-8"))
+    check("post-render breakout QA gates the finished video",
+          "_postrender_breakout_qa(result" in bsrc)
+
+
 def main():
     test_verifier_promotion_rewrites_beat_windows()
     test_budget_loop_survives_plan_beats_failure()
@@ -3580,6 +3787,7 @@ def main():
     test_cut_window_validation()
     test_wqc_moment_preservation()
     test_gemini_timeout_hardening()
+    test_breakout_atomic_composition()
     print(f"\n{PASS} passed · {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

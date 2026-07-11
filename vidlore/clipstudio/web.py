@@ -67,15 +67,37 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
              script_text: str, voiceover: str | None, max_sources: int, policy: str,
              theme: str, verify: bool, voice_provider: str = "", voice_preset: str = "",
              provider: str = "", ds_model: str = "", turbo: bool = True):
+    # FULL render log persisted to the project dir — the in-memory buffer keeps only the last 400
+    # lines, so window-QC / breakout selection / composed index maps / caption merge / audit remap /
+    # assembly-invariant / post-render QA lines scroll off and can never be audited after the fact.
+    # `output/build.log` keeps the COMPLETE line-numbered log for every render (best-effort; a log
+    # write must never break a render).
+    _log_path = project_dir / "output" / "build.log"
+    try:
+        _log_path.parent.mkdir(parents=True, exist_ok=True)
+        _log_fh = open(_log_path, "a", encoding="utf-8")
+        _log_fh.write(f"\n===== render start {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                      f"job={jid} =====\n")
+        _log_fh.flush()
+    except Exception:
+        _log_fh = None
+
     def log(m):
         with _LOCK:
             j = _JOBS.get(jid)
+            _el = (time.time() - j['started']) if j is not None else 0.0
             if j is not None:
-                j["log"].append(f"[{time.time()-j['started']:6.1f}s] {m}")
+                j["log"].append(f"[{_el:6.1f}s] {m}")
                 j["log"] = j["log"][-400:]
                 # cheap phase hint from the orchestrator's "N/9 ·" prefixes
                 if "·" in m and m.split("/")[0].strip().isdigit():
                     j["phase"] = m.strip()
+            if _log_fh is not None:
+                try:
+                    _log_fh.write(f"[{_el:7.1f}s] {m}\n")
+                    _log_fh.flush()
+                except Exception:
+                    pass
 
     try:
         if _RENDER_LOCK.locked():
@@ -117,6 +139,18 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
             j["log"].append("FATAL: " + str(e)[:300])
         # full traceback (absolute paths) only to the server console, not the browser
         traceback.print_exc()
+        if _log_fh is not None:
+            try:
+                _log_fh.write("FATAL: " + str(e)[:400] + "\n")
+            except Exception:
+                pass
+    finally:
+        if _log_fh is not None:
+            try:
+                _log_fh.write(f"===== render end {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+                _log_fh.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------

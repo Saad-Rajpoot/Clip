@@ -7833,8 +7833,14 @@ def _write_export_metrics(final_mp4: Path, fps: int) -> dict:
     return metrics
 
 
-def _repair_black_frames(video_in: Path, workdir: Path, fps: int) -> Path:
+def _repair_black_frames(video_in: Path, workdir: Path, fps: int,
+                         breakout_windows: list | None = None) -> Path:
     """Iterate-until-clean driver around `_repair_black_frames_once`.
+
+    `breakout_windows` = [(start_s, end_s), ...] real-audio breakout windows. A black span
+    overlapping one of these is NEVER a legitimate 'intentional fade' (a breakout is validated
+    real footage that must be on screen while its audio plays) — the once-pass repairs it and
+    flags it `breakout_window_black` so the failure is visible, never silently preserved.
 
     User requirement (2026-06-01): "re-run post-render black detection AFTER
     the repair — never trust repair metadata alone — and iterate until clean
@@ -7855,7 +7861,7 @@ def _repair_black_frames(video_in: Path, workdir: Path, fps: int) -> Path:
     cur = video_in
     sidecar = workdir.parent / "render_black_frame_metrics.json"
     for _pass in range(3):
-        out = _repair_black_frames_once(cur, workdir, fps)
+        out = _repair_black_frames_once(cur, workdir, fps, breakout_windows=breakout_windows)
         if out is cur:
             break                       # nothing detected this pass → clean
         cur = out
@@ -7873,7 +7879,8 @@ def _repair_black_frames(video_in: Path, workdir: Path, fps: int) -> Path:
     return cur
 
 
-def _repair_black_frames_once(video_in: Path, workdir: Path, fps: int) -> Path:
+def _repair_black_frames_once(video_in: Path, workdir: Path, fps: int,
+                              breakout_windows: list | None = None) -> Path:
     """Eliminate black/blank spans from a video-only stream by FREEZE-
     HOLDING the nearest VALID (non-dark) frame across each gap (total
     duration + frame count preserved, so downstream audio stays in sync).
@@ -7947,10 +7954,17 @@ def _repair_black_frames_once(video_in: Path, workdir: Path, fps: int) -> Path:
                 video_in, min(max(0.0, total - 1.5 / fps), e + 1.0 / fps))
             anchor_t, direction, anchor_lum = _find_valid_anchor(
                 video_in, s, e, fps, total)
+            # a black span inside a real-audio breakout window is NEVER an intentional fade:
+            # a breakout is validated real footage that must be visible while its audio plays.
+            # Force a repairable classification so it is freeze-filled, not preserved-as-fade.
+            _in_breakout = any(bs < e - 0.05 and be > s + 0.05
+                               for (bs, be) in (breakout_windows or []))
             if before_lum >= 28.0 and after_lum >= 28.0:
                 klass = "unintended_empty_gap"      # bright→black→bright
             elif anchor_lum >= 28.0:
                 klass = "dark_boundary_repairable"   # fade/dark edge, valid frame nearby
+            elif _in_breakout:
+                klass = "breakout_window_black"      # black over breakout audio — must repair
             else:
                 klass = "dark_cinematic_or_fade"     # genuinely dark surroundings
 
@@ -8193,6 +8207,7 @@ def assemble(
     motion_graphics_windows: dict | None = None,
     motion_graphics_primitives: dict | None = None,
     caption_suppress_windows: list | None = None,
+    breakout_windows: list | None = None,
 ) -> Path:
     workdir.mkdir(parents=True, exist_ok=True)
     # STYLE MODE (cinematic personality) — biases pacing, transitions,
@@ -9251,7 +9266,7 @@ def assemble(
     # the previous frame across the gap; no-op when the video is clean.
     try:
         _video_for_final = _repair_black_frames(
-            _video_for_final, workdir, FPS)
+            _video_for_final, workdir, FPS, breakout_windows=breakout_windows)
     except Exception as _e:                                # noqa: BLE001
         print(f"  [5/5] black-frame repair skipped ({str(_e)[:60]})",
               flush=True)
