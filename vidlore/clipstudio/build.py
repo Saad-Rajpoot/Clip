@@ -2714,6 +2714,28 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None, *, preset=None) -
         m = WhisperModel("base", device="cpu", compute_type="int8")
     except Exception:
         return None
+    # The BK Style line comes from the selected preset (same design family as the narration
+    # caption). Resolve it UP FRONT so the shared width-aware line layout below can read its real
+    # font size / outline / shadow / margins (falls back to professional so a stray call is valid).
+    if preset is None:
+        from .caption_presets import resolve_style as _rs
+        preset = _rs(None)[0]
+    # ── shared professional line-layout policy (SAME engine the narration caption uses) ──
+    # Breakouts karaoke-FILL (\kf colour sweep); they never \fscx-grow, so peak_extra = 0. We split
+    # pathological unbroken words by grapheme and lay each karaoke line into AT MOST two rows that
+    # fit the BK safe area — outline+shadow reserved — shrinking \fs only as a bounded last resort.
+    from vidlore.captions import _est_px, split_wide_cells, layout_two_lines
+    _bk_size = float(preset.bk_size)
+    _bk_lines = int(getattr(preset, "max_lines", 2))
+    _safe_w = 1920.0 - 120.0 - 120.0                    # BK MarginL + MarginR (breakout_style_line)
+    _pad = 2.0 * (float(preset.bk_outline_w) + float(preset.bk_shadow) + 2.0)
+    _budget = max(_safe_w, 2.0 * (_safe_w - _pad) * 0.92)   # ~two readable rows' worth of width
+
+    def _grp_w(ws_):
+        if not ws_:
+            return 0.0
+        return (sum(_est_px(w[0], _bk_size) for w in ws_)
+                + _est_px(" ", _bk_size) * max(0, len(ws_) - 1))
     for cap in caps:
         try:
             segs, _i = m.transcribe(str(cap["audio"]), word_timestamps=True, vad_filter=False)
@@ -2730,12 +2752,13 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None, *, preset=None) -
             continue
         base = float(cap["start"])
         dur = float(cap["dur"])
-        # group into short lines (<=5 words) that fit one row
+        # WIDTH-AWARE grouping: accumulate words into karaoke lines whose 2-row layout fits the BK
+        # safe area (never a clipped third row). Cap at 6 words OR ~two rows' width, whichever first.
         grp, cur = [], []
         for w in words:
-            cur.append(w)
-            if len(cur) >= 5:
+            if cur and (len(cur) >= 6 or _grp_w(cur + [w]) > _budget):
                 grp.append(cur); cur = []
+            cur.append(w)
         if cur:
             grp.append(cur)
         # ASR-CONFIDENCE floor per line: whisper mishears movie audio occasionally ("...poison
@@ -2757,21 +2780,35 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None, *, preset=None) -
             we = min(base + dur, base + line[-1][2] + 0.10)
             if we <= ws:
                 continue
-            txt = ""
-            for (wt, a, b, _p4) in line:
-                cs = max(6, int(round((b - a) * 100)))     # karaoke fill centiseconds
-                safe = wt.replace("{", "(").replace("}", ")").replace("\\", "")
-                txt += f"{{\\kf{cs}}}{safe} "
+            toks = [w[0] for w in line]
+            kcs = [max(6, int(round((w[2] - w[1]) * 100))) for w in line]   # karaoke cs per word
+            # grapheme-split any pathological unbroken word, then lay the karaoke line into ≤2 rows
+            cells, imap = split_wide_cells(toks, _bk_size, _safe_w, peak_extra=0.0, pad=_pad)
+            _bidx, _fit, _squeeze = ((None, _bk_size, 100) if _bk_lines < 2 else
+                                     layout_two_lines(cells, _bk_size, _safe_w, peak_extra=0.0, pad=_pad))
+            _cellcount = {}
+            for j in imap:
+                _cellcount[j] = _cellcount.get(j, 0) + 1
+            parts = []
+            for ci, cell in enumerate(cells):
+                j = imap[ci]
+                # a split word's karaoke fill sweeps evenly across its cells (total sweep == word cs)
+                cs = max(3, int(round(kcs[j] / _cellcount[j])))
+                safe = cell.replace("{", "(").replace("}", ")").replace("\\", "")
+                parts.append(f"{{\\kf{cs}}}{safe}")
+            if _bidx is None:
+                body = " ".join(parts)
+            else:
+                body = " ".join(parts[:_bidx]) + "\\N" + " ".join(parts[_bidx:])
+            # bounded \fs shrink then, for a pathological unbroken word, a last-resort \fscx squeeze —
+            # so the karaoke line always fits its two rows without a clipped third row or truncation
+            _fs = f"\\fs{_fit:.0f}" if _fit < _bk_size - 0.5 else ""
+            _sq = f"\\fscx{_squeeze}" if _squeeze < 100 else ""
             lines.append(f"Dialogue: 0,{_ass_ts(ws)},{_ass_ts(we)},BK,,0,0,0,,"
-                         f"{{\\fad(120,120)}}{txt.strip()}")
+                         f"{{\\fad(120,120){_fs}{_sq}}}{body}")
     if not lines:
         return None
-    # The BK Style line comes from the selected preset (same design family as the narration
-    # caption), karaoke fill from unsung → sung. Falls back to the professional preset if none given
-    # so a stray call still produces a valid, on-brand overlay.
-    if preset is None:
-        from .caption_presets import resolve_style as _rs
-        preset = _rs(None)[0]
+    # BK Style line from the (already-resolved) preset — karaoke fill sweeps unsung → sung.
     _bk_style = preset.breakout_style_line()
     header = (
         "[Script Info]\nScriptType: v4.00+\nWrapStyle: 2\nPlayResX: 1920\nPlayResY: 1080\n"

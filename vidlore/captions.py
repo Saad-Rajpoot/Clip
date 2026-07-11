@@ -188,30 +188,120 @@ def _est_px(text: str, fs: float) -> float:
     return sum(_char_w_factor(c) for c in text) * fs
 
 
-def _two_line_split(tokens: list, fs: float, safe_w: float, min_scale: float = 0.72):
-    """Lay a caption cue into AT MOST TWO lines within `safe_w`. Returns (break_index, fit_fs):
-    break_index = number of tokens on line 1 (None → one line), fit_fs = the font size to use
-    (<= fs, floored at min_scale*fs) so the widest resulting line fits. A single over-wide word (or
-    over-long two lines) is shrunk via fit_fs — never split into a third line."""
-    if not tokens:
-        return None, fs
-    widths = [_est_px(t, fs) for t in tokens]
-    sp = _est_px(" ", fs)
-    total = sum(widths) + sp * (len(tokens) - 1)
-    if len(tokens) == 1 or total <= safe_w:
-        fit = fs if total <= safe_w else max(min_scale * fs, fs * safe_w / max(total, 1.0))
-        return None, fit
-    # pick the break that minimises the WIDER line (tie-break toward a balanced midpoint)
+import unicodedata as _ud
+
+
+def _graphemes(s: str) -> list:
+    """Split into grapheme-ish clusters: a base char plus any trailing combining marks stays one
+    unit, so a break never lands in the middle of an accented / composed character."""
+    out: list = []
+    for ch in s:
+        if out and _ud.category(ch) in ("Mn", "Mc", "Me"):
+            out[-1] += ch
+        else:
+            out.append(ch)
+    return out
+
+
+def _pack_graphemes(text: str, fs: float, max_w: float) -> list:
+    """Grapheme-aware pack of `text` into the fewest runs whose each estimated width <= max_w."""
+    runs, cur, cw = [], "", 0.0
+    for g in _graphemes(text):
+        gw = _est_px(g, fs)
+        if cur and cw + gw > max_w:
+            runs.append(cur)
+            cur, cw = "", 0.0
+        cur += g
+        cw += gw
+    if cur:
+        runs.append(cur)
+    return runs or [text]
+
+
+def split_wide_cells(tokens: list, base_fs: float, safe_w: float, *,
+                     peak_extra: float = 0.5, pad: float = 0.0, min_fs_frac: float = 0.5):
+    """Turn caption `tokens` into display CELLS that each fit one line — grapheme-splitting any
+    pathological unbroken token (a 60/100-char run) that is wider than the safe area even at the
+    minimum font. Returns (cells, index_map): index_map[i] = the original token index of cell i, so
+    callers can map word emphasis / karaoke timing back after a split. Spoken text is never dropped.
+    Only a genuinely un-wrappable token splits (a real long word like 'antidisestablishmentarianism'
+    is left whole); when one does, it is cut into FINE runs so the two-line layout can balance them
+    closely (less horizontal compression, more readable) rather than into a few coarse halves."""
+    safe = max(120.0, float(safe_w) - float(pad))
+    fs_floor = base_fs * min_fs_frac
+    cell_budget = safe / (1.0 + peak_extra)                # decision: fits one line even at peak?
+    run_budget = max(safe * 0.10, cell_budget / 3.0)       # when splitting, use fine runs to balance
+    cells, imap = [], []
+    for i, t in enumerate(tokens):
+        if _est_px(t, fs_floor) > cell_budget and len(_graphemes(t)) > 1:
+            for run in _pack_graphemes(t, fs_floor, run_budget):
+                cells.append(run)
+                imap.append(i)
+        else:
+            cells.append(t)
+            imap.append(i)
+    return cells, imap
+
+
+def layout_two_lines(cells: list, base_fs: float, safe_w: float, *,
+                     peak_extra: float = 0.5, pad: float = 0.0, min_fs_frac: float = 0.5):
+    """GUARANTEED ≤2-line, no-clip layout of pre-sized `cells` within (safe_w - pad). Returns
+    (break_index, fit_fs, squeeze): break_index = cells on line 1 (None = one line); fit_fs = font
+    size (<= base_fs, floored); squeeze = horizontal \\fscx percent (100 = none).
+
+    Normal path: the layout is evaluated at the active-word PEAK (the popped word grows by
+    peak_extra, e.g. 0.5 = 150%) and fit_fs is shrunk so even the peak line fits — squeeze stays 100
+    and the caller keeps its per-word emphasis animation. Pathological path (a 60/100-char unbroken
+    token where even the floored font on two lines still overflows): the caller is signalled — via
+    squeeze < 100 — to DROP the emphasis pop for that cue and apply a bounded horizontal compression
+    so the text still fits exactly. Spoken text is never truncated and a third line never appears."""
+    safe = max(120.0, float(safe_w) - float(pad))
+    fs_floor = base_fs * min_fs_frac
+
+    def line_w(seg, fs, pk):                                # width of a line of cells at scale `pk`
+        if not seg:
+            return 0.0
+        wsum = sum(_est_px(c, fs) for c in seg)
+        spc = _est_px(" ", fs) * max(0, len(seg) - 1)
+        return wsum + spc + pk * max(_est_px(c, fs) for c in seg)
+
+    # ONE line whenever the whole cue fits (peak reserved) — a break is only introduced when needed.
+    if len(cells) <= 1 or line_w(cells, base_fs, peak_extra) <= safe:
+        w1 = line_w(cells, base_fs, peak_extra)
+        if w1 <= safe:
+            return None, base_fs, 100
+        # single un-splittable cell too wide even alone: shrink, then compress as a last resort
+        fit1 = max(fs_floor, base_fs * safe / max(w1, 1.0))
+        if line_w(cells, fit1, peak_extra) <= safe + 0.5:
+            return None, fit1, 100
+        fit1f = max(fs_floor, base_fs * safe / max(line_w(cells, base_fs, 0.0), 1.0))
+        sq1 = int(safe * 0.98 / max(line_w(cells, fit1f, 0.0), 1.0) * 100)
+        return None, fit1f, max(1, min(100, sq1))
+    # TWO lines: pick the break that minimises the wider line (peak-aware), tie → most balanced
     best = None
-    for b in range(1, len(tokens)):
-        w1 = sum(widths[:b]) + sp * max(0, b - 1)
-        w2 = sum(widths[b:]) + sp * max(0, len(tokens) - b - 1)
+    for b in range(1, len(cells)):
+        w1, w2 = line_w(cells[:b], base_fs, peak_extra), line_w(cells[b:], base_fs, peak_extra)
         key = (round(max(w1, w2), 2), round(abs(w1 - w2), 2))
         if best is None or key < best[0]:
-            best = (key, b, max(w1, w2))
-    _, b, widest = best
-    fit = fs if widest <= safe_w else max(min_scale * fs, fs * safe_w / max(widest, 1.0))
-    return b, fit
+            best = (key, b)
+    bidx = best[1]
+
+    def widest(fs, pk):
+        return max(line_w(cells[:bidx], fs, pk), line_w(cells[bidx:], fs, pk))
+
+    # 1) fits at full size with the peak reserved → nothing to do
+    if widest(base_fs, peak_extra) <= safe:
+        return bidx, base_fs, 100
+    # 2) shrink the font (floored) so the PEAK line fits → emphasis stays on, no compression
+    fit_pk = max(fs_floor, base_fs * safe / max(widest(base_fs, peak_extra), 1.0))
+    if widest(fit_pk, peak_extra) <= safe + 0.5:
+        return bidx, fit_pk, 100
+    # 3) pathological: even the floored font can't hold the peak on two lines. Drop the peak (caller
+    #    turns off the emphasis pop) and compress horizontally the last, bounded amount to fit.
+    fit_flat = max(fs_floor, base_fs * safe / max(widest(base_fs, 0.0), 1.0))
+    w_flat = widest(fit_flat, 0.0)
+    squeeze = int(safe * 0.98 / max(w_flat, 1.0) * 100)    # 0.98 guards rounding; always makes it fit
+    return bidx, fit_flat, max(1, min(100, squeeze))
 
 
 def write_ass(
@@ -273,6 +363,15 @@ def write_ass(
                 _ss_size, _ss_margin, _ss_emph, _ss_bounce, _ss_font = _p
     except Exception:                                       # noqa: BLE001
         pass
+    # PER-PRESET WORD MOTION — a caption preset declares its own active-word emphasis intensity +
+    # bounce ('motion' in the style dict). It OVERRIDES the (skipped-when-locked) subtitle_style
+    # motion so the preset owns the pop: minimal/cinematic/documentary stay restrained & un-bounced,
+    # professional is a controlled premium lift, focus is the strongest word-synced emphasis. Because
+    # locked presets never load subtitle_style, this is the SOLE motion source for them → locked.
+    _motion = style.get("motion")
+    if isinstance(_motion, dict):
+        _ss_emph = float(_motion.get("emphasis", _ss_emph))
+        _ss_bounce = bool(_motion.get("bounce", _ss_bounce))
     _base_size = int(style["size"] * 1.06)
     big = max(18, int(_base_size * _ch_size_mult * _ss_size))
     hi = _ass_color(accent)
@@ -322,10 +421,10 @@ Style: Main,{_ass_font},{big},{style['primary']},{style['outline']},{style['back
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-    # subtitle_style emphasis intensity — scale how far above 100% the
-    # spoken / key / punch words pop (1.0 = legacy 116/110/138-150).
+    # emphasis intensity — scale how far above 100% the spoken / key / punch words pop, driven by
+    # the preset's motion (_ss_emph). Minimal ~0.30 barely lifts; focus ~1.15 hits hardest.
     def _sc(v: int) -> int:
-        return int(round(100 + (v - 100) * _ss_emph))
+        return max(100, int(round(100 + (v - 100) * _ss_emph)))
     _e_p0, _e_pk = _sc(138), _sc(150)          # punch rest, peak
     _e_spoken, _e_key = _sc(116), _sc(110)
     if _ss_bounce:
@@ -336,33 +435,53 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         _punch = f"\\b1\\c{hi}\\fscx{_e_p0}\\fscy{_e_p0}"
     _spoke = f"\\b1\\c{hi}\\fscx{_e_spoken}\\fscy{_e_spoken}"
     _keyw = f"\\b1\\c{hi}\\fscx{_e_key}\\fscy{_e_key}"
-    # TWO-LINE ENFORCEMENT (max_lines) — a cue is laid into AT MOST two lines within the horizontal
-    # safe area (play_w minus the L/R margins). One \N at the most-balanced word boundary; a cue (or
-    # a single over-long word) that still overflows is shrunk via a bounded per-cue font size (\fs),
-    # NEVER a third line. The break index + fit size are computed ONCE per cue so every karaoke
-    # word-frame keeps the identical layout; \r resets re-apply the fit size so it survives.
+    # LAYOUT — a cue is laid into AT MOST two lines that fit the horizontal SAFE area even at the
+    # active-word PEAK. The safe width reserves the L/R margins PLUS the outline+shadow bleed; the
+    # peak factor is the widest state any word reaches (punch peak, e.g. 150% → 0.5). A single
+    # over-wide token is grapheme-split (split_wide_cells) so it wraps within the two lines; the
+    # widest peak line is then shrunk with a bounded per-cue \fs — never a third line, never a clip,
+    # never truncated. Break + fit are computed ONCE per cue so every karaoke frame shares the
+    # identical layout; \r resets re-apply the fit \fs so it survives.
     _max_lines = int(style.get("max_lines", 2) or 2)
+    _peak_extra = max(0.0, (max(_e_pk, _e_spoken, _e_key) - 100) / 100.0)
+    _pad = 2.0 * (float(style.get("outline_w", 2) or 0) + float(style.get("shadow", 1) or 0) + 2.0)
     _safe_w = max(200.0, float(play_w) - _ml - _mr)
     lines = [header]
     cues = _group(words)
     for cue in cues:
         toks = [_esc(w.word) for w in cue]
         n = len(cue)
-        _bidx, _fit = (_two_line_split(toks, float(big), _safe_w) if _max_lines >= 2
-                       else (None, float(big)))
+        # display cells (over-wide words grapheme-split) + map back to the source word index
+        cells, imap = split_wide_cells(toks, float(big), _safe_w, peak_extra=_peak_extra, pad=_pad)
+        # a word that had to be grapheme-split spans multiple cells (possibly across the line break):
+        # never pop it, because all its cells would scale at once and blow past the single-cell peak
+        # the layout reserved. Such tokens are pathological anyway — they render calm and plain.
+        _split_src = {j for j in set(imap) if imap.count(j) > 1}
+        _bidx, _fit, _squeeze = (
+            layout_two_lines(cells, float(big), _safe_w, peak_extra=_peak_extra, pad=_pad)
+            if _max_lines >= 2 else (None, float(big), 100))
+        # squeeze < 100 only on a pathological cue (a 60/100-char unbroken token): drop the emphasis
+        # pop for THIS cue and apply a bounded horizontal \fscx compression so it fits without a
+        # third line or truncation. \fscy stays 100 so text height (readability) is preserved.
+        _emph_on = _squeeze >= 100
         _scaled = _fit < float(big) - 0.5
-        _fs = f"\\fs{int(round(_fit))}"
-        _reset = "\\r" + (_fs if _scaled else "")
-        _prefix = "{%s}" % _fs if _scaled else ""
+        _cue = (f"\\fs{int(round(_fit))}" if _scaled else "")
+        if not _emph_on:
+            _cue += f"\\fscx{_squeeze}"
+        _reset = "\\r" + _cue
+        _prefix = "{%s}" % _cue if _cue else ""
         for k, w in enumerate(cue):
             ws = w.start
             we = max(w.end, ws + 0.06)
             if k == n - 1:                       # hold last word to cue end
                 we = max(we, cue[-1].end)
             parts = []
-            for j, tk in enumerate(toks):
-                is_emph = _norm(cue[j].word) in emphasis_words
-                if j == k and is_emph:           # the punch word, on beat
+            for ci, tk in enumerate(cells):
+                j = imap[ci]                     # source word index of this cell
+                is_emph = _emph_on and (_norm(cue[j].word) in emphasis_words)
+                if not _emph_on or j in _split_src:   # pathological cue / split word: plain, no pop
+                    parts.append(tk)
+                elif j == k and is_emph:         # the punch word, on beat
                     parts.append(f"{{{_punch}}}{tk}{{{_reset}}}")
                 elif j == k:                     # the spoken word: pop
                     parts.append(f"{{{_spoke}}}{tk}{{{_reset}}}")

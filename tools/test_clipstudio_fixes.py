@@ -4097,7 +4097,7 @@ def test_caption_correctness():
             os.environ["VIDLORE_SUBTITLE_STYLE"] = _oldss
 
     # ── (4) TWO-LINE ENFORCEMENT — real generated ASS, never a third line ────────────────────────
-    from vidlore.captions import _two_line_split
+    from vidlore.captions import split_wide_cells, layout_two_lines
     capd, acc = CP.CAPTION_PRESETS["professional"].theme_caption()
     _big = int(capd["size"] * 1.06)
     _safe = 1920 - 90 - 90
@@ -4129,8 +4129,10 @@ def test_caption_correctness():
           _max_breaks(write_ass(_p, _tmp / "p.ass", style=capd, accent=acc)) <= 1
           and _max_breaks(write_ass(_cjk, _tmp / "cjk.ass", style=capd, accent=acc)) <= 1
           and _max_breaks(write_ass(_rtl, _tmp / "rtl.ass", style=capd, accent=acc)) <= 1)
+    _wc, _wi = split_wide_cells(_wide, float(_big), float(_safe))
+    _wb, _wf, _wsq = layout_two_lines(_wc, float(_big), float(_safe))
     check("two-line: split picks a balanced midpoint boundary for a wide cue",
-          _two_line_split(_wide, _big, _safe)[0] in (2, 3, 4))
+          _wb in (2, 3, 4) and _wsq == 100)
 
     # ── (6) REAL Flask POST — the portal actually sends validated caption settings to the worker ──
     import vidlore.clipstudio.web as _web
@@ -4173,6 +4175,171 @@ def test_caption_correctness():
               and _captured.get("captions_enabled") is True)
     finally:
         _web._ROOT, _web._run_job = _orig_root, _orig_run
+
+
+def test_caption_motion_presets():
+    print("[captions] per-preset word MOTION (gap 4) — locked, distinct, tasteful")
+    import re
+    import tempfile
+    from pathlib import Path as _P
+    from vidlore.clipstudio import caption_presets as CP
+    from vidlore.tts import WordTiming
+    from vidlore.captions import write_ass
+    _tmp = _P(tempfile.mkdtemp(prefix="capmotion_"))
+    _words = [WordTiming("Power", 0.0, 0.4), WordTiming("corrupts", 0.4, 1.0),
+              WordTiming("always", 1.0, 1.5)]
+
+    def _max_fscx(txt):
+        vals = [int(x) for x in re.findall(r"\\fscx(\d+)", txt)]
+        return max(vals) if vals else 100
+
+    def _has_bounce(txt):                                  # the punch bounce is an animated \t
+        return "\\t(" in txt
+
+    _peak, _bounce = {}, {}
+    for name in CP.VALID_STYLES:
+        cap, acc = CP.CAPTION_PRESETS[name].theme_caption()
+        _txt = write_ass(_words, _tmp / f"{name}.ass", style=cap, accent=acc,
+                         emphasis_words={"corrupts"}).read_text()
+        _peak[name], _bounce[name] = _max_fscx(_txt), _has_bounce(_txt)
+    check("motion: focus is the strongest word-synced emphasis",
+          _peak["focus"] == max(_peak.values()) and _peak["focus"] > _peak["professional"])
+    check("motion: minimal is the most restrained pop",
+          _peak["minimal"] == min(_peak.values()) and _peak["minimal"] < _peak["professional"])
+    check("motion: cinematic + documentary sit below professional (subtle, readable)",
+          _peak["cinematic"] < _peak["professional"] and _peak["documentary"] < _peak["professional"])
+    check("motion: ONLY focus bounces; minimal/cinematic/documentary/professional stay calm",
+          _bounce["focus"] and not any(_bounce[n] for n in
+                                       ("minimal", "cinematic", "documentary", "professional")))
+    _m = {n: CP.CAPTION_PRESETS[n].theme_caption()[0].get("motion") for n in CP.VALID_STYLES}
+    check("motion: every preset emits a 'motion' (emphasis+bounce) in its caption dict",
+          all(isinstance(_m[n], dict) and "emphasis" in _m[n] and "bounce" in _m[n]
+              for n in CP.VALID_STYLES))
+    # PRESET-LOCK also locks motion: an active subtitle_style must not alter a locked preset's motion
+    _old = os.environ.get("VIDLORE_SUBTITLE_STYLE")
+    os.environ["VIDLORE_SUBTITLE_STYLE"] = "1"
+    try:
+        cap, acc = CP.CAPTION_PRESETS["focus"].theme_caption()      # locked
+        _lk = write_ass(_words, _tmp / "focus_locked.ass", style=cap, accent=acc,
+                        emphasis_words={"corrupts"}).read_text()
+        check("motion: preset-lock locks motion too (subtitle_style can't override)",
+              _max_fscx(_lk) == _peak["focus"] and _has_bounce(_lk))
+    finally:
+        if _old is None:
+            os.environ.pop("VIDLORE_SUBTITLE_STYLE", None)
+        else:
+            os.environ["VIDLORE_SUBTITLE_STYLE"] = _old
+
+
+def test_caption_pixel_bbox():
+    print("[captions] PIXEL validation (gaps 1-3) — real libass render, measured bbox in safe margins")
+    import tempfile
+    from pathlib import Path as _P
+    try:
+        sys.path.insert(0, str(_P(__file__).resolve().parent))
+        from caption_pixel_probe import (have_libass, render_frame, measure,
+                                          _write_narration, _cases, FFMPEG)
+    except Exception as _e:                                # probe/deps missing → honest skip
+        check(f"pixel: probe unavailable, skipped ({type(_e).__name__})", True)
+        return
+    if not have_libass():
+        check("pixel: libass subtitles filter unavailable — skipped (documented limitation)", True)
+        return
+    from vidlore.clipstudio import caption_presets as CP
+    style, accent = CP.CAPTION_PRESETS["professional"].theme_caption()
+    _tmp = _P(tempfile.mkdtemp(prefix="cappix_"))
+    ml, _bad, _measured = 90, [], 0
+    for label, words, emph, t in _cases():                 # normal + peak-animation sample times
+        for (w, h, tag) in ((1920, 1080, "1080p"), (1280, 720, "720p")):
+            ass = _tmp / f"{label}.ass"
+            _write_narration(words, style, accent, emph, ass)
+            png = _tmp / f"{label}_{tag}.png"
+            if not render_frame(ass, png, w=w, h=h, t=t):
+                continue
+            m = measure(png)
+            _measured += 1
+            safe_l = ml * (w / 1920.0)
+            if m["empty"] or m["rows"] > 2 or m["margin_l"] < safe_l - 6 or m["margin_r"] < safe_l - 6:
+                _bad.append((label, tag, m))
+    check(f"pixel: {_measured} rendered caption frames all ≤2 rows AND inside safe margins (0 clips)",
+          _measured >= 15 and not _bad)
+    if _bad:
+        print("   OUT-OF-SAFE:", [(b[0], b[1], b[2].get("rows"), b[2].get("margin_l"),
+                                   b[2].get("margin_r")) for b in _bad[:4]])
+    # Caption OFF → zero visible caption ink (no subtitle burn at all)
+    import subprocess as _sp
+    _blank = _tmp / "off.png"
+    _sp.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+             "-i", "color=c=black:s=1280x720:d=1", "-frames:v", "1", str(_blank)],
+            check=True, capture_output=True)
+    _mo = measure(_blank)
+    check("pixel: Caption OFF renders zero visible caption ink", _mo.get("empty") or _mo.get("px") == 0)
+
+
+def test_breakout_caption_layout():
+    print("[captions] breakout width-aware karaoke (gap 1) — ≤2 rows, timing preserved, ASR floor")
+    import re
+    import tempfile
+    import types as _ty
+    from pathlib import Path as _P
+    try:
+        import faster_whisper as _fw
+    except Exception:
+        check("breakout-layout: faster_whisper unavailable — skipped", True)
+        return
+    import vidlore.clipstudio.build as B
+    from vidlore.clipstudio import caption_presets as CP
+
+    class _FW:                                             # canned word timestamps (no audio/model)
+        def __init__(self, word, start, end, probability=0.99):
+            self.word, self.start, self.end, self.probability = word, start, end, probability
+
+    class _Seg:
+        def __init__(self, words):
+            self.words = words
+
+    _canned = {"segs": []}
+
+    class _FakeModel:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, audio, **k):
+            return _canned["segs"], _ty.SimpleNamespace()
+
+    _orig, _fw.WhisperModel = _fw.WhisperModel, _FakeModel
+    _tmp = _P(tempfile.mkdtemp(prefix="bkcap_"))
+    _pre = CP.CAPTION_PRESETS["professional"]
+    caps = [{"audio": str(_tmp / "a.wav"), "start": 10.0, "dur": 4.0}]
+    try:
+        # FIVE long W-heavy words → wrap into ≤2 rows per karaoke line, never a clipped third
+        _five = [_FW("WWWWWWWWWWWW", i * 0.4, i * 0.4 + 0.35) for i in range(5)]
+        _canned["segs"] = [_Seg(_five)]
+        out = _tmp / "bk.ass"
+        B._breakout_caption_ass(caps, out, log=None, preset=_pre)
+        _dlg = [l for l in out.read_text().splitlines() if l.startswith("Dialogue")]
+        check("breakout: five long words wrap ≤2 rows per line (one \\N max, never a third)",
+              _dlg and all(l.count("\\N") <= 1 for l in _dlg))
+        check("breakout: word-sync karaoke \\kf tags preserved on every line",
+              _dlg and all("\\kf" in l for l in _dlg))
+        _cs = sum(int(x) for l in _dlg for x in re.findall(r"\\kf(\d+)", l))
+        _exp = sum(int(round((w.end - w.start) * 100)) for w in _five)
+        check("breakout: total karaoke fill preserves the spoken word durations (timing unchanged)",
+              abs(_cs - _exp) <= len(_five) * 3 + 6)
+        # a PATHOLOGICAL 80-char unbroken word → grapheme-split, still ≤2 rows, never truncated
+        _canned["segs"] = [_Seg([_FW("W" * 80, 0.0, 1.0)])]
+        out2 = _tmp / "bk2.ass"
+        B._breakout_caption_ass(caps, out2, log=None, preset=_pre)
+        _d2 = [l for l in out2.read_text().splitlines() if l.startswith("Dialogue")]
+        check("breakout: an 80-char unbroken word wraps ≤2 rows (grapheme-split, never a third)",
+              _d2 and all(l.count("\\N") <= 1 for l in _d2))
+        # ASR-confidence floor still drops a low-confidence line (no wrong word burned)
+        _canned["segs"] = [_Seg([_FW("garbled", 0.0, 0.5, probability=0.10)])]
+        _r3 = B._breakout_caption_ass(caps, _tmp / "bk3.ass", log=None, preset=_pre)
+        check("breakout: a sub-floor ASR line is dropped (a missing line beats a wrong one)",
+              _r3 is None)
+    finally:
+        _fw.WhisperModel = _orig
 
 
 def main():
@@ -4221,6 +4388,9 @@ def main():
     test_breakout_atomic_composition()
     test_caption_presets()
     test_caption_correctness()
+    test_caption_motion_presets()
+    test_breakout_caption_layout()
+    test_caption_pixel_bbox()
     print(f"\n{PASS} passed · {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

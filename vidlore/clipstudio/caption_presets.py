@@ -54,6 +54,9 @@ class CaptionPreset:
     back_alpha: int                  # 0x00 opaque … 0xFF transparent
     margin_v: int
     max_lines: int
+    # ---- active-word MOTION (locked per preset) — emphasis intensity (1.0 = legacy pop) + bounce ----
+    emphasis: float                  # 0.30 restrained … 1.15 strongest
+    bounce: bool                     # the scale-pulse on the punch word (social-style) — off = calm
     # ---- breakout dialogue caption variant (same design family, gold karaoke fill) ----
     bk_font: str
     bk_size: int
@@ -80,8 +83,11 @@ class CaptionPreset:
             "shadow": self.shadow,
             "margin_v": self.margin_v,
             "max_lines": self.max_lines,
+            # the preset OWNS its active-word motion; because a locked preset never loads the
+            # legacy subtitle_style, this 'motion' is the sole (locked) source of emphasis/bounce.
+            "motion": {"emphasis": self.emphasis, "bounce": self.bounce},
             # a ClipStudio-selected preset is EXACT: write_ass must not let Look-DNA / legacy
-            # subtitle_style silently re-skin its font / size / margin / weight / emphasis.
+            # subtitle_style silently re-skin its font / size / margin / weight / emphasis / motion.
             "preset_locked": True,
         }
         return cap, tuple(self.accent_rgb)
@@ -135,6 +141,7 @@ CAPTION_PRESETS: dict[str, CaptionPreset] = {
         primary_rgb=(255, 255, 255), accent_rgb=(255, 196, 84),
         outline_rgb=(12, 12, 12), outline_w=2.6, shadow=1.2, border_style=1,
         back_rgb=(0, 0, 0), back_alpha=0x82, margin_v=72, max_lines=2,
+        emphasis=0.75, bounce=False,
         bk_font="Arial Black", bk_size=62, bk_sung_rgb=(255, 200, 60), bk_unsung_rgb=(230, 230, 230),
         bk_outline_rgb=(0, 0, 0), bk_outline_w=3.4, bk_shadow=1.4, bk_border_style=1,
         bk_back_alpha=0x78, bk_margin_v=150),
@@ -147,6 +154,7 @@ CAPTION_PRESETS: dict[str, CaptionPreset] = {
         primary_rgb=(248, 248, 248), accent_rgb=(244, 236, 214),
         outline_rgb=(18, 18, 18), outline_w=1.4, shadow=0.6, border_style=1,
         back_rgb=(0, 0, 0), back_alpha=0x9A, margin_v=66, max_lines=2,
+        emphasis=0.30, bounce=False,
         bk_font="Arial", bk_size=56, bk_sung_rgb=(250, 244, 224), bk_unsung_rgb=(210, 210, 210),
         bk_outline_rgb=(16, 16, 16), bk_outline_w=1.8, bk_shadow=0.8, bk_border_style=1,
         bk_back_alpha=0x9A, bk_margin_v=150),
@@ -160,6 +168,7 @@ CAPTION_PRESETS: dict[str, CaptionPreset] = {
         primary_rgb=(240, 244, 250), accent_rgb=(232, 200, 128),
         outline_rgb=(16, 20, 28), outline_w=1.8, shadow=1.0, border_style=1,
         back_rgb=(0, 0, 0), back_alpha=0x88, margin_v=104, max_lines=2,
+        emphasis=0.45, bounce=False,
         bk_font="Arial", bk_size=58, bk_sung_rgb=(236, 206, 132), bk_unsung_rgb=(224, 228, 234),
         bk_outline_rgb=(12, 16, 24), bk_outline_w=2.2, bk_shadow=1.2, bk_border_style=1,
         bk_back_alpha=0x82, bk_margin_v=176),
@@ -173,6 +182,7 @@ CAPTION_PRESETS: dict[str, CaptionPreset] = {
         primary_rgb=(255, 255, 255), accent_rgb=(236, 206, 110),
         outline_rgb=(0, 0, 0), outline_w=0.6, shadow=0.0, border_style=3,
         back_rgb=(0, 0, 0), back_alpha=0x5A, margin_v=64, max_lines=2,
+        emphasis=0.35, bounce=False,
         bk_font="Arial", bk_size=52, bk_sung_rgb=(240, 210, 110), bk_unsung_rgb=(236, 236, 236),
         bk_outline_rgb=(0, 0, 0), bk_outline_w=0.8, bk_shadow=0.0, bk_border_style=3,
         bk_back_alpha=0x50, bk_margin_v=150),
@@ -186,6 +196,7 @@ CAPTION_PRESETS: dict[str, CaptionPreset] = {
         primary_rgb=(255, 255, 255), accent_rgb=(255, 178, 40),
         outline_rgb=(10, 10, 10), outline_w=2.8, shadow=1.2, border_style=1,
         back_rgb=(0, 0, 0), back_alpha=0x80, margin_v=74, max_lines=2,
+        emphasis=1.15, bounce=True,
         bk_font="Arial Black", bk_size=64, bk_sung_rgb=(255, 184, 40), bk_unsung_rgb=(226, 226, 226),
         bk_outline_rgb=(0, 0, 0), bk_outline_w=3.6, bk_shadow=1.4, bk_border_style=1,
         bk_back_alpha=0x74, bk_margin_v=150),
