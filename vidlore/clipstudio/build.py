@@ -2929,7 +2929,7 @@ def wqc_render_log_line(act: str, meta: dict, why: str) -> str:
 
 
 def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfig, *,
-                voice: str = "", captions: bool = True, title: str = "",
+                voice: str = "", captions: Optional[bool] = None, title: str = "",
                 theme_name: str = "history", music: Optional[str] = None,
                 voiceover: Optional[str] = None, voice_provider: str = "",
                 voice_preset: str = "", caption_style: str = "",
@@ -2959,12 +2959,13 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     out_path = proj.output_dir / "final.mp4"
     sel_by_idx = {s.segment_index: s for s in proj.selections}
 
-    # CAPTION PRESET + ON/OFF (single resolution point for the whole render — every downstream
-    # caption gate reads _cap_on / _cap_preset, never the raw args). Env can force either.
-    from .caption_presets import resolve_style as _resolve_cap_style
-    _cap_env = os.environ.get("VIDLORE_CLIPSTUDIO_CAPTIONS", "").strip().lower()
-    _cap_on = (_cap_env not in ("0", "false", "no", "off")) if _cap_env in \
-        ("0", "1", "true", "false", "yes", "no", "on", "off") else bool(captions)
+    # CAPTION PRESET + ON/OFF — the single resolution point for the whole render (every downstream
+    # caption gate reads _cap_on / _cap_preset, never the raw args). Precedence via the centralized
+    # resolvers: an EXPLICIT value wins; the env var is a fallback only when nothing was supplied
+    # (captions=None); default = captions ON + professional.
+    from .caption_presets import (resolve_style as _resolve_cap_style,
+                                   captions_enabled as _captions_enabled)
+    _cap_on = _captions_enabled(captions)
     _cap_preset, _cap_invalid = _resolve_cap_style(caption_style)
     if _cap_invalid:
         # the offending value may have come from the arg OR the env — report whichever was set
@@ -2973,10 +2974,13 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         log(f"build: invalid caption style {str(_bad)!r} — using {_cap_preset.name}")
     log(f"build: captions={'on' if _cap_on else 'off'} "
         f"style={_cap_preset.name if _cap_on else 'none'}")
-    try:                                                    # persist so the project can rebuild same
+    # persist ATOMICALLY to project.json so a rebuild (rerender_project) reproduces the exact design.
+    # The orchestrator's last proj.save() runs BEFORE build, so build_video owns this write.
+    try:
         proj.meta["caption_settings"] = {"enabled": bool(_cap_on), "style": _cap_preset.name}
-    except Exception:
-        pass
+        proj.save()
+    except Exception as _e:                                # noqa: BLE001
+        log(f"build: caption-settings persist skipped ({str(_e)[:60]})")
 
     # 1) engine Script from our segments (narration text per scene)
     scenes = [Scene(index=seg.index, narration=seg.text,

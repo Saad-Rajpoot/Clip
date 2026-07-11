@@ -162,6 +162,58 @@ _SUBTITLE_STYLE = {
 _SUB_FONT = {"serif": "Georgia", "mono": "Courier New", "sans": "Arial"}
 
 
+def _char_w_factor(ch: str) -> float:
+    """Rough per-character advance as a fraction of the font size (proportional-font estimate;
+    good enough to decide line breaks + a fit-scale, never pixel-exact). CJK/Hangul/kana are
+    treated as ~1em wide."""
+    o = ord(ch)
+    if o < 0x20:
+        return 0.0
+    if ch == " ":
+        return 0.32
+    if (0x1100 <= o <= 0x115F or 0x2E80 <= o <= 0xA4CF or 0xAC00 <= o <= 0xD7A3
+            or 0xF900 <= o <= 0xFAFF or 0xFE30 <= o <= 0xFE4F or 0xFF00 <= o <= 0xFF60
+            or 0xFFE0 <= o <= 0xFFE6 or 0x3040 <= o <= 0x30FF):
+        return 1.0
+    if ch in "iIl.,:;'!|":
+        return 0.30
+    if ch in "mwMW@":
+        return 0.86
+    if ch.isupper():
+        return 0.62
+    return 0.52
+
+
+def _est_px(text: str, fs: float) -> float:
+    return sum(_char_w_factor(c) for c in text) * fs
+
+
+def _two_line_split(tokens: list, fs: float, safe_w: float, min_scale: float = 0.72):
+    """Lay a caption cue into AT MOST TWO lines within `safe_w`. Returns (break_index, fit_fs):
+    break_index = number of tokens on line 1 (None → one line), fit_fs = the font size to use
+    (<= fs, floored at min_scale*fs) so the widest resulting line fits. A single over-wide word (or
+    over-long two lines) is shrunk via fit_fs — never split into a third line."""
+    if not tokens:
+        return None, fs
+    widths = [_est_px(t, fs) for t in tokens]
+    sp = _est_px(" ", fs)
+    total = sum(widths) + sp * (len(tokens) - 1)
+    if len(tokens) == 1 or total <= safe_w:
+        fit = fs if total <= safe_w else max(min_scale * fs, fs * safe_w / max(total, 1.0))
+        return None, fit
+    # pick the break that minimises the WIDER line (tie-break toward a balanced midpoint)
+    best = None
+    for b in range(1, len(tokens)):
+        w1 = sum(widths[:b]) + sp * max(0, b - 1)
+        w2 = sum(widths[b:]) + sp * max(0, len(tokens) - b - 1)
+        key = (round(max(w1, w2), 2), round(abs(w1 - w2), 2))
+        if best is None or key < best[0]:
+            best = (key, b, max(w1, w2))
+    _, b, widest = best
+    fit = fs if widest <= safe_w else max(min_scale * fs, fs * safe_w / max(widest, 1.0))
+    return b, fit
+
+
 def write_ass(
     words: list[WordTiming],
     out_path: Path,
@@ -180,6 +232,11 @@ def write_ass(
     font, size, primary, outline, back, bold, border_style, outline_w,
     shadow, margin_v."""
     emphasis_words = emphasis_words or set()
+    # PRESET LOCK — when the caller declares an exact caption preset (ClipStudio's caption-preset
+    # system sets style['preset_locked']=True), the per-channel Look-DNA overrides and the legacy
+    # per-video subtitle_style family must NOT silently replace its font / size / margin / weight /
+    # emphasis personality. Other engine callers omit the flag → existing Look-DNA behaviour intact.
+    _locked = bool(style.get("preset_locked"))
     # Channel subtitle styling (P-subtitle).  Pulls font_size_mult,
     # fade timing, margin position, and emphasis-shake intensity
     # from Look DNA so Atlas reads tight + snappy, Amber reads
@@ -192,7 +249,7 @@ def write_ass(
     _ch_font_chain: list = []
     try:
         from .look_dna import current as _ld_current, look_get
-        if _ld_current() is not None:
+        if not _locked and _ld_current() is not None:
             _ch_size_mult     = float(look_get("captions.size_mult", 1.0) or 1.0)
             _ch_fade_in_ms    = int(look_get("captions.fade_in_ms", 140) or 140)
             _ch_fade_out_ms   = int(look_get("captions.fade_out_ms", 140) or 140)
@@ -208,7 +265,7 @@ def write_ass(
     _ss_size, _ss_margin, _ss_emph, _ss_bounce, _ss_font = 1.0, 1.0, 1.0, True, None
     try:
         import os as _os
-        if _os.environ.get("VIDLORE_SUBTITLE_STYLE", "1").strip().lower() \
+        if not _locked and _os.environ.get("VIDLORE_SUBTITLE_STYLE", "1").strip().lower() \
                 not in ("0", "false", "no", "off"):
             from .look_dna import look_get as _lg_ss
             _p = _SUBTITLE_STYLE.get((_lg_ss("subtitle_style") or "").strip().lower())
@@ -279,11 +336,24 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         _punch = f"\\b1\\c{hi}\\fscx{_e_p0}\\fscy{_e_p0}"
     _spoke = f"\\b1\\c{hi}\\fscx{_e_spoken}\\fscy{_e_spoken}"
     _keyw = f"\\b1\\c{hi}\\fscx{_e_key}\\fscy{_e_key}"
+    # TWO-LINE ENFORCEMENT (max_lines) — a cue is laid into AT MOST two lines within the horizontal
+    # safe area (play_w minus the L/R margins). One \N at the most-balanced word boundary; a cue (or
+    # a single over-long word) that still overflows is shrunk via a bounded per-cue font size (\fs),
+    # NEVER a third line. The break index + fit size are computed ONCE per cue so every karaoke
+    # word-frame keeps the identical layout; \r resets re-apply the fit size so it survives.
+    _max_lines = int(style.get("max_lines", 2) or 2)
+    _safe_w = max(200.0, float(play_w) - _ml - _mr)
     lines = [header]
     cues = _group(words)
     for cue in cues:
         toks = [_esc(w.word) for w in cue]
         n = len(cue)
+        _bidx, _fit = (_two_line_split(toks, float(big), _safe_w) if _max_lines >= 2
+                       else (None, float(big)))
+        _scaled = _fit < float(big) - 0.5
+        _fs = f"\\fs{int(round(_fit))}"
+        _reset = "\\r" + (_fs if _scaled else "")
+        _prefix = "{%s}" % _fs if _scaled else ""
         for k, w in enumerate(cue):
             ws = w.start
             we = max(w.end, ws + 0.06)
@@ -293,21 +363,24 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             for j, tk in enumerate(toks):
                 is_emph = _norm(cue[j].word) in emphasis_words
                 if j == k and is_emph:           # the punch word, on beat
-                    parts.append(f"{{{_punch}}}{tk}{{\\r}}")
+                    parts.append(f"{{{_punch}}}{tk}{{{_reset}}}")
                 elif j == k:                     # the spoken word: pop
-                    parts.append(f"{{{_spoke}}}{tk}{{\\r}}")
+                    parts.append(f"{{{_spoke}}}{tk}{{{_reset}}}")
                 elif is_emph:                    # key word, always lifted
-                    parts.append(f"{{{_keyw}}}{tk}{{\\r}}")
+                    parts.append(f"{{{_keyw}}}{tk}{{{_reset}}}")
                 else:
                     parts.append(tk)
-            txt = " ".join(parts)
+            if _bidx is None:
+                txt = " ".join(parts)
+            else:                                # exactly ONE line break at the chosen boundary
+                txt = " ".join(parts[:_bidx]) + "\\N" + " ".join(parts[_bidx:])
             fade = ""
             if k == 0:
                 fade = "{\\fad(%d,0)}" % _ch_fade_in_ms
             elif k == n - 1:
                 fade = "{\\fad(0,%d)}" % _ch_fade_out_ms
             lines.append(
-                f"Dialogue: 0,{_ts(ws)},{_ts(we)},Main,,0,0,0,,{fade}{txt}"
+                f"Dialogue: 0,{_ts(ws)},{_ts(we)},Main,,0,0,0,,{fade}{_prefix}{txt}"
             )
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return out_path

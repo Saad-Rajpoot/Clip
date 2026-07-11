@@ -4006,6 +4006,175 @@ def test_caption_presets():
           osrc.count("caption_style=caption_style") >= 2)
 
 
+def test_caption_correctness():
+    print("[captions] correctness pass — persist, precedence, preset lock, two-line, portal POST")
+    import tempfile
+    from pathlib import Path as _P
+    from vidlore.clipstudio import caption_presets as CP
+
+    # ── (1) PERSIST caption_settings to project.json — real save + reload roundtrip ──────────────
+    from vidlore.clipstudio.models import ClipProject
+    _root = _P(tempfile.mkdtemp(prefix="capproj_"))
+    proj = ClipProject(name="capttest", root=str(_root))
+    # replicate build_video's exact resolution + persist (real resolvers + real ClipProject.save)
+    _on = CP.captions_enabled(False)                       # explicit OFF
+    _preset, _ = CP.resolve_style("cinematic")
+    proj.meta["caption_settings"] = {"enabled": bool(_on), "style": _preset.name}
+    proj.save()
+    reloaded = ClipProject.load(_root)
+    _cs = reloaded.meta.get("caption_settings")
+    check("caption_settings survives save→reload exactly (enabled=False, style=cinematic)",
+          _cs == {"enabled": False, "style": "cinematic"})
+    # rerender_project consumes the reloaded values (mirror its read logic)
+    _capset = (reloaded.meta.get("caption_settings") or {})
+    check("rerender_project reads persisted caption settings from the reloaded project",
+          bool(_capset.get("enabled", True)) is False and str(_capset.get("style", "")) == "cinematic")
+    # build_video actually owns the write (its persist calls proj.save AFTER setting the meta)
+    _bsrc = (_P(__file__).resolve().parents[1] / "vidlore" / "clipstudio"
+             / "build.py").read_text(encoding="utf-8")
+    check("build_video persists atomically (proj.save after caption_settings)",
+          'proj.meta["caption_settings"] = {"enabled": bool(_cap_on), "style": _cap_preset.name}'
+          in _bsrc and "proj.save()" in _bsrc.split('proj.meta["caption_settings"]')[1][:80])
+
+    # ── (2) PRECEDENCE — explicit > env > default (centralized captions_enabled) ─────────────────
+    _oldC = os.environ.get("VIDLORE_CLIPSTUDIO_CAPTIONS")
+    try:
+        os.environ["VIDLORE_CLIPSTUDIO_CAPTIONS"] = "1"
+        check("env=1 + explicit False → OFF (explicit wins)", CP.captions_enabled(False) is False)
+        os.environ["VIDLORE_CLIPSTUDIO_CAPTIONS"] = "0"
+        check("env=0 + explicit True → ON (explicit wins)", CP.captions_enabled(True) is True)
+        check("no explicit + env=0 → OFF", CP.captions_enabled(None) is False)
+        os.environ.pop("VIDLORE_CLIPSTUDIO_CAPTIONS", None)
+        check("no explicit + no env → ON (default)", CP.captions_enabled(None) is True)
+    finally:
+        if _oldC is None:
+            os.environ.pop("VIDLORE_CLIPSTUDIO_CAPTIONS", None)
+        else:
+            os.environ["VIDLORE_CLIPSTUDIO_CAPTIONS"] = _oldC
+    check("build_video routes captions through captions_enabled (bool|None), not inline env logic",
+          "_cap_on = _captions_enabled(captions)" in _bsrc
+          and "captions: Optional[bool] = None" in _bsrc)
+
+    # ── (3) PRESET LOCK — Look-DNA / subtitle_style must NOT re-skin a locked preset ─────────────
+    from vidlore.captions import write_ass
+    from vidlore.tts import WordTiming
+    import vidlore.look_dna as _ld
+    _tmp = _P(tempfile.mkdtemp(prefix="caplock_"))
+    _words = [WordTiming(w, i * 0.3, (i + 1) * 0.3) for i, w in enumerate("Power is never given".split())]
+    _oldcur, _oldget, _oldss = _ld.current, _ld.look_get, os.environ.get("VIDLORE_SUBTITLE_STYLE")
+
+    def _style_line(ass_path):
+        return next(l for l in ass_path.read_text().splitlines() if l.startswith("Style: Main,"))
+    try:
+        # activate an aggressive Look-DNA that would blow up size + swap the font, + a subtitle_style
+        _ld.current = lambda: {"active": True}
+        _ld.look_get = lambda k, d=None: {"captions.size_mult": 1.6,
+                                          "captions.font_family": ["Impact"],
+                                          "captions.margin_v_mult": 1.5,
+                                          "subtitle_style": "bold_lower"}.get(k, d)
+        os.environ["VIDLORE_SUBTITLE_STYLE"] = "1"
+        for name in ("professional", "minimal", "focus"):
+            capd, acc = CP.CAPTION_PRESETS[name].theme_caption()
+            _sl = _style_line(write_ass(_words, _tmp / f"lock_{name}.ass", style=capd, accent=acc))
+            _f = _sl.split(",")
+            # Fontname (field 1 after 'Style: Main') must be the preset's font, Fontsize its own size
+            _expect_size = int(CP.CAPTION_PRESETS[name].size * 1.06)
+            check(f"locked preset '{name}' keeps its font ({capd['font']}) + size ({_expect_size}) "
+                  f"despite active Look-DNA",
+                  _f[1] == capd["font"] and abs(int(_f[2]) - _expect_size) <= 1)
+        # a NON-locked caption dict (other engine callers) still gets the Look-DNA override
+        _unlocked = {k: v for k, v in CP.CAPTION_PRESETS["professional"].theme_caption()[0].items()
+                     if k != "preset_locked"}
+        _slu = _style_line(write_ass(_words, _tmp / "unlocked.ass", style=_unlocked, accent=(255, 196, 84)))
+        _fu = _slu.split(",")
+        check("non-locked caller still honours Look-DNA (font swapped / size scaled)",
+              _fu[1] == "Impact" and int(_fu[2]) > int(CP.CAPTION_PRESETS["professional"].size * 1.06))
+    finally:
+        _ld.current, _ld.look_get = _oldcur, _oldget
+        if _oldss is None:
+            os.environ.pop("VIDLORE_SUBTITLE_STYLE", None)
+        else:
+            os.environ["VIDLORE_SUBTITLE_STYLE"] = _oldss
+
+    # ── (4) TWO-LINE ENFORCEMENT — real generated ASS, never a third line ────────────────────────
+    from vidlore.captions import _two_line_split
+    capd, acc = CP.CAPTION_PRESETS["professional"].theme_caption()
+    _big = int(capd["size"] * 1.06)
+    _safe = 1920 - 90 - 90
+
+    def _max_breaks(ass_path):
+        return max((l.count("\\N") for l in ass_path.read_text().splitlines()
+                    if l.startswith("Dialogue")), default=0)
+    # normal short sentence → one line
+    _n = [WordTiming(w, i * 0.3, (i + 1) * 0.3) for i, w in enumerate("Power is never given".split())]
+    check("two-line: a normal short cue stays on one line",
+          _max_breaks(write_ass(_n, _tmp / "n.ass", style=capd, accent=acc)) == 0)
+    # a WIDE single cue (6 long words) → exactly one break, never two
+    _wide = ["Extraordinary", "revolutionary", "transformation", "fundamentally", "reshaping", "everything"]
+    _w = [WordTiming(x, i * 0.2, (i + 1) * 0.2) for i, x in enumerate(_wide)]
+    check("two-line: a wide cue breaks into exactly two lines (one \\N, never a third)",
+          _max_breaks(write_ass(_w, _tmp / "w.ass", style=capd, accent=acc, emphasis_words={"revolutionary"})) == 1)
+    # an EXTREME single word → fit-scaled (\fs), never split, never a third line
+    _xl = [WordTiming("Supercalifragilisticexpialidociousantidisestablishmentarianism", 0, 1.0),
+           WordTiming("indeed", 1.0, 1.4)]
+    _xa = write_ass(_xl, _tmp / "xl.ass", style=capd, accent=acc)
+    check("two-line: an extreme long word is fit-scaled (\\fs), never a third line",
+          any("\\fs" in l for l in _xa.read_text().splitlines() if l.startswith("Dialogue"))
+          and _max_breaks(_xa) <= 1)
+    # punctuation + CJK + RTL never exceed one break
+    _p = [WordTiming(w, i * 0.3, (i + 1) * 0.3) for i, w in enumerate(["Power,", "is", "never—", "given!"])]
+    _cjk = [WordTiming("权力从来不是别人赐予的东西啊", 0, 0.5), WordTiming("而是自己夺来的", 0.5, 1.0)]
+    _rtl = [WordTiming("القوة", 0, 0.4), WordTiming("لا", 0.4, 0.6), WordTiming("تُمنح", 0.6, 1.0)]
+    check("two-line: punctuation / CJK / RTL never produce a third line",
+          _max_breaks(write_ass(_p, _tmp / "p.ass", style=capd, accent=acc)) <= 1
+          and _max_breaks(write_ass(_cjk, _tmp / "cjk.ass", style=capd, accent=acc)) <= 1
+          and _max_breaks(write_ass(_rtl, _tmp / "rtl.ass", style=capd, accent=acc)) <= 1)
+    check("two-line: split picks a balanced midpoint boundary for a wide cue",
+          _two_line_split(_wide, _big, _safe)[0] in (2, 3, 4))
+
+    # ── (6) REAL Flask POST — the portal actually sends validated caption settings to the worker ──
+    import vidlore.clipstudio.web as _web
+    _portal_root = _P(tempfile.mkdtemp(prefix="portal_"))
+    _orig_root, _orig_run = _web._ROOT, _web._run_job
+    _captured = {}
+
+    def _fake_run_job(jid, proj, **kw):                    # capture kwargs; never actually render
+        _captured["jid"] = jid
+        _captured.update(kw)
+    _web._ROOT = _portal_root
+    _web._run_job = _fake_run_job
+    try:
+        _web.app.config["TESTING"] = True
+        _c = _web.app.test_client()
+        import time as _t
+        _captured.clear()
+        _c.post("/create", data={"topic": "T", "script": "hello world", "captions": "0",
+                                 "caption_style": "cinematic"})
+        for _ in range(40):
+            if "caption_style" in _captured:
+                break
+            _t.sleep(0.05)
+        check("portal POST: captions OFF + cinematic reach the worker (real test_client)",
+              _captured.get("captions_enabled") is False and _captured.get("caption_style") == "cinematic")
+        _jid = _captured.get("jid")
+        check("portal POST: per-job caption settings stored on the job (no cross-job state)",
+              _web._JOBS.get(_jid, {}).get("captions_enabled") is False
+              and _web._JOBS.get(_jid, {}).get("caption_style") == "cinematic")
+        # a manipulated / unknown style clamps to the default before reaching the worker
+        _captured.clear()
+        _c.post("/create", data={"topic": "T", "script": "hi", "captions": "1",
+                                 "caption_style": "bogus'; DROP TABLE"})
+        for _ in range(40):
+            if "caption_style" in _captured:
+                break
+            _t.sleep(0.05)
+        check("portal POST: hostile/unknown caption_style is clamped to professional server-side",
+              _captured.get("caption_style") == "professional"
+              and _captured.get("captions_enabled") is True)
+    finally:
+        _web._ROOT, _web._run_job = _orig_root, _orig_run
+
+
 def main():
     test_verifier_promotion_rewrites_beat_windows()
     test_budget_loop_survives_plan_beats_failure()
@@ -4051,6 +4220,7 @@ def main():
     test_gemini_timeout_hardening()
     test_breakout_atomic_composition()
     test_caption_presets()
+    test_caption_correctness()
     print(f"\n{PASS} passed · {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

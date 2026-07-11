@@ -80,6 +80,9 @@ class CaptionPreset:
             "shadow": self.shadow,
             "margin_v": self.margin_v,
             "max_lines": self.max_lines,
+            # a ClipStudio-selected preset is EXACT: write_ass must not let Look-DNA / legacy
+            # subtitle_style silently re-skin its font / size / margin / weight / emphasis.
+            "preset_locked": True,
         }
         return cap, tuple(self.accent_rgb)
 

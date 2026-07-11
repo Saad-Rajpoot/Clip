@@ -54,7 +54,7 @@ def _scaled_source_budget(max_sources: int, n_beats: int, video_type: str = "") 
 def produce(project_dir, *, script_path: Optional[str] = None, script_text: Optional[str] = None,
             source_specs: Optional[list[SourceSpec]] = None, name: str = "",
             cfg: Optional[ClipConfig] = None, theme: str = "history", voice: str = "",
-            title: str = "", captions: bool = True, caption_style: str = "",
+            title: str = "", captions: Optional[bool] = None, caption_style: str = "",
             use_tts: bool = True, enrich: bool = True, voiceover: Optional[str] = None,
             do_build: bool = True, force_index: bool = False, progress=None) -> dict:
     cfg = cfg or load_clip_config()
@@ -377,8 +377,8 @@ def _purge_unwanted_sources(proj, log) -> int:
 def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = None,
                  script_text: Optional[str] = None, movie_hint: str = "",
                  policy: str = "block", max_sources: int = 6, cfg: Optional[ClipConfig] = None,
-                 theme: str = "history", voice: str = "", title: str = "", captions: bool = True,
-                 caption_style: str = "",
+                 theme: str = "history", voice: str = "", title: str = "",
+                 captions: Optional[bool] = None, caption_style: str = "",
                  voiceover: Optional[str] = None, voice_provider: str = "", voice_preset: str = "",
                  use_tts: bool = True, verify: bool = True, do_build: bool = True,
                  force_index: bool = False, progress=None) -> dict:
