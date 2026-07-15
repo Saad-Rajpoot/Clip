@@ -4348,6 +4348,34 @@ def test_breakout_caption_layout():
         _fw.WhisperModel = _orig
 
 
+def test_era_policy_and_still_verification():
+    print("[gap-2] beat-local era policy + semantic recovery-still verification")
+    from vidlore.clipstudio.verify import _beat_era
+    from vidlore.clipstudio import models as M
+    # (1) single-scene video → global episode hint may be used
+    s = M.ScriptSegment(index=0, text="Tywin dismisses Joffrey")
+    check("single-scene uses the global episode hint",
+          _beat_era(s, "S03E04", single_scene=True) == "S03E04")
+    # (2) multi-scene → NO global hint; era must come from the beat's own evidence
+    check("multi-scene ignores the unsafe global hint when the beat has no local era",
+          _beat_era(s, "S03E04", single_scene=False) == "")
+    s2 = M.ScriptSegment(index=1, text="Arya wakes up blind",
+                         scene_query="Arya blinded House of Black and White season 6")
+    check("multi-scene derives beat-local era from scene_query",
+          _beat_era(s2, "S02E07", single_scene=False) == "season 6")
+    s3 = M.ScriptSegment(index=2, text="the coin handoff", expected_visual="Jaqen 2x10 gives the coin")
+    check("multi-scene derives beat-local era from expected_visual (SxxExx)",
+          _beat_era(s3, "", single_scene=False) == "season 2")
+    # (3) wiring: recovery stills semantically verified; era policy threaded
+    vsrc = (Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "verify.py").read_text()
+    osrc = (Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "orchestrate.py").read_text()
+    check("verifier uses beat-local era (not a global multi-scene hint)",
+          "_beat_era(_seg, _global_era, _single)" in vsrc and '_vtype == "single_scene"' in vsrc)
+    check("recovery stills are semantically verified before install",
+          "_still_semantically_ok" in osrc and "recovery still REJECTED" in osrc
+          and "wrong character/era/contradictory" in osrc)
+
+
 def test_verifier_context_and_fallback():
     print("[stage-2] verifier storyboard context + honest fallback relevance-class")
     from vidlore.clipstudio import verify as V
@@ -4665,6 +4693,7 @@ def main():
     test_music_dynamics_wiring()
     test_discovery_query_stratification()
     test_verifier_context_and_fallback()
+    test_era_policy_and_still_verification()
     test_verifier_promotion_rewrites_beat_windows()
     test_budget_loop_survives_plan_beats_failure()
     test_find_produced_video()

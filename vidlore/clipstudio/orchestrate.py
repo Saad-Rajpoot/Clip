@@ -143,7 +143,7 @@ def produce(project_dir, *, script_path: Optional[str] = None, script_text: Opti
     }
 
 
-def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log) -> int:
+def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cfg=None) -> int:
     """For every WEAK beat (no source / low confidence / confirmed wrong character / a repeated
     filler shot) attach a relevant still as a Ken-Burns image_path. PREFERENCE ORDER:
       1) a REAL source-footage frame (a shot keyframe) drawn from the matcher's own ranked
@@ -168,6 +168,40 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log) -> int:
     web_fallback_on = os.environ.get("VIDLORE_CLIPSTUDIO_WEB_IMAGE_FALLBACK", "1").strip() \
         not in ("0", "false", "no")
     img_dir = proj.root_path / "scene_images"
+
+    # SEMANTIC recovery-still verification (Gap 2): a recovery still is a real source keyframe, but it
+    # must still be SEMANTICALLY correct — never a wrong character / wrong show / wrong era / an action
+    # contradicting the narration. We verify it with the vision verifier in LENIENT mode (contextual
+    # acceptance: a relevant same-character/scene still is fine; only off-topic / wrong-character /
+    # wrong-era is rejected). Honest labeling ('contextual_fallback') is NOT a substitute for passing
+    # these guards. Verification runs only when an LLM is available; env disables.
+    from . import verify as _verify_mod
+    from . import llm as _llm_mod
+    _still_verify_on = (eng_cfg is not None and _llm_mod.has_llm(eng_cfg)
+                        and os.environ.get("VIDLORE_CLIPSTUDIO_VERIFY_STILLS", "1").strip()
+                        not in ("0", "false", "no"))
+    _vtype_sv = (proj.meta.get("analysis", {}) or {}).get("video_type", "")
+    _global_era_sv = str((proj.meta.get("analysis", {}) or {}).get("episode_hint", "") or "")
+
+    def _still_semantically_ok(kf_path, seg) -> bool:
+        """LENIENT vision check on a recovery still: True unless it shows the wrong character/era or
+        is off-topic/contradictory. Fail-open only when verification is unavailable."""
+        if not _still_verify_on or not kf_path:
+            return True
+        try:
+            names = list(getattr(seg, "entities", None) or [])
+            v = _verify_mod.verify_frame(
+                str(kf_path), seg.text, getattr(seg, "required_entity", ""),
+                getattr(seg, "required_kind", ""), names, eng_cfg,
+                getattr(eng_cfg, "anthropic_model", ""), is_specific=False,
+                expected_visual=getattr(seg, "expected_visual", "") or "",
+                scene_query=getattr(seg, "scene_query", "") or "",
+                era_hint=_verify_mod._beat_era(seg, _global_era_sv, _vtype_sv == "single_scene"))
+            if v is None:                                 # transport error → cannot judge → fail open
+                return True
+            return v.get("verdict") != "replace"          # 'replace' = wrong char/era/off-topic
+        except Exception:
+            return True
 
     # Index every pooled shot — REAL downloaded source-video keyframes are the PREFERRED (and primary)
     # image source. No NOW-photos / recent-actor photos / AI images anywhere in this path.
@@ -265,6 +299,18 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log) -> int:
             if still is None:                          # no relevance-ranked alternate → scan the pool
                 still = _imgfb.pick_pool_still(seg, shots_by_key, used_keys, used_phash,
                                                distinct_from=aired_phash)
+            # SEMANTIC guard (Gap 2): on an exact/character beat, a recovery still must not show the
+            # wrong character/era or contradict the narration. If it fails, try the pool alternate;
+            # if that also fails, DON'T install a wrong still — leave the beat flagged (PASS 3 → web
+            # exact / manual review). Never air a contradictory still just because it is a real frame.
+            if (still and pol in (_policy.EXACT, _policy.CHARACTER)
+                    and not _still_semantically_ok(still[0], seg)):
+                _alt = _imgfb.pick_pool_still(seg, shots_by_key, used_keys | {(still[1], still[2])},
+                                              used_phash, distinct_from=aired_phash)
+                still = _alt if (_alt and _still_semantically_ok(_alt[0], seg)) else None
+                if still is None:
+                    log(f"image-fallback: beat {seg.index} recovery still REJECTED "
+                        f"(wrong character/era/contradictory) — left for web-exact/review")
             if still:
                 kf, sid, sidx, score, sph = still
                 if sel is None:
@@ -524,7 +570,7 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
     import os as _os
     if _os.environ.get("VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK", "1").strip() not in ("0", "false", "no"):
         try:
-            _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log)
+            _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, eng_cfg=eng)
         except Exception as _e:
             log(f"image-fallback: skipped ({type(_e).__name__}: {_e})")
 

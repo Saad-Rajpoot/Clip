@@ -105,6 +105,27 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
     return None
 
 
+_SEASON_RX = re.compile(
+    r"\bS0?(\d{1,2})\s?E0?\d{1,2}\b|\bseason\s+(\d{1,2})\b|\b(\d{1,2})\s?x\s?\d{2}\b", re.I)
+
+
+def _beat_era(seg, global_era: str, single_scene: bool) -> str:
+    """The era/season constraint for ONE beat (Gap 2). Single-scene videos may use the project's
+    global episode hint. Multi-scene videos derive era ONLY from the beat's own local evidence
+    (scene_query / expected_visual / narration); if none names a season, the era is left
+    UNCONSTRAINED ('') rather than guessed with a wrong global hint."""
+    if single_scene:
+        return global_era or ""
+    for txt in (getattr(seg, "scene_query", "") or "", getattr(seg, "expected_visual", "") or "",
+                getattr(seg, "text", "") or ""):
+        m = _SEASON_RX.search(txt)
+        if m:
+            n = m.group(1) or m.group(2) or m.group(3)
+            if n:
+                return f"season {int(n)}"
+    return ""
+
+
 def _action_contact_sheet(src_path: str, shot_start: float, shot_end: float, dest: Path):
     """Build a START -> MIDDLE -> END horizontal contact sheet from a shot's source span, so an
     ACTION beat is judged on whether the action actually happens (one keyframe can't prove motion —
@@ -203,9 +224,13 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             _reuse[(_s.source_id, _s.shot_index)] += 1
     _reuse_cap = int(getattr(cfg, "max_reuse_per_shot", 2) or 2)
     import os as _os_ms
-    # global era/season context for the verifier — a multi_scene essay has no single-season filter,
-    # but the verifier can still reject a clearly-wrong-era frame when the beat names an era.
-    _era_hint = str((proj.meta.get("analysis", {}) or {}).get("episode_hint", "") or "")
+    # ERA POLICY (Gap 2): a project-level episode hint may be used GLOBALLY only for a genuinely
+    # single-scene video. A multi_scene essay spans many eras, so a global season hint is unsafe —
+    # each beat's era must come from its OWN local evidence (scene_query/expected_visual/narration),
+    # and a beat with no reliable local era is left UNCONSTRAINED (empty) rather than guessed.
+    _vtype = str((proj.meta.get("analysis", {}) or {}).get("video_type", "") or "")
+    _single = (_vtype == "single_scene")
+    _global_era = str((proj.meta.get("analysis", {}) or {}).get("episode_hint", "") or "")
     _mf_on = _os_ms.environ.get("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "1").strip() \
         not in ("0", "false", "no")
 
@@ -231,7 +256,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                                 eng_cfg, model, is_specific=_exact,
                                 expected_visual=getattr(_seg, "expected_visual", "") or "",
                                 scene_query=getattr(_seg, "scene_query", "") or "",
-                                era_hint=_era_hint, multiframe=is_mf)
+                                era_hint=_beat_era(_seg, _global_era, _single), multiframe=is_mf)
         finally:
             if is_mf:
                 try:
