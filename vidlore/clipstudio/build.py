@@ -4084,6 +4084,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     #     `_group` hard-cuts a cue at a >=1s gap, and the breakout window is added to the caption-
     #     suppress list below (the breakout's OWN dialogue is captioned by _burn_breakout_captions).
     _breakout_clip: dict = {}
+    _bidx: dict = {}          # {ORIGINAL beat index -> FINAL post-breakout scene index}; {} = identity
     _breakout_entries: list = []
     if os.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUTS", "1").strip() not in ("0", "false", "no"):
         try:
@@ -4815,6 +4816,12 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 overlap_min=_hold_overlap_min)
 
         _rlens = {segments[_p].index: list(_ls) for _p, _ls in _lens_by_pos.items()}
+        # The block loop runs in FINAL (post-breakout-reindex) index space, which is CORRECT for the
+        # gate. But every other surface — project.json, match/verify logs, orchestrate recovery —
+        # uses ORIGINAL beat indices. Relabel the AUDIT/report to original space so "scene N" names
+        # the same beat the rest of the pipeline does (identity map when there are no breakouts).
+        _final_to_orig = {v: k for k, v in (_bidx or {}).items()}
+        _orig = lambda i: _final_to_orig.get(i, i)      # noqa: E731
         _last_clean_r, _last_clean_idx = None, None
         _consec_holds, _rrep, _hold_total = 0, 0, 0.0
         _rf_audit, _rf_block = [], []
@@ -4853,8 +4860,9 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             if _reason is not None:
                 # UNRESOLVED — release-block (recovery is attempted upstream in orchestrate; by here
                 # a still-rejected beat with no valid bounded hold must never air rejected/black frames).
-                _rf_block.append({"seg_index": seg.index, "reason": _reason,
-                                  "hold_dur_s": round(_beat_hold_dur, 2), "evidence": _compat_ev})
+                _rf_block.append({"seg_index": _orig(seg.index), "final_index": seg.index,
+                                  "reason": _reason, "hold_dur_s": round(_beat_hold_dur, 2),
+                                  "evidence": _compat_ev})
                 continue
             _held_ok = True
             for m, cp in enumerate(list(clips)):
@@ -4864,13 +4872,14 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 if _got:
                     clips[m] = Path(_got)
                     _rrep += 1
-                    _rf_audit.append({"seg_index": seg.index, "replacement": "editorial_hold",
-                                      "held_from_beat": _last_clean_idx, "duration_s": round(_d, 2),
+                    _rf_audit.append({"seg_index": _orig(seg.index), "final_index": seg.index,
+                                      "replacement": "editorial_hold",
+                                      "held_from_beat": _orig(_last_clean_idx), "duration_s": round(_d, 2),
                                       "validation": "same_scene_clean_hold", "clip": m,
                                       "compat_evidence": _compat_ev})
                 else:
                     _held_ok = False                      # freeze GENERATION FAILURE → fail closed
-                    _rf_block.append({"seg_index": seg.index,
+                    _rf_block.append({"seg_index": _orig(seg.index), "final_index": seg.index,
                                       "reason": "editorial-hold freeze generation FAILED"})
                     break
             if _held_ok:

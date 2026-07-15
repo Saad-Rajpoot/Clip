@@ -2304,6 +2304,42 @@ def test_generic_beat_filler_leniency():
           "is_specific" in vsrc and "GENERIC narration line" in vsrc and "Be STRICT" in vsrc)
 
 
+def test_character_present_unconfirmed():
+    print("[relevance] character beat, subject present-but-unconfirmed → era+FaceID-gated contextual")
+    from vidlore.clipstudio.verify import _present_unconfirmed_ok
+    from vidlore.clipstudio import models as M
+
+    joff = M.ScriptSegment(index=1, text="Joffrey is carried out screaming",
+                           required_kind="character", required_entity="Joffrey Baratheon")
+    V0 = {"correct_subject_visible": False}   # rejected pick, subject not face-confirmed
+
+    # POSITIVE: right era (season 3) + same-season source + no wrong Face-ID → downgrade allowed
+    check("right-era S03E10 shot, no wrong face → present-unconfirmed contextual ALLOWED",
+          _present_unconfirmed_ok(V0, joff, "Game of Thrones S03E10 small council", [], "season 3") is True)
+
+    # REGRESSION CORNER (the exact hole the reviewer flagged): UNCONSTRAINED era + empty Face-ID +
+    # no wrong_subject_visible → MUST still block (never gamble a wrong character through).
+    check("UNCONSTRAINED era + empty Face-ID → STILL BLOCKS (fails closed, no gamble)",
+          _present_unconfirmed_ok(V0, joff, "Game of Thrones small council", [], "") is False)
+
+    # a DIFFERENT identified main character in the shot → contradictory → block
+    check("wrong character in Face-ID (Cersei on a Joffrey beat) → BLOCKS",
+          _present_unconfirmed_ok(V0, joff, "Game of Thrones S03E10", ["Cersei Lannister"], "season 3") is False)
+
+    # a source declaring a DIFFERENT season → wrong era → block
+    check("wrong-era source (S05) on a season-3 beat → BLOCKS",
+          _present_unconfirmed_ok(V0, joff, "Game of Thrones S05E08", [], "season 3") is False)
+
+    # vision explicitly saw a different main subject → block even with matching era
+    check("wrong_subject_visible=True → BLOCKS regardless of era/FaceID",
+          _present_unconfirmed_ok({"correct_subject_visible": False, "wrong_subject_visible": True},
+                                  joff, "Game of Thrones S03E10", [], "season 3") is False)
+
+    # the SAME required character face present is fine (matches the required entity token)
+    check("same character in Face-ID (Joffrey) + right era → ALLOWED",
+          _present_unconfirmed_ok(V0, joff, "Game of Thrones S03E10", ["Joffrey Baratheon"], "season 3") is True)
+
+
 def test_verify_only_indices_subset():
     print("[recovery] verify_and_repair only_indices restricts the re-verify to a beat subset")
     from vidlore.clipstudio import verify as V
@@ -4956,6 +4992,7 @@ def main():
     test_caption_sync_per_scene_tolerant()
     test_source_budget_scales_with_script()
     test_generic_beat_filler_leniency()
+    test_character_present_unconfirmed()
     test_verify_only_indices_subset()
     test_unified_visual_policy()
     test_final_image_policy()

@@ -84,8 +84,12 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         f"(kind: {required_kind or 'any'}).\n"
         + _story + _mf + _rule +
         f"Automatic Face-ID on this frame detected: {', '.join(faceid_names) if faceid_names else 'none'}.\n\n"
+        "For wrong_subject_visible: set true ONLY if a DIFFERENT specific character (clearly NOT the "
+        "one this line is about) is the main subject of the frame; set false for a wide / crowd / "
+        "reaction / establishing shot where the required person may be present off-centre or unclear.\n"
         "Answer ONLY this JSON:\n"
         '{"matches_narration": true/false, "correct_subject_visible": true/false, '
+        '"wrong_subject_visible": true/false, '
         '"specific_enough": true/false, "quality_ok": true/false, '
         '"confidence": 0.0-1.0, "verdict": "keep" or "replace", "reason": "one short sentence"}'
     )
@@ -204,6 +208,43 @@ def _contextual_subject_ok(vd) -> bool:
     return (vd.get("correct_subject_visible") is True
             or (bool(vd.get("matches_narration"))
                 and vd.get("correct_subject_visible") is not False))
+
+
+def _season_num(text: str):
+    """Season number declared anywhere in a string (S03E10 / 'season 3' / 3x10), else None."""
+    m = _SEASON_RX.search(text or "")
+    if m:
+        n = m.group(1) or m.group(2) or m.group(3)
+        return int(n) if n else None
+    return None
+
+
+def _present_unconfirmed_ok(vd, seg, src_title, faceid_names, beat_era) -> bool:
+    """A CHARACTER beat whose exact-moment footage was rejected with correct_subject_visible=False
+    may STILL be a legitimate contextual fallback when the required person is PRESENT but not
+    face-confirmed (a wide / reaction shot of the RIGHT scene) — as opposed to a DIFFERENT character
+    dominating the frame (contradictory). Because a single boolean cannot tell these apart, the
+    downgrade requires a POSITIVE confirmation and fails CLOSED otherwise:
+      (1) NO different identified main character in the shot's Face-ID (a non-target name ⇒ block); and
+      (2) a POSITIVE same-era signal — the beat's era is CONSTRAINED and the source's declared season
+          matches it. An UNCONSTRAINED era gives no positive signal → block (never gamble that an
+          empty Face-ID + missing era means the right person). This never fires for a confirmed wrong
+          character or a wrong-era source."""
+    if vd.get("wrong_subject_visible") is True:
+        return False                                   # vision saw a different main subject
+    _need = (getattr(seg, "required_entity", "") or "").lower()
+    _need_toks = {w for w in re.findall(r"[a-z0-9]+", _need) if len(w) > 2}
+    for nm in (faceid_names or []):
+        _nm_toks = {w for w in re.findall(r"[a-z0-9]+", (nm or "").lower()) if len(w) > 2}
+        if _nm_toks and _need_toks and not (_nm_toks & _need_toks):
+            return False                               # a DIFFERENT identified person → contradictory
+    _bn = _season_num(beat_era)
+    if _bn is None:
+        return False                                   # unconstrained era → no positive signal → block
+    _sn = _season_num(src_title)
+    if _sn is not None and _sn != _bn:
+        return False                                   # source declares a DIFFERENT season → wrong era
+    return True                                        # right era, no wrong character present
 
 
 def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfig,
@@ -440,6 +481,28 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         f"(required subject on screen — kept, honestly labeled contextual_fallback)")
                 else:
                     _try_promote(downgrade=True)     # scan alternates for a right-subject clip
+
+            # CHARACTER beat, subject PRESENT-BUT-UNCONFIRMED. A character beat whose exact-moment
+            # footage was rejected with correct_subject_visible=False is normally left unresolved (a
+            # wrong-character read is contradictory). But when the shot is the RIGHT scene/era with no
+            # DIFFERENT character identified, the required person is almost certainly present off-face
+            # (a wide / reaction shot) — a legitimate contextual fallback. _present_unconfirmed_ok
+            # fails CLOSED unless there is a POSITIVE same-era confirmation and no wrong Face-ID, so a
+            # confirmed wrong character or a wrong/unconstrained-era source still blocks.
+            if not swapped and _exact and _downgrade_on \
+                    and (getattr(seg, "required_kind", "") or "").lower() in ("character", "actor"):
+                _src_r = proj.source(sel.source_id)
+                _src_title = ((getattr(_src_r, "title", "") or "") + " " + (sel.source_id or ""))
+                if _present_unconfirmed_ok(v, seg, _src_title, faceid_names,
+                                           _beat_era(seg, _global_era, _single)):
+                    v["verdict"] = "keep"
+                    v["downgraded"] = "exact→contextual(present-unconfirmed)"
+                    v["relevance_class"] = "contextual_fallback"
+                    sel.verifier = v
+                    replaced += 1
+                    swapped = True
+                    log(f"verify: seg{sel.segment_index} exact→contextual (character present-"
+                        f"unconfirmed; right scene/era, no wrong character — contextual_fallback)")
 
             # EXACT→GENERIC-FILLER (the last hierarchy tier before an honest gap). When neither the
             # exact moment NOR a right-subject contextual clip exists, a NON-CHARACTER beat
