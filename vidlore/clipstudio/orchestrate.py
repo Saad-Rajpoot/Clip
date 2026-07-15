@@ -530,11 +530,19 @@ _TITLE_STOP = set(
     "movie series show tv hbo max netflix subscribe watch online".split())
 
 
+_EP_CODE_RX = None  # lazy-compiled below
+
+
 def _norm_title_toks(title: str) -> set:
-    """Meaningful (>2-char, non-generic) tokens of a source title — the show-identity fingerprint."""
+    """Meaningful (>2-char, non-generic) tokens of a source title — the show-identity fingerprint.
+    Season/episode codes (s03, s03e10, e10, 3x10) are stripped too — they are NOT show identity and
+    would otherwise survive as 'meaningful' tokens and pollute the same-show comparison."""
     import re as _re
+    global _EP_CODE_RX
+    if _EP_CODE_RX is None:
+        _EP_CODE_RX = _re.compile(r"^(s\d{1,2}(e\d{1,2})?|e\d{1,2}|\d{1,2}x\d{1,2})$")
     return {w for w in _re.findall(r"[a-z0-9]+", (title or "").lower())
-            if w not in _TITLE_STOP and len(w) > 2}
+            if w not in _TITLE_STOP and len(w) > 2 and not _EP_CODE_RX.match(w)}
 
 
 def _title_season(title: str) -> str:
@@ -559,16 +567,23 @@ def _deterministic_still_ok(*, source_title, score, seg, faces, movie_toks, glob
       (3) CLIP relevance above a floor, and
       (4) for a named character/actor, that entity actually present in the shot's Face-ID
     pass. Returns (ok: bool, reason: str)."""
+    import re as _re
     from .verify import _beat_era
-    # (1) same-show — meaningful token identity, not any incidental shared function word
-    mt = {w for w in (movie_toks or set()) if w not in _TITLE_STOP and len(w) > 2}
+    # (1) same-show — meaningful token identity, not any incidental shared common noun. A SINGLE
+    # shared generic token ('dragon' in 'House of the Dragon' vs 'Dragon Ball'; 'game' in 'Game of
+    # Thrones' vs 'The Game') is too weak. Require the BULK of the movie's distinctive fingerprint:
+    # both tokens of a two-token title, else the one distinctive token of a single-token title.
+    mt = {w for w in (movie_toks or set()) if w not in _TITLE_STOP and len(w) > 2
+          and not _re.match(r"^(s\d{1,2}(e\d{1,2})?|e\d{1,2}|\d{1,2}x\d{1,2})$", w)}
     tt = _norm_title_toks(source_title)
     if mt:
         if not tt:
             return False, "source title has no meaningful tokens (cannot confirm same show)"
         _shared = mt & tt
-        if not _shared:
-            return False, f"different show (title {sorted(tt)} shares nothing with movie {sorted(mt)})"
+        _need = 1 if len(mt) == 1 else 2
+        if len(_shared) < _need:
+            return False, (f"different / unconfirmed show (title {sorted(tt)} shares only "
+                           f"{sorted(_shared)} with movie {sorted(mt)}; need >= {_need})")
     # (2) explicit era: compare the beat's own era to the source title's declared season
     era_beat = _beat_era(seg, global_era, single_scene)
     era_src = _title_season(source_title)
@@ -577,17 +592,22 @@ def _deterministic_still_ok(*, source_title, score, seg, faces, movie_toks, glob
     # (3) CLIP relevance floor
     if float(score or 0.0) < float(min_clip):
         return False, f"CLIP relevance {float(score or 0.0):.2f} < floor {float(min_clip):.2f}"
-    # (4) named character must be Face-ID-present in the shot
+    # (4) named character must be Face-ID-present in the shot. Match on WHOLE-WORD tokens (not
+    # substring — 'the' in 'theon' or 'jon' in 'jonas' must not count) and drop leading articles
+    # ('The Hound' -> distinctive token 'hound', not 'the'). Require ALL distinctive entity tokens
+    # present, so a shared given name or surname alone (Jon Snow vs Jon Arryn; Tywin vs Cersei
+    # Lannister) can NEVER satisfy a different character.
+    _articles = {"the", "a", "an", "of", "and"}
     _ent = (getattr(seg, "required_entity", "") or "").strip().lower()
     _kind = (getattr(seg, "required_kind", "") or "").lower()
     if _ent and _kind in ("character", "actor"):
-        _faces = " ".join(faces or []).lower()
-        # Match on the DISTINCTIVE given name (first token), not any shared word — a family name
-        # (Tywin Lannister vs Cersei Lannister) must NOT satisfy a different character.
-        _ent_toks = [w for w in _ent.split() if len(w) > 2]
-        _given = _ent_toks[0] if _ent_toks else _ent
-        if _ent not in _faces and _given not in _faces:
-            return False, f"required character '{_ent}' not Face-ID-confirmed in the shot"
+        _face_toks = set(_re.findall(r"[a-z0-9]+", " ".join(faces or []).lower()))
+        _ent_toks = [w for w in _re.findall(r"[a-z0-9]+", _ent)
+                     if len(w) > 2 and w not in _articles]
+        _matched = bool(_ent_toks) and all(t in _face_toks for t in _ent_toks)
+        if not _matched:
+            return False, (f"required character '{_ent}' not Face-ID-confirmed "
+                           f"(need all of {_ent_toks} in {sorted(_face_toks)[:6]})")
     return True, f"same-show + era({era_beat or 'any'}) + CLIP + Face-ID all pass"
 
 

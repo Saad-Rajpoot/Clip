@@ -96,7 +96,7 @@ def main():
     ok9, why9 = _deterministic_still_ok(source_title="The Last of Us - Episode 3", score=0.6,
                                         seg=seg(1), faces=[], movie_toks={"game", "of", "thrones"},
                                         global_era="", single_scene=True)
-    _say(not ok9 and "different show" in why9, "9. wrong-show deterministic still → REJECTED")
+    _say(not ok9 and "show" in why9, "9. wrong-show deterministic still → REJECTED")
     # 10
     ok10, why10 = _deterministic_still_ok(source_title="Game of Thrones S03E10 — Tywin", score=0.6,
                                           seg=seg(1, ent="Tywin Lannister", kind="character"),

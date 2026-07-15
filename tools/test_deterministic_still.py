@@ -50,7 +50,7 @@ def main():
 
     # ---- (A) GoT ≠ The Last of Us (the headline requirement) ----
     ok, why = det("The Last of Us - Episode 3 - Joel and Ellie")
-    _say(not ok and "different show" in why, f"(A) GoT still is NOT installed onto a Last-of-Us source ({why})")
+    _say(not ok and "show" in why, f"(A) GoT still is NOT installed onto a Last-of-Us source ({why})")
 
     # ...and unrelated shows in general
     for bad in ["Breaking Bad S03E07", "The Witcher — Geralt fights", "House of the Dragon S1E10"]:
@@ -84,6 +84,36 @@ def main():
     # ---- (F) a title with no meaningful tokens can't be confirmed same-show ----
     ok8, why8 = det("Season 3 Episode 10 [HD]")
     _say(not ok8, f"(F) a generic-only title cannot confirm same show ({why8})")
+
+    # ---- (G) REVIEW FIX C: a SINGLE shared common token is too weak for same-show ----
+    # 'The Game' shares only 'game' with 'Game of Thrones' → NOT the same show.
+    okG1, whyG1 = det("The Game S03E05 — poker night")
+    _say(not okG1 and "need >= 2" in whyG1, f"(G) 'The Game' shares only 'game' → REJECTED ({whyG1})")
+    # 'House of the Dragon' vs 'Dragon Ball' — shares only 'dragon' → NOT the same show.
+    HOTD = {"house", "of", "the", "dragon"}
+    okG2, whyG2 = _deterministic_still_ok(source_title="Dragon Ball Super Episode 3", score=0.6,
+                                          seg=seg(), faces=[], movie_toks=HOTD, global_era="",
+                                          single_scene=True)
+    _say(not okG2, f"(G) 'Dragon Ball' shares only 'dragon' with 'House of the Dragon' → REJECTED ({whyG2})")
+    okG3, whyG3 = _deterministic_still_ok(source_title="House of the Dragon S01E10 — Rhaenyra", score=0.6,
+                                          seg=seg(), faces=[], movie_toks=HOTD, global_era="",
+                                          single_scene=True)
+    _say(okG3, f"(G) a real HotD source (shares house+dragon) → ACCEPTED ({whyG3})")
+    _say("s03e10" not in _norm_title_toks("Game of Thrones S03E10")
+         and "s01" not in _norm_title_toks("House of the Dragon S01E10"),
+         "(G) episode codes (S03E10 / S01) are stripped from title tokens")
+
+    # ---- (H) REVIEW FIX D: whole-word, article-dropped, ALL-token Face-ID match ----
+    hound = seg(entity="The Hound", kind="character")
+    okH1, whyH1 = det("Game of Thrones S04E01", s=hound, faces=["Theon Greyjoy"], era="")
+    _say(not okH1, f"(H) 'The Hound' beat is NOT satisfied by a 'Theon' face (no 'the' substring hit) ({whyH1})")
+    okH2, whyH2 = det("Game of Thrones S04E01", s=hound, faces=["The Hound"], era="")
+    _say(okH2, f"(H) 'The Hound' beat IS satisfied by a 'Hound' face ({whyH2})")
+    jon = seg(entity="Jon Snow", kind="character")
+    okH3, whyH3 = det("Game of Thrones S04E01", s=jon, faces=["Jon Arryn"], era="")
+    _say(not okH3, f"(H) 'Jon Snow' beat is NOT satisfied by 'Jon Arryn' (shared given name only) ({whyH3})")
+    okH4, whyH4 = det("Game of Thrones S04E01", s=jon, faces=["Jon Snow"], era="")
+    _say(okH4, f"(H) 'Jon Snow' beat IS satisfied by a 'Jon Snow' face ({whyH4})")
 
     print(f"\n{PASS} passed · {FAIL} failed")
     sys.exit(1 if FAIL else 0)

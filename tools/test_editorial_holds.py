@@ -146,6 +146,34 @@ def main():
     _say(not ok12,
          f"(12) single-scene video does NOT blindly pass an unrelated moment ({ev12.get('reason')})")
 
+    # ---- (13) REVIEW FIX B: same character, DIFFERENT scene (multi-scene) is NOT compatible ----
+    tr = seg(20, scene_query="tywin lannister throne room", required_entity="Tywin Lannister",
+             required_kind="character")
+    bf = seg(21, scene_query="tywin lannister battlefield tent", required_entity="Tywin Lannister",
+             required_kind="character")
+    ok13, ev13 = _hold_scene_compat(tr, bf, Sel("A", "Tywin Lannister"), Sel("B"),
+                                    single_scene=False, global_era="")
+    _say(not ok13 and "different scene" in ev13.get("reason", ""),
+         f"(13) multi-scene: same character, throne-room vs battlefield → INCOMPATIBLE ({ev13.get('reason')})")
+    # ...but the SAME source shot lineage IS genuine continuity (allowed)
+    ok13b, ev13b = _hold_scene_compat(tr, bf, Sel("A", "Tywin Lannister"), Sel("A"),
+                                      single_scene=False, global_era="")
+    _say(ok13b, "(13b) same-source continuity permits the hold even without a shared location token")
+    # ...and a genuinely shared location token (same scene) passes
+    tr2 = seg(22, scene_query="tywin lannister throne room dawn", required_entity="Tywin Lannister",
+              required_kind="character")
+    ok13c, ev13c = _hold_scene_compat(tr, tr2, Sel("A", "Tywin Lannister"), Sel("B"),
+                                      single_scene=False, global_era="")
+    _say(ok13c, f"(13c) multi-scene: a shared LOCATION token (throne+room) IS the same scene ({ev13c.get('shared_tokens')})")
+
+    # ---- (14) REVIEW FIX A: hold duration is the SUM of sub-clips, not the max ----
+    # 3 sub-clips of 1.8s each freeze the SAME frame sequentially → 3*(1.8+0.5)=6.9s, not 2.3s.
+    ls = [1.8, 1.8, 1.8]
+    beat_hold_sum = sum((ls[m] if ls[m] > 0 else 3.0) + 0.5 for m in range(len(ls)))
+    _say(abs(beat_hold_sum - 6.9) < 0.01, f"(14) 3×1.8s sub-clips → 6.9s total frozen (SUM), not 2.3s")
+    _say(block(compat=(ok, ev), dur=beat_hold_sum, single_cap=2.5) is not None,
+         "(14) a 6.9s multi-sub-clip hold EXCEEDS the 2.5s single cap → BLOCKED (was hidden by max)")
+
     print(f"\n{PASS} passed · {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

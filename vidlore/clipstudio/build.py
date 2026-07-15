@@ -2909,11 +2909,28 @@ def _hold_scene_compat(seg_a, seg_b, sel_a, sel_b, *, single_scene, global_era,
     ta, tb = _sig_scene_tokens(seg_a), _sig_scene_tokens(seg_b)
     if not (ta and tb):
         return False, {"reason": "no meaningful scene tokens to compare", **ev}
-    _ov = len(ta & tb) / max(1, min(len(ta), len(tb)))
+    _shared = ta & tb
+    _ov = len(_shared) / max(1, min(len(ta), len(tb)))
     ev["scene_overlap"] = round(_ov, 2)
-    ev["shared_tokens"] = sorted(ta & tb)[:8]
+    ev["shared_tokens"] = sorted(_shared)[:8]
     if _ov < overlap_min:
         return False, {"reason": f"scene tokens differ (overlap {_ov:.2f})", **ev}
+    _src_a = getattr(sel_a, "source_id", "") or ""
+    _src_b = getattr(sel_b, "source_id", "") or ""
+    _src_cont = bool(_src_a and _src_a == _src_b)
+    # (2b) In a MULTI-scene video the same character appears in many different moments, so an overlap
+    # made up ONLY of the character/entity name (same person, different location/action) is NOT the
+    # same scene — a throne-room frame must not freeze over a battlefield beat. Require at least one
+    # shared LOCATION/ACTION token beyond either beat's required_entity, unless it's the SAME source
+    # shot lineage (genuine continuity) or a single-scene deep-dive (every beat IS the one scene).
+    _ent_a = {w for w in _re.findall(r"[a-z0-9]+",
+              (getattr(seg_a, "required_entity", "") or "").lower()) if len(w) > 2}
+    _ent_b = {w for w in _re.findall(r"[a-z0-9]+",
+              (getattr(seg_b, "required_entity", "") or "").lower()) if len(w) > 2}
+    _scene_shared = _shared - _ent_a - _ent_b
+    if not single_scene and not _scene_shared and not _src_cont:
+        return False, {"reason": "same entity, different scene (no shared location/action token)",
+                       **ev}
     _id_a = (getattr(sel_a, "identity", "") or "").strip().lower()
     _need_b = (getattr(seg_b, "required_entity", "") or "").strip().lower()
     _kind_b = (getattr(seg_b, "required_kind", "") or "").strip().lower()
@@ -2923,9 +2940,7 @@ def _hold_scene_compat(seg_a, seg_b, sel_a, sel_b, *, single_scene, global_era,
         if _need_toks and _id_toks and not (_need_toks & _id_toks):
             return False, {"reason": f"held frame shows '{_id_a}', beat needs '{_need_b}'", **ev}
     ev["entity_prev"] = _id_a or "n/a"
-    _src_a = getattr(sel_a, "source_id", "") or ""
-    _src_b = getattr(sel_b, "source_id", "") or ""
-    ev["source_continuity"] = bool(_src_a and _src_a == _src_b)
+    ev["source_continuity"] = _src_cont
     return True, ev
 
 
@@ -4817,9 +4832,13 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 continue
             clips = beat_clips.get(seg.index) or []
             _ls = _rlens.get(seg.index) or []
-            # this beat's hold duration (max of its sub-clip windows + tail pad)
-            _beat_hold_dur = (max([(_ls[m] if m < len(_ls) and _ls[m] > 0 else 3.0)
-                                   for m in range(len(clips))], default=3.0) + 0.5) if clips else 0.0
+            # this beat's TOTAL frozen duration. The loop below freezes EVERY sub-clip window of the
+            # beat to the SAME predecessor still, and the sub-clips play SEQUENTIALLY, so the viewer
+            # sees a frozen frame for the SUM of the windows (each + its 0.5s tail pad), not the max.
+            # Using max would under-count a multi-sub-clip hold and let it slip past the R4-4 caps
+            # (e.g. 3×2.3s = 6.9s of frozen frame recorded as 2.3s).
+            _beat_hold_dur = (sum((_ls[m] if m < len(_ls) and _ls[m] > 0 else 3.0) + 0.5
+                                  for m in range(len(clips)))) if clips else 0.0
             _compat_ok, _compat_ev = (
                 _scene_compat(_last_clean_idx, seg.index) if _last_clean_idx is not None
                 else (False, {"reason": "no clean predecessor"}))
