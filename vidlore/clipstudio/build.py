@@ -136,9 +136,19 @@ _CAS = "hqdn3d=1.5:1.5:3:3,unsharp=5:5:0.9:3:3:0.0,cas=0.5"
 def _ken_burns_filter(dur: float, src_w: int = 0, zoom_to: float = 1.10) -> str:
     """A slow cinematic push-in (Ken Burns) over the clip — what the competitor does on a held
     key shot. Pre-upscale (lanczos) so the zoom never reveals soft pixels, then zoompan from
-    1.0→zoom_to across the clip's frames, output 1920x1080@30."""
+    1.0→zoom_to across the clip's frames, output 1920x1080@30.
+
+    TIME-NEUTRALITY (P0 fix): `zoompan` with `d=1` emits one OUTPUT frame per INPUT frame, so the
+    caller's `-t dur` OUTPUT limit pulls `dur*30` input frames through it — on a non-30fps source
+    that consumes `dur*30/src_fps` SECONDS of source, not `dur` (23.976fps → 1.25× over-consume ran
+    the cut straight into a source's Max/WarnerMedia outro slate past the window-QC-cleared end;
+    50/60fps → under-consume aired as accidental slow-motion). Prepending `fps=30` resamples the
+    seeked input to exactly 30fps FIRST, so 1 output second == 1 source second for every source fps
+    and the window-QC-cleared [start, start+dur] range is exactly what airs. On a true 30fps source
+    `fps=30` is a no-op (no regression); other rates get frame-rate conversion (24→30 gains 3:2-style
+    repeats) — the relevance-safe direction, since the cleared range now airs verbatim."""
     frames = max(1, int(round(max(0.5, dur) * 30)))
-    return (f"scale=2560:1440:force_original_aspect_ratio=increase:flags=lanczos,crop=2560:1440,"
+    return (f"fps=30,scale=2560:1440:force_original_aspect_ratio=increase:flags=lanczos,crop=2560:1440,"
             f"zoompan=z='min(1.0+{zoom_to - 1.0:.4f}*on/{frames},{zoom_to:.3f})':d=1:"
             f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080:fps=30,setsar=1,{_CAS}")
 
@@ -2656,15 +2666,56 @@ _BRANDING_RX = re.compile(
     r"magnific|topaz|gigapixel|upscayl|upscaled|stable ?diffusion|midjourney|runway|krea", re.I)
 
 
+def _probe_duration(path) -> float:
+    """Container duration in seconds (0.0 if unknown). Cheap ffmpeg header parse — no ffprobe dep."""
+    try:
+        r = subprocess.run([ffmpeg_exe(), "-hide_banner", "-i", str(path)],
+                           capture_output=True, text=True, timeout=20)
+        m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", r.stderr)
+        if m:
+            return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    except Exception:
+        pass
+    return 0.0
+
+
+def _branding_probe_offsets(dur: float) -> list:
+    """Sample offsets covering the WHOLE clip — head, middle, and (critically) the TAIL, where
+    channel outros / streaming end-slates / CTA cards live. The old fixed head-only grid
+    (0.2..3.6s) never sampled a clip's last seconds, so an 8s beat that ran into a Max/WarnerMedia
+    outro at ~6.3s was invisible to the gate. Now: 0.2s, then ~every 1.3s through the clip, plus
+    three explicit tail samples (dur-0.3 / -1.0 / -1.8). Capped so OCR cost stays bounded."""
+    if dur <= 0:
+        return [0.2, 0.8, 1.6, 2.6, 3.6]                   # unknown length → legacy head grid
+    offs = {0.2}
+    t = 1.3
+    while t < dur - 0.05:
+        offs.add(round(t, 2))
+        t += 1.3
+    for tail in (dur - 0.3, dur - 1.0, dur - 1.8):         # TAIL coverage — end-slates live here
+        if tail > 0.1:
+            offs.add(round(tail, 2))
+    out = sorted(o for o in offs if 0.05 <= o < dur)
+    # bound OCR cost on long clips: keep head, tail, and an even spread of the middle (<= 10 probes)
+    if len(out) > 10:
+        head, tail = out[:2], out[-3:]
+        mids = out[2:-3]
+        step = max(1, len(mids) // 5)
+        out = sorted(set(head + mids[::step][:5] + tail))
+    return out
+
+
 def _clip_branding_text(clip_path: Path, ocr_engine) -> bool:
     """STRICTER than _clip_has_burned_text: True only when the clip shows a channel branding /
-    social-links / CTA slate (must be REMOVED), not a mere in-scene dialogue subtitle (kept)."""
+    social-links / CTA slate (must be REMOVED), not a mere in-scene dialogue subtitle (kept).
+    Probes the ENTIRE clip window (head + middle + TAIL + implicit shot boundaries), so an outro
+    slate that only appears in the clip's last seconds is caught (the Max-slate leak)."""
     if ocr_engine is None or not Path(clip_path).exists():
         return False
     import os as _os2
     ff = ffmpeg_exe()
-    for off in (0.2, 0.8, 1.6, 2.6, 3.6):
-        tmp = f"{clip_path}.brand_{int(off * 10)}.jpg"
+    for off in _branding_probe_offsets(_probe_duration(clip_path)):
+        tmp = f"{clip_path}.brand_{int(off * 100)}.jpg"
         try:
             subprocess.run([ff, "-y", "-loglevel", "error", "-ss", f"{off:.2f}", "-i", str(clip_path),
                             "-frames:v", "1", "-vf", "scale=854:-1", tmp], capture_output=True, timeout=20)
@@ -2691,6 +2742,154 @@ def _freeze_replace(prev_clip: Path, dest: Path, duration: float) -> Optional[Pa
     """Replace a branding/junk clip with a still freeze of the PREVIOUS clean clip's last frame
     (timing preserved, the card never airs) — reuses the freeze-continuation still renderer."""
     return _freeze_continuation(prev_clip, dest, duration)
+
+
+# STRONG full-screen promo / outro / CTA card language — deliberately STRICTER than _BRANDING_RX
+# (which contains loose words like "follow"/"watch" that a narration caption can legitimately
+# contain). These tokens appear on designed promotional cards, not in scene footage or narration:
+# prices, subscription plans, streaming CTAs, channel outros, and streamer-brand slates. The
+# final-video gate only fires on one of these AND full-screen-CARD geometry (two-factor), so a
+# narration caption that happens to read "watch"/"HBO" over live footage never trips it.
+_PROMO_RX = re.compile(
+    r"\$\s?\d|\d+\.\d{2}\s*/?\s*mo(nth)?|\bper month\b|/month\b|"
+    r"plans?\s*start|starting at\b|free trial|\d+[- ]day free|"
+    r"now streaming|stream(ing)?\s+(now|all|it|on|only|this)|only on\b|"
+    r"watch\s+(it|them|the full|now on|free)|episodes?\s+(now\s+)?(streaming|available|free)|"
+    r"binge|sign up\b|start (your|watching|streaming|the free)|the one to watch|"
+    r"subscribe|hit (the|that) (like|bell|subscribe)|like (and|&) subscribe|"
+    r"don'?t forget to|new videos? every|link in (the )?(bio|description)|all links|"
+    r"hbo\s*max|disney\s?\+|\bnetflix\b|\bhulu\b|prime video|paramount\s?\+|peacock|"
+    r"discover more|www\.|\.com\b|\.net\b|/watch\b|@[A-Za-z0-9_]{4,}", re.I)
+
+
+def _frame_card_uniformity(img_path) -> float:
+    """0..1 'designed-card' score for a FINAL-video frame: the fraction of the PICTURE CENTER
+    occupied by one near-uniform colour. A promotional/outro/CTA slate is a designed graphic with
+    a large flat background (~0.5-1.0); a photographic scene is detailed everywhere (~0.05-0.2).
+    Measured on a center crop that EXCLUDES the cinematic letterbox bars and the bottom caption
+    band, so neither the bars nor our own burned captions inflate the score."""
+    try:
+        from PIL import Image
+        import numpy as _np2
+    except Exception:
+        return 0.0
+    try:
+        im = Image.open(img_path).convert("RGB")
+        W, H = im.size
+        # picture center only: drop top/bottom ~28%/30% (letterbox bars + caption band) and outer 10%
+        crop = im.crop((int(0.10 * W), int(0.28 * H), int(0.90 * W), int(0.70 * H)))
+        crop = crop.resize((48, 32))
+        a = (_np2.asarray(crop, dtype=_np2.uint8) >> 4)           # quantize to 4 bits/channel
+        keys = (a[..., 0].astype(_np2.int32) << 8) | (a[..., 1].astype(_np2.int32) << 4) | a[..., 2]
+        vals, counts = _np2.unique(keys, return_counts=True)
+        return float(counts.max()) / float(keys.size) if keys.size else 0.0
+    except Exception:
+        return 0.0
+
+
+def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
+                         stride: float = 0.5) -> list:
+    """Scan the FINISHED video every `stride` seconds (default 0.5s — a 1-2s card cannot fit
+    between probes) for full-screen promotional / outro / CTA / streamer-brand slates that must
+    never ship. TWO-FACTOR to avoid false positives: a frame is flagged only when (a) a STRONG
+    promo token (_PROMO_RX) is read AND (b) the picture center is a near-uniform designed CARD
+    (_frame_card_uniformity >= floor). This distinguishes a full-screen promo card from an
+    in-scene sign, a small broadcaster corner bug, or our own narration caption over live footage
+    (all fail the card-geometry test). Returns a list of hit dicts (empty = clean)."""
+    if ocr_engine is None:
+        if log:
+            log("build: ⚠ final-video ad scan SKIPPED (no OCR engine) — relying on clip-stage gate")
+        return []
+    import os as _os2
+    ff = ffmpeg_exe()
+    from .config import _f as _cfg_f3
+    card_floor = _cfg_f3("VIDLORE_CLIPSTUDIO_AD_CARD_FLOOR", 0.40)
+    scan_dir = work / "_adscan"
+    try:
+        scan_dir.mkdir(exist_ok=True)
+        for _old in scan_dir.glob("fr_*.jpg"):
+            _old.unlink(missing_ok=True)
+    except Exception:
+        pass
+    fps = 1.0 / max(0.1, stride)
+    # one decode pass → all sample frames (downscaled); far cheaper than N seeks
+    subprocess.run([ff, "-y", "-loglevel", "error", "-i", str(result),
+                    "-vf", f"fps={fps:.4f},scale=854:-1", "-q:v", "4",
+                    str(scan_dir / "fr_%05d.jpg")], capture_output=True, timeout=900)
+    frames = sorted(scan_dir.glob("fr_*.jpg"))
+    hits = []
+    import re as _re2
+    for i, fp in enumerate(frames):
+        t = i * stride
+        # cheap card-geometry pre-filter first — OCR only the designed-card frames (a promo slate
+        # is ALWAYS a flat card, so photographic scene frames are skipped without OCR cost)
+        if _frame_card_uniformity(fp) < card_floor:
+            continue
+        try:
+            # OCR the top ~82% only, so a burned narration caption at the bottom can never match
+            from PIL import Image
+            im = Image.open(fp).convert("RGB")
+            W, H = im.size
+            top = im.crop((0, 0, W, int(0.82 * H)))
+            tpath = scan_dir / f"_ocr_{i:05d}.jpg"
+            top.save(tpath)
+            res, _el = ocr_engine(str(tpath))
+            tpath.unlink(missing_ok=True)
+            joined = " ".join(str(txt) for _b, txt, conf in (res or []) if float(conf) >= 0.30)
+            m = _PROMO_RX.search(joined)
+            if m:
+                hits.append({"t": round(t, 2), "token": m.group(0)[:40],
+                             "text": joined[:160],
+                             "card_uniformity": round(_frame_card_uniformity(fp), 3)})
+        except Exception:
+            pass
+    try:
+        for _f in scan_dir.glob("fr_*.jpg"):
+            _f.unlink(missing_ok=True)
+    except Exception:
+        pass
+    if log:
+        if hits:
+            for h in hits[:12]:
+                log(f"build: final-video AD SCAN HIT @{h['t']}s token={h['token']!r} "
+                    f"card={h['card_uniformity']}")
+        else:
+            log(f"build: final-video ad scan clean — {len(frames)} frames @{stride}s, "
+                f"0 promo/outro/CTA cards")
+    return hits
+
+
+def _final_video_ad_gate(result: Path, work: Path, ocr_engine, *, log) -> Path:
+    """HARD publication gate against full-screen promo/outro/CTA/streamer-brand cards. Auto-repair
+    for these happens UPSTREAM at the clip stage (_clip_branding_text full-window probe →
+    _freeze_replace / clean re-window), so a survivor here means a card slipped every earlier
+    guard: rather than silently ship it, QUARANTINE the render (rename to *.FAILED_AD_QA.*) and
+    RAISE, exactly like the breakout release gate. Clean renders pass through unchanged."""
+    import json as _json_ad
+    import os as _os3
+    if _os3.environ.get("VIDLORE_CLIPSTUDIO_FINAL_AD_GATE", "1").strip() in ("0", "false", "no"):
+        return result
+    hits = _final_video_ad_scan(result, work, ocr_engine, log=log)
+    if not hits:
+        return result
+    try:
+        (work.parent / "final_ad_failures.json").write_text(
+            _json_ad.dumps({"failures": hits, "video": str(result)}, indent=1), encoding="utf-8")
+    except Exception:
+        pass
+    _quar = result.with_name(result.stem + ".FAILED_AD_QA" + result.suffix)
+    try:
+        if _quar.exists():
+            _quar.unlink()
+        result.rename(_quar)
+    except Exception:
+        _quar = result
+    log(f"build: ⛔ RELEASE-BLOCKED — {len(hits)} promotional/outro/CTA frame(s) survived to the "
+        f"final video (first @{hits[0]['t']}s, token {hits[0]['token']!r}); quarantined → "
+        f"{_quar.name} (NOT published). See final_ad_failures.json.")
+    raise RuntimeError(
+        f"final-video ad gate failed — {len(hits)} promo/outro/CTA card frame(s) survived "
+        f"(quarantined at {_quar.name}); refusing to publish a video with third-party promo material")
 
 
 def _ass_ts(t: float) -> str:
@@ -3864,5 +4063,10 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     if _final_caps and os.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_QA", "1").strip() \
             not in ("0", "false", "no"):
         result = _breakout_qa_gate(result, _final_caps, work, log=log)
+    # FINAL-VIDEO AD/BRANDING RELEASE GATE — scan the finished video every 0.5s for full-screen
+    # promo / outro / CTA / streamer-brand slates (the Max/WarnerMedia end-slate class). Clip-stage
+    # removal + Ken-Burns time-neutrality are the primary fix; this is the last-line block so a
+    # promo frame can never SILENTLY ship (quarantine + raise on any survivor).
+    result = _final_video_ad_gate(result, work, _ocr_eng, log=log)
     log(f"build: done → {result}")
     return result

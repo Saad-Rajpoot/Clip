@@ -4342,7 +4342,74 @@ def test_breakout_caption_layout():
         _fw.WhisperModel = _orig
 
 
+def test_fps_and_ad_protection():
+    print("[stage-1] FPS time-neutrality + ad/branding release gate")
+    import vidlore.clipstudio.build as B
+    from vidlore.clipstudio.match import clean_cut_window
+    root = Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio"
+    bsrc = (root / "build.py").read_text(encoding="utf-8")
+    msrc = (root / "match.py").read_text(encoding="utf-8")
+
+    # (1) Ken-Burns is FPS time-neutral: fps=30 is normalized BEFORE zoompan so 1 output second ==
+    #     1 source second for every source frame rate (stops the non-30fps source over/under-consume
+    #     that ran the cut into the Max/WarnerMedia outro slate).
+    kb = B._ken_burns_filter(6.0, zoom_to=1.10)
+    check("ken-burns normalizes fps BEFORE zoompan (time-neutral)",
+          kb.startswith("fps=30,") and kb.index("fps=30") < kb.index("zoompan"))
+
+    # (2) _PROMO_RX: strong promo/CTA/outro tokens only — never ordinary narration words
+    for s in ["max PLANS START AT $9.99/MONTH mox.com", "subscribe now", "only on HBO Max",
+              "www.foo.tv", "discover more", "now streaming"]:
+        check(f"promo-rx flags {s!r}", bool(B._PROMO_RX.search(s)))
+    for s in ["watch how she moves", "follow her north", "the dragons happened",
+              "he catches her by the throat"]:
+        check(f"promo-rx ignores narration {s!r}", not B._PROMO_RX.search(s))
+
+    # (3) branding probe covers the clip TAIL (end-slates live there), not just the head
+    offs = B._branding_probe_offsets(8.0)
+    check("branding probe samples the TAIL", max(offs) >= 7.0 and any(o >= 6.0 for o in offs))
+    check("branding probe head-only fallback on unknown duration",
+          B._branding_probe_offsets(0) == [0.2, 0.8, 1.6, 2.6, 3.6])
+
+    # (4) card-geometry: flat card high, photographic frame low
+    try:
+        from PIL import Image
+        import numpy as _np
+        _flat = Path(tempfile.mktemp(suffix=".png")); _rnd = Path(tempfile.mktemp(suffix=".png"))
+        Image.new("RGB", (960, 540), (12, 40, 150)).save(_flat)
+        Image.fromarray((_np.random.RandomState(5).rand(540, 960, 3) * 255).astype("uint8")).save(_rnd)
+        uf, ur = B._frame_card_uniformity(_flat), B._frame_card_uniformity(_rnd)
+        _flat.unlink(missing_ok=True); _rnd.unlink(missing_ok=True)
+        check("card-uniformity: flat slate >= 0.9, photographic < 0.25", uf >= 0.9 and ur < 0.25)
+    except Exception as _e:
+        check(f"card-uniformity PIL test ran ({_e})", False)
+
+    # (5) clean_cut_window keeps a safety MARGIN before an ocr-text (branding/card) shot, but NOT
+    #     before a subtitle shot (subs keep exact bounds — long-standing shortening behavior)
+    def _shot(i, s, e, **kw):
+        d = dict(index=i, start=s, end=e, subs_flag=0, luma_avg=60.0, luma_hi=200.0,
+                 corner_masks={}, ocr_text="", ocr_names=[], keyframe_path="")
+        d.update(kw)
+        return types.SimpleNamespace(**d)
+    A = _shot(0, 0.0, 2.0)
+    Btext = _shot(1, 2.0, 5.0, ocr_text="max PLANS START AT WATCH")     # ocr-text card
+    _, n1_txt, act_t, _ = clean_cut_window([A, Btext], 0.0, 2.4, 1.2, anchor=(0.0, 2.0))
+    check("ocr-text neighbour → clean window ends with a safety margin before it",
+          act_t == "shortened" and n1_txt <= 2.0 - 0.3 + 1e-6)
+    Bsub = _shot(1, 2.0, 5.0, subs_flag=1)                              # burned subtitle
+    _, n1_sub, act_s, _ = clean_cut_window([A, Bsub], 0.0, 2.4, 1.2, anchor=(0.0, 2.0))
+    check("subs neighbour → exact boundary kept (no margin, unchanged behavior)",
+          act_s == "shortened" and abs(n1_sub - 2.0) <= 1e-6)
+    check("edge-margin applies to ocr-text reason only", "r == \"ocr-text\"" in msrc)
+
+    # (6) the final-video ad gate is WIRED into build_video as a release gate
+    check("final-video ad gate wired into build_video",
+          "_final_video_ad_gate(result, work, _ocr_eng" in bsrc
+          and "def _final_video_ad_gate" in bsrc and "FAILED_AD_QA" in bsrc)
+
+
 def main():
+    test_fps_and_ad_protection()
     test_verifier_promotion_rewrites_beat_windows()
     test_budget_loop_survives_plan_beats_failure()
     test_find_produced_video()

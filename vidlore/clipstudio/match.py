@@ -692,13 +692,30 @@ def clean_cut_window(shots, t0: float, t1: float, min_len: float,
     alternates instead of silently airing a DIFFERENT moment of the same shot.
     Old indexes (no flags) report every shot clean → 'ok' (fail-open, keyframe gates still ran)."""
     anchor = anchor or (t0, t1)
-    over = [sh for sh in shots if sh.end > t0 + 0.05 and sh.start < t1 - 0.05]
+    # A designed on-screen TEXT card — a channel/CTA/outro slate or a promo card — routinely FADES
+    # in a few frames BEFORE its indexed shot boundary, so a window cleared to end exactly at that
+    # boundary still airs a frame or two of the card (the Max/WarnerMedia outro aired from a ~0.15s
+    # fade-in that begins just before the shot-33 boundary; a time-neutral cut ending at 147.9 still
+    # showed slate luma 61). Pad only TEXT-card dirty spans (ocr-text) by a small safety margin so the
+    # cleared window never abuts one — and WIDEN the shot-consideration window by that same margin so a
+    # card whose indexed shot starts just BEYOND [t0,t1] (its fade bleeds back in) is still caught.
+    # Burned dialogue subtitles (subs), dark murk, and corner logos keep their EXACT bounds — margining
+    # subs would over-trim ordinary subtitled scenes and change long-standing shortening behavior; and
+    # a shot that starts past t1 for a non-text reason yields a clamped-empty span, so widening `over`
+    # is behaviour-neutral except for the ocr-text margin it enables.
+    _edge = _f_env("VIDLORE_CLIPSTUDIO_WQC_EDGE_MARGIN", 0.35)
+    over = [sh for sh in shots if sh.end > t0 - _edge and sh.start < t1 + _edge]
     dirty = []
     for sh in over:
         r = _shot_dirty_reason(sh, partial_corner)
         if r:
-            dirty.append((max(t0, float(sh.start)), min(t1, float(sh.end)),
-                          f"{r}(shot {getattr(sh, 'index', '?')})"))
+            ds, de = float(sh.start), float(sh.end)
+            if r == "ocr-text" and _edge > 0:
+                ds -= _edge
+                de += _edge
+            ds, de = max(t0, ds), min(t1, de)
+            if de - ds > 0.01:                        # skip clamped-empty spans (shot fully outside)
+                dirty.append((ds, de, f"{r}(shot {getattr(sh, 'index', '?')})"))
     if not dirty:
         return t0, t1, "ok", ""
     dirty.sort()
