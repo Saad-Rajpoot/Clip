@@ -2237,7 +2237,8 @@ def test_generic_beat_filler_leniency():
             M.ScriptSegment(index=1, text="Tywin at the small council table",
                             visual_policy="exact_scene", is_specific_claim=True),   # over-marked spec
             M.ScriptSegment(index=2, text="the wrong character entirely",
-                            visual_policy="exact_scene", is_specific_claim=True)]
+                            visual_policy="exact_scene", required_kind="character",
+                            required_entity="Jon Snow", is_specific_claim=True)]
     fake_shot = types.SimpleNamespace(index=1, keyframe_path="kf.jpg", face_ids=[], identities=[])
 
     # META/commentary narration → matches_narration False even when the right subject IS on screen
@@ -2266,9 +2267,36 @@ def test_generic_beat_filler_leniency():
           ctx.verifier.get("verdict") == "keep" and ctx.verifier.get("downgraded") == "exact→contextual"
           and not ctx.flagged and "verifier_failed" not in (ctx.flag_reasons or []))
     # EXACT beat whose footage shows the WRONG subject → contradictory → NOT downgraded → flagged.
-    check("EXACT beat, WRONG subject → contradictory, NOT downgraded (flagged/blocked)",
+    # A CHARACTER beat (required_kind character/actor) with the wrong subject is never filler-eligible.
+    check("EXACT character beat, WRONG subject → contradictory, NOT downgraded (flagged/blocked)",
           wrong.verifier.get("verdict") == "replace" and wrong.flagged
           and "verifier_failed" in (wrong.flag_reasons or []))
+
+    # GENERIC-FILLER tier: an EXACT NON-CHARACTER beat (scene/event/object) whose subject is absent
+    # (correct_subject_visible False) airs its thematic clip as honest generic_filler, not a block.
+    tmp2 = tempfile.mkdtemp(prefix="csfill_")
+    proj2 = M.ClipProject(name="t2", root=tmp2)
+    fill = M.ClipSelection(segment_index=0, source_id="srcA", shot_index=1,
+                           in_point=1.0, out_point=4.0, confidence=0.8)
+    proj2.selections = [fill]
+    segs2 = [M.ScriptSegment(index=0, text="Days earlier, at a wedding, an army was butchered",
+                             visual_policy="exact_scene", required_kind="event",
+                             required_entity="Red Wedding", is_specific_claim=True)]
+    orig2 = (V.verify_frame, V._shot_lookup, V._cut.cut_selection, L.has_llm)
+    try:
+        V.verify_frame = lambda *a, **k: {"verdict": "replace", "matches_narration": False,
+                                          "correct_subject_visible": False, "specific_enough": False,
+                                          "confidence": 0.5, "reason": "off-pool event not shown"}
+        V._shot_lookup = lambda p: (lambda sid, idx: fake_shot)
+        V._cut.cut_selection = lambda p, s, c: None
+        L.has_llm = lambda eng_cfg=None: True
+        V.verify_and_repair(proj2, segs2, ClipConfig(),
+                            types.SimpleNamespace(anthropic_model="m"), progress=None)
+    finally:
+        V.verify_frame, V._shot_lookup, V._cut.cut_selection, L.has_llm = orig2
+    check("NON-CHARACTER off-pool beat → exact→generic_filler (thematic, kept, not blocked)",
+          fill.verifier.get("verdict") == "keep"
+          and fill.verifier.get("relevance_class") == "generic_filler" and not fill.flagged)
     # the prompt actually carries the specific/generic instruction
     vsrc = (Path(__file__).resolve().parent.parent / "vidlore" / "clipstudio" /
             "verify.py").read_text(encoding="utf-8")

@@ -439,7 +439,28 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     log(f"verify: seg{sel.segment_index} exact→contextual downgrade "
                         f"(required subject on screen — kept, honestly labeled contextual_fallback)")
                 else:
-                    _try_promote(downgrade=True)
+                    _try_promote(downgrade=True)     # scan alternates for a right-subject clip
+
+            # EXACT→GENERIC-FILLER (the last hierarchy tier before an honest gap). When neither the
+            # exact moment NOR a right-subject contextual clip exists, a NON-CHARACTER beat
+            # (scene / event / object / location / abstract) may air its thematic clip as honestly
+            # labelled generic_filler — a thematic same-show clip is NOT contradictory and beats a
+            # frozen still / black. A CHARACTER/actor beat is NOT filler-eligible: a clip that does
+            # not show the required person risks a WRONG-CHARACTER read (contradictory), so it stays
+            # unresolved for the still / hold / honest release-block. env-gated (default ON).
+            _filler_on = _os_ms.environ.get(
+                "VIDLORE_CLIPSTUDIO_GENERIC_FILLER_DOWNGRADE", "1").strip() \
+                not in ("0", "false", "no")
+            if not swapped and _exact and _downgrade_on and _filler_on \
+                    and (getattr(seg, "required_kind", "") or "").lower() not in ("character", "actor"):
+                v["verdict"] = "keep"
+                v["downgraded"] = "exact→generic_filler"
+                v["relevance_class"] = "generic_filler"
+                sel.verifier = v
+                replaced += 1
+                swapped = True
+                log(f"verify: seg{sel.segment_index} exact→generic_filler "
+                    f"(non-character beat; exact+contextual absent — thematic clip, honestly labeled)")
 
             if not swapped:
                 failed += 1
