@@ -310,24 +310,31 @@ def build_queries(a: ScriptAnalysis, segments=None) -> list[str]:
             q.append(f"{mv} {sc}"[:90])
     # 2) PER-BEAT: the LLM's PRECISE scene query is the strongest signal — it names the exact moment,
     #    so search it verbatim (this is what actually downloads the on-script scene). Fall back to the
-    #    entity + action keywords when the line is generic.
-    for s in (segments or []):
+    #    entity + action keywords when the line is generic. Collected SEPARATELY with each beat's
+    #    timeline position so the query budget can be STRATIFIED across early/middle/late beats — the
+    #    old flat segment-order truncation starved late exact beats (a 238-beat script never searched
+    #    its coin-handoff / blind-Arya scenes because the first ~40 beats filled the 60-query cap).
+    _beat_q: list = []                                 # (seg_index, query)
+    _seg_list = list(segments or [])
+    _maxidx = max((int(getattr(s, "index", i)) for i, s in enumerate(_seg_list)), default=1) or 1
+    for i, s in enumerate(_seg_list):
         # POLICY budget (req. 8): only EXACT/CHARACTER beats earn a dedicated scene-query search —
         # generic_filler reuses the existing pool and abstract_effect wants an image, so spending
         # discovery/download budget on them is waste.
         if not _policy.wants_discovery_query(s):
             continue
+        _si = int(getattr(s, "index", i))
         sq = (getattr(s, "scene_query", "") or "").strip()
         if sq and len(sq) > 6:
             # the LLM usually already prefixes the movie; only add it if missing
-            q.append((sq if mv.lower() in sq.lower() else f"{mv} {sq}").strip()[:100])
+            _beat_q.append((_si, (sq if mv.lower() in sq.lower() else f"{mv} {sq}").strip()[:100]))
         ent = (getattr(s, "required_entity", "") or "").strip()
         kws = [k for k in (getattr(s, "keywords", []) or [])
                if k not in _STOPQ and k.lower() != ent.lower()][:3]
         if mv and ent and len(ent) > 2 and ent.lower() not in ("game of thrones", "the cast"):
-            q.append(f"{mv} {ent} {' '.join(kws)}".strip()[:80])
+            _beat_q.append((_si, f"{mv} {ent} {' '.join(kws)}".strip()[:80]))
         elif mv and len(kws) >= 2:
-            q.append(f"{mv} {' '.join(kws)}".strip()[:80])
+            _beat_q.append((_si, f"{mv} {' '.join(kws)}".strip()[:80]))
     # 3) a few character/actor scene queries for face coverage — ERA-ANCHORED so a single-scene
     #    deep-dive gets ON-ERA footage of each character (e.g. long-hair S1 Cersei, not short-hair
     #    S6 Cersei spliced in from a multi-season compilation). The season comes from episode_hint.
@@ -347,15 +354,59 @@ def build_queries(a: ScriptAnalysis, segments=None) -> list[str]:
     for loc in (a.locations or [])[:3]:
         if mv and loc and loc.lower() not in ("westeros",):     # too generic alone
             q.append(f"{mv} {loc}".strip()[:80])
-    # dedupe preserve order
-    seen, out = set(), []
-    for x in q:
-        k = x.lower().strip()
-        if k and k not in seen:
-            seen.add(k)
-            out.append(x)
+
+    # --- combine: structural queries (anchors/key-scenes/characters/locations) FIRST, then the
+    #     per-beat exact queries STRATIFIED across the timeline so late exact beats are never starved.
+    _mv_toks = {w for w in re.findall(r"[a-z0-9']+", mv.lower())}
+
+    def _eqkey(s: str) -> str:
+        """Equivalent-query key: drop the movie title + stopwords, sort the rest — so 'Tywin Arya
+        dinner Harrenhal' and 'Arya dinner at Harrenhal Tywin' collapse to ONE search (dedupe
+        equivalent scene queries, req.). Single DIGITS are kept (a season/episode number is a real
+        distinguisher — 'Tywin scene season 2' must NOT collapse into 'Tywin scene season 6')."""
+        toks = [w for w in re.findall(r"[a-z0-9']+", s.lower())
+                if w not in _mv_toks and w not in _STOPQ and (len(w) > 1 or w.isdigit())]
+        return " ".join(sorted(set(toks))) or s.lower().strip()
+
+    seen_key, out = set(), []
+
+    def _emit(x: str):
+        x = (x or "").strip()
+        if not x:
+            return
+        k = _eqkey(x)
+        if k in seen_key:
+            return
+        seen_key.add(k)
+        out.append(x)
+
+    for x in q:                                          # structural queries keep priority/order
+        _emit(x)
+    # stratify the per-beat queries into early/middle/late thirds and round-robin interleave, so a
+    # forced truncation (very long script) is SPREAD across the whole timeline instead of dropping
+    # every late beat. Dedupe equivalent queries within the beat pool first.
+    _bseen, _b = set(), []
+    for _si, x in _beat_q:
+        k = _eqkey(x)
+        if k not in _bseen:
+            _bseen.add(k)
+            _b.append((_si, x))
+    thirds = ([], [], [])
+    for _si, x in _b:
+        thirds[min(2, int(3 * _si / max(1, _maxidx + 1)))].append(x)
+    _il = 0
+    while any(thirds):
+        for t in thirds:
+            if t:
+                _emit(t.pop(0))
+        _il += 1
     from .config import _i as _cfg_i
     _qcap = _cfg_i("VIDLORE_CLIPSTUDIO_QUERY_CAP", 60)    # tolerant: bad value → default
+    _hard = _cfg_i("VIDLORE_CLIPSTUDIO_QUERY_CAP_MAX", 200)
+    # scale the cap with the beat count so a long script can search ALL its exact scenes (more
+    # queries = better candidate discovery only; downloads stay separately budgeted). Bounded by
+    # _hard so a pathological script can't explode the search API call count.
+    _qcap = max(_qcap, min(_hard, len(out)))
     return out[:_qcap]
 
 

@@ -60,7 +60,8 @@ def test_verifier_promotion_rewrites_beat_windows():
 
     calls = {"n": 0, "cut": 0}
 
-    def fake_verify_frame(kf, narration, ent, kind, names, eng_cfg, model="", is_specific=True):
+    def fake_verify_frame(kf, narration, ent, kind, names, eng_cfg, model="", is_specific=True,
+                          **kwargs):
         calls["n"] += 1
         # first call = the chosen pick -> replace; second = the alternate -> keep
         if calls["n"] == 1:
@@ -527,7 +528,7 @@ def test_round2_review_fixes():
     fake_shot = types.SimpleNamespace(index=0, keyframe_path="kf.jpg", face_ids=[], identities=[])
     calls = {"n": 0}
 
-    def fake_vf(kf, narration, ent, kind, names, eng_cfg, model="", is_specific=True):
+    def fake_vf(kf, narration, ent, kind, names, eng_cfg, model="", is_specific=True, **kwargs):
         calls["n"] += 1
         # chosen -> replace; altA -> replace (FAILS); altB -> keep
         return {"verdict": ["replace", "replace", "keep"][min(calls["n"] - 1, 2)],
@@ -2234,7 +2235,7 @@ def test_generic_beat_filler_leniency():
 
     # the verifier returns the SAME verdict for both beats: replace, but the footage IS on-topic
     # (matches_narration) and the right subject is visible — only "not the exact scene".
-    def fake_vf(kf, narration, ent, kind, names, eng_cfg, model="", is_specific=True):
+    def fake_vf(kf, narration, ent, kind, names, eng_cfg, model="", is_specific=True, **kwargs):
         return {"verdict": "replace", "matches_narration": True, "correct_subject_visible": True,
                 "specific_enough": False, "confidence": 0.6, "reason": "on-topic but not exact"}
 
@@ -4342,6 +4343,120 @@ def test_breakout_caption_layout():
         _fw.WhisperModel = _orig
 
 
+def test_verifier_context_and_fallback():
+    print("[stage-2] verifier storyboard context + honest fallback relevance-class")
+    from vidlore.clipstudio import verify as V
+    import vidlore.clipstudio.llm as L
+    from vidlore.clipstudio import models as M
+    from vidlore.clipstudio import ledger as LG
+    from PIL import Image
+
+    # (1) verify_frame feeds the beat's storyboard (expected_visual / scene_query / era) to the LLM,
+    #     and instructs it that the right character alone is NOT enough (kills the "Jon = the most
+    #     powerful man" rationalized keep).
+    kf = Path(tempfile.mktemp(suffix=".jpg")); Image.new("RGB", (64, 36), (30, 30, 30)).save(kf)
+    captured = {}
+
+    def fake_complete(system=None, max_tokens=None, messages=None, eng_cfg=None, model=None):
+        captured["text"] = messages[0]["content"][-1]["text"]
+        return '{"verdict":"replace","confidence":0.3,"reason":"wrong scene"}'
+    orig = L.complete
+    try:
+        L.complete = fake_complete
+        V.verify_frame(str(kf), "the most powerful man in Westeros", "Arya Stark", "character", [],
+                       types.SimpleNamespace(), model="m", is_specific=True,
+                       expected_visual="an 11-year-old girl looks up at Tywin at the dinner table",
+                       scene_query="Arya looks up at Tywin Harrenhal season 2", era_hint="S2")
+    finally:
+        L.complete = orig
+    kf.unlink(missing_ok=True)
+    t = captured.get("text", "")
+    check("verifier prompt carries expected_visual", "looks up at Tywin at the dinner table" in t)
+    check("verifier prompt carries scene_query + era", "Harrenhal season 2" in t and "S2" in t)
+    check("verifier told right character alone is NOT enough",
+          "correct character ALONE is not enough" in t or "different scene" in t.lower())
+
+    # (2) action beats get a start/mid/end contact sheet; storyboard context is threaded from segs
+    vsrc = (Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "verify.py").read_text()
+    check("action contact-sheet builder exists + multiframe wired",
+          "_action_contact_sheet" in vsrc and "multiframe=is_mf" in vsrc)
+    check("verify passes storyboard to both primary + alternate checks",
+          vsrc.count("expected_visual=getattr(_seg") >= 1 and "_verify_ctx(ashot.keyframe_path" in vsrc)
+
+    # (3) honest relevance_class in the ledger
+    tmp = Path(tempfile.mkdtemp(prefix="rc_"))
+    proj = M.ClipProject(name="t", root=str(tmp))
+    # a) exact beat, verifier-kept moving footage → exact_scene
+    s0 = M.ClipSelection(segment_index=0, source_id="srcA", shot_index=1, in_point=1, out_point=4,
+                         confidence=0.8)
+    s0.verifier = {"status": "ok", "verdict": "keep"}
+    # b) recovery still on exact beat → contextual_fallback (labelled at fill time)
+    s1 = M.ClipSelection(segment_index=1, source_id="", shot_index=-1, in_point=0, out_point=0,
+                         confidence=0.0)
+    s1.image_meta = {"source": "source-frame-recovery", "relevance_class": "contextual_fallback"}
+    # c) exact beat, verifier failed, no footage → exact_scene_missing
+    s2 = M.ClipSelection(segment_index=2, source_id="srcB", shot_index=3, in_point=1, out_point=4,
+                         confidence=0.5)
+    s2.flag_reasons = ["verifier_failed", "exact_scene_missing"]
+    proj.selections = [s0, s1, s2]
+    g0 = M.ScriptSegment(index=0, text="x", quote="a line"); g0.visual_policy = "exact_scene"
+    g1 = M.ScriptSegment(index=1, text="y"); g1.visual_policy = "exact_scene"
+    g2 = M.ScriptSegment(index=2, text="z", quote="q"); g2.visual_policy = "exact_scene"
+    LG.write_ledger(proj, [g0, g1, g2])
+    recs = [json.loads(l) for l in proj.ledger_path.read_text().splitlines() if l.strip()]
+    rc = {r["segment_index"]: r.get("relevance_class") for r in recs}
+    check("verifier-kept exact footage → relevance_class exact_scene", rc.get(0) == "exact_scene")
+    check("recovery still on exact beat → contextual_fallback", rc.get(1) == "contextual_fallback")
+    check("verifier-failed exact beat → exact_scene_missing", rc.get(2) == "exact_scene_missing")
+
+
+def test_discovery_query_stratification():
+    print("[stage-2] discovery: timeline-stratified query coverage + equivalent-query dedup")
+    import os, re
+    from vidlore.clipstudio.discover import build_queries
+    from vidlore.clipstudio.analyze import ScriptAnalysis
+    from vidlore.clipstudio import models as M
+    ana = ScriptAnalysis(movie_title="Game of Thrones")
+    ana.characters = []; ana.locations = []; ana.key_scenes = []
+    # 90 EXACT beats spread across the timeline, each a unique scene
+    segs = []
+    for i in range(90):
+        s = M.ScriptSegment(index=i, text=f"beat {i}",
+                            scene_query=f"unique moment number {i} distinct scene {i}")
+        s.visual_policy = "exact_scene"
+        segs.append(s)
+    # + three EQUIVALENT queries (same tokens, reordered) → must collapse to ONE
+    for j, q in enumerate(["Arya dinner Harrenhal Tywin", "Tywin Harrenhal dinner Arya",
+                           "dinner at Harrenhal with Tywin and Arya"]):
+        s = M.ScriptSegment(index=45, text="dup", scene_query=q)
+        s.visual_policy = "exact_scene"
+        segs.append(s)
+
+    qs = build_queries(ana, segs)
+    j = " || ".join(qs).lower()
+    # (1) with cap scaling, EVERY beat's scene is searched — including the LAST beats (no starvation)
+    check("late beats are searched (no segment-order starvation)",
+          "number 88" in j and "number 89" in j and "number 2 " in j)
+    # (2) equivalent scene queries collapse to a single search
+    n_harrenhal = sum(1 for x in qs if "harrenhal" in x.lower())
+    check("equivalent scene queries deduped to one", n_harrenhal == 1)
+
+    # (3) when the HARD cap forces truncation, coverage is STRATIFIED across early/middle/late,
+    #     never all-early (the old flat truncation dropped every late exact beat)
+    os.environ["VIDLORE_CLIPSTUDIO_QUERY_CAP"] = "24"
+    os.environ["VIDLORE_CLIPSTUDIO_QUERY_CAP_MAX"] = "24"
+    try:
+        qs2 = build_queries(ana, segs)
+    finally:
+        os.environ.pop("VIDLORE_CLIPSTUDIO_QUERY_CAP", None)
+        os.environ.pop("VIDLORE_CLIPSTUDIO_QUERY_CAP_MAX", None)
+    j2 = " || ".join(qs2).lower()
+    nums = [int(re.search(r"number (\d+)", x).group(1)) for x in qs2 if re.search(r"number (\d+)", x)]
+    check("hard cap honored", len(qs2) <= 24)
+    check("truncation is stratified: early AND middle AND late beats all represented",
+          bool(nums) and min(nums) < 30 and any(30 <= n < 60 for n in nums) and max(nums) >= 60)
+
+
 def test_fps_and_ad_protection():
     print("[stage-1] FPS time-neutrality + ad/branding release gate")
     import vidlore.clipstudio.build as B
@@ -4410,6 +4525,8 @@ def test_fps_and_ad_protection():
 
 def main():
     test_fps_and_ad_protection()
+    test_discovery_query_stratification()
+    test_verifier_context_and_fallback()
     test_verifier_promotion_rewrites_beat_windows()
     test_budget_loop_survives_plan_beats_failure()
     test_find_produced_video()

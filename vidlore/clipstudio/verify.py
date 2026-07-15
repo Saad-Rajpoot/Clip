@@ -36,27 +36,53 @@ def _img_block(path: Path) -> dict:
     return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}}
 
 
-def verify_frame(keyframe_path: str, narration: str, required_entity: str, required_kind: str,
-                 faceid_names: list[str], eng_cfg, model: str = "", is_specific: bool = True) -> dict | None:
-    """One vision verdict for a single frame (Gemini brain → Claude fallback). None on error.
+def verify_frame(keyframe_path, narration: str, required_entity: str, required_kind: str,
+                 faceid_names: list[str], eng_cfg, model: str = "", is_specific: bool = True,
+                 *, expected_visual: str = "", scene_query: str = "", era_hint: str = "",
+                 multiframe: bool = False) -> dict | None:
+    """One vision verdict for a frame (Gemini brain → Claude fallback). None on error.
 
     `is_specific` carries the beat's is_specific_claim: a SPECIFIC line ("Tyrion shoots Tywin with a
     crossbow") demands the EXACT scene; a GENERIC line ("and everything changed") only needs a
-    thematically-relevant filler — so the verifier is told to grade leniently there."""
+    thematically-relevant filler — so the verifier is told to grade leniently there.
+
+    `expected_visual`/`scene_query`/`era_hint` give the verifier the beat's STORYBOARD — what the
+    exact moment should look like, which scene it is, and the era/season. Without them the verifier
+    only knew the required character, so it rationalized wrong-scene keeps ("Arya is visible looking
+    up at Jon Snow (the most powerful man)" for a Daenerys beat; "holding a coin-like object" for the
+    Jaqen coin handoff). With the storyboard it can fail a right-character / wrong-moment frame.
+
+    `keyframe_path` may be a single frame or a pre-built start→mid→end contact sheet (set
+    `multiframe=True`) so an ACTION beat is judged on whether the action actually occurs, not on one
+    ambiguous instant."""
     if not keyframe_path or not Path(keyframe_path).exists():
         return None
     from . import llm as _llm
     _rule = (
         "This line refers to a SPECIFIC scene/moment — the footage must show THAT exact scene/"
-        "subject. Be STRICT.\n" if is_specific else
+        "subject. Be STRICT: the correct character ALONE is not enough — if the frame shows the right "
+        "person but a DIFFERENT scene, moment, action, or era than the one described, mark 'replace'.\n"
+        if is_specific else
         "This is a GENERIC narration line (no specific scene claim) — a thematically RELEVANT filler "
         "clip is acceptable. Mark 'replace' ONLY if the footage is off-topic, jarring, or shows the "
         "WRONG character/era — NOT merely because it isn't a specific/exact scene.\n")
+    _story = ""
+    if expected_visual:
+        _story += f"The exact moment should LOOK LIKE: {expected_visual}\n"
+    if scene_query:
+        _story += f"Target scene: {scene_query}\n"
+    if era_hint:
+        _story += (f"Era/season context: {era_hint} — footage from a clearly different era/season "
+                   f"than the moment described is WRONG even if the character matches.\n")
+    _mf = ("The image is a START -> MIDDLE -> END contact sheet (three moments of the clip, left to "
+           "right). Judge whether the described ACTION actually happens across them — a single frame "
+           "cannot prove an action, so require visible progression consistent with the line.\n"
+           if multiframe else "")
     txt = (
         f'Narration line: "{narration}"\n'
         f"This clip should show: {required_entity or '(a general scene fitting the line)'} "
         f"(kind: {required_kind or 'any'}).\n"
-        + _rule +
+        + _story + _mf + _rule +
         f"Automatic Face-ID on this frame detected: {', '.join(faceid_names) if faceid_names else 'none'}.\n\n"
         "Answer ONLY this JSON:\n"
         '{"matches_narration": true/false, "correct_subject_visible": true/false, '
@@ -77,6 +103,51 @@ def verify_frame(keyframe_path: str, narration: str, required_entity: str, requi
                 return None
             time.sleep(min(1.5 * (2 ** attempt), 16))
     return None
+
+
+def _action_contact_sheet(src_path: str, shot_start: float, shot_end: float, dest: Path):
+    """Build a START -> MIDDLE -> END horizontal contact sheet from a shot's source span, so an
+    ACTION beat is judged on whether the action actually happens (one keyframe can't prove motion —
+    'he catches her by the throat' verified fine on a single ambiguous frame). Returns dest or None."""
+    import subprocess
+    from .config import ffmpeg_exe
+    if not src_path or not Path(src_path).exists():
+        return None
+    a, b = float(shot_start), float(shot_end)
+    if b - a < 0.5:
+        return None
+    mid = (a + b) / 2.0
+    ff = ffmpeg_exe()
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    frames = []
+    for i, t in enumerate((a + 0.12, mid, max(a + 0.2, b - 0.12))):
+        fp = dest.with_name(f"{dest.stem}_{i}.jpg")
+        subprocess.run([ff, "-y", "-loglevel", "error", "-ss", f"{max(0.0, t):.2f}", "-i", str(src_path),
+                        "-frames:v", "1", "-vf", "scale=426:-1", str(fp)], capture_output=True, timeout=20)
+        if fp.exists():
+            frames.append(fp)
+    if len(frames) < 3:
+        for fp in frames:
+            fp.unlink(missing_ok=True)
+        return None
+    try:
+        ims = [Image.open(f).convert("RGB") for f in frames]
+        h = min(im.height for im in ims)
+        ims = [im.resize((int(im.width * h / im.height), h)) for im in ims]
+        sheet = Image.new("RGB", (sum(im.width for im in ims), h))
+        x = 0
+        for im in ims:
+            sheet.paste(im, (x, 0)); x += im.width
+        sheet.save(dest, quality=88)
+    except Exception:
+        dest = None
+    finally:
+        for fp in frames:
+            fp.unlink(missing_ok=True)
+    return dest if (dest and Path(dest).exists()) else None
 
 
 def _shot_lookup(proj: ClipProject):
@@ -119,6 +190,42 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
     by_idx = {s.index: s for s in segments}
     model = eng_cfg.anthropic_model
     verified = replaced = failed = 0
+    import os as _os_ms
+    # global era/season context for the verifier — a multi_scene essay has no single-season filter,
+    # but the verifier can still reject a clearly-wrong-era frame when the beat names an era.
+    _era_hint = str((proj.meta.get("analysis", {}) or {}).get("episode_hint", "") or "")
+    _mf_on = _os_ms.environ.get("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "1").strip() \
+        not in ("0", "false", "no")
+
+    def _verify_ctx(kf_path, ashot, _seg, _exact, faceids):
+        """verify one candidate with the beat's storyboard context + (for specific action beats) a
+        start/mid/end contact sheet built from the shot's source span."""
+        sheet, is_mf = kf_path, False
+        if _mf_on and _exact and ashot is not None:
+            try:
+                _sid = getattr(ashot, "source_id", "") or ""
+                _src = proj.source(_sid) if _sid else None
+                _sp = getattr(_src, "local_path", "") if _src else ""
+                if _sp:
+                    _dest = proj.clips_dir / f"_vsheet_{_seg.index}_{getattr(ashot, 'index', 0)}.jpg"
+                    _got = _action_contact_sheet(_sp, getattr(ashot, "start", 0.0),
+                                                 getattr(ashot, "end", 0.0), _dest)
+                    if _got:
+                        sheet, is_mf = str(_got), True
+            except Exception:
+                sheet, is_mf = kf_path, False              # any sheet failure → single-frame path
+        try:
+            return verify_frame(sheet, _seg.text, _seg.required_entity, _seg.required_kind, faceids,
+                                eng_cfg, model, is_specific=_exact,
+                                expected_visual=getattr(_seg, "expected_visual", "") or "",
+                                scene_query=getattr(_seg, "scene_query", "") or "",
+                                era_hint=_era_hint, multiframe=is_mf)
+        finally:
+            if is_mf:
+                try:
+                    Path(sheet).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     for sel in proj.selections:
         if not sel.source_id:
@@ -130,8 +237,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         kf = shot.keyframe_path if shot else ""
         faceid_names = (shot.face_ids if shot else []) or ([sel.identity] if sel.identity else [])
         _exact = _policy.verify_strict(seg)               # exact_scene → strict; else lenient (filler ok)
-        v = verify_frame(kf, seg.text, seg.required_entity, seg.required_kind, faceid_names,
-                         eng_cfg, model, is_specific=_exact)
+        v = _verify_ctx(kf, shot, seg, _exact, faceid_names)
         verified += 1
         if v is None:
             sel.verifier = {"status": "error"}
@@ -159,8 +265,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 if ashot is None:
                     continue
                 anames = ashot.face_ids or []
-                av = verify_frame(ashot.keyframe_path, seg.text, seg.required_entity,
-                                  seg.required_kind, anames, eng_cfg, model, is_specific=_exact)
+                av = _verify_ctx(ashot.keyframe_path, ashot, seg, _exact, anames)
                 if av is not None and av.get("verdict") != "keep":
                     # an explicit non-keep judgment (av None = transport error, NOT a judgment)
                     failed_wins.append((alt.source_id, float(alt.in_point)))

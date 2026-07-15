@@ -275,8 +275,16 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log) -> int:
                 sel.image_path = str(kf)
                 _src = "source-frame-recovery" if (pol == _policy.EXACT and (weak or no_clip)) \
                     else "source-frame"
+                # HONEST relevance class for the audit (req. 4): a real source keyframe of the right
+                # subject is a CONTEXTUAL fallback for an exact/character beat (correct character/
+                # scene/era, but the exact moment is not verifier-confirmed), and thematic FILLER for
+                # a generic/abstract beat. Never labelled 'exact' — only verifier-kept moving footage
+                # or a validated web-exact-scene still earns that.
+                _rclass = ("contextual_fallback" if pol in (_policy.EXACT, _policy.CHARACTER)
+                           else "generic_filler")
                 sel.image_meta = {"source": _src, "score": round(float(score), 3),
-                                  "src": sid, "shot": sidx}
+                                  "src": sid, "shot": sidx, "relevance_class": _rclass,
+                                  "exact_scene_missing": bool(pol == _policy.EXACT and (weak or no_clip))}
                 used_keys.add((sid, sidx))
                 if sph:
                     used_phash.add(sph)
@@ -321,9 +329,11 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log) -> int:
                 proj.selections.append(sel)
                 sel_by_idx[seg.index] = sel
             sel.image_path = str(res["path"])
-            # validated real live-action still → tag explicitly (never the raw host / 'web' / 'ai')
+            # validated real live-action still → tag explicitly (never the raw host / 'web' / 'ai').
+            # A CLIP+Face-ID-validated exact-scene web still is confirmed exact coverage.
             sel.image_meta = {"source": "web-exact-scene", "score": res.get("score"),
-                              "clip": res.get("clip"), "face": res.get("face"), "query": res.get("query")}
+                              "clip": res.get("clip"), "face": res.get("face"), "query": res.get("query"),
+                              "relevance_class": "exact_scene"}
             web_filled += 1
 
     # ---- PASS 3 — exact_scene still uncovered/unconfirmed → MANUAL REVIEW (never silent weak filler

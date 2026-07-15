@@ -117,6 +117,27 @@ def write_ledger(proj: ClipProject, segments: list[ScriptSegment]) -> Path:
     for sel in sorted(proj.selections, key=lambda s: s.segment_index):
         src = proj.source(sel.source_id)
         seg = by_idx.get(sel.segment_index)
+        # HONEST relevance class (req. 4) — one of: exact_scene (verifier-kept moving footage on an
+        # exact beat, or a validated web-exact-scene still) · contextual_fallback (right character/
+        # scene/era but the exact moment is unconfirmed) · generic_filler (thematic) · exact_scene_
+        # missing (an exact beat with no confirmed footage) · unverified.
+        _imeta = getattr(sel, "image_meta", {}) or {}
+        _rclass = _imeta.get("relevance_class", "")
+        if not _rclass:
+            _v = getattr(sel, "verifier", {}) or {}
+            _kept = _v.get("verdict") == "keep" and _v.get("status") == "ok"
+            _pol = (_policy.policy_of(seg) if seg else "")
+            _flags = sel.flag_reasons or []
+            if "exact_scene_missing" in _flags:
+                _rclass = "exact_scene_missing"
+            elif sel.source_id and _kept:
+                _rclass = "exact_scene" if _pol == "exact_scene" else "contextual_fallback"
+            elif "verifier_failed" in _flags:
+                _rclass = "exact_scene_missing" if _pol == "exact_scene" else "contextual_fallback"
+            elif sel.source_id:
+                _rclass = "unverified"
+            else:
+                _rclass = "none"
         rec = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "segment_index": sel.segment_index,
@@ -133,6 +154,7 @@ def write_ledger(proj: ClipProject, segments: list[ScriptSegment]) -> Path:
             "clip_path": sel.clip_path,
             "image_path": getattr(sel, "image_path", ""),
             "image_source": (getattr(sel, "image_meta", {}) or {}).get("source", ""),
+            "relevance_class": _rclass,
             "reuse_count": sel.reuse_count,
             "confidence": round(sel.confidence, 4),
             "signals": {k: round(float(v), 4) for k, v in sel.signals.items()},
