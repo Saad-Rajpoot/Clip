@@ -3049,9 +3049,20 @@ def test_clean_copy_arbitration():
     # ordering sanity of the cleanliness key itself
     k_dirty = _cleanliness_key("dirty_src", dirty.shot, src_dirty, src_height)
     k_clean = _cleanliness_key("clean_src", clean.shot, src_dirty, src_height)
-    check("cleanliness key orders watermark > subs > resolution > sharpness",
+    check("cleanliness key orders watermark > subs > decoded-quality > resolution",
           k_clean < k_dirty and _res_tier(1080) == 3 and _res_tier(718) == 2
           and _res_tier(360) == 0)
+    # CODEC-AWARE: a genuinely SHARP 720p beats a SOFT/upscaled 1080p (decoded quality, not raw
+    # container resolution/bitrate). A REAL sharp 1080p still beats the sharp 720p.
+    soft_1080 = types.SimpleNamespace(quality=0.35, ocr_text="", subs_flag=0)
+    sharp_720 = types.SimpleNamespace(quality=0.60, ocr_text="", subs_flag=0)
+    real_1080 = types.SimpleNamespace(quality=0.72, ocr_text="", subs_flag=0)
+    sh = {"soft1080": 1080, "sharp720": 720, "real1080": 1080}
+    k_soft = _cleanliness_key("soft1080", soft_1080, {}, sh)
+    k_sharp = _cleanliness_key("sharp720", sharp_720, {}, sh)
+    k_real = _cleanliness_key("real1080", real_1080, {}, sh)
+    check("sharp 720p beats SOFT/upscaled 1080p (codec-neutral decoded quality)", k_sharp < k_soft)
+    check("REAL sharp 1080p still beats the sharp 720p", k_real < k_sharp)
 
     # wiring: gates + breakout crop + still-pool band check
     root = Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio"

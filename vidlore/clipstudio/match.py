@@ -1008,14 +1008,24 @@ def _res_tier(h: int) -> int:
 
 
 def _cleanliness_key(sid: str, shot, src_dirty: dict, src_height: dict) -> tuple:
-    """Sort key for clean-copy arbitration — LOWER is cleaner. Ordered exactly per policy:
-    watermark first, then burned-sub risk, then resolution tier, then luma/sharpness."""
+    """Sort key for clean-copy arbitration — LOWER is cleaner. Order: watermark first, then burned-
+    sub risk, then DECODED-QUALITY tier, then container resolution tier, then fine quality.
+
+    Decoded quality (shot.quality = Laplacian-variance sharpness + brightness + resolution, measured
+    on decoded frames) is the CODEC-NEUTRAL picture-quality signal and ranks ABOVE raw container
+    resolution — so a genuinely sharp 720p beats a SOFT/upscaled 1080p, and a higher H.264 bitrate is
+    never blindly equated with better decoded quality than an efficient VP9/AV1 copy. shot.quality
+    already includes a resolution term, so a REAL sharp 1080p still wins; container resolution only
+    breaks near-ties (0.25 quality bins keep sharpness noise from flipping genuine resolution ties)."""
     d = src_dirty.get(sid) or {}
     subs_risk = (float(d.get("subs", 0.0)) >= 0.12) or _shot_subtitle_band(shot)
+    q = float(getattr(shot, "quality", 0.5) or 0.5)
+    q_bin = round(q * 4) / 4.0                          # coarse decoded-quality tier (0.25 steps)
     return (1 if d.get("corner") else 0,
             1 if subs_risk else 0,
+            -q_bin,
             -_res_tier(int(src_height.get(sid, 0) or 0)),
-            -float(getattr(shot, "quality", 0.5) or 0.5))
+            -q)
 
 
 def _clean_copy_swap(seg, best, scored, src_dirty: dict, src_height: dict, cfg,
