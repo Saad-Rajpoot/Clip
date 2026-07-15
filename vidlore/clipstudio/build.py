@@ -615,7 +615,10 @@ def _ordered_coverage(quote_words: list, aired_words: list) -> float:
     """Fraction of the quote's CONTENT words that appear IN ORDER in the aired transcript (a
     longest-common-subsequence ratio, not unordered presence) — so a shuffled/partial coincidental
     word match does not read as a real quote. 0..1."""
-    qc = [w for w in quote_words if w not in _BK_FUNC and len(w) > 2]
+    # content words only; EXCLUDE contractions/possessives (apostrophe tokens like "i've", "don't",
+    # "tywin's") — whisper transcribes them inconsistently ("i've" vs "i have"), so requiring them to
+    # match verbatim would spuriously fail a faithful quote.
+    qc = [w for w in quote_words if w not in _BK_FUNC and len(w) > 2 and "'" not in w]
     if not qc:
         return 1.0
     aw = [w.strip(".,!?…'\"").lower() for w in aired_words]
@@ -867,6 +870,12 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         band (Arabic/Turkish burned subs OCR to nothing readable but must never open a breakout)."""
         return (_tgate9 and _txt9(sh)) or (_sbgate9 and _sub9(sh))
     cands = []
+    # EXPLICIT candidate ORIGIN, keyed by (seg_idx, src_id, round(start,1)) and set WHERE the
+    # candidate is created — 'verbatim_quote' (a scripted quote located in the footage's own ASR) or
+    # 'evidence_mined' (a dialogue-rich shot overlapping the beat's narration). This is the candidate's
+    # true type; it is NOT the same as `_verbatim_strong` (which is merely Face-ID-bypass eligibility),
+    # so downstream coverage thresholds must key on THIS, not on bypass membership.
+    _cand_origin = {}
     # STRONG-VERBATIM set: (seg_idx, src_id, round(start,1)) for matches where 4+ CONSECUTIVE scripted
     # words are spoken verbatim in the footage's own ASR. The exact scripted line located inside the
     # footage's audio is a STRONGER scene-identity proof than a face — a wrong scene almost never
@@ -897,6 +906,7 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         if best is not None:
             cands.append((best[0], seg.index, best[1], best[2], _q))
             _k = (seg.index, best[1].id, round(float(best[2].start), 1))
+            _cand_origin[_k] = "verbatim_quote"        # created from a scripted quote
             # Face-ID BYPASS requires a STRONG verbatim match (>=4 words, >=70% coverage, a content
             # word) — a bare 3-4-word generic prefix used to steal the gate and air a DIFFERENT line.
             if _verbatim_bypass_ok(_rw(_q)[:8], best[3]):
@@ -1028,6 +1038,7 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
             if kk not in _seen_shot:
                 _seen_shot.add(kk)
                 cands.append(c)
+                _cand_origin.setdefault((c[1], c[2].id, round(float(c[3].start), 1)), "evidence_mined")
     if not cands:
         log("build: no breakout — no spoken line relates to the narration (natural skip)")
         return []
@@ -1287,19 +1298,24 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                 f"(no reliable words) → UNVERIFIED, not aired")
             continue
         _ocov = _ordered_coverage(_rw(_q), _aw) if _aw else 1.0
-        # CANDIDATE-TYPE-AWARE ordered-coverage floor: a verbatim/scripted quote must strongly match
-        # (>=70%); mined standalone dialogue needs a meaningful (>=50%) ordered match (its semantic
-        # relevance to the beat is already established by the mining overlap + commentary gate). A 25%
-        # one-word coincidence is never enough.
-        _is_verbatim = (idx, src.id, round(float(sh.start), 1)) in _verbatim_strong
-        _mincov = (_cfg_fbk("VIDLORE_CLIPSTUDIO_BREAKOUT_MIN_COVERAGE_VERBATIM", 0.70) if _is_verbatim
+        # CANDIDATE-TYPE-AWARE ordered-coverage floor, keyed on the candidate's EXPLICIT ORIGIN (not
+        # Face-ID-bypass membership). verbatim_quote → >=70%; a COLD-OPEN is a verbatim quote and gets
+        # the SAME strong floor (no `not _is_cold` exemption — it is the most prominent breakout);
+        # evidence_mined standalone dialogue → >=50% (its semantic relevance to the beat is established
+        # by the mining overlap + commentary gate). A 25% one-word coincidence is never enough.
+        _origin = _cand_origin.get((idx, src.id, round(float(sh.start), 1)),
+                                   "verbatim_quote" if _is_cold else "evidence_mined")
+        _is_verbatim_type = (_origin == "verbatim_quote") or _is_cold
+        _cand_type = "verbatim" if _is_verbatim_type else "mined"
+        _mincov = (_cfg_fbk("VIDLORE_CLIPSTUDIO_BREAKOUT_MIN_COVERAGE_VERBATIM", 0.70) if _is_verbatim_type
                    else _cfg_fbk("VIDLORE_CLIPSTUDIO_BREAKOUT_MIN_COVERAGE_MINED", 0.50))
-        if _bk_verify and (not _is_cold) and _ocov < _mincov:
-            log(f"build: breakout before scene {idx} DROPPED — aired audio ordered-coverage of the "
-                f"{'verbatim' if _is_verbatim else 'mined'} line {_ocov:.2f} < {_mincov:.2f}; "
+        if _bk_verify and _ocov < _mincov:             # applies to COLD-OPENS too
+            log(f"build: breakout before scene {idx}{' (COLD-OPEN)' if _is_cold else ''} DROPPED — "
+                f"aired-audio ordered coverage of the {_cand_type} line {_ocov:.2f} < {_mincov:.2f}; "
                 f"aired={_atext[:50]!r} quote={_q[:40]!r}")
             continue
-        _entry = {"seg_index": idx, "dur": real, "video": v, "audio": a}
+        _entry = {"seg_index": idx, "dur": real, "video": v, "audio": a,
+                  "candidate_type": _cand_type, "accepted_coverage_floor": round(_mincov, 2)}
         if _is_cold:
             # carry the hook quote + the beats it was stitched from, so the VO word-cut (default ON
             # for uploaded voiceover) can locate the narrator's rendition of the hook and replace it.
@@ -1324,7 +1340,9 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                             "source_t": round(float(sh.start), 1), "line": _q[:160],
                             "aired_transcript": _aired_tx[:300],
                             "line_coverage": round(_cov, 2),
-                            "candidate_type": ("verbatim" if _is_verbatim else "mined"),
+                            "candidate_type": _cand_type,
+                            "candidate_origin": _origin,
+                            "accepted_coverage_floor": round(_mincov, 2),
                             "speaker": "unknown",
                             "visible_faces": list(_fid),
                             "standalone_utterance": bool(_cov >= _mincov and not _is_narration(_aired_tx)),
@@ -1602,7 +1620,9 @@ def _apply_coldopen_vocut(proj, segments, scenes, narration, co, work, log, prot
         cap_specs.append({"start": 0.0, "dur": d_clip, "audio": str(clip_audio),
                           "video": str(clip_video), "seg_index": co.get("seg_index"),
                           "source_id": _coa.get("source_id", ""),
-                          "source_t": _coa.get("source_t"), "line": _coa.get("line", "")})
+                          "source_t": _coa.get("source_t"), "line": _coa.get("line", ""),
+                          "candidate_type": _coa.get("candidate_type", "verbatim"),
+                          "accepted_coverage_floor": _coa.get("accepted_coverage_floor", 0.70)})
         co.setdefault("_audit", {})["aired_at_s"] = 0.0
         ni = 1
         for idx in sorted(survive):
@@ -1761,7 +1781,9 @@ def _apply_breakouts(proj, segments, scenes, narration, picks, work, log):
                               "dur": float(p["dur"]), "audio": str(p["audio"]),
                               "video": str(p["video"]), "seg_index": p.get("seg_index"),
                               "source_id": _pa.get("source_id", ""),
-                              "source_t": _pa.get("source_t"), "line": _pa.get("line", "")})
+                              "source_t": _pa.get("source_t"), "line": _pa.get("line", ""),
+                              "candidate_type": _pa.get("candidate_type", "mined"),
+                              "accepted_coverage_floor": _pa.get("accepted_coverage_floor", 0.50)})
             p.setdefault("_audit", {})["aired_at_s"] = cap_specs[-1]["start"]
             if delta_here and len(new_ns) >= 2:        # [-1] is the pseudo scene itself
                 new_ns[-2].duration = float(new_ns[-2].duration) + delta_here
@@ -2202,7 +2224,11 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
             _wm = None
         _sil_floor = float(_cfg_i("VIDLORE_CLIPSTUDIO_BREAKOUT_AUDIO_SILENCE_DB", -50))
         from .config import _f as _cfg_faq
-        _mix_cov_floor = _cfg_faq("VIDLORE_CLIPSTUDIO_BREAKOUT_AUDIO_MIN_COVERAGE", 0.34)
+        # DOCUMENTED ASR tolerance: the final-mix ASR runs on MIXED audio (dialogue + ducked score),
+        # which whisper transcribes a little less completely than the clean extract used at selection.
+        # So the final-mix floor is the candidate's OWN accepted selection floor MINUS this tolerance
+        # (verbatim 0.70→~0.50, mined 0.50→~0.30) — a per-candidate threshold, NOT one unrelated 0.34.
+        _mix_tol = _cfg_faq("VIDLORE_CLIPSTUDIO_BREAKOUT_AUDIO_ASR_TOLERANCE", 0.20)
         if _wm is None:
             # FAIL CLOSED: breakout QA is enabled but ASR is unavailable — we cannot verify the
             # accepted dialogue survived into the mix, so every breakout is UNVERIFIED (not a pass).
@@ -2256,13 +2282,17 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
                                      "reason": f"breakout window has essentially NO detectable speech "
                                                f"(speech_frac {speech_frac:.2f}) in the final mix",
                                      "speech_frac": round(speech_frac, 3)})
-                elif ocov is not None and ocov < _mix_cov_floor:
-                    # enforce a MEANINGFUL ordered-coverage floor on the final mix (not just zero) —
-                    # the accepted dialogue must be recognizably present after mixing/ducking
+                elif ocov is not None and ocov < max(0.20, float(
+                        c.get("accepted_coverage_floor", 0.50)) - _mix_tol):
+                    # per-candidate final-mix floor = the accepted selection floor minus the ASR
+                    # tolerance (verbatim >= ~0.50, mined >= ~0.30), not one unrelated 0.34
+                    _mix_floor = max(0.20, float(c.get("accepted_coverage_floor", 0.50)) - _mix_tol)
                     problems.append({"breakout": line[:44], "start": round(s, 2),
-                                     "reason": f"final-mix ordered coverage of the accepted line "
-                                               f"{ocov:.2f} < {_mix_cov_floor:.2f} — dialogue masked/"
-                                               f"missing (speech_frac {speech_frac:.2f})",
+                                     "reason": f"final-mix ordered coverage of the "
+                                               f"{c.get('candidate_type', '?')} line {ocov:.2f} < "
+                                               f"{_mix_floor:.2f} (accepted floor "
+                                               f"{c.get('accepted_coverage_floor')} − tol {_mix_tol}) "
+                                               f"— dialogue masked/missing (speech {speech_frac:.2f})",
                                      "ordered_coverage": round(ocov, 2),
                                      "speech_frac": round(speech_frac, 3)})
                 elif log:
@@ -2999,6 +3029,31 @@ def _probe_duration(path) -> float:
     return 0.0
 
 
+def _scan_coverage_reason(n_frames: int, stride: float, dur: float, rc: int = 0):
+    """Verify a fps=1/stride extraction covered the WHOLE timeline. Returns None when covered, else a
+    failure string. The substantive guarantee is that the LAST sampled frame reaches within
+    max(1s, 2 strides) of the probed duration — a `len < expected*0.95` heuristic can silently miss
+    the final ~45s of a 15-min video, exactly where an outro/ad slate lives. Also requires the frame
+    count to be within ~2 of the expected count (catches mid-timeline gaps). An unexpected ffmpeg rc
+    is tolerated ONLY when this final-timestamp coverage is independently proven by the frames on disk."""
+    if dur <= 0:
+        return "could not probe final-video duration — cannot confirm full-timeline coverage"
+    if n_frames <= 0:
+        return "zero decoded scan frames"
+    tol = max(1.0, 2.0 * stride)
+    last_t = (n_frames - 1) * stride
+    if last_t < dur - tol:
+        return (f"partial decode — scan reached only {last_t:.1f}s of the {dur:.1f}s timeline "
+                f"(> {tol:.1f}s short; final frames not sampled)")
+    expected = int(dur / stride) + 1
+    if n_frames < expected - 2:
+        return (f"missing scan frames — {n_frames} decoded but ~{expected} expected @{stride}s "
+                f"(mid-timeline gap)")
+    if rc != 0:                                        # rc failure with proven coverage is tolerated
+        return None
+    return None
+
+
 def _branding_probe_offsets(dur: float) -> list:
     """Sample offsets covering the WHOLE clip — head, middle, and (critically) the TAIL, where
     channel outros / streaming end-slates / CTA cards live. The old fixed head-only grid
@@ -3193,17 +3248,10 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
                          "-vf", f"fps={fps:.4f},scale=854:-1", "-q:v", "4",
                          str(scan_dir / "fr_%05d.jpg")], capture_output=True, timeout=1800)
     frames = sorted(scan_dir.glob("fr_*.jpg"))
-    if not frames:
-        return {"status": "unverified", "hits": [], "frames": 0, "ocr_errors": 0,
-                "reason": f"zero decoded scan frames (ffmpeg rc={_p.returncode}) — cannot verify"}
-    expected = int(dur / stride) - 1 if dur > 0 else 0
-    if dur <= 0:
+    _cov = _scan_coverage_reason(len(frames), stride, dur, _p.returncode)
+    if _cov is not None:
         return {"status": "unverified", "hits": [], "frames": len(frames), "ocr_errors": 0,
-                "reason": "could not probe final-video duration — cannot confirm full-timeline coverage"}
-    if len(frames) < expected * 0.95:
-        return {"status": "unverified", "hits": [], "frames": len(frames), "ocr_errors": 0,
-                "reason": f"partial decode — {len(frames)} scan frames but the {dur:.0f}s timeline "
-                          f"needs ~{expected} @{stride}s (final frame not reached)"}
+                "reason": _cov}
     cand = {}                                          # t -> candidate dict
     ocr_errors = 0
     for i, fp in enumerate(frames):
@@ -3226,8 +3274,9 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
                 "reason": f"excessive OCR errors ({ocr_errors}/{len(frames)}) — cannot verify"}
 
     def _dense_confirm(t0):
-        """A LONE strong candidate is NOT discarded as transient — rescan densely (~0.1s) around it;
-        confirmed if >= 2 dense samples are promo candidates."""
+        """A LONE strong candidate is NOT discarded as transient — rescan densely (~0.1s) around it.
+        TRI-STATE: 'confirmed' (>=2 dense samples are promo), 'clean' (dense samples decoded but not
+        promo), 'unverified' (dense extraction/OCR failed — cannot judge → the whole scan must block)."""
         ddir = scan_dir / "dense"
         try:
             ddir.mkdir(exist_ok=True)
@@ -3235,22 +3284,26 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
                 _o.unlink(missing_ok=True)
         except Exception:
             pass
-        subprocess.run([ff, "-y", "-loglevel", "error", "-ss", f"{max(0.0, t0 - 0.5):.2f}",
-                        "-t", "1.0", "-i", str(result), "-vf", "fps=10,scale=854:-1", "-q:v", "4",
-                        str(ddir / "d_%03d.jpg")], capture_output=True, timeout=120)
-        hit = 0
-        for dp in sorted(ddir.glob("d_*.jpg")):
+        _r = subprocess.run([ff, "-y", "-loglevel", "error", "-ss", f"{max(0.0, t0 - 0.5):.2f}",
+                             "-t", "1.0", "-i", str(result), "-vf", "fps=10,scale=854:-1", "-q:v", "4",
+                             str(ddir / "d_%03d.jpg")], capture_output=True, timeout=120)
+        dframes = sorted(ddir.glob("d_*.jpg"))
+        if _r.returncode != 0 or len(dframes) < 6:      # ~10 expected over 1.0s; too few → unverified
+            for _o in ddir.glob("*.jpg"):
+                _o.unlink(missing_ok=True)
+            return "unverified"
+        hit = derr = 0
+        for dp in dframes:
             try:
                 if _probe_frame(dp) is not None:
                     hit += 1
             except Exception:
-                pass
-        try:
-            for _o in ddir.glob("*.jpg"):
-                _o.unlink(missing_ok=True)
-        except Exception:
-            pass
-        return hit >= 2
+                derr += 1
+        for _o in ddir.glob("*.jpg"):
+            _o.unlink(missing_ok=True)
+        if derr > len(dframes) * 0.34:
+            return "unverified"
+        return "confirmed" if hit >= 2 else "clean"
 
     hits = []
     for t, c in sorted(cand.items()):
@@ -3258,8 +3311,14 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
         if consec or c["strong_single"]:
             hits.append(c)
         elif c["path"] == "layout_heavy" or c["card"] >= card_floor:
-            # a lone strong-ish candidate → dense 0.1s rescan instead of discarding as transient
-            if _dense_confirm(t):
+            # a lone strong-ish candidate → dense 0.1s rescan (tri-state)
+            _dv = _dense_confirm(t)
+            if _dv == "unverified":
+                return {"status": "unverified", "hits": hits, "frames": len(frames),
+                        "ocr_errors": ocr_errors,
+                        "reason": f"dense rescan around a real promo candidate @{t}s failed "
+                                  f"(extraction/OCR) — cannot rule it out (fail-closed)"}
+            if _dv == "confirmed":
                 c["confirmed_by"] = "dense_rescan"
                 hits.append(c)
     if log:
@@ -3269,7 +3328,8 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
                     f"path={h['path']} card={h['card']} boxes={h['n_box']}")
         else:
             log(f"build: final-video ad scan clean — {len(frames)} frames @{stride}s "
-                f"(full {dur:.0f}s timeline), {len(cand)} promo candidate(s) (none confirmed)")
+                f"(full {dur:.0f}s timeline, last @{(len(frames) - 1) * stride:.0f}s), "
+                f"{len(cand)} promo candidate(s) (none confirmed)")
     return {"status": ("blocked" if hits else "clean"), "hits": hits,
             "frames": len(frames), "ocr_errors": ocr_errors, "reason": ""}
 
@@ -3421,12 +3481,9 @@ def _final_video_black_gate(result: Path, work: Path, *, log) -> Path:
                                 f"crop=iw*0.80:ih*0.55:iw*0.10:ih*0.15,scale=480:-1",
                          "-q:v", "5", str(scan / "b_%05d.jpg")], capture_output=True, timeout=1800)
     frames = sorted(scan.glob("b_*.jpg"))
-    expected = int(dur / stride) - 1                   # frames the scan should reach for full coverage
-    if not frames:
-        _blk(f"could not extract scan frames (ffmpeg rc={_p.returncode}) — cannot verify legibility")
-    if len(frames) < expected * 0.95:
-        _blk(f"partial decode — scan produced {len(frames)} frames but the {dur:.0f}s timeline needs "
-             f"~{expected} @{stride}s (final timestamp not reached); UNVERIFIED")
+    _cov = _scan_coverage_reason(len(frames), stride, dur, _p.returncode)
+    if _cov is not None:
+        _blk(f"{_cov} — cannot verify legibility to the final timestamp")
     lows, fails = [], 0
     for i, fp in enumerate(frames):
         v = _frame_luma_hi(fp)

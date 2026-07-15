@@ -2437,7 +2437,7 @@ def test_intro_coldopen_breakout():
 
     _P("/tmp/x.mp4").write_bytes(b"x")                  # source path must exist (helpers are mocked)
 
-    def _run(*, quote, asr, face_ids=(), luma=80.0, burned=False,
+    def _run(*, quote, asr, aired=None, face_ids=(), luma=80.0, burned=False,
              src_title="Cersei vs Littlefinger throne scene HD", n_segs=6):
         shots = [
             types.SimpleNamespace(index=0, start=12.0, end=20.0, transcript=asr,
@@ -2466,9 +2466,11 @@ def test_intro_coldopen_breakout():
         B._extract_breakout = lambda *a, **k: 5.0
         B._breakout_window_luma = lambda *a, **k: luma
         B._frame_has_burned_text = lambda *a, **k: burned
-        # test-double for the aired-audio RE-ASR (the mocked _extract_breakout writes no wav): the
-        # aired audio is the scene ASR, which contains the quote verbatim → coverage passes honestly
-        B._asr_wav_words = lambda p: (asr.split(), asr, 5.0)
+        # test-double for the aired-audio RE-ASR (the mocked _extract_breakout writes no wav): by
+        # default the aired audio equals the scene ASR (contains the quote → coverage passes); pass
+        # `aired` to simulate a mismatched aired transcript (low ordered coverage → dropped).
+        _airtx = aired if aired is not None else asr
+        B._asr_wav_words = lambda p: (_airtx.split(), _airtx, 5.0)
         logs = []
         try:
             out = B._select_breakouts(proj, segs, 200.0, _P("/tmp"), lambda m: logs.append(str(m)))
@@ -2506,6 +2508,23 @@ def test_intro_coldopen_breakout():
     _cm = "basically what this scene shows is cersei seize him cut his throat then changes her mind to prove power"
     check("verbatim cold-open still rejected on commentary audio",
           not _has0(_run(quote="Seize him. Cut his throat.", asr=_cm)[0]))
+
+    # 5) R3-2: a COLD-OPEN must meet the SAME >=70% ordered-coverage floor — an unrelated aired
+    #    transcript (shot has the quote so the candidate is created, but the extracted audio does NOT
+    #    contain it) is REJECTED even though it is the cold-open (no `not _is_cold` exemption).
+    out5, logs5 = _run(quote=VQ, asr=SC,
+                       aired="the weather today is quite pleasant nothing at all like the quote")
+    check("unrelated low-coverage COLD-OPEN is rejected (>=70% floor applies to cold-opens)",
+          not _has0(out5) and "COLD-OPEN) DROPPED" in logs5)
+    # a cold-open whose aired audio DOES contain the line still airs (regression guard)
+    check("faithful cold-open still airs (coverage passes)", _has0(_run(quote=VQ, asr=SC)[0]))
+    # candidate origin is explicit + persisted in the audit (not inferred from _verbatim_strong)
+    _oc = _run(quote=VQ, asr=SC)[0]
+    _c0 = next((o for o in _oc if o["seg_index"] == 0), None)
+    check("candidate origin + type + accepted floor persisted in the audit",
+          _c0 is not None and _c0["_audit"].get("candidate_origin") == "verbatim_quote"
+          and _c0["_audit"].get("candidate_type") == "verbatim"
+          and _c0["_audit"].get("accepted_coverage_floor") == 0.70)
     check("verbatim cold-open still rejected on recap line",
           not _has0(_run(quote="last time I was here I killed",
                          asr="last time i was here i killed my father with a crossbow")[0]))
@@ -4607,8 +4626,14 @@ def test_breakout_correctness():
     check("breakout re-ASR REQUIRED (no indexed-transcript fallback) + type-aware ordered coverage",
           "could not be re-ASR'd" in bsrc and "MIN_COVERAGE_VERBATIM" in bsrc
           and "MIN_COVERAGE_MINED" in bsrc)
-    check("final-mix breakout QA enforces a coverage threshold + fails closed w/o Whisper",
-          "BREAKOUT_AUDIO_MIN_COVERAGE" in bsrc and "final-mix ASR unavailable (no Whisper)" in bsrc)
+    check("final-mix breakout QA enforces a PER-CANDIDATE coverage floor + documented ASR tolerance",
+          "BREAKOUT_AUDIO_ASR_TOLERANCE" in bsrc and "accepted_coverage_floor" in bsrc
+          and "final-mix ASR unavailable (no Whisper)" in bsrc)
+    check("cold-open uses the same >=70% coverage floor (no not-_is_cold exemption)",
+          "applies to COLD-OPENS too" in bsrc and "not _is_cold) and _ocov < _mincov" not in bsrc)
+    check("candidate ORIGIN is explicit at creation, not inferred from _verbatim_strong",
+          "_cand_origin[_k] = \"verbatim_quote\"" in bsrc and '"evidence_mined")' in bsrc
+          and "_cand_origin.get((idx, src.id" in bsrc)
     check("final-mix breakout AUDIO QA fails CLOSED (probe failure = UNVERIFIED, not pass)",
           "BREAKOUT_AUDIO_QA" in bsrc and "UNVERIFIED (failing closed)" in bsrc
           and "could NOT be extracted" in bsrc)
@@ -4754,6 +4779,30 @@ def test_fps_and_ad_protection():
           and "zero decoded scan frames" in bsrc and "excessive OCR errors" in bsrc)
     check("ad gate has a second (layout-heavy, non-uniform card) detection path",
           "_ocr_layout_metrics" in bsrc and "layout_heavy" in bsrc and "strong_single" in bsrc)
+
+    # (8) COMPLETE-TIMELINE coverage: the scan must reach the FINAL timestamp, not merely 95% of the
+    #     frames (a 5% shortfall on a 15-min video silently drops the last ~45s where outros live)
+    stride, dur = 0.5, 900.0
+    full = int(dur / stride) + 1
+    check("full-timeline scan is covered (last frame reaches the end)",
+          B._scan_coverage_reason(full, stride, dur) is None)
+    n_2s = int((dur - 2.0) / stride) + 1                 # final 2 seconds missing
+    check("final 2s missing → NOT covered (fails closed)",
+          B._scan_coverage_reason(n_2s, stride, dur) is not None)
+    n_4pct = int((dur * 0.96) / stride) + 1              # final 4% missing
+    check("final 4% missing → NOT covered (fails closed)",
+          B._scan_coverage_reason(n_4pct, stride, dur) is not None)
+    check("the old 5%-tolerance would have WRONGLY passed the 2s-short case",
+          n_2s >= full * 0.95)                           # proves the heuristic was insufficient
+    check("zero duration → unverified", B._scan_coverage_reason(full, stride, 0.0) is not None)
+    check("rc!=0 tolerated ONLY with proven full coverage",
+          B._scan_coverage_reason(full, stride, dur, rc=1) is None
+          and B._scan_coverage_reason(n_2s, stride, dur, rc=1) is not None)
+    check("dense ad rescan is tri-state (confirmed/clean/unverified) → unverified blocks",
+          "'unverified'" in bsrc and "dense rescan around a real promo candidate" in bsrc
+          and "cannot rule it out (fail-closed)" in bsrc)
+    check("BOTH ad + black gates use the same complete-timeline coverage guarantee",
+          bsrc.count("_scan_coverage_reason(len(frames), stride, dur") >= 2)
 
 
 def main():
