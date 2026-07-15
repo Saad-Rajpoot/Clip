@@ -193,17 +193,23 @@ def _shot_lookup(proj: ClipProject):
 
 
 def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfig,
-                      eng_cfg, *, max_replacements: int = 3, progress=None) -> dict:
+                      eng_cfg, *, max_replacements: int = 3, only_indices=None, progress=None) -> dict:
     """Verify every selection; replace failures with the best passing alternate; re-cut swaps.
-    Returns a summary. No-op (records 'unavailable') if there's no LLM key."""
+    Returns a summary. No-op (records 'unavailable') if there's no LLM key.
+    `only_indices` (a set of segment indices) restricts verification to just those beats — used by
+    the bounded recovery pass to re-verify ONLY the beats it re-matched, instead of re-running the
+    whole (very expensive) verifier over every beat. Beats outside the set keep their prior verdict."""
+    _subset = set(only_indices) if only_indices is not None else None
+
     def log(m):
         if progress:
             progress(m)
 
     from . import llm as _llm
     if not _llm.has_llm(eng_cfg):
-        for sel in proj.selections:
-            sel.verifier = {"status": "unavailable", "reason": "no LLM key"}
+        if _subset is None:                    # a full pass with no LLM stamps every beat unavailable
+            for sel in proj.selections:
+                sel.verifier = {"status": "unavailable", "reason": "no LLM key"}
         log("verify: skipped (no LLM key)")
         return {"verified": 0, "replaced": 0, "failed": 0, "available": False}
 
@@ -265,6 +271,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     pass
 
     for sel in proj.selections:
+        if _subset is not None and sel.segment_index not in _subset:
+            continue                           # recovery pass: verify only the re-matched beats
         if not sel.source_id:
             continue
         seg = by_idx.get(sel.segment_index)
@@ -292,21 +300,39 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
 
         if v.get("verdict") == "replace":
             swapped = False
-            tried = 0
             failed_wins: list = []      # alternates the verifier explicitly REJECTED on the way
-            for alt in sel.alternates:
-                if tried >= max_replacements:
-                    break
-                tried += 1
-                ashot = get_shot(alt.source_id, alt.shot_index)
-                if ashot is None:
-                    continue
-                anames = ashot.face_ids or []
-                av = _verify_ctx(ashot.keyframe_path, ashot, seg, _exact, anames)
-                if av is not None and av.get("verdict") != "keep":
-                    # an explicit non-keep judgment (av None = transport error, NOT a judgment)
-                    failed_wins.append((alt.source_id, float(alt.in_point)))
-                if av and av.get("verdict") == "keep":
+
+            def _try_promote(downgrade: bool) -> bool:
+                """Scan the beat's relevance-ranked alternates and promote the first acceptable one.
+                downgrade=False → the ORIGINAL strict promotion (verify at the beat's own strictness,
+                accept only an explicit verdict==keep). downgrade=True → the EXACT→CONTEXTUAL rung:
+                verify LENIENTLY and accept a right-subject / on-topic clip that simply isn't the
+                exact moment (wrong-show/era/character still fail and are skipped). Returns True on a
+                swap. All the production safeguards (reuse-ledger cap, Window-QC, beat_windows rewrite,
+                re-cut) are shared by both modes."""
+                nonlocal swapped, replaced
+                tried = 0
+                for alt in sel.alternates:
+                    if tried >= max_replacements:
+                        break
+                    tried += 1
+                    ashot = get_shot(alt.source_id, alt.shot_index)
+                    if ashot is None:
+                        continue
+                    anames = ashot.face_ids or []
+                    av = _verify_ctx(ashot.keyframe_path, ashot, seg,
+                                     (False if downgrade else _exact), anames)
+                    if av is None:
+                        continue                        # transport error, NOT a judgment
+                    if downgrade:
+                        _accept = bool(av.get("matches_narration")
+                                       and av.get("correct_subject_visible") is not False)
+                    else:
+                        _accept = av.get("verdict") == "keep"
+                    if not _accept:
+                        # an explicit non-keep judgment (av None = transport error, handled above)
+                        failed_wins.append((alt.source_id, float(alt.in_point)))
+                        continue
                     # REUSE LEDGER — do not promote a look that already airs on >= cap beats (that is
                     # how one clip got re-aired 9×). Skip to the next relevance-ranked alternate; if
                     # none survive, the beat stays flagged and image-fallback gives it a DISTINCT still.
@@ -360,6 +386,10 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     sel.beat_windows = [new_win] + kept
                     av["status"] = "ok"
                     av["replaced_from"] = {"shot": shot.index if shot else -1}
+                    if downgrade:
+                        av["verdict"] = "keep"
+                        av["downgraded"] = "exact→contextual"
+                        av["relevance_class"] = "contextual_fallback"
                     sel.verifier = av
                     _cut.cut_selection(proj, sel, cfg)     # re-cut the new in/out
                     _reuse[(alt.source_id, alt.shot_index)] += 1   # this look now airs one more time
@@ -367,19 +397,56 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         _reuse[_old_key] -= 1                       # the replaced pick no longer airs here
                     replaced += 1
                     swapped = True
-                    log(f"verify: seg{sel.segment_index} replaced → {alt.source_id}#{alt.shot_index}")
-                    break
+                    log(f"verify: seg{sel.segment_index} "
+                        f"{'exact→contextual' if downgrade else 'replaced'} → "
+                        f"{alt.source_id}#{alt.shot_index}")
+                    return True
+                return False
+
+            _try_promote(downgrade=False)     # ORIGINAL strict/normal promotion (unchanged behavior)
+
+            # EXACT→CONTEXTUAL DOWNGRADE (relevance hierarchy: exact → contextual_fallback → filler).
+            # The strict verifier rejected every candidate for not being the EXACT moment — but a
+            # relevant SAME-SHOW / SAME-ERA / right-subject clip is a legitimate contextual fallback
+            # (a moving clip beats a frozen still and never black-blocks). Prefer keeping the ORIGINAL
+            # pick (already cut — no re-cut) when it is on-topic and right-subject; else promote the
+            # first lenient-acceptable alternate. Wrong-show / wrong-era / wrong-character footage has
+            # matches_narration False or correct_subject_visible False → NOT downgraded → it falls
+            # through to the honest release-block below. env-gated (default ON).
+            _downgrade_on = _os_ms.environ.get(
+                "VIDLORE_CLIPSTUDIO_EXACT_CONTEXTUAL_DOWNGRADE", "1").strip() \
+                not in ("0", "false", "no")
+            # A SPECIFIC VISUAL CLAIM ("Tyrion shoots Tywin with a crossbow", "the Red Wedding
+            # massacre") is NOT eligible for the downgrade: on-topic footage that does not SHOW the
+            # asserted event would contradict the narration ("contradictory never acceptable"). Such a
+            # beat still requires the exact moment or an honest gap (still / manual review / block).
+            # Only DESCRIPTIVE exact beats (commentary/scene-setting mis-classified as exact) downgrade.
+            _specific_claim = bool(getattr(seg, "is_specific_claim", False))
+            if not swapped and _exact and _downgrade_on and not _specific_claim:
+                if v.get("matches_narration") and v.get("correct_subject_visible") is not False:
+                    v["verdict"] = "keep"
+                    v["downgraded"] = "exact→contextual"
+                    v["relevance_class"] = "contextual_fallback"
+                    sel.verifier = v
+                    replaced += 1
+                    swapped = True
+                    log(f"verify: seg{sel.segment_index} exact→contextual downgrade "
+                        f"(relevant same-scene pick kept, honestly labeled contextual_fallback)")
+                else:
+                    _try_promote(downgrade=True)
+
             if not swapped:
                 failed += 1
                 if "verifier_failed" not in sel.flag_reasons:
                     sel.flag_reasons.append("verifier_failed")
-                # EXACT-SCENE MISSING (req. 9): an exact_scene beat with no passing real footage must
-                # be marked for MANUAL REVIEW — the image-fallback will NOT silently cover it with a
-                # web/AI image or loose filler (only a real source-frame of the exact scene may).
+                # EXACT-SCENE MISSING (req. 9): an exact_scene beat with no passing real footage AND no
+                # relevant contextual clip must be marked for MANUAL REVIEW — the image-fallback will
+                # NOT silently cover it with a web/AI image or loose filler (only a real source-frame of
+                # the exact scene may), and build release-blocks rather than air contradictory footage.
                 if _exact and FLAG_EXACT_MISSING not in sel.flag_reasons:
                     sel.flag_reasons.append(FLAG_EXACT_MISSING)
                     log(f"verify: seg{sel.segment_index} EXACT-SCENE MISSING → manual review "
-                        f"(no real footage of the exact scene)")
+                        f"(no exact footage AND no relevant contextual clip — only contradictory)")
                 sel.flagged = True
                 log(f"verify: seg{sel.segment_index} FAILED, no passing alternate")
         if progress and sel.segment_index % 10 == 0:

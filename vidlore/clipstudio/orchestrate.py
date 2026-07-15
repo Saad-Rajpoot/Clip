@@ -701,12 +701,15 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
 
         # index the new sources, rematch, cut, then reverify. proj.selections is fully rebuilt here;
         # it is reconciled against the snapshot below so only recovered beats survive the change.
+        # The re-verify is restricted to the recovered beats ONLY (only_indices) — re-verifying all
+        # 229 beats here just to re-check ~8 recovered ones cost hours; every other beat is restored
+        # from the snapshot anyway, so its verdict does not matter.
         index_all(proj, cfg_r, references=refs, faceid=faceid_obj, roster=roster,
                   force=False, progress=None)
         match_segments(proj, segs, cfg_r, analysis=analysis, progress=None)
         cut_all(proj, cfg_r, progress=None)
         from . import verify as _verify_r
-        _verify_r.verify_and_repair(proj, segs, cfg, eng, progress=None)
+        _verify_r.verify_and_repair(proj, segs, cfg, eng, only_indices=set(unresolved), progress=None)
 
         new_sel_by_idx = {s.segment_index: s for s in proj.selections}
         for i in unresolved:

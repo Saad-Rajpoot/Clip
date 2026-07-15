@@ -131,7 +131,13 @@ def write_ledger(proj: ClipProject, segments: list[ScriptSegment]) -> Path:
             if "exact_scene_missing" in _flags:
                 _rclass = "exact_scene_missing"
             elif sel.source_id and _kept:
-                _rclass = "exact_scene" if _pol == "exact_scene" else "contextual_fallback"
+                # an exact beat whose EXACT moment was unconfirmed but was kept as a relevant
+                # same-scene clip (the exact→contextual downgrade) is HONESTLY a contextual fallback,
+                # never labelled exact_scene.
+                if _v.get("downgraded") or _v.get("relevance_class") == "contextual_fallback":
+                    _rclass = "contextual_fallback"
+                else:
+                    _rclass = "exact_scene" if _pol == "exact_scene" else "contextual_fallback"
             elif "verifier_failed" in _flags:
                 _rclass = "exact_scene_missing" if _pol == "exact_scene" else "contextual_fallback"
             elif sel.source_id:

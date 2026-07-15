@@ -2223,14 +2223,19 @@ def test_generic_beat_filler_leniency():
 
     tmp = tempfile.mkdtemp(prefix="csgen_")
     proj = M.ClipProject(name="t", root=tmp)
-    # beat 0 = GENERIC narration (no specific scene claim); beat 1 = SPECIFIC claim
+    # beat 0 = GENERIC narration (no specific scene claim); beat 1 = SPECIFIC claim;
+    # beat 2 = DESCRIPTIVE exact_scene (mis-classified commentary — eligible for exact→contextual)
     gen = M.ClipSelection(segment_index=0, source_id="srcA", shot_index=1,
                           in_point=1.0, out_point=4.0, confidence=0.8)
     spec = M.ClipSelection(segment_index=1, source_id="srcA", shot_index=2,
                            in_point=5.0, out_point=8.0, confidence=0.8)
-    proj.selections = [gen, spec]
+    ctx = M.ClipSelection(segment_index=2, source_id="srcA", shot_index=3,
+                          in_point=9.0, out_point=12.0, confidence=0.8)
+    proj.selections = [gen, spec, ctx]
     segs = [M.ScriptSegment(index=0, text="and everything was about to change", is_specific_claim=False),
-            M.ScriptSegment(index=1, text="Tyrion shoots Tywin with a crossbow", is_specific_claim=True)]
+            M.ScriptSegment(index=1, text="Tyrion shoots Tywin with a crossbow", is_specific_claim=True),
+            M.ScriptSegment(index=2, text="the small council chamber during the meeting",
+                            visual_policy="exact_scene", is_specific_claim=False)]
     fake_shot = types.SimpleNamespace(index=1, keyframe_path="kf.jpg", face_ids=[], identities=[])
 
     # the verifier returns the SAME verdict for both beats: replace, but the footage IS on-topic
@@ -2255,11 +2260,58 @@ def test_generic_beat_filler_leniency():
           and gen.verifier.get("relaxed"))
     check("SPECIFIC beat: still held to exact scene (flagged when no exact match)",
           spec.verifier.get("verdict") == "replace" and spec.flagged)
+    # DESCRIPTIVE exact beat: exact moment unconfirmed but footage is on-topic/right-subject →
+    # exact→contextual downgrade keeps the relevant clip (honest contextual_fallback), NOT flagged.
+    check("DESCRIPTIVE exact beat: on-topic clip DOWNGRADED to contextual (kept, not blocked)",
+          ctx.verifier.get("verdict") == "keep" and ctx.verifier.get("downgraded") == "exact→contextual"
+          and not ctx.flagged and "verifier_failed" not in (ctx.flag_reasons or []))
     # the prompt actually carries the specific/generic instruction
     vsrc = (Path(__file__).resolve().parent.parent / "vidlore" / "clipstudio" /
             "verify.py").read_text(encoding="utf-8")
     check("verify_frame prompt distinguishes specific vs generic",
           "is_specific" in vsrc and "GENERIC narration line" in vsrc and "Be STRICT" in vsrc)
+
+
+def test_verify_only_indices_subset():
+    print("[recovery] verify_and_repair only_indices restricts the re-verify to a beat subset")
+    from vidlore.clipstudio import verify as V
+    from vidlore.clipstudio import models as M
+    from vidlore.clipstudio.config import ClipConfig
+    import vidlore.clipstudio.llm as L
+
+    tmp = tempfile.mkdtemp(prefix="csonly_")
+    proj = M.ClipProject(name="t", root=tmp)
+    a = M.ClipSelection(segment_index=0, source_id="srcA", shot_index=1, in_point=1, out_point=4,
+                        confidence=0.8, verifier={"status": "ok", "verdict": "keep", "sentinel": "OLD"})
+    b = M.ClipSelection(segment_index=1, source_id="srcA", shot_index=2, in_point=5, out_point=8,
+                        confidence=0.8, verifier={"status": "ok", "verdict": "keep", "sentinel": "OLD"})
+    proj.selections = [a, b]
+    segs = [M.ScriptSegment(index=0, text="beat zero", is_specific_claim=False),
+            M.ScriptSegment(index=1, text="beat one", is_specific_claim=False)]
+    fake_shot = types.SimpleNamespace(index=1, keyframe_path="kf.jpg", face_ids=[], identities=[])
+    calls = []
+
+    def fake_vf(kf, narration, ent, kind, names, eng_cfg, model="", is_specific=True, **kwargs):
+        calls.append(narration)
+        return {"verdict": "keep", "matches_narration": True, "correct_subject_visible": True,
+                "specific_enough": True, "confidence": 0.9, "reason": "new-verify"}
+
+    orig = (V.verify_frame, V._shot_lookup, V._cut.cut_selection, L.has_llm)
+    try:
+        V.verify_frame = fake_vf
+        V._shot_lookup = lambda p: (lambda sid, idx: fake_shot)
+        V._cut.cut_selection = lambda p, s, c: None
+        L.has_llm = lambda eng_cfg=None: True
+        eng = types.SimpleNamespace(anthropic_model="test-model")
+        V.verify_and_repair(proj, segs, ClipConfig(), eng, only_indices={1}, progress=None)
+    finally:
+        V.verify_frame, V._shot_lookup, V._cut.cut_selection, L.has_llm = orig
+
+    check("only_indices verified ONLY beat 1 (single verify call)", calls == ["beat one"])
+    check("beat 0 (outside subset) keeps its prior verdict untouched",
+          a.verifier.get("sentinel") == "OLD")
+    check("beat 1 (in subset) was re-verified fresh", b.verifier.get("sentinel") is None
+          and b.verifier.get("reason") == "new-verify")
 
 
 def test_reaction_still_pool_gate():
@@ -4872,6 +4924,7 @@ def main():
     test_caption_sync_per_scene_tolerant()
     test_source_budget_scales_with_script()
     test_generic_beat_filler_leniency()
+    test_verify_only_indices_subset()
     test_unified_visual_policy()
     test_final_image_policy()
     test_image_policy_edge_gaps()
