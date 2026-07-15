@@ -2223,26 +2223,29 @@ def test_generic_beat_filler_leniency():
 
     tmp = tempfile.mkdtemp(prefix="csgen_")
     proj = M.ClipProject(name="t", root=tmp)
-    # beat 0 = GENERIC narration (no specific scene claim); beat 1 = SPECIFIC claim;
-    # beat 2 = DESCRIPTIVE exact_scene (mis-classified commentary — eligible for exact→contextual)
+    # beat 0 = GENERIC narration (non-exact, on-topic filler ok);
+    # beat 1 = EXACT beat, REQUIRED SUBJECT confirmed on screen → exact→contextual downgrade;
+    # beat 2 = EXACT beat, WRONG subject (correct_subject_visible False) → contradictory, NOT downgraded
     gen = M.ClipSelection(segment_index=0, source_id="srcA", shot_index=1,
                           in_point=1.0, out_point=4.0, confidence=0.8)
-    spec = M.ClipSelection(segment_index=1, source_id="srcA", shot_index=2,
-                           in_point=5.0, out_point=8.0, confidence=0.8)
-    ctx = M.ClipSelection(segment_index=2, source_id="srcA", shot_index=3,
-                          in_point=9.0, out_point=12.0, confidence=0.8)
-    proj.selections = [gen, spec, ctx]
+    ctx = M.ClipSelection(segment_index=1, source_id="srcA", shot_index=2,
+                          in_point=5.0, out_point=8.0, confidence=0.8)
+    wrong = M.ClipSelection(segment_index=2, source_id="srcA", shot_index=3,
+                            in_point=9.0, out_point=12.0, confidence=0.8)
+    proj.selections = [gen, ctx, wrong]
     segs = [M.ScriptSegment(index=0, text="and everything was about to change", is_specific_claim=False),
-            M.ScriptSegment(index=1, text="Tyrion shoots Tywin with a crossbow", is_specific_claim=True),
-            M.ScriptSegment(index=2, text="the small council chamber during the meeting",
-                            visual_policy="exact_scene", is_specific_claim=False)]
+            M.ScriptSegment(index=1, text="Tywin at the small council table",
+                            visual_policy="exact_scene", is_specific_claim=True),   # over-marked spec
+            M.ScriptSegment(index=2, text="the wrong character entirely",
+                            visual_policy="exact_scene", is_specific_claim=True)]
     fake_shot = types.SimpleNamespace(index=1, keyframe_path="kf.jpg", face_ids=[], identities=[])
 
-    # the verifier returns the SAME verdict for both beats: replace, but the footage IS on-topic
-    # (matches_narration) and the right subject is visible — only "not the exact scene".
+    # META/commentary narration → matches_narration False even when the right subject IS on screen
+    # (mirrors the real Gemini behaviour). Beat 2's footage shows the WRONG subject.
     def fake_vf(kf, narration, ent, kind, names, eng_cfg, model="", is_specific=True, **kwargs):
-        return {"verdict": "replace", "matches_narration": True, "correct_subject_visible": True,
-                "specific_enough": False, "confidence": 0.6, "reason": "on-topic but not exact"}
+        subj = False if "wrong character" in narration else True
+        return {"verdict": "replace", "matches_narration": False, "correct_subject_visible": subj,
+                "specific_enough": False, "confidence": 0.6, "reason": "not the exact moment"}
 
     orig = (V.verify_frame, V._shot_lookup, V._cut.cut_selection, L.has_llm)
     try:
@@ -2256,15 +2259,16 @@ def test_generic_beat_filler_leniency():
         V.verify_frame, V._shot_lookup, V._cut.cut_selection, L.has_llm = orig
 
     check("GENERIC beat: on-topic filler KEPT (not flagged)",
-          gen.verifier.get("verdict") == "keep" and not gen.flagged
-          and gen.verifier.get("relaxed"))
-    check("SPECIFIC beat: still held to exact scene (flagged when no exact match)",
-          spec.verifier.get("verdict") == "replace" and spec.flagged)
-    # DESCRIPTIVE exact beat: exact moment unconfirmed but footage is on-topic/right-subject →
-    # exact→contextual downgrade keeps the relevant clip (honest contextual_fallback), NOT flagged.
-    check("DESCRIPTIVE exact beat: on-topic clip DOWNGRADED to contextual (kept, not blocked)",
+          gen.verifier.get("verdict") == "keep" and not gen.flagged)
+    # EXACT beat, right subject on screen (but META narration → matches_narration False): the
+    # downgrade keys on the SUBJECT, not literal narration match, so it is kept as contextual.
+    check("EXACT beat, right subject visible (meta narration) → DOWNGRADED to contextual",
           ctx.verifier.get("verdict") == "keep" and ctx.verifier.get("downgraded") == "exact→contextual"
           and not ctx.flagged and "verifier_failed" not in (ctx.flag_reasons or []))
+    # EXACT beat whose footage shows the WRONG subject → contradictory → NOT downgraded → flagged.
+    check("EXACT beat, WRONG subject → contradictory, NOT downgraded (flagged/blocked)",
+          wrong.verifier.get("verdict") == "replace" and wrong.flagged
+          and "verifier_failed" in (wrong.flag_reasons or []))
     # the prompt actually carries the specific/generic instruction
     vsrc = (Path(__file__).resolve().parent.parent / "vidlore" / "clipstudio" /
             "verify.py").read_text(encoding="utf-8")

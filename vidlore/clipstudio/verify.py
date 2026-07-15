@@ -192,6 +192,20 @@ def _shot_lookup(proj: ClipProject):
     return get
 
 
+def _contextual_subject_ok(vd) -> bool:
+    """Is a verifier-rejected clip a legitimate NON-CONTRADICTORY contextual fallback? The single
+    reliable signal is the REQUIRED SUBJECT being confirmed on screen (correct_subject_visible is
+    True) — right character/scene, merely not the exact moment. matches_narration is NOT usable on
+    its own: the AI verifier returns it False for nearly all META / COMMENTARY narration ("he isn't
+    king anymore") even when the right subject is plainly visible, and the analyzer over-marks
+    is_specific_claim on every beat, so neither can gate this. A clip whose subject is WRONG
+    (correct_subject_visible is False) is contradictory and never accepted. (A clip that literally
+    matches the narration with the subject not-disproven is also accepted.)"""
+    return (vd.get("correct_subject_visible") is True
+            or (bool(vd.get("matches_narration"))
+                and vd.get("correct_subject_visible") is not False))
+
+
 def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfig,
                       eng_cfg, *, max_replacements: int = 3, only_indices=None, progress=None) -> dict:
     """Verify every selection; replace failures with the best passing alternate; re-cut swaps.
@@ -292,10 +306,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         # NON-EXACT LENIENCY (user rule: exact clip only for a SPECIFIC scene; a relevant FILLER is
         # fine for generic/character/abstract beats). Don't replace an on-topic, right-subject clip on
         # a non-exact beat just because it isn't the exact scene — only off-topic / wrong-character.
-        if not _exact and v.get("verdict") == "replace" and v.get("matches_narration") \
-                and v.get("correct_subject_visible") is not False:
+        if not _exact and v.get("verdict") == "replace" and _contextual_subject_ok(v):
             v["verdict"] = "keep"
-            v["relaxed"] = "non-exact beat: relevant filler accepted"
+            v["relaxed"] = "non-exact beat: relevant right-subject filler accepted"
         sel.verifier = v
 
         if v.get("verdict") == "replace":
@@ -325,8 +338,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     if av is None:
                         continue                        # transport error, NOT a judgment
                     if downgrade:
-                        _accept = bool(av.get("matches_narration")
-                                       and av.get("correct_subject_visible") is not False)
+                        _accept = _contextual_subject_ok(av)
                     else:
                         _accept = av.get("verdict") == "keep"
                     if not _accept:
@@ -406,24 +418,18 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             _try_promote(downgrade=False)     # ORIGINAL strict/normal promotion (unchanged behavior)
 
             # EXACT→CONTEXTUAL DOWNGRADE (relevance hierarchy: exact → contextual_fallback → filler).
-            # The strict verifier rejected every candidate for not being the EXACT moment — but a
-            # relevant SAME-SHOW / SAME-ERA / right-subject clip is a legitimate contextual fallback
-            # (a moving clip beats a frozen still and never black-blocks). Prefer keeping the ORIGINAL
-            # pick (already cut — no re-cut) when it is on-topic and right-subject; else promote the
-            # first lenient-acceptable alternate. Wrong-show / wrong-era / wrong-character footage has
-            # matches_narration False or correct_subject_visible False → NOT downgraded → it falls
-            # through to the honest release-block below. env-gated (default ON).
+            # The strict verifier rejected every candidate for not being the EXACT moment — but a clip
+            # whose REQUIRED SUBJECT is confirmed on screen is a legitimate contextual fallback (a
+            # right-character/scene moving clip beats a frozen still and never black-blocks). Prefer
+            # keeping the ORIGINAL pick (already cut — no re-cut) when its subject is confirmed; else
+            # promote the first alternate whose subject is confirmed. A clip whose subject is WRONG
+            # (correct_subject_visible False) is CONTRADICTORY — it is never downgraded and falls
+            # through to the honest still / release-block below. env-gated (default ON).
             _downgrade_on = _os_ms.environ.get(
                 "VIDLORE_CLIPSTUDIO_EXACT_CONTEXTUAL_DOWNGRADE", "1").strip() \
                 not in ("0", "false", "no")
-            # A SPECIFIC VISUAL CLAIM ("Tyrion shoots Tywin with a crossbow", "the Red Wedding
-            # massacre") is NOT eligible for the downgrade: on-topic footage that does not SHOW the
-            # asserted event would contradict the narration ("contradictory never acceptable"). Such a
-            # beat still requires the exact moment or an honest gap (still / manual review / block).
-            # Only DESCRIPTIVE exact beats (commentary/scene-setting mis-classified as exact) downgrade.
-            _specific_claim = bool(getattr(seg, "is_specific_claim", False))
-            if not swapped and _exact and _downgrade_on and not _specific_claim:
-                if v.get("matches_narration") and v.get("correct_subject_visible") is not False:
+            if not swapped and _exact and _downgrade_on:
+                if _contextual_subject_ok(v):
                     v["verdict"] = "keep"
                     v["downgraded"] = "exact→contextual"
                     v["relevance_class"] = "contextual_fallback"
@@ -431,7 +437,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     replaced += 1
                     swapped = True
                     log(f"verify: seg{sel.segment_index} exact→contextual downgrade "
-                        f"(relevant same-scene pick kept, honestly labeled contextual_fallback)")
+                        f"(required subject on screen — kept, honestly labeled contextual_fallback)")
                 else:
                     _try_promote(downgrade=True)
 
