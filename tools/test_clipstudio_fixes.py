@@ -4442,8 +4442,14 @@ def test_era_policy_and_still_verification():
           "_still_verdict" in osrc and "_shot_face_ids" in osrc
           and "NOT the beat's requested entities" in osrc)
     check("unverified/rejected still is NOT installed; rejected moving footage never airs",
-          "no wrong still airs" in osrc and "rejected-footage removal" in bsrc
+          "no wrong still airs" in osrc and "verifier-rejected clip(s) replaced with a validated" in bsrc
           and "verifier_failed" in bsrc)
+    check("rejected footage → validated same-scene editorial HOLD (capped) or release-block",
+          "editorial_hold" in bsrc and "_scene_compat" in bsrc and "MAX_CONSEC_HOLD" in bsrc
+          and "FAILED_REJECTED_FOOTAGE" in bsrc and "rejected_footage_audit.json" in bsrc)
+    check("no-vision-model exact/char still requires DETERMINISTIC same-show/era/CLIP/Face-ID",
+          "_still_deterministic_ok" in osrc and "no arbitrary unverified still installed" in osrc
+          and "DET_STILL_MIN_CLIP" in osrc)
 
 
 def test_verifier_context_and_fallback():

@@ -207,6 +207,37 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
             return "disabled"
         if not kf_path:
             return "unverified"
+        return _still_verdict_call(kf_path, seg, sid, sidx)
+
+    import re
+    _movie_toks = set(re.findall(r"[a-z0-9]+", str(
+        (proj.meta.get("analysis", {}) or {}).get("movie_title", "") or "").lower()))
+
+    def _still_deterministic_ok(sid, sidx, score, seg) -> bool:
+        """When NO vision model is available, an exact/character recovery still may be installed ONLY
+        if it passes DETERMINISTIC checks (no arbitrary 'unverified_fallback' that could be a
+        contradictory frame): same-show (source title shares the movie tokens), beat-local era match
+        (or unconstrained), CLIP relevance above a floor, AND — for a character-required beat — the
+        required entity actually present in the shot's Face-ID."""
+        try:
+            src = proj.source(sid)
+            title = (getattr(src, "title", "") or "").lower()
+            if _movie_toks and not (_movie_toks & set(re.findall(r"[a-z0-9]+", title))):
+                return False                              # not the same title/show
+            if float(score or 0.0) < float(os.environ.get(
+                    "VIDLORE_CLIPSTUDIO_DET_STILL_MIN_CLIP", "0.30") or 0.30):
+                return False                              # CLIP relevance too low
+            _ent = (getattr(seg, "required_entity", "") or "").strip().lower()
+            _kind = (getattr(seg, "required_kind", "") or "").lower()
+            if _ent and _kind in ("character", "actor"):
+                faces = " ".join(_shot_face_ids(sid, sidx)).lower()
+                if _ent not in faces and not any(w in faces for w in _ent.split() if len(w) > 3):
+                    return False                          # required character not Face-ID-confirmed
+            return True
+        except Exception:
+            return False
+
+    def _still_verdict_call(kf_path, seg, sid, sidx):
         faces = _shot_face_ids(sid, sidx)
         for _attempt in (1, 2):
             try:
@@ -346,9 +377,17 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                         continue
                     _rej += (_vd == "reject"); _unv += (_vd == "unverified")
                 if still is None and _disabled and _cands:
-                    # can't semantically verify (no vision model) — install to avoid a black gap, but
-                    # label it 'unverified_fallback', NEVER silently 'contextual_fallback'
-                    still, _still_verified = _cands[0], False
+                    # NO vision model: do NOT install an arbitrary 'unverified_fallback' (it could be a
+                    # contradictory frame). Install ONLY a candidate that passes DETERMINISTIC checks
+                    # (same-show + era + CLIP relevance + actual Face-ID) — labelled contextual_fallback
+                    # (deterministically verified); else leave unresolved for review.
+                    _det = next((c for c in _cands if _still_deterministic_ok(c[1], c[2], c[3], seg)), None)
+                    if _det is not None:
+                        still, _still_verified = _det, True
+                    else:
+                        log(f"image-fallback: beat {seg.index} — no vision model and no candidate "
+                            f"passed the deterministic same-show/era/CLIP/Face-ID checks → left "
+                            f"unresolved (no arbitrary unverified still installed)")
                 if still is None and _cands:
                     log(f"image-fallback: beat {seg.index} — {len(_cands)} recovery still(s) not "
                         f"installed ({_rej} rejected wrong-char/era, {_unv} unverified) → left for "
