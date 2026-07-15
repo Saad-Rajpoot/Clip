@@ -3246,6 +3246,99 @@ def _final_video_ad_gate(result: Path, work: Path, ocr_engine, *, log) -> Path:
         f"refusing to publish (quarantined at {_quar.name}); set AD_GATE_OVERRIDE=1 to override")
 
 
+def _frame_luma_hi(img_path) -> float:
+    """~99.5th-percentile luma of a frame (the same 'brightest legible content' signal the index's
+    luma_hi uses). A frame whose brightest pixels are still dim has no legible content."""
+    try:
+        from PIL import Image
+        import numpy as _np2
+        g = _np2.asarray(Image.open(img_path).convert("L"), dtype=_np2.uint8)
+        return float(_np2.percentile(g, 99.5))
+    except Exception:
+        return 255.0                                   # unreadable → fail open (never false-block)
+
+
+def _final_video_black_gate(result: Path, work: Path, *, log) -> Path:
+    """FAIL-CLOSED release gate against sustained NEAR-BLACK / unusable-dark footage in the finished
+    video (distinct from the assemble black-repair, which only fills TRUE-black gaps). Samples every
+    0.5s; a run of frames whose brightest content stays below a legibility floor (luma_hi) for longer
+    than a short intentional fade is UNUSABLE and blocks publication (quarantine + raise). Short
+    dark dips (fades between shots) are allowed. env VIDLORE_CLIPSTUDIO_FINAL_BLACK_GATE=0 disables;
+    _FLOOR / _MINDUR tune."""
+    import os as _os5
+    import json as _json_b
+    if _os5.environ.get("VIDLORE_CLIPSTUDIO_FINAL_BLACK_GATE", "1").strip() in ("0", "false", "no"):
+        return result
+    from .config import _f as _cfg_fb, _i as _cfg_ib
+    floor = _cfg_fb("VIDLORE_CLIPSTUDIO_FINAL_BLACK_FLOOR", 50.0)     # luma_hi below this = unusable
+    min_dur = _cfg_fb("VIDLORE_CLIPSTUDIO_FINAL_BLACK_MINDUR", 0.8)   # sustained longer than a fade
+    stride = 0.5
+    ff = ffmpeg_exe()
+    scan = work / "_blackscan"
+    try:
+        scan.mkdir(exist_ok=True)
+        for _o in scan.glob("*.jpg"):
+            _o.unlink(missing_ok=True)
+    except Exception:
+        pass
+    _p = subprocess.run([ff, "-y", "-loglevel", "error", "-i", str(result),
+                         "-vf", f"fps={1.0 / stride:.4f},scale=480:-1", "-q:v", "5",
+                         str(scan / "b_%05d.jpg")], capture_output=True, timeout=1800)
+    frames = sorted(scan.glob("b_*.jpg"))
+    if not frames:
+        # fail closed: cannot verify
+        _quar = result.with_name(result.stem + ".FAILED_BLACK_QA" + result.suffix)
+        try:
+            result.rename(_quar)
+        except Exception:
+            _quar = result
+        log(f"build: ⛔ RELEASE-BLOCKED (fail-closed) — could not extract frames to verify the final "
+            f"video has no unusable-dark footage (ffmpeg rc={_p.returncode}); quarantined → {_quar.name}")
+        raise RuntimeError(f"final-video black gate could not verify the render (quarantined at {_quar.name})")
+    lows = [i for i, fp in enumerate(frames) if _frame_luma_hi(fp) < floor]
+    try:
+        for _o in scan.glob("*.jpg"):
+            _o.unlink(missing_ok=True)
+    except Exception:
+        pass
+    # group consecutive low frames into runs; a run longer than min_dur is an unusable-dark region
+    runs, cur = [], []
+    for i in lows:
+        if cur and i == cur[-1] + 1:
+            cur.append(i)
+        else:
+            if cur:
+                runs.append(cur)
+            cur = [i]
+    if cur:
+        runs.append(cur)
+    bad = [(r[0] * stride, (r[-1] + 1) * stride) for r in runs
+           if (r[-1] - r[0] + 1) * stride > min_dur]
+    if not bad:
+        log(f"build: final-video black/legibility scan clean — {len(frames)} frames @{stride}s, "
+            f"0 sustained unusable-dark region(s) (short fades allowed)")
+        return result
+    try:
+        (work.parent / "final_black_failures.json").write_text(
+            _json_b.dumps({"unusable_dark_regions_s": [[round(a, 2), round(b, 2)] for a, b in bad],
+                           "floor_luma_hi": floor, "min_dur_s": min_dur}, indent=1), encoding="utf-8")
+    except Exception:
+        pass
+    _quar = result.with_name(result.stem + ".FAILED_BLACK_QA" + result.suffix)
+    try:
+        if _quar.exists():
+            _quar.unlink()
+        result.rename(_quar)
+    except Exception:
+        _quar = result
+    log(f"build: ⛔ RELEASE-BLOCKED — {len(bad)} sustained unusable-dark region(s) in the final video "
+        f"(first {bad[0][0]:.1f}-{bad[0][1]:.1f}s, luma_hi < {floor:.0f}); quarantined → {_quar.name}. "
+        f"See final_black_failures.json.")
+    raise RuntimeError(
+        f"final-video black gate failed — {len(bad)} unusable-dark region(s) survived "
+        f"(quarantined at {_quar.name}); refusing to publish near-black/illegible footage")
+
+
 def _ass_ts(t: float) -> str:
     t = max(0.0, float(t))
     h = int(t // 3600); m = int((t % 3600) // 60); s = t % 60
@@ -3738,8 +3831,18 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # USER RULE: footage with readable burned-in text (tweet/quote overlays, lyric cards,
     # hard subtitles) NEVER airs. match.py gates new selections; this build-time check also
     # covers windows from OLDER selections and verify-promoted alternates.
-    from .match import _ocr_text_heavy as _txt_heavy
+    from .match import _ocr_text_heavy as _txt_heavy, _shot_unreadable as _dark_b
     _TGATE = os.environ.get("VIDLORE_CLIPSTUDIO_TEXT_GATE", "1").strip() not in ("0", "false", "no", "")
+
+    def _shot_at(sid, t):
+        for _sh in _shots_b(sid):
+            if _sh.start <= float(t) < _sh.end:
+                return _sh
+        return None
+
+    def _win_unreadable(sid, t):
+        _sh = _shot_at(sid, t)
+        return bool(_sh is not None and _dark_b(_sh))
 
     # CUT-WINDOW FLAG VALIDATION at render time — the playhead walk / lead-in snapping computes
     # the DEFINITIVE aired window [start, start+need] here, after every earlier stage. Shift the
@@ -3872,6 +3975,8 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                     continue
                 if _TGATE and _txt_heavy(sh):
                     continue                           # burned-in text never airs
+                if _dark_b(sh):
+                    continue                           # near-black/unreadable never airs (Gap 3)
                 if sp and _looks_recent(_frame_hash(sp, min(sh.start + 1.2, sh.end - 0.2))):
                     continue
                 if _TGATE and sp and (
@@ -4081,17 +4186,33 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 # (pixel-hash spacing — nearby in-points of a static scene are visual clones
                 # even when the timestamps differ, and CLIP embeds can't see that)
                 _fresh = []
+                _fresh_dark = []                       # legible-preferred: dark windows are last resort
                 for w in windows_avail:
                     if _air_ct.get(_wkey(w[0], w[1]), 0) >= 1:
                         continue
                     if _shot_has_text(w[0], float(w[1])):
                         continue                       # burned-in text never airs
+                    if _win_unreadable(w[0], float(w[1])):
+                        _fresh_dark.append(w)          # near-black — only if nothing legible remains
+                        continue
                     _wsrc = proj.source(w[0])
                     _h = _frame_hash(_wsrc.local_path, float(w[1]) + 1.2) if (
                         _wsrc and _wsrc.local_path) else None
                     if _looks_recent(_h):
                         continue
                     _fresh.append((w, _h))
+                if not _fresh and _fresh_dark:
+                    # every legible window aired/looks-recent; only near-black windows remain. Prefer
+                    # the LEAST-dark one as a last resort (still better than a black placeholder) and
+                    # warn — the final-video black gate blocks it downstream if it is truly unusable.
+                    _fresh_dark.sort(key=lambda w: -float(
+                        getattr(_shot_at(w[0], float(w[1])), "luma_hi", 0.0) or 0.0))
+                    _dw = _fresh_dark[0]
+                    _dsrc = proj.source(_dw[0])
+                    _fresh = [(_dw, _frame_hash(_dsrc.local_path, float(_dw[1]) + 1.2)
+                               if (_dsrc and _dsrc.local_path) else None)]
+                    log(f"build: scene {seg.index} — no legible window left; airing least-dark "
+                        f"available window as last resort (final black gate will block if unusable)")
                 if _fresh:
                     # prefer a look that has NOT already aired _LOOK_CAP times across the whole video;
                     # only fall back to an over-cap look if every fresh window is over-cap (never drops
@@ -4472,5 +4593,9 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # removal + Ken-Burns time-neutrality are the primary fix; this is the last-line block so a
     # promo frame can never SILENTLY ship (quarantine + raise on any survivor).
     result = _final_video_ad_gate(result, work, _ocr_eng, log=log)
+    # FINAL-VIDEO SUSTAINED-BLACK / LEGIBILITY GATE — no near-black/unusable-dark footage may ship
+    # (distinct from the assemble true-black repair). Short fades are allowed; sustained illegible
+    # regions block publication.
+    result = _final_video_black_gate(result, work, log=log)
     log(f"build: done → {result}")
     return result

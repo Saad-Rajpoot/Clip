@@ -4480,6 +4480,16 @@ def test_source_quality_and_repetition():
     check("look-cap prefers under-cap looks but never drops the last option",
           "_under if _under else _fresh" in bsrc)
 
+    # (5) Gap 3: no near-black/unreadable beat airs; final sustained-black release gate
+    check("build window picker skips unreadable shots (near-black never airs)",
+          "_win_unreadable(w[0]" in bsrc and "near-black/unreadable never airs" in bsrc
+          and "_fresh_dark" in bsrc)
+    check("final-video sustained-black/legibility gate wired as a release gate",
+          "def _final_video_black_gate" in bsrc and "_final_video_black_gate(result, work" in bsrc
+          and "FAILED_BLACK_QA" in bsrc and "sustained unusable-dark" in bsrc)
+    check("black gate distinguishes short fades from sustained unusable dark",
+          "FINAL_BLACK_MINDUR" in bsrc and "short fades allowed" in bsrc)
+
 
 def test_breakout_correctness():
     print("[stage-4] breakout: early-stop, strict Face-ID bypass, dup detect, audit fields")
