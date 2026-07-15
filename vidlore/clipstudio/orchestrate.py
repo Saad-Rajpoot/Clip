@@ -516,6 +516,150 @@ def _purge_unwanted_sources(proj, log) -> int:
     return n
 
 
+def _write_recovery_audit(proj, audit: dict) -> None:
+    import json as _json
+    try:
+        (proj.output_dir / "recovery_audit.json").write_text(_json.dumps(audit, indent=1),
+                                                             encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _beat_is_unresolved(sel, seg, _policy) -> bool:
+    """An EXACT beat with no trustworthy footage yet: no selection, a verifier REJECTION (replace),
+    or no source at all — and no real still (a source-frame / web-exact-scene still IS coverage).
+    Contextual/generic beats are never 'unresolved' (they have a legitimate fallback treatment)."""
+    if seg is None or not _policy.is_exact(seg):
+        return False
+    if sel is None:
+        return True
+    _im = getattr(sel, "image_meta", {}) or {}
+    if getattr(sel, "image_path", "") and _im.get("source") in ("source-frame", "web-exact-scene"):
+        return False
+    v = getattr(sel, "verifier", {}) or {}
+    verifier_failed = v.get("status") == "ok" and v.get("verdict") == "replace"
+    return bool(verifier_failed or not getattr(sel, "source_id", ""))
+
+
+def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, refs, roster,
+                              policy, log) -> int:
+    """R4-5 BOUNDED AUTONOMOUS RECOVERY. For EXACT beats still unresolved after match + verify, run
+    ONE bounded round of targeted rediscovery → download → index → rematch → (re-cut) → reverify
+    BEFORE the render can fall back to a deterministic still / editorial hold / release-block.
+
+    Invariants:
+      • Already-resolved beats are PRESERVED byte-for-byte (snapshot + restore + final re-cut) —
+        recovery can only IMPROVE unresolved beats, never disturb a good one.
+      • A recovered pick is accepted ONLY if it VERIFIES. The matcher ranks candidates by relevance
+        and the verifier is the gate, so an irrelevant HD clip that fails verify is never installed —
+        an EXACT (even low-res) clip that verifies is preferred over an irrelevant HD one.
+      • Fail-closed: any error, no-LLM, or empty discovery leaves the beats unresolved for the
+        downstream still/hold/block to handle honestly. Cheap no-op when there is nothing to recover.
+      • Every attempt (queries, candidates, new sources, per-beat outcome) is audited to
+        recovery_audit.json.
+    Returns the number of beats recovered with real verified footage."""
+    import os as _os
+    import copy as _copy
+    import dataclasses as _dc
+    from . import policy as _policy
+
+    if _os.environ.get("VIDLORE_CLIPSTUDIO_RECOVERY", "1").strip() in ("0", "false", "no"):
+        return 0
+    max_beats = int(_os.environ.get("VIDLORE_CLIPSTUDIO_RECOVERY_MAX_BEATS", "8") or 8)
+    max_sources = int(_os.environ.get("VIDLORE_CLIPSTUDIO_RECOVERY_MAX_SOURCES", "4") or 4)
+
+    seg_by_idx = {s.index: s for s in segs}
+    sel_by_idx = {s.segment_index: s for s in proj.selections}
+    unresolved = [s.index for s in segs
+                  if _beat_is_unresolved(sel_by_idx.get(s.index), s, _policy)]
+    audit = {"unresolved_before": list(unresolved), "caps": {"beats": max_beats, "sources": max_sources},
+             "attempts": [], "new_sources": [], "recovered": [], "still_unresolved": []}
+    if not unresolved:
+        _write_recovery_audit(proj, audit)
+        return 0
+    unresolved = unresolved[:max_beats]
+    log(f"recovery: {len(unresolved)} unresolved exact beat(s) → bounded rediscovery {unresolved}")
+
+    # Snapshot EVERY current selection; the final selection list is snapshot ∪ (recovered new picks).
+    snapshot = {s.segment_index: _copy.deepcopy(s) for s in proj.selections}
+    unresolved_segs = [seg_by_idx[i] for i in unresolved if i in seg_by_idx]
+    recovered: set = set()
+
+    try:
+        from .discover import discover_sources
+        from .download import download_candidates
+        cfg_r = _dc.replace(cfg, discover_target=max(2, max_sources))
+        have_urls = {(getattr(s, "url", "") or "").strip() for s in proj.sources if getattr(s, "url", "")}
+        cands = discover_sources(analysis, cfg_r, segments=unresolved_segs, progress=None) or []
+        new_cands = [c for c in cands
+                     if (getattr(c, "url", "") or "").strip() and
+                     (getattr(c, "url", "") or "").strip() not in have_urls][:max_sources]
+        audit["attempts"].append({
+            "queries": [getattr(s, "scene_query", "") or getattr(s, "required_entity", "")
+                        for s in unresolved_segs],
+            "candidates_found": len(cands), "new_candidates": len(new_cands)})
+        if not new_cands:
+            log("recovery: targeted rediscovery found no NEW source — leaving beats for downstream fallback")
+            _write_recovery_audit(proj, audit)
+            return 0
+
+        before_ok = {s.id for s in proj.sources if s.status == SOURCE_OK}
+        download_candidates(proj, new_cands, cfg_r, policy=policy, limit=len(new_cands), progress=None)
+        newly = [s for s in proj.sources if s.status == SOURCE_OK and s.id not in before_ok]
+        audit["new_sources"] = [{"id": s.id, "title": (getattr(s, "title", "") or "")[:70],
+                                 "height": getattr(s, "height", 0)} for s in newly]
+        if not newly:
+            log(f"recovery: no NEW source downloaded under policy={policy} — leaving beats unresolved")
+            _write_recovery_audit(proj, audit)
+            return 0
+
+        # index the new sources, rematch, cut, then reverify. proj.selections is fully rebuilt here;
+        # it is reconciled against the snapshot below so only recovered beats survive the change.
+        index_all(proj, cfg_r, references=refs, faceid=faceid_obj, roster=roster,
+                  force=False, progress=None)
+        match_segments(proj, segs, cfg_r, analysis=analysis, progress=None)
+        cut_all(proj, cfg_r, progress=None)
+        from . import verify as _verify_r
+        _verify_r.verify_and_repair(proj, segs, cfg, eng, progress=None)
+
+        new_sel_by_idx = {s.segment_index: s for s in proj.selections}
+        for i in unresolved:
+            if not _beat_is_unresolved(new_sel_by_idx.get(i), seg_by_idx.get(i), _policy):
+                recovered.add(i)
+    except Exception as e:
+        log(f"recovery: bounded round errored ({type(e).__name__}: {e}) — leaving beats unresolved")
+
+    # Reconcile: recovered beats keep their NEW pick; EVERY other beat is restored from the snapshot
+    # (good beats unchanged; un-recovered unresolved beats keep their prior state for the honest
+    # downstream still/hold/block). A final re-cut guarantees each beat's on-disk clip matches its
+    # final selection — so a re-verify that happened to swap a good beat can never leave a stale clip.
+    new_sel_by_idx = {s.segment_index: s for s in proj.selections}
+    final = []
+    for idx in sorted(set(snapshot) | set(new_sel_by_idx)):
+        if idx in recovered and idx in new_sel_by_idx:
+            final.append(new_sel_by_idx[idx])
+        elif idx in snapshot:
+            final.append(snapshot[idx])
+        else:
+            final.append(new_sel_by_idx[idx])
+    proj.selections = final
+    try:
+        cut_all(proj, cfg, progress=None)
+    except Exception as e:
+        log(f"recovery: final re-cut errored ({type(e).__name__}: {e})")
+    proj.save()
+
+    audit["recovered"] = sorted(recovered)
+    audit["still_unresolved"] = [i for i in unresolved if i not in recovered]
+    _write_recovery_audit(proj, audit)
+    if recovered:
+        log(f"recovery: ✓ recovered {len(recovered)} beat(s) with real verified footage {sorted(recovered)}")
+    if audit["still_unresolved"]:
+        log(f"recovery: {len(audit['still_unresolved'])} beat(s) still unresolved → deterministic still / "
+            f"editorial hold / honest release-block downstream {audit['still_unresolved']}")
+    return len(recovered)
+
+
 def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = None,
                  script_text: Optional[str] = None, movie_hint: str = "",
                  policy: str = "block", max_sources: int = 6, cfg: Optional[ClipConfig] = None,
@@ -648,6 +792,17 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
     if verify:
         log("8/9 · AI verify + repair")
         _verify.verify_and_repair(proj, segs, cfg, eng, progress=progress)
+
+    # 8a — BOUNDED AUTONOMOUS RECOVERY (R4-5): for exact beats the verifier could NOT satisfy, try
+    # ONE targeted rediscovery→download→index→rematch→re-cut→reverify round BEFORE falling back to a
+    # still/hold/block. Prefers an exact clip that verifies over an irrelevant HD one; preserves every
+    # already-resolved beat; fail-closed. The deterministic still (8b) and the build-stage editorial
+    # hold / honest release-block remain the downstream last resorts.
+    try:
+        _recover_unresolved_beats(proj, segs, analysis, cfg, eng, faceid_obj=faceid_obj, refs=refs,
+                                  roster=roster, policy=policy, log=log)
+    except Exception as _e:
+        log(f"recovery: skipped ({type(_e).__name__}: {_e})")
 
     # 8b — EXACT-SCENE IMAGE FALLBACK: beats that still have no relevant footage (no source,
     # low confidence, or a confirmed wrong-character pick) get a face/CLIP-verified still from
