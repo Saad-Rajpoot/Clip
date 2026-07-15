@@ -416,23 +416,46 @@ def _dialogue_aware_dur(src_path: str, start: float, lo: float = 3.0,
         text = " ".join(w[0] for w in words)
         if not words:
             return max(lo, min(hi, 5.0)), ""
-        stops = []                                     # candidate end-times (relative to start)
-        for i, (txt, _ws, we) in enumerate(words):
-            if we > hi + 0.4:
-                break
-            ends_sentence = txt[-1:] in ".!?…"
-            gap_after = (words[i + 1][1] - we) if i + 1 < len(words) else 1.0
-            if ends_sentence:
-                stops.append(min(hi, we + 0.30))       # let the line breathe before the cut
-            elif gap_after >= 0.45:
-                stops.append(min(hi, we + min(0.30, gap_after / 2)))
-        good = [t for t in stops if lo <= t <= hi]
-        if good:
-            return round(max(good), 3), text           # latest complete line within the window
-        last_end = min(hi, words[-1][2] + 0.30)        # no clean stop → run to last word
-        return round(max(lo, min(hi, last_end)), 3), text
+        return _pick_breakout_stop(words, lo, hi), text
     except Exception:
         return max(lo, min(hi, 5.5)), ""
+
+
+def _pick_breakout_stop(words: list, lo: float, hi: float) -> float:
+    """Duration to cut a breakout on a COMPLETE spoken line (pure — unit-testable). `words` is a
+    list of (text, start, end) relative to the breakout start. Prefer the LATEST complete stop in
+    [lo, hi]; if none, a SHORT complete utterance followed by real silence ends AT ITS OWN STOP
+    (floored 2.0s) instead of stretching to `hi` (the '10s window / 1.2s speech' dead-air bug)."""
+    if not words:
+        return round(max(2.0, min(hi, 5.0)), 3)
+    stops = []                                         # candidate end-times (relative to start)
+    for i, (txt, _ws, we) in enumerate(words):
+        if we > hi + 0.4:
+            break
+        ends_sentence = txt[-1:] in ".!?…"
+        gap_after = (words[i + 1][1] - we) if i + 1 < len(words) else 1.0
+        if ends_sentence:
+            stops.append(min(hi, we + 0.30))           # let the line breathe before the cut
+        elif gap_after >= 0.45:
+            stops.append(min(hi, we + min(0.30, gap_after / 2)))
+    good = [t for t in stops if lo <= t <= hi]
+    if good:
+        return round(max(good), 3)                     # latest complete line within the window
+    # NO complete stop in [lo, hi]: a SHORT complete utterance ("Anyone can be killed.") followed by
+    # real silence must END AT ITS OWN STOP (floored 2.0s), NOT stretch to `hi`. Prefer the EARLIEST
+    # sentence-final stop below `lo` whose next word is >= 2s away (a genuine trailing gap).
+    early = []
+    for i, (txt, _ws, we) in enumerate(words):
+        if we > hi:
+            break
+        if txt[-1:] in ".!?…":
+            nxt = words[i + 1][1] if i + 1 < len(words) else (we + 5.0)
+            if nxt - we >= 2.0:                        # complete line + a real trailing gap
+                early.append(we + 0.30)
+    if early:
+        return round(max(2.0, min(hi, min(early))), 3)
+    last_end = min(hi, words[-1][2] + 0.30)            # continuous dialogue → run to last word
+    return round(max(2.0, min(hi, last_end)), 3)
 
 
 def _extract_breakout(src_path: str, start: float, dur: float, vdest: Path,
@@ -537,6 +560,56 @@ def _quote_run_in(qwords: list, twords: list) -> int:
         for i in range(len(qwords) - 2):
             if (" " + " ".join(qwords[i:i + 3]) + " ") in tstr:
                 best = 3
+                break
+    return best
+
+
+# function/near-universal words — a run made only of these ("do you know the", "where did you")
+# is a GENERIC interrogative prefix, not a distinctive verbatim quote.
+_BK_FUNC = {"the", "a", "an", "of", "to", "in", "on", "and", "or", "but", "is", "are", "was",
+            "were", "be", "been", "he", "she", "it", "they", "you", "i", "we", "my", "your",
+            "his", "her", "do", "did", "does", "that", "this", "what", "who", "how", "when",
+            "where", "why", "so", "if", "for", "with", "at", "as", "by", "me", "him", "them",
+            "there", "here", "have", "has", "had", "will", "would", "can", "could", "them"}
+
+
+def _verbatim_bypass_ok(qw: list, run: int) -> bool:
+    """May a verbatim quote-in-footage match OVERRIDE the Face-ID wrong-character gate? Only for a
+    STRONG match: >= 4 consecutive matched words, covering >= 70% of the quote, and containing at
+    least one DISTINCTIVE content word. A bare 3-4-word generic prefix ('Do you know the', 'Where
+    did you learn') is insufficient — that over-matched a DIFFERENT spoken line and stole the gate
+    (breakout_017/055 aired the wrong occurrence). Coverage alone separates 'Do you know the [story
+    of Harrenhal]' (4/7 = 0.57, rejected) from 'Anyone can be killed' (4/4 = 1.0, kept)."""
+    if run < 4 or not qw:
+        return False
+    matched = qw[:run]
+    coverage = run / max(1, len(qw))
+    has_content = any(w not in _BK_FUNC and len(w) > 2 for w in matched)
+    return coverage >= 0.70 and has_content
+
+
+def _narr_dup_run(quote_words: list, segments, idx: int, window: int = 2) -> int:
+    """Longest run of consecutive words the breakout quote shares with the NARRATION of the beats
+    around it ([idx-window .. idx+window]) — i.e. does the narrator SAY the same line right before/
+    after the scene plays it (the duplication 'sandwich'). 0 = no meaningful overlap."""
+    if not quote_words:
+        return 0
+    import re as _redup
+    best = 0
+    for s in segments:
+        _si = int(getattr(s, "index", -1))
+        if _si == idx or abs(_si - idx) > window:
+            continue
+        tw = _redup.findall(r"[a-z']+", (getattr(s, "text", "") or "").lower())
+        if not tw:
+            continue
+        tstr = " " + " ".join(tw) + " "
+        for j in range(len(quote_words), 3, -1):          # need >= 4 consecutive shared words
+            for i in range(len(quote_words) - j + 1):
+                if (" " + " ".join(quote_words[i:i + j]) + " ") in tstr:
+                    best = max(best, j)
+                    break
+            if best >= j:
                 break
     return best
 
@@ -781,16 +854,19 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         if best is not None:
             cands.append((best[0], seg.index, best[1], best[2], _q))
             _k = (seg.index, best[1].id, round(float(best[2].start), 1))
-            if best[3] >= 4:                           # 4+ exact consecutive words → trust over Face-ID
+            # Face-ID BYPASS requires a STRONG verbatim match (>=4 words, >=70% coverage, a content
+            # word) — a bare 3-4-word generic prefix used to steal the gate and air a DIFFERENT line.
+            if _verbatim_bypass_ok(_rw(_q)[:8], best[3]):
                 _verbatim_strong.add(_k)
             if _verbatim_first is None or seg.index < _verbatim_first[0]:
-                _verbatim_first = (seg.index, _k)
-    # COLD-OPEN HOOK: the EARLIEST verbatim quote that falls in the opening stretch is the hook — the
-    # user wants the real scene of the opening quoted line (e.g. "Seize him. Cut his throat.") to air
-    # right at the start. Exempt it from the Face-ID gate too, so a short 3-word opening quote over a
-    # dim throne-room shot still airs (a wrong scene won't speak that exact opening line).
+                _verbatim_first = (seg.index, _k, _rw(_q)[:8], best[3])
+    # COLD-OPEN HOOK: the EARLIEST verbatim quote in the opening stretch is the hook — air the real
+    # scene of the opening quoted line right at the start. It is still Face-ID-exempt ONLY when it is
+    # itself a STRONG verbatim match (same bar as any other bypass) — a weak 3-word opening prefix no
+    # longer buys Face-ID immunity just for being first.
     if _verbatim_first is not None and _verbatim_first[0] <= max(5, len(segments) // 12):
-        _verbatim_strong.add(_verbatim_first[1])
+        if _verbatim_bypass_ok(_verbatim_first[2], _verbatim_first[3]):
+            _verbatim_strong.add(_verbatim_first[1])
     if True:
         # EVIDENCE MINING — always runs, not just as a fallback. The competitor's edit uses the
         # scene's OWN spoken lines as evidence every ~15-30s (narration makes a point, the scene
@@ -1140,6 +1216,18 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                     f"(src={(src.title or src.id)[:40]!r})")
                 continue                               # try the next candidate
         _is_cold = (idx, src.id, round(float(sh.start), 1)) == _cold_key
+        # NARRATOR DUPLICATION — does the narration around this beat SPEAK the same line the scene
+        # is about to play (the pre-empt/echo 'sandwich')? Record it honestly. A mid-video VO word-cut
+        # to remove the duplicate stays DEFAULT OFF (unsafe — the historical caption-desync bug), so
+        # the safe response is to RECORD it (and optionally skip the redundant breakout via env) rather
+        # than damage sync. Cold-opens are exempt: their VO-cut path IS proven/atomic.
+        _dup_run = 0 if _is_cold else _narr_dup_run(_rw(_q), segments, idx)
+        if (_dup_run >= 4 and not _is_cold
+                and _os9b.environ.get("VIDLORE_CLIPSTUDIO_SKIP_DUP_BREAKOUT", "0").strip()
+                in ("1", "true", "yes")):
+            log(f"build: breakout before scene {idx} SKIPPED — narrator duplicates the line "
+                f"({_dup_run}-word overlap) and mid-video VO-cut is off (SKIP_DUP_BREAKOUT)")
+            continue
         _entry = {"seg_index": idx, "dur": real, "video": v, "audio": a}
         if _is_cold:
             # carry the hook quote + the beats it was stitched from, so the VO word-cut (default ON
@@ -1153,9 +1241,20 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         _cold = "COLD-OPEN " if _is_cold else ""
         log(f"[BREAKOUT-OK] #{len(out)} {_cold}before-scene={idx} dur={real:.1f}s "
             f"src@{float(sh.start):.0f}s src={(src.title or src.id)[:52]!r} line={_q[:42]!r}")
+        # TRUTHFUL AUDIT: persist what actually AIRED (aired_transcript) + how much of the matched
+        # quote it covers (line_coverage) + speaker + standalone-utterance flag + narrator duplication.
+        _qc = [w for w in _rw(_q) if w not in _BK_FUNC and len(w) > 2]
+        _wtl = _rw(_wtxt)
+        _cov = (sum(1 for w in _qc if w in _wtl) / len(_qc)) if _qc else 0.0
+        _spk = (getattr(sh, "face_ids", None) or [""])[0] if getattr(sh, "face_ids", None) else ""
         _entry["_audit"] = {"seg_index": idx, "cold_open": _is_cold, "dur_s": round(real, 2),
                             "source_id": src.id, "source_title": (src.title or "")[:120],
-                            "source_t": round(float(sh.start), 1), "line": _q[:160]}
+                            "source_t": round(float(sh.start), 1), "line": _q[:160],
+                            "aired_transcript": (_wtxt or "")[:300],
+                            "line_coverage": round(_cov, 2),
+                            "speaker": _spk,
+                            "standalone_utterance": bool(_cov >= 0.5 and not _is_narration(_wtxt or "")),
+                            "narrator_duplication_words": _dup_run}
     # ALWAYS report the FINAL accepted count after post-extraction (the pre_extract_accepted count
     # above can shrink here when an aired window is rejected as commentary) — so the audit is never
     # ambiguous about how many breakouts actually aired.
@@ -2013,6 +2112,66 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
                                        f"(best dHash distance {min(hams)}/256 > {maxham} — a wrong "
                                        f"scene aired over the breakout audio)",
                              "hamming": hams, "source": str(src)})
+    # (d) FINAL-MIX AUDIO INTELLIGIBILITY — a breakout airs the scene's OWN dialogue; verify the
+    # final MIX actually carries audible speech there (not near-silence / audio-over-nothing). We
+    # measure loudness + ASR the window and record intelligibility; we HARD-FAIL only on genuinely
+    # broken audio (near-silent window or essentially no detected speech) so masking/marginal cases
+    # never false-quarantine a good render. env VIDLORE_CLIPSTUDIO_BREAKOUT_AUDIO_QA=0 disables.
+    import os as _os_aq
+    if _os_aq.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_AUDIO_QA", "1").strip() not in ("0", "false", "no"):
+        _wm = None
+        try:
+            from faster_whisper import WhisperModel as _WM
+            _wm = _WM("base", device="cpu", compute_type="int8")
+        except Exception:
+            _wm = None
+        _sil_floor = float(_cfg_i("VIDLORE_CLIPSTUDIO_BREAKOUT_AUDIO_SILENCE_DB", -50))
+        for c in (caps or []):
+            s, d = float(c.get("start", 0.0)), float(c.get("dur", 0.0))
+            line = (c.get("line", "") or "")
+            if d <= 0.4:
+                continue
+            wav = work / f"_bkaud_{int(s * 100)}.wav"
+            try:
+                subprocess.run([ff, "-y", "-loglevel", "error", "-ss", f"{s:.3f}", "-t", f"{d:.3f}",
+                                "-i", str(result), "-vn", "-ar", "16000", "-ac", "1", str(wav)],
+                               capture_output=True, timeout=60)
+                if not wav.exists():
+                    continue
+                # loudness
+                _vd = subprocess.run([ff, "-hide_banner", "-i", str(wav), "-af", "volumedetect",
+                                      "-f", "null", "-"], capture_output=True, text=True, timeout=60).stderr
+                _mm = re.search(r"mean_volume:\s*(-?[\d.]+) dB", _vd)
+                mean_db = float(_mm.group(1)) if _mm else -120.0
+                # ASR speech fraction + line coverage
+                speech_frac, cov = 0.0, 1.0
+                if _wm is not None:
+                    _segs, _inf = _wm.transcribe(str(wav), word_timestamps=True, vad_filter=False)
+                    _wds = [(str(w.word or "").strip().lower(), float(w.start), float(w.end))
+                            for _sg in _segs for w in (_sg.words or [])]
+                    if d > 0:
+                        speech_frac = min(1.0, sum(e - b for _t, b, e in _wds) / d)
+                    _asr = " " + " ".join(w for w, _b, _e in _wds) + " "
+                    _lc = [w for w in re.findall(r"[a-z']+", line.lower())
+                           if w not in _BK_FUNC and len(w) > 2]
+                    cov = (sum(1 for w in _lc if (" " + w + " ") in _asr) / len(_lc)) if _lc else 1.0
+                if mean_db < _sil_floor:
+                    problems.append({"breakout": line[:44], "start": round(s, 2),
+                                     "reason": f"breakout airs NEAR-SILENT audio (mean {mean_db:.1f} dB "
+                                               f"< {_sil_floor:.0f}) — the scene dialogue is missing",
+                                     "mean_db": round(mean_db, 1)})
+                elif _wm is not None and speech_frac < 0.05:
+                    problems.append({"breakout": line[:44], "start": round(s, 2),
+                                     "reason": f"breakout window has essentially NO detectable speech "
+                                               f"(speech_frac {speech_frac:.2f}) in the final mix",
+                                     "speech_frac": round(speech_frac, 3)})
+                elif log:
+                    log(f"build: breakout audio @{s:.1f}s — mean {mean_db:.1f}dB · speech "
+                        f"{speech_frac:.0%} · line-coverage {cov:.0%}")
+            except Exception:
+                pass
+            finally:
+                wav.unlink(missing_ok=True)
     if log:
         if problems:
             for _p in problems:

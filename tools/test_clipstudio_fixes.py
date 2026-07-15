@@ -4410,6 +4410,56 @@ def test_verifier_context_and_fallback():
     check("verifier-failed exact beat → exact_scene_missing", rc.get(2) == "exact_scene_missing")
 
 
+def test_breakout_correctness():
+    print("[stage-4] breakout: early-stop, strict Face-ID bypass, dup detect, audit fields")
+    import vidlore.clipstudio.build as B
+
+    # (1) _pick_breakout_stop: a short complete line + long silence ends at ITS stop, not at hi
+    # a short complete line, then SILENCE (whisper transcribes no further words in the window)
+    short = [("Anyone", 0.0, 0.4), ("can", 0.4, 0.7), ("be", 0.7, 0.9), ("killed.", 0.9, 1.4)]
+    d = B._pick_breakout_stop(short, lo=3.0, hi=10.0)
+    check("short complete line + silence → ~2s window (not 10s dead air)", 1.6 <= d <= 2.5)
+    # a two-part exchange with a stop inside [lo,hi] keeps the later complete line
+    two = [("They", 0.0, 0.3), ("say", 0.3, 0.6), ("he", 0.6, 0.8), ("cant", 0.8, 1.1),
+           ("be", 1.1, 1.3), ("killed.", 1.3, 1.7),
+           ("Do", 4.5, 4.7), ("you", 4.7, 4.9), ("believe", 4.9, 5.3), ("them?", 5.3, 5.8)]
+    d2 = B._pick_breakout_stop(two, lo=3.0, hi=10.0)
+    check("two-part exchange keeps the later complete line", 5.5 <= d2 <= 6.2)
+
+    # (2) _verbatim_bypass_ok: a generic 3-4-word prefix does NOT bypass Face-ID; a strong,
+    #     high-coverage distinctive quote does
+    q_generic = ["do", "you", "know", "the", "story", "of", "harrenhal"]     # 7-word quote
+    check("generic 4-word prefix of a long quote does NOT bypass Face-ID (0.57 cov)",
+          not B._verbatim_bypass_ok(q_generic, 4))
+    q_iconic = ["anyone", "can", "be", "killed"]
+    check("iconic short line fully matched DOES bypass Face-ID (1.0 cov, content word)",
+          B._verbatim_bypass_ok(q_iconic, 4))
+    check("a 3-word run never bypasses (needs >= 4)", not B._verbatim_bypass_ok(q_iconic, 3))
+    q_allfunc = ["do", "you", "did", "that"]                 # every token is a function word
+    check("a 4-word all-function-word quote does NOT bypass (no content word)",
+          not B._verbatim_bypass_ok(q_allfunc, 4))
+
+    # (3) _narr_dup_run: narrator repeating the breakout line in an adjacent beat is detected
+    from vidlore.clipstudio import models as M
+    segs = [M.ScriptSegment(index=0, text="He asks where she is from"),
+            M.ScriptSegment(index=1, text="watch what he knew and when"),
+            M.ScriptSegment(index=2, text="she tells him that anyone can be killed today")]
+    dup = B._narr_dup_run(["anyone", "can", "be", "killed"], segs, idx=1)
+    check("narrator duplication detected (>=4-word overlap in a neighbour beat)", dup >= 4)
+    nodup = B._narr_dup_run(["valar", "morghulis", "all", "men"], segs, idx=1)
+    check("no false duplication when narration differs", nodup < 4)
+
+    # (4) wiring / audit fields / gates present
+    bsrc = (Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "build.py").read_text()
+    check("audit persists aired_transcript + line_coverage + speaker + standalone + dup",
+          all(k in bsrc for k in ('"aired_transcript"', '"line_coverage"', '"speaker"',
+                                  '"standalone_utterance"', '"narrator_duplication_words"')))
+    check("final-mix breakout AUDIO QA (near-silence / no-speech) wired",
+          "BREAKOUT_AUDIO_QA" in bsrc and "NEAR-SILENT audio" in bsrc)
+    check("mid-video VO word-cut stays default OFF (cold-open VO-cut only)",
+          "SKIP_DUP_BREAKOUT" in bsrc and 'VIDLORE_CLIPSTUDIO_SKIP_DUP_BREAKOUT", "0"' in bsrc)
+
+
 def test_music_dynamics_wiring():
     print("[stage-3] natural music dynamics — envelope + wiring (VO never touched)")
     import vidlore.clipstudio.build as B
@@ -4544,6 +4594,7 @@ def test_fps_and_ad_protection():
 
 def main():
     test_fps_and_ad_protection()
+    test_breakout_correctness()
     test_music_dynamics_wiring()
     test_discovery_query_stratification()
     test_verifier_context_and_fallback()
