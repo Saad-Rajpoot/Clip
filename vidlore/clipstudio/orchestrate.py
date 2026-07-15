@@ -183,25 +183,46 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
     _vtype_sv = (proj.meta.get("analysis", {}) or {}).get("video_type", "")
     _global_era_sv = str((proj.meta.get("analysis", {}) or {}).get("episode_hint", "") or "")
 
-    def _still_semantically_ok(kf_path, seg) -> bool:
-        """LENIENT vision check on a recovery still: True unless it shows the wrong character/era or
-        is off-topic/contradictory. Fail-open only when verification is unavailable."""
-        if not _still_verify_on or not kf_path:
-            return True
+    from . import index as _index_sv
+
+    def _shot_face_ids(sid, sidx):
+        """The candidate SHOT's actual persisted face detections (NOT the beat's requested entities —
+        those are script asks, not faces found in this frame). Empty list when unavailable."""
         try:
-            names = list(getattr(seg, "entities", None) or [])
-            v = _verify_mod.verify_frame(
-                str(kf_path), seg.text, getattr(seg, "required_entity", ""),
-                getattr(seg, "required_kind", ""), names, eng_cfg,
-                getattr(eng_cfg, "anthropic_model", ""), is_specific=False,
-                expected_visual=getattr(seg, "expected_visual", "") or "",
-                scene_query=getattr(seg, "scene_query", "") or "",
-                era_hint=_verify_mod._beat_era(seg, _global_era_sv, _vtype_sv == "single_scene"))
-            if v is None:                                 # transport error → cannot judge → fail open
-                return True
-            return v.get("verdict") != "replace"          # 'replace' = wrong char/era/off-topic
+            for _sh in _index_sv.load_shots(proj, sid):
+                if getattr(_sh, "index", None) == sidx:
+                    return list(getattr(_sh, "face_ids", None) or [])
         except Exception:
-            return True
+            pass
+        return []
+
+    def _still_verdict(kf_path, seg, sid, sidx):
+        """LENIENT semantic verdict on a recovery still: 'ok' | 'reject' | 'unverified' | 'disabled'.
+        Passes the SHOT's real face_ids. A transport error / timeout / malformed response (while the
+        verifier IS configured) → 'unverified' (NOT silently 'ok'). 'disabled' means NO verifier is
+        configured at all — the caller may still install to avoid a black gap, but labels the still
+        'unverified_fallback' (never 'contextual_fallback', which implies a real verdict). Retries
+        once on a transient error."""
+        if not _still_verify_on:
+            return "disabled"
+        if not kf_path:
+            return "unverified"
+        faces = _shot_face_ids(sid, sidx)
+        for _attempt in (1, 2):
+            try:
+                v = _verify_mod.verify_frame(
+                    str(kf_path), seg.text, getattr(seg, "required_entity", ""),
+                    getattr(seg, "required_kind", ""), faces, eng_cfg,
+                    getattr(eng_cfg, "anthropic_model", ""), is_specific=False,
+                    expected_visual=getattr(seg, "expected_visual", "") or "",
+                    scene_query=getattr(seg, "scene_query", "") or "",
+                    era_hint=_verify_mod._beat_era(seg, _global_era_sv, _vtype_sv == "single_scene"))
+                if v is None:
+                    continue                              # transport error → retry, then unverified
+                return "reject" if v.get("verdict") == "replace" else "ok"
+            except Exception:
+                continue
+        return "unverified"                               # no real verdict after retries
 
     # Index every pooled shot — REAL downloaded source-video keyframes are the PREFERRED (and primary)
     # image source. No NOW-photos / recent-actor photos / AI images anywhere in this path.
@@ -292,25 +313,48 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
         essential = no_clip or (pol == _policy.EXACT and weak)
         within_cap = essential or src_filled < still_cap
         if want_still and within_cap and not (sel and getattr(sel, "image_path", "")):
-            still = None
+            # Collect several RANKED still candidates, then (for exact/character beats) install the
+            # first one that passes SEMANTIC verification. A verdict of 'reject' (wrong character/era/
+            # contradictory) or 'unverified' (transport error / no verdict) is NOT installed — we try
+            # the next candidate; if none pass, the beat is left flagged (PASS 3 → web-exact / review),
+            # and build will NOT air a rejected still or the rejected moving clip (freeze fallback).
+            _cands = []
+            _seen_keys = set(used_keys)
             if sel is not None:
-                still = _imgfb.pick_source_still(sel, shots_by_key, used_keys, used_phash,
-                                                 distinct_from=aired_phash)
-            if still is None:                          # no relevance-ranked alternate → scan the pool
-                still = _imgfb.pick_pool_still(seg, shots_by_key, used_keys, used_phash,
+                _s0 = _imgfb.pick_source_still(sel, shots_by_key, _seen_keys, used_phash,
                                                distinct_from=aired_phash)
-            # SEMANTIC guard (Gap 2): on an exact/character beat, a recovery still must not show the
-            # wrong character/era or contradict the narration. If it fails, try the pool alternate;
-            # if that also fails, DON'T install a wrong still — leave the beat flagged (PASS 3 → web
-            # exact / manual review). Never air a contradictory still just because it is a real frame.
-            if (still and pol in (_policy.EXACT, _policy.CHARACTER)
-                    and not _still_semantically_ok(still[0], seg)):
-                _alt = _imgfb.pick_pool_still(seg, shots_by_key, used_keys | {(still[1], still[2])},
-                                              used_phash, distinct_from=aired_phash)
-                still = _alt if (_alt and _still_semantically_ok(_alt[0], seg)) else None
-                if still is None:
-                    log(f"image-fallback: beat {seg.index} recovery still REJECTED "
-                        f"(wrong character/era/contradictory) — left for web-exact/review")
+                if _s0:
+                    _cands.append(_s0); _seen_keys = _seen_keys | {(_s0[1], _s0[2])}
+            for _ in range(3):                         # a few ranked pool candidates
+                _sp = _imgfb.pick_pool_still(seg, shots_by_key, _seen_keys, used_phash,
+                                             distinct_from=aired_phash)
+                if not _sp:
+                    break
+                _cands.append(_sp); _seen_keys = _seen_keys | {(_sp[1], _sp[2])}
+            still = None
+            _still_verified = False
+            if pol in (_policy.EXACT, _policy.CHARACTER):
+                _rej = _unv = 0
+                _disabled = False
+                for _c in _cands:
+                    _vd = _still_verdict(_c[0], seg, _c[1], _c[2])
+                    if _vd == "ok":
+                        still, _still_verified = _c, True
+                        break
+                    if _vd == "disabled":                # no verifier configured at all
+                        _disabled = True
+                        continue
+                    _rej += (_vd == "reject"); _unv += (_vd == "unverified")
+                if still is None and _disabled and _cands:
+                    # can't semantically verify (no vision model) — install to avoid a black gap, but
+                    # label it 'unverified_fallback', NEVER silently 'contextual_fallback'
+                    still, _still_verified = _cands[0], False
+                if still is None and _cands:
+                    log(f"image-fallback: beat {seg.index} — {len(_cands)} recovery still(s) not "
+                        f"installed ({_rej} rejected wrong-char/era, {_unv} unverified) → left for "
+                        f"web-exact/review (no wrong still airs)")
+            else:
+                still, _still_verified = (_cands[0] if _cands else None), True   # filler: CLIP-ranked ok
             if still:
                 kf, sid, sidx, score, sph = still
                 if sel is None:
@@ -326,10 +370,13 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                 # scene/era, but the exact moment is not verifier-confirmed), and thematic FILLER for
                 # a generic/abstract beat. Never labelled 'exact' — only verifier-kept moving footage
                 # or a validated web-exact-scene still earns that.
-                _rclass = ("contextual_fallback" if pol in (_policy.EXACT, _policy.CHARACTER)
-                           else "generic_filler")
+                if pol in (_policy.EXACT, _policy.CHARACTER):
+                    _rclass = "contextual_fallback" if _still_verified else "unverified_fallback"
+                else:
+                    _rclass = "generic_filler"
                 sel.image_meta = {"source": _src, "score": round(float(score), 3),
                                   "src": sid, "shot": sidx, "relevance_class": _rclass,
+                                  "still_verified": bool(_still_verified),
                                   "exact_scene_missing": bool(pol == _policy.EXACT and (weak or no_clip))}
                 used_keys.add((sid, sidx))
                 if sph:

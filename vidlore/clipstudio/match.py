@@ -1046,8 +1046,15 @@ def _clean_copy_swap(seg, best, scored, src_dirty: dict, src_height: dict, cfg,
         return best, None
     _adj, base_b, ps_b, cand_b = best
     key_b = _cleanliness_key(ps_b.sid, ps_b.shot, src_dirty, src_height)
-    if key_b[0] == 0 and key_b[1] == 0 and key_b[2] == -3:
-        return best, None                          # already a clean 1080-class copy — nothing to win
+    # Early-out ONLY when the current best is UNBEATABLE: no watermark (key[0]==0), no subs
+    # (key[1]==0), top decoded-quality tier (key[2] <= -1.0, i.e. q_bin==1.0 — reachable only by a
+    # pristine HD frame), AND top resolution tier (key[3]==-3 = 1080-class). NOTE the tuple order is
+    # now (corner, subs, -decoded_quality_tier, -res_tier, -quality): decoded quality comes BEFORE
+    # resolution, so the stale `key_b[2] == -3` (which used to test the 1080p res tier) no longer
+    # applies — resolution is key[3]. A clean-but-SOFT 1080p is intentionally NOT skipped here, so a
+    # sharp 720p copy can still win the arbitration below.
+    if key_b[0] == 0 and key_b[1] == 0 and key_b[2] <= -1.0 and key_b[3] == -3:
+        return best, None                          # already a clean, pristine 1080-class copy
     tb = (getattr(ps_b.shot, "transcript", "") or "").lower().split()
     alt, alt_key, alt_base = None, key_b, 0.0
     for base, bonus, sig, ps in scored:

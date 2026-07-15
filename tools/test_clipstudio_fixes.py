@@ -2460,17 +2460,22 @@ def test_intro_coldopen_breakout():
                           else f"narration filler beat number {i} words here now"),
                     quote=(quote if i == 0 else "")) for i in range(n_segs)]
         _orig_ls = _idxmod.load_shots
-        _orig = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text)
+        _orig = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
+                 B._asr_wav_words)
         _idxmod.load_shots = lambda p, sid: shots
         B._extract_breakout = lambda *a, **k: 5.0
         B._breakout_window_luma = lambda *a, **k: luma
         B._frame_has_burned_text = lambda *a, **k: burned
+        # test-double for the aired-audio RE-ASR (the mocked _extract_breakout writes no wav): the
+        # aired audio is the scene ASR, which contains the quote verbatim → coverage passes honestly
+        B._asr_wav_words = lambda p: (asr.split(), asr, 5.0)
         logs = []
         try:
             out = B._select_breakouts(proj, segs, 200.0, _P("/tmp"), lambda m: logs.append(str(m)))
         finally:
             _idxmod.load_shots = _orig_ls
-            B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text = _orig
+            (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
+             B._asr_wav_words) = _orig
         return out, "\n".join(logs)
 
     def _has0(out):
@@ -2541,17 +2546,20 @@ def test_intro_coldopen_breakout():
         segs = [fr[0], fr[1], fr[2], fr[3]] + [types.SimpleNamespace(
             index=i, quote="", text=f"narration filler beat {i} words here") for i in range(4, 9)]
         _ls = _idxmod.load_shots
-        _o = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text)
+        _o = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text, B._asr_wav_words)
         _idxmod.load_shots = lambda p, sid: shots
         B._extract_breakout = lambda *a, **k: 6.0
         B._breakout_window_luma = lambda *a, **k: 80.0
         B._frame_has_burned_text = lambda *a, **k: False
+        _hooktx = "seize him cut his throat stop wait i have changed my mind let him go"
+        B._asr_wav_words = lambda p: (_hooktx.split(), _hooktx, 6.0)
         lg = []
         try:
             o = B._select_breakouts(proj, segs, 200.0, _P("/tmp"), lambda m: lg.append(str(m)))
         finally:
             _idxmod.load_shots = _ls
-            B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text = _o
+            (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
+             B._asr_wav_words) = _o
         return o, "\n".join(lg)
     of, lf = _run_frag()
     check("fragmented hook airs as a scene-0 COLD-OPEN breakout",
@@ -3046,6 +3054,34 @@ def test_clean_copy_arbitration():
     nb2, note2 = _clean_copy_swap(seg, best, scored2, src_dirty, src_height, cfg)
     check("same-scene copy outside the relevance window does not swap",
           nb2[2].sid == "dirty_src" and note2 is None)
+
+    # BEHAVIORAL regression (decoded-quality-before-resolution tuple): a SOFT 1080p best is swapped
+    # for a same-scene SHARP 720p (codec-neutral decoded quality wins), and the early-return uses the
+    # correct tuple fields — a PRISTINE clean 1080p best is never swapped away.
+    soft1080 = mkps("soft1080", "cc" * 8, q=0.35)
+    sharp720 = mkps("sharp720", "cc" * 8, q=0.62)      # identical phash = same scene
+    sq_dirty = {"soft1080": {"corner": "", "subs": 0.0}, "sharp720": {"corner": "", "subs": 0.0}}
+    sq_h = {"soft1080": 1080, "sharp720": 720}
+    best_soft = (0.80, 0.80, soft1080, types.SimpleNamespace(source_id="soft1080", shot_index=1,
+                 score=0.80, in_point=10, out_point=14, signals={}, segment_index=0))
+    scored_sq = [(0.80, 0.0, {}, soft1080), (0.79, 0.0, {}, sharp720)]
+    nb3, note3 = _clean_copy_swap(seg, best_soft, scored_sq, sq_dirty, sq_h, cfg)
+    check("SOFT 1080p best is swapped for a same-scene SHARP 720p (decoded quality > resolution)",
+          nb3[2].sid == "sharp720" and note3 is not None)
+    # a PRISTINE clean 1080p best (q=1.0) early-outs and is never downgraded to a lower copy
+    prist = mkps("prist1080", "dd" * 8, q=1.0)
+    lowcopy = mkps("low720", "dd" * 8, q=0.9)
+    pr_dirty = {"prist1080": {"corner": "", "subs": 0.0}, "low720": {"corner": "", "subs": 0.0}}
+    pr_h = {"prist1080": 1080, "low720": 720}
+    best_pr = (0.80, 0.80, prist, types.SimpleNamespace(source_id="prist1080", shot_index=1,
+               score=0.80, in_point=10, out_point=14, signals={}, segment_index=0))
+    nb4, note4 = _clean_copy_swap(seg, best_pr, [(0.80, 0.0, {}, prist), (0.80, 0.0, {}, lowcopy)],
+                                  pr_dirty, pr_h, cfg)
+    check("pristine clean 1080p best early-outs (never downgraded)", nb4[2].sid == "prist1080")
+    from vidlore.clipstudio.match import _cleanliness_key as _ck2
+    kp = _ck2("prist1080", prist.shot, pr_dirty, pr_h)
+    check("early-return tests the intended fields (clean, q_bin==1.0, res tier 1080)",
+          kp[0] == 0 and kp[1] == 0 and kp[2] <= -1.0 and kp[3] == -3)
     # ordering sanity of the cleanliness key itself
     k_dirty = _cleanliness_key("dirty_src", dirty.shot, src_dirty, src_height)
     k_clean = _cleanliness_key("clean_src", clean.shot, src_dirty, src_height)
@@ -4380,11 +4416,15 @@ def test_era_policy_and_still_verification():
     # (3) wiring: recovery stills semantically verified; era policy threaded
     vsrc = (Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "verify.py").read_text()
     osrc = (Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "orchestrate.py").read_text()
+    bsrc = (Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "build.py").read_text()
     check("verifier uses beat-local era (not a global multi-scene hint)",
           "_beat_era(_seg, _global_era, _single)" in vsrc and '_vtype == "single_scene"' in vsrc)
-    check("recovery stills are semantically verified before install",
-          "_still_semantically_ok" in osrc and "recovery still REJECTED" in osrc
-          and "wrong character/era/contradictory" in osrc)
+    check("recovery stills semantically verified before install (tri-state; real face_ids)",
+          "_still_verdict" in osrc and "_shot_face_ids" in osrc
+          and "NOT the beat's requested entities" in osrc)
+    check("unverified/rejected still is NOT installed; rejected moving footage never airs",
+          "no wrong still airs" in osrc and "rejected-footage removal" in bsrc
+          and "verifier_failed" in bsrc)
 
 
 def test_verifier_context_and_fallback():
@@ -4492,9 +4532,12 @@ def test_source_quality_and_repetition():
           "_under if _under else _fresh" in bsrc)
 
     # (5) Gap 3: no near-black/unreadable beat airs; final sustained-black release gate
-    check("build window picker skips unreadable shots (near-black never airs)",
-          "_win_unreadable(w[0]" in bsrc and "near-black/unreadable never airs" in bsrc
-          and "_fresh_dark" in bsrc)
+    check("build window picker skips unreadable shots (near-black never airs; no dark last-resort)",
+          "_win_unreadable(w[0]" in bsrc and "near-black/unreadable NEVER airs" in bsrc
+          and "_fresh_dark" not in bsrc)
+    check("full window (not just in-point shot) validated for legibility + dark-clip removal",
+          "Validate the ENTIRE rendered source window" in bsrc and "_clip_too_dark" in bsrc
+          and "unreadable-clip removal" in bsrc)
     check("final-video sustained-black/legibility gate wired as a release gate",
           "def _final_video_black_gate" in bsrc and "_final_video_black_gate(result, work" in bsrc
           and "FAILED_BLACK_QA" in bsrc and "sustained unusable-dark" in bsrc)
@@ -4558,8 +4601,14 @@ def test_breakout_correctness():
           "_asr_wav_words(a)" in bsrc and "_atext if _aw else" in bsrc)
     check("genuine wrong-occurrence breakout is DROPPED on low ordered coverage",
           "BREAKOUT_MIN_COVERAGE" in bsrc and "ordered coverage" in bsrc)
-    check("speaker is 'unknown' unless a face identity is established",
-          '_spk = (_fid[0] if _fid else "unknown")' in bsrc and '"speaker_confidence"' in bsrc)
+    check("speaker is always 'unknown' (Face-ID proves visible, not speaking); visible_faces separate",
+          '"speaker": "unknown"' in bsrc and '"visible_faces"' in bsrc
+          and "who is VISIBLE, not who is SPEAKING" in bsrc)
+    check("breakout re-ASR REQUIRED (no indexed-transcript fallback) + type-aware ordered coverage",
+          "could not be re-ASR'd" in bsrc and "MIN_COVERAGE_VERBATIM" in bsrc
+          and "MIN_COVERAGE_MINED" in bsrc)
+    check("final-mix breakout QA enforces a coverage threshold + fails closed w/o Whisper",
+          "BREAKOUT_AUDIO_MIN_COVERAGE" in bsrc and "final-mix ASR unavailable (no Whisper)" in bsrc)
     check("final-mix breakout AUDIO QA fails CLOSED (probe failure = UNVERIFIED, not pass)",
           "BREAKOUT_AUDIO_QA" in bsrc and "UNVERIFIED (failing closed)" in bsrc
           and "could NOT be extracted" in bsrc)

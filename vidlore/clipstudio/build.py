@@ -1274,16 +1274,29 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
             log(f"build: breakout before scene {idx} SKIPPED — narrator duplicates the line "
                 f"({_dup_run}-word overlap) and mid-video VO-cut is off (SKIP_DUP_BREAKOUT)")
             continue
-        # RE-ASR the EXTRACTED audio (ground truth of what actually airs) → aired_transcript + ORDERED
-        # coverage of the matched quote. A genuine wrong-occurrence match (the audio does not contain
-        # the quote at all) is DROPPED; the aired transcript is recorded truthfully either way.
-        _aw, _atext, _aspk = _asr_wav_words(a)
-        _ocov = _ordered_coverage(_rw(_q), _aw) if _aw else -1.0
+        # RE-ASR the EXTRACTED audio (ground truth of what actually airs). If re-ASR is unavailable or
+        # returns no reliable words, the breakout is UNVERIFIED — we do NOT fall back to the indexed
+        # shot transcript and call it 'aired_transcript'; we SKIP the breakout (it never airs) so a
+        # breakout's aired dialogue is always its own measured audio. env=0 keeps the legacy behavior.
         from .config import _f as _cfg_fbk
-        _mincov = _cfg_fbk("VIDLORE_CLIPSTUDIO_BREAKOUT_MIN_COVERAGE", 0.25)
-        if (not _is_cold) and _aw and _ocov >= 0 and _ocov < _mincov:
-            log(f"build: breakout before scene {idx} DROPPED — aired audio does not contain the "
-                f"matched quote (ordered coverage {_ocov:.2f} < {_mincov:.2f}); "
+        _bk_verify = _os9b.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_REASR", "1").strip() \
+            not in ("0", "false", "no")
+        _aw, _atext, _aspk = _asr_wav_words(a)
+        if _bk_verify and len(_aw) < 2:
+            log(f"build: breakout before scene {idx} SKIPPED — extracted audio could not be re-ASR'd "
+                f"(no reliable words) → UNVERIFIED, not aired")
+            continue
+        _ocov = _ordered_coverage(_rw(_q), _aw) if _aw else 1.0
+        # CANDIDATE-TYPE-AWARE ordered-coverage floor: a verbatim/scripted quote must strongly match
+        # (>=70%); mined standalone dialogue needs a meaningful (>=50%) ordered match (its semantic
+        # relevance to the beat is already established by the mining overlap + commentary gate). A 25%
+        # one-word coincidence is never enough.
+        _is_verbatim = (idx, src.id, round(float(sh.start), 1)) in _verbatim_strong
+        _mincov = (_cfg_fbk("VIDLORE_CLIPSTUDIO_BREAKOUT_MIN_COVERAGE_VERBATIM", 0.70) if _is_verbatim
+                   else _cfg_fbk("VIDLORE_CLIPSTUDIO_BREAKOUT_MIN_COVERAGE_MINED", 0.50))
+        if _bk_verify and (not _is_cold) and _ocov < _mincov:
+            log(f"build: breakout before scene {idx} DROPPED — aired audio ordered-coverage of the "
+                f"{'verbatim' if _is_verbatim else 'mined'} line {_ocov:.2f} < {_mincov:.2f}; "
                 f"aired={_atext[:50]!r} quote={_q[:40]!r}")
             continue
         _entry = {"seg_index": idx, "dur": real, "video": v, "audio": a}
@@ -1299,22 +1312,22 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         _cold = "COLD-OPEN " if _is_cold else ""
         log(f"[BREAKOUT-OK] #{len(out)} {_cold}before-scene={idx} dur={real:.1f}s "
             f"src@{float(sh.start):.0f}s src={(src.title or src.id)[:52]!r} line={_q[:42]!r}")
-        # TRUTHFUL AUDIT: aired_transcript = re-ASR of the ACTUAL extracted audio (ground truth);
-        # line_coverage = ORDERED coverage of the matched quote in it. speaker is only named when an
-        # identity is actually established (Face-ID); a merely-visible face is NOT the speaker →
-        # "unknown". standalone_utterance requires real ordered coverage of a non-commentary line.
+        # TRUTHFUL AUDIT: aired_transcript = re-ASR of the ACTUAL extracted audio (ground truth).
+        # SPEAKER ATTRIBUTION is not established (Face-ID proves who is VISIBLE, not who is SPEAKING,
+        # and we run no diarization) → speaker is always "unknown"; the visible faces are recorded
+        # SEPARATELY as visible_faces.
         _aired_tx = _atext if _aw else (_wtxt or "")
-        _cov = _ocov if (_aw and _ocov >= 0) else _ordered_coverage(_rw(_q), _rw(_wtxt))
+        _cov = _ocov
         _fid = getattr(sh, "face_ids", None) or []
-        _spk = (_fid[0] if _fid else "unknown")
         _entry["_audit"] = {"seg_index": idx, "cold_open": _is_cold, "dur_s": round(real, 2),
                             "source_id": src.id, "source_title": (src.title or "")[:120],
                             "source_t": round(float(sh.start), 1), "line": _q[:160],
                             "aired_transcript": _aired_tx[:300],
                             "line_coverage": round(_cov, 2),
-                            "speaker": _spk,
-                            "speaker_confidence": ("faceid" if _fid else "unknown"),
-                            "standalone_utterance": bool(_cov >= 0.5 and not _is_narration(_aired_tx)),
+                            "candidate_type": ("verbatim" if _is_verbatim else "mined"),
+                            "speaker": "unknown",
+                            "visible_faces": list(_fid),
+                            "standalone_utterance": bool(_cov >= _mincov and not _is_narration(_aired_tx)),
                             "narrator_duplication_words": _dup_run}
     # ALWAYS report the FINAL accepted count after post-extraction (the pre_extract_accepted count
     # above can shrink here when an aired window is rejected as commentary) — so the audit is never
@@ -2188,10 +2201,22 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
         except Exception:
             _wm = None
         _sil_floor = float(_cfg_i("VIDLORE_CLIPSTUDIO_BREAKOUT_AUDIO_SILENCE_DB", -50))
+        from .config import _f as _cfg_faq
+        _mix_cov_floor = _cfg_faq("VIDLORE_CLIPSTUDIO_BREAKOUT_AUDIO_MIN_COVERAGE", 0.34)
+        if _wm is None:
+            # FAIL CLOSED: breakout QA is enabled but ASR is unavailable — we cannot verify the
+            # accepted dialogue survived into the mix, so every breakout is UNVERIFIED (not a pass).
+            for c in (caps or []):
+                if float(c.get("dur", 0.0)) > 0.4:
+                    problems.append({"breakout": (c.get("line", "") or "")[:44],
+                                     "start": round(float(c.get("start", 0.0)), 2),
+                                     "reason": "breakout final-mix ASR unavailable (no Whisper) — "
+                                               "UNVERIFIED (failing closed; set BREAKOUT_AUDIO_QA=0 "
+                                               "only if intentionally waiving)"})
         for c in (caps or []):
             s, d = float(c.get("start", 0.0)), float(c.get("dur", 0.0))
             line = (c.get("line", "") or "")
-            if d <= 0.4:
+            if d <= 0.4 or _wm is None:
                 continue
             wav = work / f"_bkaud_{int(s * 100)}.wav"
             try:
@@ -2231,12 +2256,15 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
                                      "reason": f"breakout window has essentially NO detectable speech "
                                                f"(speech_frac {speech_frac:.2f}) in the final mix",
                                      "speech_frac": round(speech_frac, 3)})
-                elif _wm is not None and (ocov is not None and ocov <= 0.0 and speech_frac >= 0.20):
-                    # clear speech present but NONE of the accepted line in order = wrong audio aired
+                elif ocov is not None and ocov < _mix_cov_floor:
+                    # enforce a MEANINGFUL ordered-coverage floor on the final mix (not just zero) —
+                    # the accepted dialogue must be recognizably present after mixing/ducking
                     problems.append({"breakout": line[:44], "start": round(s, 2),
-                                     "reason": f"final-mix speech does NOT contain the accepted line "
-                                               f"(ordered coverage 0, speech_frac {speech_frac:.2f})",
-                                     "ordered_coverage": 0.0, "speech_frac": round(speech_frac, 3)})
+                                     "reason": f"final-mix ordered coverage of the accepted line "
+                                               f"{ocov:.2f} < {_mix_cov_floor:.2f} — dialogue masked/"
+                                               f"missing (speech_frac {speech_frac:.2f})",
+                                     "ordered_coverage": round(ocov, 2),
+                                     "speech_frac": round(speech_frac, 3)})
                 elif log:
                     log(f"build: breakout audio @{s:.1f}s — mean {mean_db:.1f}dB · speech "
                         f"{speech_frac:.0%} · ordered-coverage "
@@ -3127,12 +3155,39 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
     from .config import _f as _cfg_f3
     card_floor = _cfg_f3("VIDLORE_CLIPSTUDIO_AD_CARD_FLOOR", 0.40)
     card_strong = _cfg_f3("VIDLORE_CLIPSTUDIO_AD_CARD_STRONG", 0.55)
+    from PIL import Image
+
+    def _probe_frame(fp):
+        """OCR ONE frame → a promo-candidate dict or None. OCRs the FULL frame (promo URLs/prices
+        live at the very bottom too) — our own captions are protected by the two-factor gate below,
+        never by discarding the bottom band. Card-uniformity is measured on the picture area."""
+        card = _frame_card_uniformity(fp)
+        im = Image.open(fp).convert("RGB")
+        W, H = im.size
+        res, _el = ocr_engine(str(fp))
+        joined = " ".join(str(txt) for _b, txt, conf in (res or []) if float(conf) >= 0.30)
+        m = _PROMO_RX.search(joined)
+        if not m:
+            return None
+        n_box, area_frac, max_frac = _ocr_layout_metrics(res, W, H)
+        is_card = card >= card_floor
+        layout_heavy = (area_frac >= 0.06) or (n_box >= 5) or (max_frac >= 0.04)
+        if not (is_card or layout_heavy):
+            return None
+        return {"token": m.group(0)[:40], "text": joined[:160], "card": round(card, 3),
+                "n_box": n_box, "text_area": round(area_frac, 3),
+                "path": "flat_card" if is_card else "layout_heavy",
+                "strong_single": bool(card >= card_strong or (layout_heavy and max_frac >= 0.10))}
+
     try:
         scan_dir.mkdir(exist_ok=True)
-        for _old in scan_dir.glob("fr_*.jpg"):
+        for _old in scan_dir.glob("*.jpg"):
             _old.unlink(missing_ok=True)
     except Exception:
         pass
+    # COMPLETE-DURATION coverage: probe the video length and confirm the 0.5s extraction reaches the
+    # final timestamp (a partial decode that yields SOME frames is UNVERIFIED, not clean).
+    dur = _probe_duration(result)
     fps = 1.0 / max(0.1, stride)
     _p = subprocess.run([ff, "-y", "-loglevel", "error", "-i", str(result),
                          "-vf", f"fps={fps:.4f},scale=854:-1", "-q:v", "4",
@@ -3141,33 +3196,23 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
     if not frames:
         return {"status": "unverified", "hits": [], "frames": 0, "ocr_errors": 0,
                 "reason": f"zero decoded scan frames (ffmpeg rc={_p.returncode}) — cannot verify"}
-    from PIL import Image
-    cand = []                                          # per-frame promo candidate (t, token, text, card, path)
+    expected = int(dur / stride) - 1 if dur > 0 else 0
+    if dur <= 0:
+        return {"status": "unverified", "hits": [], "frames": len(frames), "ocr_errors": 0,
+                "reason": "could not probe final-video duration — cannot confirm full-timeline coverage"}
+    if len(frames) < expected * 0.95:
+        return {"status": "unverified", "hits": [], "frames": len(frames), "ocr_errors": 0,
+                "reason": f"partial decode — {len(frames)} scan frames but the {dur:.0f}s timeline "
+                          f"needs ~{expected} @{stride}s (final frame not reached)"}
+    cand = {}                                          # t -> candidate dict
     ocr_errors = 0
     for i, fp in enumerate(frames):
-        t = i * stride
+        t = round(i * stride, 2)
         try:
-            card = _frame_card_uniformity(fp)
-            im = Image.open(fp).convert("RGB")
-            W, H = im.size
-            top = im.crop((0, 0, W, int(0.82 * H)))    # drop bottom caption band (our captions/subs)
-            tpath = scan_dir / f"_ocr_{i:05d}.jpg"
-            top.save(tpath)
-            res, _el = ocr_engine(str(tpath))
-            tpath.unlink(missing_ok=True)
-            joined = " ".join(str(txt) for _b, txt, conf in (res or []) if float(conf) >= 0.30)
-            m = _PROMO_RX.search(joined)
-            if not m:
-                continue
-            n_box, area_frac, max_frac = _ocr_layout_metrics(res, W, int(0.82 * H))
-            is_card = card >= card_floor
-            layout_heavy = (area_frac >= 0.06) or (n_box >= 5) or (max_frac >= 0.04)
-            if is_card or layout_heavy:
-                cand.append({"t": round(t, 2), "token": m.group(0)[:40], "text": joined[:160],
-                             "card": round(card, 3), "n_box": n_box,
-                             "text_area": round(area_frac, 3),
-                             "path": "flat_card" if is_card else "layout_heavy",
-                             "strong_single": bool(card >= card_strong)})
+            c = _probe_frame(fp)
+            if c is not None:
+                c["t"] = t
+                cand[t] = c
         except Exception:
             ocr_errors += 1
             continue
@@ -3179,21 +3224,52 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
     if frames and ocr_errors / len(frames) > 0.25:
         return {"status": "unverified", "hits": [], "frames": len(frames), "ocr_errors": ocr_errors,
                 "reason": f"excessive OCR errors ({ocr_errors}/{len(frames)}) — cannot verify"}
-    # CONFIRM: >=2 consecutive candidate frames, OR a single unambiguous strong flat card
-    _ts = {c["t"] for c in cand}
+
+    def _dense_confirm(t0):
+        """A LONE strong candidate is NOT discarded as transient — rescan densely (~0.1s) around it;
+        confirmed if >= 2 dense samples are promo candidates."""
+        ddir = scan_dir / "dense"
+        try:
+            ddir.mkdir(exist_ok=True)
+            for _o in ddir.glob("*.jpg"):
+                _o.unlink(missing_ok=True)
+        except Exception:
+            pass
+        subprocess.run([ff, "-y", "-loglevel", "error", "-ss", f"{max(0.0, t0 - 0.5):.2f}",
+                        "-t", "1.0", "-i", str(result), "-vf", "fps=10,scale=854:-1", "-q:v", "4",
+                        str(ddir / "d_%03d.jpg")], capture_output=True, timeout=120)
+        hit = 0
+        for dp in sorted(ddir.glob("d_*.jpg")):
+            try:
+                if _probe_frame(dp) is not None:
+                    hit += 1
+            except Exception:
+                pass
+        try:
+            for _o in ddir.glob("*.jpg"):
+                _o.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return hit >= 2
+
     hits = []
-    for c in cand:
-        consec = (round(c["t"] - stride, 2) in _ts) or (round(c["t"] + stride, 2) in _ts)
+    for t, c in sorted(cand.items()):
+        consec = (round(t - stride, 2) in cand) or (round(t + stride, 2) in cand)
         if consec or c["strong_single"]:
             hits.append(c)
+        elif c["path"] == "layout_heavy" or c["card"] >= card_floor:
+            # a lone strong-ish candidate → dense 0.1s rescan instead of discarding as transient
+            if _dense_confirm(t):
+                c["confirmed_by"] = "dense_rescan"
+                hits.append(c)
     if log:
         if hits:
             for h in hits[:12]:
                 log(f"build: final-video AD SCAN HIT @{h['t']}s token={h['token']!r} "
                     f"path={h['path']} card={h['card']} boxes={h['n_box']}")
         else:
-            log(f"build: final-video ad scan clean — {len(frames)} frames @{stride}s, "
-                f"{len(cand)} lone/transient promo candidate(s) (none confirmed), 0 cards")
+            log(f"build: final-video ad scan clean — {len(frames)} frames @{stride}s "
+                f"(full {dur:.0f}s timeline), {len(cand)} promo candidate(s) (none confirmed)")
     return {"status": ("blocked" if hits else "clean"), "hits": hits,
             "frames": len(frames), "ocr_errors": ocr_errors, "reason": ""}
 
@@ -3246,16 +3322,50 @@ def _final_video_ad_gate(result: Path, work: Path, ocr_engine, *, log) -> Path:
         f"refusing to publish (quarantined at {_quar.name}); set AD_GATE_OVERRIDE=1 to override")
 
 
-def _frame_luma_hi(img_path) -> float:
+def _frame_luma_hi(img_path):
     """~99.5th-percentile luma of a frame (the same 'brightest legible content' signal the index's
-    luma_hi uses). A frame whose brightest pixels are still dim has no legible content."""
+    luma_hi uses). A frame whose brightest pixels are still dim has no legible content. Returns None
+    on an explicit probe/decode FAILURE (the caller must treat that as unverified, NOT as bright)."""
     try:
         from PIL import Image
         import numpy as _np2
+        if not Path(img_path).exists() or Path(img_path).stat().st_size == 0:
+            return None
         g = _np2.asarray(Image.open(img_path).convert("L"), dtype=_np2.uint8)
+        if g.size == 0:
+            return None
         return float(_np2.percentile(g, 99.5))
     except Exception:
-        return 255.0                                   # unreadable → fail open (never false-block)
+        return None                                    # explicit failure → unverified
+
+
+def _clip_too_dark(clip_path, floor: float = 50.0) -> bool:
+    """True when a CUT clip is unreadable throughout — its brightest PICTURE content (center crop,
+    excluding edges; the clip has no letterbox yet at this stage) stays below `floor` at EVERY
+    sampled position. A clip with any legible stretch is kept. Unmeasurable → False (the final black
+    gate is the backstop)."""
+    ff = ffmpeg_exe()
+    dur = _probe_duration(clip_path) or 3.0
+    his = []
+    for r in (0.15, 0.4, 0.65, 0.9):
+        t = dur * r
+        tmp = f"{clip_path}.dk_{int(r * 100)}.jpg"
+        try:
+            subprocess.run([ff, "-y", "-loglevel", "error", "-ss", f"{t:.2f}", "-i", str(clip_path),
+                            "-frames:v", "1",
+                            "-vf", "crop=iw*0.9:ih*0.84:iw*0.05:ih*0.08,scale=320:-1", tmp],
+                           capture_output=True, timeout=20)
+            v = _frame_luma_hi(tmp)
+            if v is not None:
+                his.append(v)
+        except Exception:
+            pass
+        finally:
+            try:
+                Path(tmp).unlink(missing_ok=True)
+            except Exception:
+                pass
+    return bool(his) and max(his) < floor
 
 
 def _final_video_black_gate(result: Path, work: Path, *, log) -> Path:
@@ -3272,8 +3382,30 @@ def _final_video_black_gate(result: Path, work: Path, *, log) -> Path:
     from .config import _f as _cfg_fb, _i as _cfg_ib
     floor = _cfg_fb("VIDLORE_CLIPSTUDIO_FINAL_BLACK_FLOOR", 50.0)     # luma_hi below this = unusable
     min_dur = _cfg_fb("VIDLORE_CLIPSTUDIO_FINAL_BLACK_MINDUR", 0.8)   # sustained longer than a fade
+    max_fail_frac = _cfg_fb("VIDLORE_CLIPSTUDIO_FINAL_BLACK_MAXFAIL", 0.03)   # strict probe-failure cap
     stride = 0.5
     ff = ffmpeg_exe()
+
+    def _blk(reason):
+        _q = result.with_name(result.stem + ".FAILED_BLACK_QA" + result.suffix)
+        try:
+            if _q.exists():
+                _q.unlink()
+            result.rename(_q)
+        except Exception:
+            _q = result
+        log(f"build: ⛔ RELEASE-BLOCKED — {reason}; quarantined → {_q.name}. See final_black_failures.json.")
+        try:
+            (work.parent / "final_black_failures.json").write_text(
+                _json_b.dumps({"reason": reason, "floor_luma_hi": floor, "min_dur_s": min_dur},
+                              indent=1), encoding="utf-8")
+        except Exception:
+            pass
+        raise RuntimeError(f"final-video black gate: {reason} (quarantined at {_q.name})")
+
+    dur = _probe_duration(result)
+    if dur <= 0:
+        _blk("could not probe the final video duration (fail-closed — cannot verify legibility)")
     scan = work / "_blackscan"
     try:
         scan.mkdir(exist_ok=True)
@@ -3281,26 +3413,35 @@ def _final_video_black_gate(result: Path, work: Path, *, log) -> Path:
             _o.unlink(missing_ok=True)
     except Exception:
         pass
+    # Crop to the actual PICTURE AREA before scaling: exclude the cinematic letterbox bars AND the
+    # bottom caption band (y 0.15-0.70) and the outer 10% — so white captions or bars can never make
+    # a black picture pass the gate.
     _p = subprocess.run([ff, "-y", "-loglevel", "error", "-i", str(result),
-                         "-vf", f"fps={1.0 / stride:.4f},scale=480:-1", "-q:v", "5",
-                         str(scan / "b_%05d.jpg")], capture_output=True, timeout=1800)
+                         "-vf", f"fps={1.0 / stride:.4f},"
+                                f"crop=iw*0.80:ih*0.55:iw*0.10:ih*0.15,scale=480:-1",
+                         "-q:v", "5", str(scan / "b_%05d.jpg")], capture_output=True, timeout=1800)
     frames = sorted(scan.glob("b_*.jpg"))
+    expected = int(dur / stride) - 1                   # frames the scan should reach for full coverage
     if not frames:
-        # fail closed: cannot verify
-        _quar = result.with_name(result.stem + ".FAILED_BLACK_QA" + result.suffix)
-        try:
-            result.rename(_quar)
-        except Exception:
-            _quar = result
-        log(f"build: ⛔ RELEASE-BLOCKED (fail-closed) — could not extract frames to verify the final "
-            f"video has no unusable-dark footage (ffmpeg rc={_p.returncode}); quarantined → {_quar.name}")
-        raise RuntimeError(f"final-video black gate could not verify the render (quarantined at {_quar.name})")
-    lows = [i for i, fp in enumerate(frames) if _frame_luma_hi(fp) < floor]
+        _blk(f"could not extract scan frames (ffmpeg rc={_p.returncode}) — cannot verify legibility")
+    if len(frames) < expected * 0.95:
+        _blk(f"partial decode — scan produced {len(frames)} frames but the {dur:.0f}s timeline needs "
+             f"~{expected} @{stride}s (final timestamp not reached); UNVERIFIED")
+    lows, fails = [], 0
+    for i, fp in enumerate(frames):
+        v = _frame_luma_hi(fp)
+        if v is None:
+            fails += 1                                 # explicit probe failure — counted, not 'bright'
+        elif v < floor:
+            lows.append(i)
     try:
         for _o in scan.glob("*.jpg"):
             _o.unlink(missing_ok=True)
     except Exception:
         pass
+    if fails > max(1, int(len(frames) * max_fail_frac)):
+        _blk(f"too many unreadable scan probes ({fails}/{len(frames)} > {max_fail_frac:.0%}) — "
+             f"UNVERIFIED (fail-closed)")
     # group consecutive low frames into runs; a run longer than min_dur is an unusable-dark region
     runs, cur = [], []
     for i in lows:
@@ -3315,8 +3456,8 @@ def _final_video_black_gate(result: Path, work: Path, *, log) -> Path:
     bad = [(r[0] * stride, (r[-1] + 1) * stride) for r in runs
            if (r[-1] - r[0] + 1) * stride > min_dur]
     if not bad:
-        log(f"build: final-video black/legibility scan clean — {len(frames)} frames @{stride}s, "
-            f"0 sustained unusable-dark region(s) (short fades allowed)")
+        log(f"build: final-video black/legibility scan clean — {len(frames)} picture-area frames "
+            f"@{stride}s ({fails} probe fail), 0 sustained unusable-dark region(s) (short fades allowed)")
         return result
     try:
         (work.parent / "final_black_failures.json").write_text(
@@ -3324,19 +3465,8 @@ def _final_video_black_gate(result: Path, work: Path, *, log) -> Path:
                            "floor_luma_hi": floor, "min_dur_s": min_dur}, indent=1), encoding="utf-8")
     except Exception:
         pass
-    _quar = result.with_name(result.stem + ".FAILED_BLACK_QA" + result.suffix)
-    try:
-        if _quar.exists():
-            _quar.unlink()
-        result.rename(_quar)
-    except Exception:
-        _quar = result
-    log(f"build: ⛔ RELEASE-BLOCKED — {len(bad)} sustained unusable-dark region(s) in the final video "
-        f"(first {bad[0][0]:.1f}-{bad[0][1]:.1f}s, luma_hi < {floor:.0f}); quarantined → {_quar.name}. "
-        f"See final_black_failures.json.")
-    raise RuntimeError(
-        f"final-video black gate failed — {len(bad)} unusable-dark region(s) survived "
-        f"(quarantined at {_quar.name}); refusing to publish near-black/illegible footage")
+    _blk(f"{len(bad)} sustained unusable-dark region(s) (first {bad[0][0]:.1f}-{bad[0][1]:.1f}s, "
+         f"picture-area luma_hi < {floor:.0f})")
 
 
 def _ass_ts(t: float) -> str:
@@ -3840,9 +3970,17 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 return _sh
         return None
 
-    def _win_unreadable(sid, t):
-        _sh = _shot_at(sid, t)
-        return bool(_sh is not None and _dark_b(_sh))
+    def _win_unreadable(sid, t, out=None):
+        """Is the aired window unreadable? Validate the ENTIRE rendered source window [t, out], not
+        only its in-point shot — the padded window can walk from a legible in-point into an
+        unreadable adjacent shot (the murk that aired mid-beat)."""
+        t = float(t)
+        hi = float(out) if (out is not None and float(out) > t) else t + 0.01
+        for _sh in _shots_b(sid):
+            if _sh.end > t + 0.03 and _sh.start < hi - 0.03 and _dark_b(_sh):
+                return True
+        _sh0 = _shot_at(sid, t)                         # also the in-point shot itself
+        return bool(_sh0 is not None and _dark_b(_sh0))
 
     # CUT-WINDOW FLAG VALIDATION at render time — the playhead walk / lead-in snapping computes
     # the DEFINITIVE aired window [start, start+need] here, after every earlier stage. Shift the
@@ -4186,33 +4324,21 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 # (pixel-hash spacing — nearby in-points of a static scene are visual clones
                 # even when the timestamps differ, and CLIP embeds can't see that)
                 _fresh = []
-                _fresh_dark = []                       # legible-preferred: dark windows are last resort
                 for w in windows_avail:
                     if _air_ct.get(_wkey(w[0], w[1]), 0) >= 1:
                         continue
                     if _shot_has_text(w[0], float(w[1])):
                         continue                       # burned-in text never airs
-                    if _win_unreadable(w[0], float(w[1])):
-                        _fresh_dark.append(w)          # near-black — only if nothing legible remains
-                        continue
+                    if _win_unreadable(w[0], float(w[1]), float(w[2]) if len(w) > 2 else None):
+                        continue                       # near-black/unreadable NEVER airs (Gap 3) — no
+                        # 'least-dark last resort'; a dark-only beat falls to the still/freeze fallback
+                        # below (image_fallback still or a freeze of the previous clean clip), never dark
                     _wsrc = proj.source(w[0])
                     _h = _frame_hash(_wsrc.local_path, float(w[1]) + 1.2) if (
                         _wsrc and _wsrc.local_path) else None
                     if _looks_recent(_h):
                         continue
                     _fresh.append((w, _h))
-                if not _fresh and _fresh_dark:
-                    # every legible window aired/looks-recent; only near-black windows remain. Prefer
-                    # the LEAST-dark one as a last resort (still better than a black placeholder) and
-                    # warn — the final-video black gate blocks it downstream if it is truly unusable.
-                    _fresh_dark.sort(key=lambda w: -float(
-                        getattr(_shot_at(w[0], float(w[1])), "luma_hi", 0.0) or 0.0))
-                    _dw = _fresh_dark[0]
-                    _dsrc = proj.source(_dw[0])
-                    _fresh = [(_dw, _frame_hash(_dsrc.local_path, float(_dw[1]) + 1.2)
-                               if (_dsrc and _dsrc.local_path) else None)]
-                    log(f"build: scene {seg.index} — no legible window left; airing least-dark "
-                        f"available window as last resort (final black gate will block if unusable)")
                 if _fresh:
                     # prefer a look that has NOT already aired _LOOK_CAP times across the whole video;
                     # only fall back to an over-cap look if every fresh window is over-cap (never drops
@@ -4401,6 +4527,91 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         if _replaced:
             log(f"build: branding-card removal — {_replaced} channel/CTA-slate clip(s) "
                 f"freeze-replaced (never airs)")
+
+    # 3a-2) UNREADABLE-CLIP REMOVAL (Gap 3) — a cut clip that is near-black/illegible THROUGHOUT must
+    #       never air (distinct from a legitimate low-RESOLUTION but legible clip). Measured on the
+    #       actual rendered clip's picture area; replaced with a freeze of the previous CLEAN clip
+    #       (timing preserved). No 'least-dark last resort' airs. env FINAL_BLACK_GATE also gates this.
+    if _os.environ.get("VIDLORE_CLIPSTUDIO_DARK_CLIP_GATE", "1").strip() not in ("0", "false", "no"):
+        _dfloor = _cfg_f("VIDLORE_CLIPSTUDIO_FINAL_BLACK_FLOOR", 50.0)
+        _dlens = {segments[_p].index: list(_ls) for _p, _ls in _lens_by_pos.items()}
+        _last_clean_d = None
+        _drep = 0
+        for seg in segments:
+            if seg.index in _breakout_clip:
+                clips0 = beat_clips.get(seg.index) or []
+                if clips0:
+                    _last_clean_d = clips0[-1]
+                continue
+            clips = beat_clips.get(seg.index) or []
+            _ls = _dlens.get(seg.index) or []
+            for m, cp in enumerate(list(clips)):
+                if _clip_too_dark(Path(cp), floor=_dfloor):
+                    _d = (_ls[m] if m < len(_ls) and _ls[m] > 0 else 3.0) + 0.5
+                    if _last_clean_d is not None:
+                        _fr = proj.clips_dir / f"beat_{seg.index:03d}_{m}_nodark.mp4"
+                        _got = _freeze_replace(Path(_last_clean_d), _fr, _d)
+                        if _got:
+                            clips[m] = Path(_got)
+                            _drep += 1
+                            log(f"build: unreadable-clip removal — scene {seg.index} clip {m} "
+                                f"near-black, freeze-replaced with previous clean frame")
+                            continue
+                    # no clean predecessor to freeze — leave it for the final black gate to BLOCK
+                    # (never silently air dark; never substitute a black placeholder either)
+                    log(f"build: ⚠ scene {seg.index} clip {m} near-black with no clean predecessor "
+                        f"— final black gate will block this render (footage gap needs rediscovery)")
+                else:
+                    _last_clean_d = cp
+            beat_clips[seg.index] = clips
+            if clips:
+                for _fi in footage:
+                    if _fi.index == seg.index:
+                        _fi.path = clips[0]
+                        break
+        if _drep:
+            log(f"build: unreadable-clip removal — {_drep} near-black clip(s) freeze-replaced")
+
+    # 3a-3) REJECTED-FOOTAGE REMOVAL (Gap 2/round-2) — a beat whose moving clip the verifier REJECTED
+    #       (verifier_failed) and that image-fallback could NOT cover with a validated still must NOT
+    #       air the rejected (wrong-character/scene) footage. Freeze-replace it with the previous clean
+    #       clip — a visible, non-contradictory, non-black fallback (the ladder's 'unresolved' state).
+    if _os.environ.get("VIDLORE_CLIPSTUDIO_REJECTED_FOOTAGE_GATE", "1").strip() not in ("0", "false", "no"):
+        _rlens = {segments[_p].index: list(_ls) for _p, _ls in _lens_by_pos.items()}
+        _last_clean_r = None
+        _rrep = 0
+        for seg in segments:
+            _sel_r = sel_by_idx.get(seg.index)
+            _rejected = bool(_sel_r is not None
+                             and "verifier_failed" in (getattr(_sel_r, "flag_reasons", None) or [])
+                             and not getattr(_sel_r, "image_path", ""))
+            if seg.index in _breakout_clip or not _rejected:
+                clips0 = beat_clips.get(seg.index) or []
+                if clips0 and not _rejected:
+                    _last_clean_r = clips0[-1]
+                continue
+            clips = beat_clips.get(seg.index) or []
+            _ls = _rlens.get(seg.index) or []
+            for m, cp in enumerate(list(clips)):
+                _d = (_ls[m] if m < len(_ls) and _ls[m] > 0 else 3.0) + 0.5
+                if _last_clean_r is not None:
+                    _fr = proj.clips_dir / f"beat_{seg.index:03d}_{m}_norej.mp4"
+                    _got = _freeze_replace(Path(_last_clean_r), _fr, _d)
+                    if _got:
+                        clips[m] = Path(_got)
+                        _rrep += 1
+                        continue
+                log(f"build: ⚠ scene {seg.index} clip {m} is verifier-rejected footage with no clean "
+                    f"predecessor and no valid still — footage gap (rediscovery needed)")
+            beat_clips[seg.index] = clips
+            if clips:
+                for _fi in footage:
+                    if _fi.index == seg.index:
+                        _fi.path = clips[0]
+                        break
+        if _rrep:
+            log(f"build: rejected-footage removal — {_rrep} verifier-rejected clip(s) freeze-replaced "
+                f"(no wrong-character/scene footage airs)")
 
     suppress_wins = []
     if _cap_on and _suppress_on:
