@@ -190,6 +190,18 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
     by_idx = {s.index: s for s in segments}
     model = eng_cfg.anthropic_model
     verified = replaced = failed = 0
+    # REUSE LEDGER (Stage 5) — verify_and_repair mutates selections AFTER match's greedy loop, which
+    # is where the per-shot reuse cap lives; without its own ledger it promoted ONE high-scoring
+    # alternate into many beats (observed: a single Jaqen closeup into 9 beats vs a cap of 2), which
+    # then re-aired that look across the timeline. Seed a counter from the CURRENT selections and skip
+    # an over-reused alternate on promotion (falling to the next relevance-ranked one; if all are
+    # exhausted, allow the least-used so repair success is preserved).
+    from collections import Counter as _Counter
+    _reuse = _Counter()
+    for _s in proj.selections:
+        if getattr(_s, "source_id", ""):
+            _reuse[(_s.source_id, _s.shot_index)] += 1
+    _reuse_cap = int(getattr(cfg, "max_reuse_per_shot", 2) or 2)
     import os as _os_ms
     # global era/season context for the verifier — a multi_scene essay has no single-season filter,
     # but the verifier can still reject a clearly-wrong-era frame when the beat names an era.
@@ -270,6 +282,12 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     # an explicit non-keep judgment (av None = transport error, NOT a judgment)
                     failed_wins.append((alt.source_id, float(alt.in_point)))
                 if av and av.get("verdict") == "keep":
+                    # REUSE LEDGER — do not promote a look that already airs on >= cap beats (that is
+                    # how one clip got re-aired 9×). Skip to the next relevance-ranked alternate; if
+                    # none survive, the beat stays flagged and image-fallback gives it a DISTINCT still.
+                    if _reuse[(alt.source_id, alt.shot_index)] >= _reuse_cap:
+                        failed_wins.append((alt.source_id, float(alt.in_point)))
+                        continue
                     # CUT-WINDOW FLAG VALIDATION on the promotion — the repair must not swap a
                     # rejected clip for one whose PADDED render window airs an adjacent shot's
                     # burned subs / logo / murk. Same PRODUCTION validator as match selections:
@@ -295,6 +313,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                                 f"{_wqc_log_line(_wact, _wmeta, _wwhy)}")
                     # promote the alternate into the selection
                     old_sid, old_in = sel.source_id, sel.in_point
+                    _old_key = (sel.source_id, sel.shot_index)
                     sel.source_id = alt.source_id
                     sel.shot_index = alt.shot_index
                     sel.in_point = alt.in_point
@@ -318,6 +337,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     av["replaced_from"] = {"shot": shot.index if shot else -1}
                     sel.verifier = av
                     _cut.cut_selection(proj, sel, cfg)     # re-cut the new in/out
+                    _reuse[(alt.source_id, alt.shot_index)] += 1   # this look now airs one more time
+                    if _reuse[_old_key] > 0:
+                        _reuse[_old_key] -= 1                       # the replaced pick no longer airs here
                     replaced += 1
                     swapped = True
                     log(f"verify: seg{sel.segment_index} replaced → {alt.source_id}#{alt.shot_index}")

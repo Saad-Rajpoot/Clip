@@ -580,9 +580,15 @@ def _shot_unreadable(shot) -> bool:
     try:
         t_avg = float(_os_u.environ.get("VIDLORE_CLIPSTUDIO_UNREADABLE_AVG", "11") or 11)
         t_hi = float(_os_u.environ.get("VIDLORE_CLIPSTUDIO_UNREADABLE_HI", "90") or 90)
+        t_hi_hard = float(_os_u.environ.get("VIDLORE_CLIPSTUDIO_UNREADABLE_HI_HARD", "60") or 60)
     except (TypeError, ValueError):
-        t_avg, t_hi = 11.0, 90.0
-    return la < t_avg and lh < t_hi
+        t_avg, t_hi, t_hi_hard = 11.0, 90.0, 60.0
+    # Two arms: (1) the original avg-AND-hi murk gate; (2) NO HIGHLIGHT AT ALL — even the brightest
+    # ~99.8th-pct pixel is below t_hi_hard (60), so nothing in the frame is legible regardless of the
+    # average. Arm 2 catches the near-black Hall-of-Faces shot that aired (avg 19 cleared t_avg=11 but
+    # its luma_hi was 49 — no pixel brighter than 49). Readable dark scenes (torch/candle privy) keep
+    # bright highlights (hi 127-147) and pass both.
+    return (la < t_avg and lh < t_hi) or (lh < t_hi_hard)
 
 
 # ---------------------------------------------------------------------------

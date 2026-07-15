@@ -4410,6 +4410,44 @@ def test_verifier_context_and_fallback():
     check("verifier-failed exact beat → exact_scene_missing", rc.get(2) == "exact_scene_missing")
 
 
+def test_source_quality_and_repetition():
+    print("[stage-5] source quality (relevance>resolution) + repetition control")
+    root = Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio"
+    hsrc = (root / "hd_download.py").read_text()
+    msrc = (root / "match.py").read_text()
+    vsrc = (root / "verify.py").read_text()
+    bsrc = (root / "build.py").read_text()
+
+    # (1) format sort is BITRATE-first (decoded-quality proxy), never fps/H.264-first
+    check("format sort puts bitrate ahead of fps/codec",
+          'res:{max_h},br' in hsrc and 'res:{max_h},fps,vcodec:h264' not in hsrc)
+
+    # (2) _shot_unreadable second arm: no-highlight (luma_hi alone < 60) = unreadable
+    from vidlore.clipstudio.match import _shot_unreadable
+    def _sh(avg, hi):
+        return types.SimpleNamespace(luma_avg=avg, luma_hi=hi)
+    check("near-black no-highlight shot (avg 19, hi 49) is UNREADABLE", _shot_unreadable(_sh(19.0, 49.0)))
+    check("torch-lit readable dark shot (avg 13, hi 140) stays readable",
+          not _shot_unreadable(_sh(13.0, 140.0)))
+    check("bright normal shot readable", not _shot_unreadable(_sh(80.0, 220.0)))
+    check("old-index sentinel fails open", not _shot_unreadable(_sh(-1.0, -1.0)))
+
+    # (3) verify_and_repair has a reuse ledger seeded from selections, capped per shot
+    check("verify reuse ledger seeded from selections",
+          "_reuse = _Counter()" in vsrc and "for _s in proj.selections:" in vsrc
+          and "_reuse[(alt.source_id, alt.shot_index)] >= _reuse_cap" in vsrc)
+    check("verify reuse counter updated on promotion",
+          "_reuse[(alt.source_id, alt.shot_index)] += 1" in vsrc and "_reuse[_old_key] -= 1" in vsrc)
+
+    # (4) whole-timeline aired-look cap + wired _near_recent (was dead code)
+    check("whole-timeline look cap present",
+          "_look_aired_count" in bsrc and "_LOOK_CAP" in bsrc and "VIDLORE_CLIPSTUDIO_LOOK_CAP" in bsrc)
+    check("_near_recent is now WIRED into fresh-window selection (no longer dead)",
+          "_near_recent(_win_embed(" in bsrc)
+    check("look-cap prefers under-cap looks but never drops the last option",
+          "_under if _under else _fresh" in bsrc)
+
+
 def test_breakout_correctness():
     print("[stage-4] breakout: early-stop, strict Face-ID bypass, dup detect, audit fields")
     import vidlore.clipstudio.build as B
@@ -4594,6 +4632,7 @@ def test_fps_and_ad_protection():
 
 def main():
     test_fps_and_ad_protection()
+    test_source_quality_and_repetition()
     test_breakout_correctness()
     test_music_dynamics_wiring()
     test_discovery_query_stratification()

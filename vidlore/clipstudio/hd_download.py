@@ -141,8 +141,13 @@ def _format_selector(max_h: int) -> str:
 
 
 def _format_sort(max_h: int) -> str:
-    # prefer height closest to (but not over) max_h, then 30/60fps, then H.264 + m4a as tie-breakers.
-    return f"res:{max_h},fps,vcodec:h264,acodec:m4a,br"
+    # RESOLUTION first, then BITRATE (the best available proxy for decoded quality), then codec
+    # efficiency, then m4a audio. The old sort put `fps` and `vcodec:h264` AHEAD of bitrate, so among
+    # 1080p renditions it chose a starved 60fps AVC1 stream (~0.6 Mbps — visibly soft/blocky) over a
+    # higher-bitrate VP9/AV1 1080p; and it rewarded upconverted 60fps rips. We never prioritize 60fps
+    # or H.264 over a cleaner same-resolution format — the engine re-encodes to H.264 on cut anyway,
+    # so a VP9/AV1 source at higher bitrate is strictly better source quality.
+    return f"res:{max_h},br,vcodec,acodec:m4a"
 
 
 def probe_max_height(url: str, *, max_height: int = 1080, timeout: int = 60) -> int:

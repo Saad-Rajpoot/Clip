@@ -3703,6 +3703,25 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 pass
         return False
 
+    # WHOLE-TIMELINE look cap: the near-term guard above only looks back _HASH_WIN beats, so the
+    # SAME picture re-aired from a DIFFERENT source-rip 78 / 28 beats apart (the burning-field b-roll
+    # aired 3×). Count how many times a look has aired across the ENTIRE video (ahash cluster,
+    # hamming <= 8) and prefer never-/less-aired looks, capping any one look at _LOOK_CAP airings when
+    # an alternative exists (never a hard drop of the last option — coverage/moment-lock preserved).
+    _LOOK_CAP = int(_cfg_i("VIDLORE_CLIPSTUDIO_LOOK_CAP", 2))
+
+    def _look_aired_count(h):
+        if h is None:
+            return 0
+        n = 0
+        for prev in _aired_hashes:
+            try:
+                if prev is not None and int(_np.sum(prev != h)) <= 8:
+                    n += 1
+            except Exception:
+                pass
+        return n
+
     def _next_distinct_shot(sid, after_t):
         # SHOT-AWARE walk: the next detected shot boundary at/after `after_t` whose LOOK is not
         # a near-term repeat — raw seconds-walking inside one static take produced visually
@@ -3937,7 +3956,17 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                         continue
                     _fresh.append((w, _h))
                 if _fresh:
-                    _fresh.sort(key=lambda wh: used_at.get(_wkey(wh[0][0], wh[0][1]), -1))
+                    # prefer a look that has NOT already aired _LOOK_CAP times across the whole video;
+                    # only fall back to an over-cap look if every fresh window is over-cap (never drops
+                    # the last option → coverage preserved). Within a tier, prefer not-semantically-
+                    # near-the-last-few-clips (_near_recent, previously dead code), then least-recent.
+                    _under = [wh for wh in _fresh if _look_aired_count(wh[1]) < _LOOK_CAP]
+                    _pool = _under if _under else _fresh
+                    _pool.sort(key=lambda wh: (
+                        _look_aired_count(wh[1]),
+                        1 if _near_recent(_win_embed(wh[0][0], float(wh[0][1]))) else 0,
+                        used_at.get(_wkey(wh[0][0], wh[0][1]), -1)))
+                    _fresh = _pool
                     for _wh in _fresh:
                         # AIR-TIME text probe: OCR the frames that will actually air — the
                         # indexed keyframe can miss mid-shot overlay text (tweet cards,
