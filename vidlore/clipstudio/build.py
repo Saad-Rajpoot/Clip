@@ -2873,6 +2873,86 @@ _STOPE = set("the a an of to in on at for and or but with from into as it its th
              "which what when where why how then than too very just only also one new".split())
 
 
+def _sig_scene_tokens(seg) -> set:
+    """Meaningful scene tokens for a beat (stopwords + ≤2-char noise removed) drawn from
+    scene_query + required_entity + expected_visual. Stopwords carry no scene identity, so they
+    must never manufacture overlap between two unrelated beats."""
+    import re as _re
+    if seg is None:
+        return set()
+    _txt = " ".join(str(getattr(seg, _a, "") or "") for _a in
+                    ("scene_query", "required_entity", "expected_visual"))
+    return {w for w in _re.findall(r"[a-z0-9]+", _txt.lower())
+            if w not in _STOPE and len(w) > 2}
+
+
+def _hold_scene_compat(seg_a, seg_b, sel_a, sel_b, *, single_scene, global_era,
+                       overlap_min=0.4):
+    """REAL same-scene compatibility test for an editorial hold (R4-3): may a freeze of beat a's
+    clean frame legitimately cover rejected beat b? Every gate is evaluated even for single-scene
+    videos (never auto-true). Returns (ok: bool, evidence: dict).
+
+    Gates: (1) canonical beat-local season/era must not conflict; (2) meaningful scene/entity tokens
+    (stopwords removed) must overlap enough to be the same moment; (3) a beat demanding a NAMED
+    person may not be covered by a frame whose Face-ID identity is a DIFFERENT named person.
+    Source-id continuity is recorded as positive evidence, not a gate."""
+    import re as _re
+    from .verify import _beat_era
+    if seg_a is None or seg_b is None:
+        return False, {"reason": "missing beat metadata"}
+    ev = {}
+    era_a = _beat_era(seg_a, global_era, single_scene)
+    era_b = _beat_era(seg_b, global_era, single_scene)
+    ev["era_prev"], ev["era_cur"] = era_a or "any", era_b or "any"
+    if era_a and era_b and era_a != era_b:
+        return False, {"reason": f"era mismatch ({era_a} vs {era_b})", **ev}
+    ta, tb = _sig_scene_tokens(seg_a), _sig_scene_tokens(seg_b)
+    if not (ta and tb):
+        return False, {"reason": "no meaningful scene tokens to compare", **ev}
+    _ov = len(ta & tb) / max(1, min(len(ta), len(tb)))
+    ev["scene_overlap"] = round(_ov, 2)
+    ev["shared_tokens"] = sorted(ta & tb)[:8]
+    if _ov < overlap_min:
+        return False, {"reason": f"scene tokens differ (overlap {_ov:.2f})", **ev}
+    _id_a = (getattr(sel_a, "identity", "") or "").strip().lower()
+    _need_b = (getattr(seg_b, "required_entity", "") or "").strip().lower()
+    _kind_b = (getattr(seg_b, "required_kind", "") or "").strip().lower()
+    if _id_a and _need_b and _kind_b in ("character", "actor"):
+        _need_toks = {w for w in _re.findall(r"[a-z0-9]+", _need_b) if len(w) > 2}
+        _id_toks = {w for w in _re.findall(r"[a-z0-9]+", _id_a) if len(w) > 2}
+        if _need_toks and _id_toks and not (_need_toks & _id_toks):
+            return False, {"reason": f"held frame shows '{_id_a}', beat needs '{_need_b}'", **ev}
+    ev["entity_prev"] = _id_a or "n/a"
+    _src_a = getattr(sel_a, "source_id", "") or ""
+    _src_b = getattr(sel_b, "source_id", "") or ""
+    ev["source_continuity"] = bool(_src_a and _src_a == _src_b)
+    return True, ev
+
+
+def _hold_block_reason(*, clips_present, has_predecessor, compat_ok, compat_reason,
+                       consec_holds, hold_cap, beat_hold_dur, hold_total,
+                       single_cap, total_cap):
+    """The single fail-closed decision (R4-4) for whether a verifier-rejected beat may become a
+    bounded editorial hold. Returns a block-reason string (UNRESOLVED → release-block), or None to
+    permit the hold. EVERY failure mode is enumerated — none may silently fall through to a black
+    or rejected frame."""
+    if not clips_present:
+        return "beat has no footage at all (empty beat_clips) — unresolved"
+    if not has_predecessor:
+        return "no clean predecessor"
+    if not compat_ok:
+        return f"not same scene — {compat_reason}"
+    if consec_holds >= hold_cap:
+        return f"a consecutive hold already used (cap {hold_cap}) — long repeated freeze"
+    if beat_hold_dur > single_cap:
+        return (f"hold would freeze {beat_hold_dur:.1f}s > single-hold cap "
+                f"{single_cap:.1f}s (frozen frame too long)")
+    if hold_total + beat_hold_dur > total_cap:
+        return (f"cumulative holds {hold_total + beat_hold_dur:.1f}s > total cap "
+                f"{total_cap:.1f}s (too much frozen footage)")
+    return None
+
+
 def _resolve_music(music, theme_name: str, total: float, work: Path):
     """A cinematic background bed. User-supplied path wins; else the engine's theme-aware
     compose_score(); else a deterministic track from the matching music bucket."""
@@ -4696,28 +4776,32 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     #       the beat is UNRESOLVED and the render is RELEASE-BLOCKED (never a repeated freeze, never a
     #       black placeholder, never the rejected clip). The aired replacement is recorded honestly.
     if _os.environ.get("VIDLORE_CLIPSTUDIO_REJECTED_FOOTAGE_GATE", "1").strip() not in ("0", "false", "no"):
-        import re as _re_rf
-        _single_scene_rf = (proj.meta.get("analysis", {}) or {}).get("video_type", "") == "single_scene"
+        _analysis_rf = (proj.meta.get("analysis", {}) or {})
+        _single_scene_rf = _analysis_rf.get("video_type", "") == "single_scene"
+        _global_era_rf = str(_analysis_rf.get("episode_hint", "") or "")
         _hold_cap = int(_cfg_i("VIDLORE_CLIPSTUDIO_MAX_CONSEC_HOLD", 1))
+        # R4-4 duration bounds: a single editorial hold may not freeze a frame longer than
+        # _hold_single_cap, and the CUMULATIVE hold time across the whole video may not exceed
+        # _hold_total_cap. Holds are a last resort — a video that needs seconds of frozen frames
+        # has a discovery gap and must recover or release-block, not paper it over with freezes.
+        _hold_single_cap = _cfg_f("VIDLORE_CLIPSTUDIO_MAX_HOLD_SINGLE_SEC", 2.5)
+        _hold_total_cap = _cfg_f("VIDLORE_CLIPSTUDIO_MAX_HOLD_TOTAL_SEC", 3.0)
+        _seg_by_idx_rf = {s.index: s for s in segments}
+        _hold_overlap_min = _cfg_f("VIDLORE_CLIPSTUDIO_HOLD_SCENE_OVERLAP", 0.4)
 
         def _scene_compat(a_idx, b_idx):
-            """Same canonical scene? True for a single-scene video, else require token overlap of the
-            two beats' scene_query + required_entity (a freeze must not hold across a scene change)."""
-            if _single_scene_rf:
-                return True
-            _sa = sel_by_idx.get(a_idx); _sb = sel_by_idx.get(b_idx)
-            _seg_a = next((s for s in segments if s.index == a_idx), None)
-            _seg_b = next((s for s in segments if s.index == b_idx), None)
-            def _tok(s):
-                return set(_re_rf.findall(r"[a-z0-9]+", (
-                    (getattr(s, "scene_query", "") or "") + " " +
-                    (getattr(s, "required_entity", "") or "")).lower())) if s is not None else set()
-            ta, tb = _tok(_seg_a), _tok(_seg_b)
-            return bool(ta and tb and len(ta & tb) / max(1, min(len(ta), len(tb))) >= 0.4)
+            """REAL same-scene compatibility (R4-3) via the module-level pure decision — a freeze of
+            beat a's clean frame may cover rejected beat b ONLY when they are genuinely the same
+            moment. Never auto-true for a single-scene video. Returns (ok, evidence)."""
+            return _hold_scene_compat(
+                _seg_by_idx_rf.get(a_idx), _seg_by_idx_rf.get(b_idx),
+                sel_by_idx.get(a_idx), sel_by_idx.get(b_idx),
+                single_scene=_single_scene_rf, global_era=_global_era_rf,
+                overlap_min=_hold_overlap_min)
 
         _rlens = {segments[_p].index: list(_ls) for _p, _ls in _lens_by_pos.items()}
         _last_clean_r, _last_clean_idx = None, None
-        _consec_holds, _rrep = 0, 0
+        _consec_holds, _rrep, _hold_total = 0, 0, 0.0
         _rf_audit, _rf_block = [], []
         for seg in segments:
             _sel_r = sel_by_idx.get(seg.index)
@@ -4726,20 +4810,32 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                              and not getattr(_sel_r, "image_path", ""))
             if seg.index in _breakout_clip or not _rejected:
                 clips0 = beat_clips.get(seg.index) or []
-                if clips0 and not _rejected:
+                # A clean predecessor for holds must be REAL footage that itself verified — never a
+                # breakout, a rejected clip, or (implicitly) a prior hold (holds don't update this).
+                if clips0 and not _rejected and seg.index not in _breakout_clip:
                     _last_clean_r, _last_clean_idx, _consec_holds = clips0[-1], seg.index, 0
                 continue
-            _same_scene = _scene_compat(_last_clean_idx, seg.index) if _last_clean_idx is not None else False
-            _can_hold = (_last_clean_r is not None and _same_scene and _consec_holds < _hold_cap)
             clips = beat_clips.get(seg.index) or []
             _ls = _rlens.get(seg.index) or []
-            if not _can_hold:
-                # UNRESOLVED — no valid same-scene hold available (first beat / scene change / a hold
-                # already used / cap reached). Never leave the rejected clip; release-block.
-                _reason = ("no clean predecessor" if _last_clean_r is None else
-                           ("scene change (hold would cross scenes)" if not _same_scene else
-                            f"a consecutive hold already used (cap {_hold_cap}) — long repeated freeze"))
-                _rf_block.append({"seg_index": seg.index, "reason": _reason})
+            # this beat's hold duration (max of its sub-clip windows + tail pad)
+            _beat_hold_dur = (max([(_ls[m] if m < len(_ls) and _ls[m] > 0 else 3.0)
+                                   for m in range(len(clips))], default=3.0) + 0.5) if clips else 0.0
+            _compat_ok, _compat_ev = (
+                _scene_compat(_last_clean_idx, seg.index) if _last_clean_idx is not None
+                else (False, {"reason": "no clean predecessor"}))
+            # Enumerate EVERY failure mode explicitly (module-level pure decision) — none may
+            # silently pass to a black/rejected frame.
+            _reason = _hold_block_reason(
+                clips_present=bool(clips), has_predecessor=(_last_clean_r is not None),
+                compat_ok=_compat_ok, compat_reason=_compat_ev.get("reason", "incompatible"),
+                consec_holds=_consec_holds, hold_cap=_hold_cap,
+                beat_hold_dur=_beat_hold_dur, hold_total=_hold_total,
+                single_cap=_hold_single_cap, total_cap=_hold_total_cap)
+            if _reason is not None:
+                # UNRESOLVED — release-block (recovery is attempted upstream in orchestrate; by here
+                # a still-rejected beat with no valid bounded hold must never air rejected/black frames).
+                _rf_block.append({"seg_index": seg.index, "reason": _reason,
+                                  "hold_dur_s": round(_beat_hold_dur, 2), "evidence": _compat_ev})
                 continue
             _held_ok = True
             for m, cp in enumerate(list(clips)):
@@ -4751,7 +4847,8 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                     _rrep += 1
                     _rf_audit.append({"seg_index": seg.index, "replacement": "editorial_hold",
                                       "held_from_beat": _last_clean_idx, "duration_s": round(_d, 2),
-                                      "validation": "same_scene_clean_hold", "clip": m})
+                                      "validation": "same_scene_clean_hold", "clip": m,
+                                      "compat_evidence": _compat_ev})
                 else:
                     _held_ok = False                      # freeze GENERATION FAILURE → fail closed
                     _rf_block.append({"seg_index": seg.index,
@@ -4759,6 +4856,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                     break
             if _held_ok:
                 _consec_holds += 1
+                _hold_total += _beat_hold_dur
                 beat_clips[seg.index] = clips
                 if clips:
                     for _fi in footage:
@@ -4768,13 +4866,17 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         try:
             import json as _json_rf
             (proj.output_dir / "rejected_footage_audit.json").write_text(_json_rf.dumps(
-                {"editorial_holds": _rf_audit, "unresolved_release_block": _rf_block}, indent=1),
+                {"editorial_holds": _rf_audit, "unresolved_release_block": _rf_block,
+                 "total_hold_seconds": round(_hold_total, 2),
+                 "caps": {"consecutive": _hold_cap, "single_sec": _hold_single_cap,
+                          "total_sec": _hold_total_cap}}, indent=1),
                 encoding="utf-8")
         except Exception:
             pass
         if _rrep:
             log(f"build: rejected-footage — {_rrep} verifier-rejected clip(s) replaced with a validated "
-                f"same-scene editorial HOLD (never the rejected footage, capped to 1 consecutive beat)")
+                f"same-scene editorial HOLD ({_hold_total:.1f}s total, caps {_hold_single_cap:.1f}s/"
+                f"{_hold_total_cap:.1f}s; never the rejected footage)")
         if _rf_block:
             _quar = out_path.with_name(out_path.stem + ".FAILED_REJECTED_FOOTAGE" + out_path.suffix)
             log(f"build: ⛔ RELEASE-BLOCKED — {len(_rf_block)} verifier-rejected beat(s) have NO valid "
