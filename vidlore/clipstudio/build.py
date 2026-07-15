@@ -2579,6 +2579,64 @@ def _resolve_music(music, theme_name: str, total: float, work: Path):
     return None
 
 
+def _music_envelope_expr(breakout_wins: list, reveal_wins: list, *, dip: float = 0.15,
+                         boost: float = 1.15, r_dip: float = 0.4, r_boost: float = 0.6) -> str:
+    """A smooth ffmpeg `volume=eval=frame` gain expression: 1.0 under normal narration, a HARD dip
+    (dip) across each real-audio breakout so the scene dialogue is clearly the loudest thing, and a
+    gentle swell (boost) across reveal/climax beats (heard mainly in the narration gaps, since the
+    engine's sidechain still ducks music under the voice). Trapezoid ramps (2-arg min of two clipped
+    edges) give NO jumps/pumping. Multiplying the factors means a breakout dip always wins over an
+    overlapping reveal boost. Empty windows → constant 1.0 (no-op)."""
+    def _tri(a, b, r):                                  # 0->1->0 trapezoid over [a-r, a..b, b+r]
+        return (f"min(clip((t-{a - r:.3f})/{r:.3f},0,1),"
+                f"clip(({b + r:.3f}-t)/{r:.3f},0,1))")
+    terms = ["1.0"]
+    for a, b in breakout_wins:
+        if b > a:
+            terms.append(f"(1-{1 - dip:.3f}*{_tri(a, b, r_dip)})")
+    for a, b in reveal_wins:
+        if b > a:
+            terms.append(f"(1+{boost - 1:.3f}*{_tri(a, b, r_boost)})")
+    return "*".join(terms)
+
+
+def _shape_music_envelope(music_path, total: float, breakout_wins: list, reveal_wins: list,
+                          work: Path, *, log=None):
+    """Bake a natural dynamics ENVELOPE onto the music track BEFORE it reaches assemble() — a
+    clipstudio-side, engine-untouched approach (the shared assemble mix keeps its single static bed
+    gain + voice sidechain). Music is strongly ducked during breakouts and swells gently on reveals;
+    the uploaded voiceover is NEVER touched. Returns the shaped path (or the original on any failure /
+    when disabled). env VIDLORE_CLIPSTUDIO_MUSIC_DYNAMICS=0 disables."""
+    import os as _os_m
+    if not music_path or not Path(str(music_path)).exists():
+        return music_path
+    if _os_m.environ.get("VIDLORE_CLIPSTUDIO_MUSIC_DYNAMICS", "1").strip() in ("0", "false", "no"):
+        return music_path
+    if not breakout_wins and not reveal_wins:
+        return music_path
+    expr = _music_envelope_expr(breakout_wins, reveal_wins)
+    if expr == "1.0":
+        return music_path
+    dest = work / "score_shaped.wav"
+    _t = max(2.0, float(total) + 1.0)
+    cmd = [ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
+           "-stream_loop", "-1", "-i", str(music_path), "-t", f"{_t:.3f}",
+           "-af", f"volume=eval=frame:volume='{expr}'", "-ar", "44100", "-ac", "2", str(dest)]
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=600)
+        if p.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+            if log:
+                log(f"build: music dynamics — {len(breakout_wins)} breakout duck(s) + "
+                    f"{len(reveal_wins)} reveal swell(s) baked (engine sidechain unchanged)")
+            return str(dest)
+        if log:
+            log(f"build: music dynamics skipped (ffmpeg rc={p.returncode}) — flat bed kept")
+    except Exception as _e:
+        if log:
+            log(f"build: music dynamics skipped ({type(_e).__name__}) — flat bed kept")
+    return music_path
+
+
 def _pick_emphasis(text: str, keywords: list[str]) -> str:
     """The single spoken word to punch in the captions (must actually appear in the line)."""
     low = text.lower()
@@ -4016,15 +4074,36 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                     [_fstarts.get(_i, 0.0) + _t for _i, _t in freeze_marks if _i in _fstarts],
                     work, log)
     log(f"build: assembling {len(footage)} scenes → {out_path.name}")
+    # MUSIC DYNAMICS (Stage 3) — bake a natural envelope onto the bed BEFORE assemble: strong duck
+    # across real-audio breakouts (dialogue is clearly loudest) + gentle swell on reveal/climax beats
+    # (heard in narration gaps; the engine sidechain still ducks under the voice, so music is never
+    # louder than narration). Engine mix untouched; the uploaded voiceover is never altered.
+    _bk_wins = [(float(c["start"]), round(float(c["start"]) + float(c["dur"]), 2))
+                for c in (getattr(narration, "_breakout_caps", None) or [])]
+    _reveal_wins = []
+    _nsc = {ns.index: ns for ns in getattr(narration, "scenes", [])}
+    for _pos, _sc in enumerate(scenes):
+        _role = (getattr(_sc, "role", "") or "").lower()
+        _inten = int(getattr(_sc, "intensity", 0) or 0)
+        if _role in ("reveal", "climax") or _inten >= 5:
+            _seg = segments[_pos] if _pos < len(segments) else None
+            _ns = _nsc.get(getattr(_seg, "index", -1)) if _seg is not None else None
+            _ws = (getattr(_ns, "words", None) or []) if _ns is not None else []
+            if _ws:
+                _reveal_wins.append((min(float(w.start) for w in _ws),
+                                     max(float(w.end) for w in _ws)))
+    _reveal_wins = _reveal_wins[:12]                    # bound the volume-expression length
+    _music_track = _shape_music_envelope(
+        _resolve_music(music, theme_name, getattr(narration, "total", 0.0) + 1.0, work),
+        getattr(narration, "total", 0.0), _bk_wins, _reveal_wins, work, log=log)
     # assemble() internally does len() on these per-scene lists, so pass them explicitly as
     # the engine's own pipeline does (its None defaults are a latent bug that never fires there).
     result = assemble(
         footage, narration, th, work, out_path,
         beat_clips=beat_clips, captions=_cap_on,
-        # music: a real cinematic bed. The engine's full sidechain-duck chain only fires when a valid
-        # track PATH is passed (the bare call earlier passed None after a revert). We generate/select
-        # one here; build_video's caller verifies it's actually audible in the rendered audio.
-        music=_resolve_music(music, theme_name, getattr(narration, "total", 0.0) + 1.0, work),
+        # music: a real cinematic bed with a baked dynamics envelope (see above). The engine's full
+        # sidechain-duck chain fires on top when a valid track PATH is passed.
+        music=_music_track,
         transitions=True, title=script.title,
         chapters=[(seg.keywords[0] if seg.keywords else "") for seg in segments],
         energies=_energies_eff,

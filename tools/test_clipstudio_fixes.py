@@ -4410,6 +4410,25 @@ def test_verifier_context_and_fallback():
     check("verifier-failed exact beat → exact_scene_missing", rc.get(2) == "exact_scene_missing")
 
 
+def test_music_dynamics_wiring():
+    print("[stage-3] natural music dynamics — envelope + wiring (VO never touched)")
+    import vidlore.clipstudio.build as B
+    # (1) pure expr: breakout dip + reveal boost, no-op when empty, smooth trapezoid (2-arg min)
+    e = B._music_envelope_expr([(4.0, 7.0)], [(9.0, 11.0)])
+    check("expr has breakout dip + reveal boost", ("1-0.85" in e) and ("1+0.15" in e))
+    check("expr uses smooth 2-arg-min trapezoid ramps", "min(clip(" in e)
+    check("empty windows → no-op 1.0", B._music_envelope_expr([], []) == "1.0")
+    # (2) wiring: build shapes the resolved music and passes music=_music_track (not raw resolve)
+    bsrc = (Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "build.py").read_text()
+    check("build shapes music before assemble",
+          "_shape_music_envelope(" in bsrc and "music=_music_track" in bsrc)
+    check("reveal windows keyed on reveal/climax beats",
+          '_role in ("reveal", "climax")' in bsrc)
+    check("music shaping is engine-side-only (uploaded VO never touched)",
+          "uploaded voiceover is never altered" in bsrc or "never touched" in bsrc)
+    check("music dynamics env-gated", "VIDLORE_CLIPSTUDIO_MUSIC_DYNAMICS" in bsrc)
+
+
 def test_discovery_query_stratification():
     print("[stage-2] discovery: timeline-stratified query coverage + equivalent-query dedup")
     import os, re
@@ -4525,6 +4544,7 @@ def test_fps_and_ad_protection():
 
 def main():
     test_fps_and_ad_protection()
+    test_music_dynamics_wiring()
     test_discovery_query_stratification()
     test_verifier_context_and_fallback()
     test_verifier_promotion_rewrites_beat_windows()
