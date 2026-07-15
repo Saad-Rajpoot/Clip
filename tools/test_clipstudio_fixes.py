@@ -4616,6 +4616,28 @@ def test_breakout_correctness():
         ["alpha", "beta", "gamma"], ["gamma", "beta", "alpha"]) < 0.5)
     check("ordered coverage is 0 for an absent quote", B._ordered_coverage(
         ["dragon", "fire", "wall"], ["the", "king", "sits", "on", "a", "chair"]) == 0.0)
+    # R4-1: contractions are CANONICALIZED (not discarded) on both sides
+    check("contraction canonicalized: 'i've changed my mind' matches aired 'i have changed my mind'",
+          B._ordered_coverage(["i've", "changed", "my", "mind"],
+                              ["i", "have", "changed", "my", "mind"]) == 1.0)
+    check("_canon_tokens expands don't/can't/possessive",
+          B._canon_tokens(["don't"]) == ["do", "not"] and B._canon_tokens(["can't"]) == ["cannot"]
+          and B._canon_tokens(["tywin's"]) == ["tywin"])
+    # DEGENERATE quotes (no >=2 content words) are INSUFFICIENT EVIDENCE — cannot pass ANY audio,
+    # including audio that literally contains the canonical phrase
+    check("'don't' quote is insufficient — 0.0 even vs 'do not do it'",
+          B._ordered_coverage(["don't"], ["do", "not", "do", "it"]) == 0.0)
+    check("'can't' quote is insufficient — 0.0 even vs 'i cannot do this'",
+          B._ordered_coverage(["can't"], ["i", "cannot", "do", "this"]) == 0.0)
+    check("'i've' quote is insufficient — 0.0 even vs 'i have seen it'",
+          B._ordered_coverage(["i've"], ["i", "have", "seen", "it"]) == 0.0)
+    check("possessive-only quote insufficient vs UNRELATED audio",
+          B._ordered_coverage(["tywin's"], ["the", "weather", "is", "nice", "today"]) == 0.0)
+    check("generic 'do you know' prefix is insufficient (1 content word)",
+          B._ordered_coverage(["do", "you", "know"], ["do", "you", "know", "the", "story"]) == 0.0)
+    check("a real 2-content-word quote still passes with contractions present",
+          B._ordered_coverage(["they", "can't", "be", "killed"],
+                              ["they", "cannot", "be", "killed"]) == 1.0)
 
     # (5) wiring / audit fields / gates present
     bsrc = (Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "build.py").read_text()
@@ -4798,6 +4820,13 @@ def test_fps_and_ad_protection():
     n_4pct = int((dur * 0.96) / stride) + 1              # final 4% missing
     check("final 4% missing → NOT covered (fails closed)",
           B._scan_coverage_reason(n_4pct, stride, dur) is not None)
+    n_half = int((dur - 1.0) / stride) + 1               # final 1.0s missing (> one stride)
+    check("final 1.0s missing → NOT covered (LITERAL within-one-stride guarantee)",
+          B._scan_coverage_reason(n_half, stride, dur) is not None)
+    check("tolerance is ~one stride (0.65), NOT max(1s, 2 strides)",
+          "stride + eps" in bsrc and "max(1.0, 2.0 * stride)" not in bsrc)
+    check("gates also PTS-check the FINAL frame decodes (not just the count)",
+          "_final_timestamp_reachable" in bsrc and "does not decode — tail not covered" in bsrc)
     check("the old 5%-tolerance would have WRONGLY passed the 2s-short case",
           n_2s >= full * 0.95)                           # proves the heuristic was insufficient
     check("zero duration → unverified", B._scan_coverage_reason(full, stride, 0.0) is not None)

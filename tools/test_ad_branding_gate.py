@@ -171,6 +171,25 @@ def main():
         out = _final_video_ad_gate(vid3, work, benign, log=lambda m: None)
         _say(out == vid3 and vid3.exists(), "clean video (benign text, no promo token) passes")
 
+        # (8) R4-2 TAIL fixture: a promo card ONLY in the FINAL 1.0s must be reached and BLOCKED
+        scene5 = td / "_s5.mp4"; card1 = td / "_c1.mp4"; tailvid = work / "tail.mp4"
+        subprocess.run([FF, "-y", "-loglevel", "error", "-f", "lavfi",
+                        "-i", "mandelbrot=s=1280x720:rate=30", "-t", "5",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(scene5)], check=True,
+                       capture_output=True)
+        subprocess.run([FF, "-y", "-loglevel", "error", "-f", "lavfi",
+                        "-i", "color=c=0x1030A0:s=1280x720:rate=30", "-t", "1",
+                        "-vf", "drawtext=fontfile=/System/Library/Fonts/Helvetica.ttc:"
+                               "text='max THE ONE TO WATCH':fontsize=64:fontcolor=white:"
+                               "x=(w-tw)/2:y=(h-th)/2", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        str(card1)], check=True, capture_output=True)
+        _lst = td / "_tl.txt"; _lst.write_text(f"file '{scene5.name}'\nfile '{card1.name}'\n")
+        subprocess.run([FF, "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
+                        "-i", str(_lst), "-c", "copy", str(tailvid)], check=True, capture_output=True)
+        r_tail = _final_video_ad_scan(tailvid, work, MockOCR("max THE ONE TO WATCH"), stride=0.5)
+        _say(r_tail["status"] == "blocked" and any(h["t"] >= 4.8 for h in r_tail["hits"]),
+             f"promo card in the FINAL 1.0s is reached + BLOCKED (hits {[h['t'] for h in r_tail['hits']]})")
+
     print(f"\n{PASS} passed · {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

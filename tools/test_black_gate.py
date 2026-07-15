@@ -73,6 +73,17 @@ def main():
         out3 = _final_video_black_gate(v3, work, log=lambda m: None)
         _say(out3 == v3 and v3.exists(), "bright video passes")
 
+        # (3b) R4-2 TAIL fixture: a sustained-black interval ONLY in the FINAL 1.0s must block
+        bright5 = td / "_b5.mp4"; blk1 = td / "_blk1.mp4"; tail = work / "tail.mp4"
+        _seg("gray", 5, bright5); _seg("0x080808", 1, blk1)
+        _concat([bright5, blk1], tail, td)
+        blocked_tail = False
+        try:
+            _final_video_black_gate(tail, work, log=lambda m: None)
+        except RuntimeError:
+            blocked_tail = True
+        _say(blocked_tail, "sustained-black interval in the FINAL 1.0s is reached + BLOCKED")
+
         # (4) luma_hi measurement: dark low, bright high
         import os as _os
         b_img = td / "b.jpg"; d_img = td / "d.jpg"

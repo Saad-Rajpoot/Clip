@@ -611,22 +611,64 @@ def _asr_wav_words(wav_path) -> tuple:
         return ([], "", 0.0)
 
 
+# Deterministic contraction / possessive canonicalization so whisper's inconsistent tokenization
+# ("I've" vs "I have", "don't" vs "do not") aligns BOTH the quote and the aired transcript to one form
+# — instead of discarding all apostrophe tokens (which let unrelated audio pass an "I've"/"don't" quote).
+_CONTRACTIONS = {
+    "i've": "i have", "you've": "you have", "we've": "we have", "they've": "they have",
+    "would've": "would have", "could've": "could have", "should've": "should have",
+    "don't": "do not", "doesn't": "does not", "didn't": "did not", "can't": "cannot",
+    "won't": "will not", "wouldn't": "would not", "shouldn't": "should not",
+    "couldn't": "could not", "isn't": "is not", "aren't": "are not", "wasn't": "was not",
+    "weren't": "were not", "haven't": "have not", "hasn't": "has not", "hadn't": "had not",
+    "mustn't": "must not", "needn't": "need not", "ain't": "is not",
+    "it's": "it is", "that's": "that is", "he's": "he is", "she's": "she is",
+    "there's": "there is", "here's": "here is", "what's": "what is", "who's": "who is",
+    "i'm": "i am", "you're": "you are", "we're": "we are", "they're": "they are",
+    "i'll": "i will", "you'll": "you will", "we'll": "we will", "he'll": "he will",
+    "she'll": "she will", "they'll": "they will", "it'll": "it will",
+    "i'd": "i would", "you'd": "you would", "he'd": "he would", "she'd": "she would",
+    "we'd": "we would", "they'd": "they would", "let's": "let us",
+}
+
+
+def _canon_tokens(words: list) -> list:
+    """Canonicalize a token list: lowercase, strip punctuation, EXPAND contractions to their full
+    word sequence, and reduce possessives ("tywin's" -> "tywin"). Deterministic; never drops
+    meaningful content."""
+    out = []
+    for w in words:
+        w = w.strip(".,!?…\"'").lower()
+        if not w:
+            continue
+        if w in _CONTRACTIONS:
+            out.extend(_CONTRACTIONS[w].split())
+        elif w.endswith("'s") or w.endswith("’s"):
+            out.append(w[:-2])                         # possessive → root noun
+        elif "'" in w or "’" in w:
+            out.append(w.replace("'", "").replace("’", ""))
+        else:
+            out.append(w)
+    return out
+
+
 def _ordered_coverage(quote_words: list, aired_words: list) -> float:
-    """Fraction of the quote's CONTENT words that appear IN ORDER in the aired transcript (a
-    longest-common-subsequence ratio, not unordered presence) — so a shuffled/partial coincidental
-    word match does not read as a real quote. 0..1."""
-    # content words only; EXCLUDE contractions/possessives (apostrophe tokens like "i've", "don't",
-    # "tywin's") — whisper transcribes them inconsistently ("i've" vs "i have"), so requiring them to
-    # match verbatim would spuriously fail a faithful quote.
-    qc = [w for w in quote_words if w not in _BK_FUNC and len(w) > 2 and "'" not in w]
-    if not qc:
-        return 1.0
-    aw = [w.strip(".,!?…'\"").lower() for w in aired_words]
-    # greedy in-order match
-    i = matched = 0
+    """Fraction of the quote's CONTENT words that appear IN ORDER in the aired transcript (an
+    ordered/LCS ratio, not unordered presence). Contractions are canonicalized on BOTH sides first.
+    A quote with NO meaningful content words after canonicalization (e.g. "don't", "can't", "I've",
+    or a bare possessive) is INSUFFICIENT EVIDENCE and returns 0.0 — it is never treated as a full
+    match, so unrelated audio can never pass such a degenerate quote. 0..1."""
+    q = _canon_tokens(quote_words)
+    a = _canon_tokens(aired_words)
+    qc = [w for w in q if w not in _BK_FUNC and len(w) > 2]
+    if len(qc) < 2:
+        return 0.0                                     # <2 distinctive content words (e.g. "don't",
+        # "can't"→"cannot", "I've", a bare possessive, or a generic "do you know" prefix) is
+        # INSUFFICIENT EVIDENCE — never a full match, so unrelated audio can never pass it.
+    i = matched = 0                                    # greedy in-order (LCS-style) match
     for w in qc:
-        while i < len(aw):
-            if aw[i] == w:
+        while i < len(a):
+            if a[i] == w:
                 matched += 1
                 i += 1
                 break
@@ -3030,28 +3072,42 @@ def _probe_duration(path) -> float:
 
 
 def _scan_coverage_reason(n_frames: int, stride: float, dur: float, rc: int = 0):
-    """Verify a fps=1/stride extraction covered the WHOLE timeline. Returns None when covered, else a
-    failure string. The substantive guarantee is that the LAST sampled frame reaches within
-    max(1s, 2 strides) of the probed duration — a `len < expected*0.95` heuristic can silently miss
-    the final ~45s of a 15-min video, exactly where an outro/ad slate lives. Also requires the frame
-    count to be within ~2 of the expected count (catches mid-timeline gaps). An unexpected ffmpeg rc
-    is tolerated ONLY when this final-timestamp coverage is independently proven by the frames on disk."""
+    """Count-based coverage check for a fps=1/stride extraction. Returns None when covered, else a
+    failure string. The LITERAL guarantee: the LAST sampled frame must reach within ONE stride plus a
+    tiny rounding epsilon of the probed duration (NOT max(1s, 2 strides), which could miss the final
+    ~1s where an outro/ad slate lives). Frame count within ~2 of expected is a secondary check for
+    mid-timeline decode gaps — NOT claimed as proof of mid-timeline content (the caller also PTS-checks
+    the tail). An unexpected ffmpeg rc is tolerated ONLY when the frames on disk prove the coverage."""
     if dur <= 0:
         return "could not probe final-video duration — cannot confirm full-timeline coverage"
     if n_frames <= 0:
         return "zero decoded scan frames"
-    tol = max(1.0, 2.0 * stride)
+    eps = 0.15
+    tol = stride + eps
     last_t = (n_frames - 1) * stride
     if last_t < dur - tol:
-        return (f"partial decode — scan reached only {last_t:.1f}s of the {dur:.1f}s timeline "
-                f"(> {tol:.1f}s short; final frames not sampled)")
+        return (f"partial decode — last sampled frame at {last_t:.2f}s is > one stride ({tol:.2f}s) "
+                f"short of the {dur:.2f}s timeline (final frame not sampled)")
     expected = int(dur / stride) + 1
     if n_frames < expected - 2:
         return (f"missing scan frames — {n_frames} decoded but ~{expected} expected @{stride}s "
-                f"(mid-timeline gap)")
-    if rc != 0:                                        # rc failure with proven coverage is tolerated
-        return None
+                f"(mid-timeline decode gap)")
     return None
+
+
+def _final_timestamp_reachable(result, dur: float, ff, work) -> bool:
+    """PTS-level tail check: verify a real frame decodes at ~dur-epsilon (the FINAL timestamp is
+    actually present), independent of the fps sample count. Returns False on any decode failure."""
+    try:
+        t = max(0.0, dur - 0.12)
+        tmp = Path(work) / "_tailprobe.png"
+        r = subprocess.run([ff, "-y", "-loglevel", "error", "-ss", f"{t:.3f}", "-i", str(result),
+                            "-frames:v", "1", str(tmp)], capture_output=True, timeout=60)
+        ok = (r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0)
+        tmp.unlink(missing_ok=True)
+        return ok
+    except Exception:
+        return False
 
 
 def _branding_probe_offsets(dur: float) -> list:
@@ -3249,6 +3305,8 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
                          str(scan_dir / "fr_%05d.jpg")], capture_output=True, timeout=1800)
     frames = sorted(scan_dir.glob("fr_*.jpg"))
     _cov = _scan_coverage_reason(len(frames), stride, dur, _p.returncode)
+    if _cov is None and not _final_timestamp_reachable(result, dur, ff, scan_dir):
+        _cov = f"final timestamp (~{dur:.1f}s) does not decode — tail not covered (fail-closed)"
     if _cov is not None:
         return {"status": "unverified", "hits": [], "frames": len(frames), "ocr_errors": 0,
                 "reason": _cov}
@@ -3482,6 +3540,8 @@ def _final_video_black_gate(result: Path, work: Path, *, log) -> Path:
                          "-q:v", "5", str(scan / "b_%05d.jpg")], capture_output=True, timeout=1800)
     frames = sorted(scan.glob("b_*.jpg"))
     _cov = _scan_coverage_reason(len(frames), stride, dur, _p.returncode)
+    if _cov is None and not _final_timestamp_reachable(result, dur, ff, scan):
+        _cov = f"final timestamp (~{dur:.1f}s) does not decode — tail not covered"
     if _cov is not None:
         _blk(f"{_cov} — cannot verify legibility to the final timestamp")
     lows, fails = [], 0
