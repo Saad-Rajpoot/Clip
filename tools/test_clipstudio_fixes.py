@@ -3546,6 +3546,11 @@ def test_gemini_timeout_hardening():
 def test_breakout_atomic_composition():
     print("[breakout] atomic composition — clip-map/bidx/captions/audit stay in lockstep")
     import tempfile
+    import os as _os_bq
+    # these are VISUAL-dimension QA tests on synthetic silent clips; the final-mix AUDIO QA (a
+    # separate real gate that requires audible dialogue) is exercised via the fresh render + its own
+    # unit checks, so disable it here so silent test fixtures don't trip the fail-closed audio path.
+    _os_bq.environ["VIDLORE_CLIPSTUDIO_BREAKOUT_AUDIO_QA"] = "0"
     import subprocess as _sp
     import vidlore.clipstudio.build as B
     from vidlore.tts import NarratedScene
@@ -4487,15 +4492,31 @@ def test_breakout_correctness():
     nodup = B._narr_dup_run(["valar", "morghulis", "all", "men"], segs, idx=1)
     check("no false duplication when narration differs", nodup < 4)
 
-    # (4) wiring / audit fields / gates present
+    # (4) ordered coverage: in-order subsequence, not unordered word presence
+    check("ordered coverage matches an in-order quote", B._ordered_coverage(
+        ["anyone", "can", "be", "killed"], ["anyone", "can", "be", "killed"]) == 1.0)
+    check("ordered coverage rejects a REVERSED/shuffled quote", B._ordered_coverage(
+        ["alpha", "beta", "gamma"], ["gamma", "beta", "alpha"]) < 0.5)
+    check("ordered coverage is 0 for an absent quote", B._ordered_coverage(
+        ["dragon", "fire", "wall"], ["the", "king", "sits", "on", "a", "chair"]) == 0.0)
+
+    # (5) wiring / audit fields / gates present
     bsrc = (Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "build.py").read_text()
     check("audit persists aired_transcript + line_coverage + speaker + standalone + dup",
           all(k in bsrc for k in ('"aired_transcript"', '"line_coverage"', '"speaker"',
                                   '"standalone_utterance"', '"narrator_duplication_words"')))
-    check("final-mix breakout AUDIO QA (near-silence / no-speech) wired",
-          "BREAKOUT_AUDIO_QA" in bsrc and "NEAR-SILENT audio" in bsrc)
-    check("mid-video VO word-cut stays default OFF (cold-open VO-cut only)",
-          "SKIP_DUP_BREAKOUT" in bsrc and 'VIDLORE_CLIPSTUDIO_SKIP_DUP_BREAKOUT", "0"' in bsrc)
+    check("aired_transcript is RE-ASR of the extracted audio (ground truth)",
+          "_asr_wav_words(a)" in bsrc and "_atext if _aw else" in bsrc)
+    check("genuine wrong-occurrence breakout is DROPPED on low ordered coverage",
+          "BREAKOUT_MIN_COVERAGE" in bsrc and "ordered coverage" in bsrc)
+    check("speaker is 'unknown' unless a face identity is established",
+          '_spk = (_fid[0] if _fid else "unknown")' in bsrc and '"speaker_confidence"' in bsrc)
+    check("final-mix breakout AUDIO QA fails CLOSED (probe failure = UNVERIFIED, not pass)",
+          "BREAKOUT_AUDIO_QA" in bsrc and "UNVERIFIED (failing closed)" in bsrc
+          and "could NOT be extracted" in bsrc)
+    check("duplicated mid-video breakout is SKIPPED BY DEFAULT (VO-cut stays off)",
+          'VIDLORE_CLIPSTUDIO_SKIP_DUP_BREAKOUT", "1"' in bsrc
+          and 'not in ("0", "false", "no")' in bsrc.split("SKIP_DUP_BREAKOUT")[1][:120])
 
 
 def test_music_dynamics_wiring():
@@ -4628,6 +4649,13 @@ def test_fps_and_ad_protection():
     check("final-video ad gate wired into build_video",
           "_final_video_ad_gate(result, work, _ocr_eng" in bsrc
           and "def _final_video_ad_gate" in bsrc and "FAILED_AD_QA" in bsrc)
+    # (7) ad gate FAILS CLOSED (no OCR / zero frames / excessive errors → unverified → block unless
+    #     explicit override) and has a SECOND non-uniform layout-heavy detection path
+    check("ad gate fails closed on unverifiable scans",
+          '"status": "unverified"' in bsrc and "AD_GATE_OVERRIDE" in bsrc
+          and "zero decoded scan frames" in bsrc and "excessive OCR errors" in bsrc)
+    check("ad gate has a second (layout-heavy, non-uniform card) detection path",
+          "_ocr_layout_metrics" in bsrc and "layout_heavy" in bsrc and "strong_single" in bsrc)
 
 
 def main():

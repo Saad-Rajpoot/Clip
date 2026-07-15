@@ -588,6 +588,49 @@ def _verbatim_bypass_ok(qw: list, run: int) -> bool:
     return coverage >= 0.70 and has_content
 
 
+def _asr_wav_words(wav_path) -> tuple:
+    """Re-ASR an EXTRACTED breakout audio clip → (ordered_words, joined_text, speech_seconds).
+    This is the GROUND TRUTH of what a breakout actually says (post-loudnorm), unlike the source's
+    indexed shot transcript. () on failure."""
+    try:
+        from faster_whisper import WhisperModel
+    except Exception:
+        return ([], "", 0.0)
+    try:
+        m = WhisperModel("base", device="cpu", compute_type="int8")
+        segs, _i = m.transcribe(str(wav_path), word_timestamps=True, vad_filter=False)
+        words, spk = [], 0.0
+        for s in segs:
+            for w in (s.words or []):
+                tk = str(w.word or "").strip()
+                if tk:
+                    words.append(tk)
+                    spk += max(0.0, float(w.end) - float(w.start))
+        return (words, " ".join(words), round(spk, 2))
+    except Exception:
+        return ([], "", 0.0)
+
+
+def _ordered_coverage(quote_words: list, aired_words: list) -> float:
+    """Fraction of the quote's CONTENT words that appear IN ORDER in the aired transcript (a
+    longest-common-subsequence ratio, not unordered presence) — so a shuffled/partial coincidental
+    word match does not read as a real quote. 0..1."""
+    qc = [w for w in quote_words if w not in _BK_FUNC and len(w) > 2]
+    if not qc:
+        return 1.0
+    aw = [w.strip(".,!?…'\"").lower() for w in aired_words]
+    # greedy in-order match
+    i = matched = 0
+    for w in qc:
+        while i < len(aw):
+            if aw[i] == w:
+                matched += 1
+                i += 1
+                break
+            i += 1
+    return matched / len(qc)
+
+
 def _narr_dup_run(quote_words: list, segments, idx: int, window: int = 2) -> int:
     """Longest run of consecutive words the breakout quote shares with the NARRATION of the beats
     around it ([idx-window .. idx+window]) — i.e. does the narrator SAY the same line right before/
@@ -1222,11 +1265,26 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         # the safe response is to RECORD it (and optionally skip the redundant breakout via env) rather
         # than damage sync. Cold-opens are exempt: their VO-cut path IS proven/atomic.
         _dup_run = 0 if _is_cold else _narr_dup_run(_rw(_q), segments, idx)
+        # DEFAULT-SKIP a mid-video breakout the narration duplicates: mid-video VO-cut stays OFF
+        # (unsafe), so retaining the narrator-dialogue-narrator repetition is worse than dropping the
+        # redundant breakout. Cold-opens are exempt (their VO-cut is atomic). env=0 to keep+log only.
         if (_dup_run >= 4 and not _is_cold
-                and _os9b.environ.get("VIDLORE_CLIPSTUDIO_SKIP_DUP_BREAKOUT", "0").strip()
-                in ("1", "true", "yes")):
+                and _os9b.environ.get("VIDLORE_CLIPSTUDIO_SKIP_DUP_BREAKOUT", "1").strip()
+                not in ("0", "false", "no")):
             log(f"build: breakout before scene {idx} SKIPPED — narrator duplicates the line "
                 f"({_dup_run}-word overlap) and mid-video VO-cut is off (SKIP_DUP_BREAKOUT)")
+            continue
+        # RE-ASR the EXTRACTED audio (ground truth of what actually airs) → aired_transcript + ORDERED
+        # coverage of the matched quote. A genuine wrong-occurrence match (the audio does not contain
+        # the quote at all) is DROPPED; the aired transcript is recorded truthfully either way.
+        _aw, _atext, _aspk = _asr_wav_words(a)
+        _ocov = _ordered_coverage(_rw(_q), _aw) if _aw else -1.0
+        from .config import _f as _cfg_fbk
+        _mincov = _cfg_fbk("VIDLORE_CLIPSTUDIO_BREAKOUT_MIN_COVERAGE", 0.25)
+        if (not _is_cold) and _aw and _ocov >= 0 and _ocov < _mincov:
+            log(f"build: breakout before scene {idx} DROPPED — aired audio does not contain the "
+                f"matched quote (ordered coverage {_ocov:.2f} < {_mincov:.2f}); "
+                f"aired={_atext[:50]!r} quote={_q[:40]!r}")
             continue
         _entry = {"seg_index": idx, "dur": real, "video": v, "audio": a}
         if _is_cold:
@@ -1241,19 +1299,22 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         _cold = "COLD-OPEN " if _is_cold else ""
         log(f"[BREAKOUT-OK] #{len(out)} {_cold}before-scene={idx} dur={real:.1f}s "
             f"src@{float(sh.start):.0f}s src={(src.title or src.id)[:52]!r} line={_q[:42]!r}")
-        # TRUTHFUL AUDIT: persist what actually AIRED (aired_transcript) + how much of the matched
-        # quote it covers (line_coverage) + speaker + standalone-utterance flag + narrator duplication.
-        _qc = [w for w in _rw(_q) if w not in _BK_FUNC and len(w) > 2]
-        _wtl = _rw(_wtxt)
-        _cov = (sum(1 for w in _qc if w in _wtl) / len(_qc)) if _qc else 0.0
-        _spk = (getattr(sh, "face_ids", None) or [""])[0] if getattr(sh, "face_ids", None) else ""
+        # TRUTHFUL AUDIT: aired_transcript = re-ASR of the ACTUAL extracted audio (ground truth);
+        # line_coverage = ORDERED coverage of the matched quote in it. speaker is only named when an
+        # identity is actually established (Face-ID); a merely-visible face is NOT the speaker →
+        # "unknown". standalone_utterance requires real ordered coverage of a non-commentary line.
+        _aired_tx = _atext if _aw else (_wtxt or "")
+        _cov = _ocov if (_aw and _ocov >= 0) else _ordered_coverage(_rw(_q), _rw(_wtxt))
+        _fid = getattr(sh, "face_ids", None) or []
+        _spk = (_fid[0] if _fid else "unknown")
         _entry["_audit"] = {"seg_index": idx, "cold_open": _is_cold, "dur_s": round(real, 2),
                             "source_id": src.id, "source_title": (src.title or "")[:120],
                             "source_t": round(float(sh.start), 1), "line": _q[:160],
-                            "aired_transcript": (_wtxt or "")[:300],
+                            "aired_transcript": _aired_tx[:300],
                             "line_coverage": round(_cov, 2),
                             "speaker": _spk,
-                            "standalone_utterance": bool(_cov >= 0.5 and not _is_narration(_wtxt or "")),
+                            "speaker_confidence": ("faceid" if _fid else "unknown"),
+                            "standalone_utterance": bool(_cov >= 0.5 and not _is_narration(_aired_tx)),
                             "narrator_duplication_words": _dup_run}
     # ALWAYS report the FINAL accepted count after post-extraction (the pre_extract_accepted count
     # above can shrink here when an aired window is rejected as commentary) — so the audit is never
@@ -2113,10 +2174,11 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
                                        f"scene aired over the breakout audio)",
                              "hamming": hams, "source": str(src)})
     # (d) FINAL-MIX AUDIO INTELLIGIBILITY — a breakout airs the scene's OWN dialogue; verify the
-    # final MIX actually carries audible speech there (not near-silence / audio-over-nothing). We
-    # measure loudness + ASR the window and record intelligibility; we HARD-FAIL only on genuinely
-    # broken audio (near-silent window or essentially no detected speech) so masking/marginal cases
-    # never false-quarantine a good render. env VIDLORE_CLIPSTUDIO_BREAKOUT_AUDIO_QA=0 disables.
+    # final MIX actually carries audible speech there. FAIL-CLOSED: a probe that cannot be taken
+    # (extraction/loudness measurement fails) is UNVERIFIED and hard-fails (it is not an automatic
+    # pass). Near-silence and no-detectable-speech hard-fail. With ASR we ALSO require meaningful
+    # ORDERED coverage of the accepted line unless the window is clearly audible speech (guarding
+    # against music-masking false positives). env VIDLORE_CLIPSTUDIO_BREAKOUT_AUDIO_QA=0 disables.
     import os as _os_aq
     if _os_aq.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_AUDIO_QA", "1").strip() not in ("0", "false", "no"):
         _wm = None
@@ -2133,28 +2195,32 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
                 continue
             wav = work / f"_bkaud_{int(s * 100)}.wav"
             try:
-                subprocess.run([ff, "-y", "-loglevel", "error", "-ss", f"{s:.3f}", "-t", f"{d:.3f}",
-                                "-i", str(result), "-vn", "-ar", "16000", "-ac", "1", str(wav)],
-                               capture_output=True, timeout=60)
-                if not wav.exists():
+                _ext = subprocess.run(
+                    [ff, "-y", "-loglevel", "error", "-ss", f"{s:.3f}", "-t", f"{d:.3f}",
+                     "-i", str(result), "-vn", "-ar", "16000", "-ac", "1", str(wav)],
+                    capture_output=True, timeout=60)
+                if _ext.returncode != 0 or not wav.exists() or wav.stat().st_size == 0:
+                    problems.append({"breakout": line[:44], "start": round(s, 2),
+                                     "reason": "breakout audio could NOT be extracted from the final "
+                                               "video for QA — UNVERIFIED (failing closed)"})
                     continue
-                # loudness
                 _vd = subprocess.run([ff, "-hide_banner", "-i", str(wav), "-af", "volumedetect",
                                       "-f", "null", "-"], capture_output=True, text=True, timeout=60).stderr
                 _mm = re.search(r"mean_volume:\s*(-?[\d.]+) dB", _vd)
-                mean_db = float(_mm.group(1)) if _mm else -120.0
-                # ASR speech fraction + line coverage
-                speech_frac, cov = 0.0, 1.0
+                if _mm is None:
+                    problems.append({"breakout": line[:44], "start": round(s, 2),
+                                     "reason": "breakout audio loudness could NOT be measured — "
+                                               "UNVERIFIED (failing closed)"})
+                    continue
+                mean_db = float(_mm.group(1))
+                speech_frac, ocov = 0.0, None
                 if _wm is not None:
                     _segs, _inf = _wm.transcribe(str(wav), word_timestamps=True, vad_filter=False)
-                    _wds = [(str(w.word or "").strip().lower(), float(w.start), float(w.end))
-                            for _sg in _segs for w in (_sg.words or [])]
+                    _wds = [str(w.word or "").strip() for _sg in _segs for w in (_sg.words or [])]
+                    _dur = [(float(w.start), float(w.end)) for _sg in _segs for w in (_sg.words or [])]
                     if d > 0:
-                        speech_frac = min(1.0, sum(e - b for _t, b, e in _wds) / d)
-                    _asr = " " + " ".join(w for w, _b, _e in _wds) + " "
-                    _lc = [w for w in re.findall(r"[a-z']+", line.lower())
-                           if w not in _BK_FUNC and len(w) > 2]
-                    cov = (sum(1 for w in _lc if (" " + w + " ") in _asr) / len(_lc)) if _lc else 1.0
+                        speech_frac = min(1.0, sum(e - b for b, e in _dur) / d)
+                    ocov = _ordered_coverage(re.findall(r"[a-z']+", line.lower()), _wds)
                 if mean_db < _sil_floor:
                     problems.append({"breakout": line[:44], "start": round(s, 2),
                                      "reason": f"breakout airs NEAR-SILENT audio (mean {mean_db:.1f} dB "
@@ -2165,11 +2231,20 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
                                      "reason": f"breakout window has essentially NO detectable speech "
                                                f"(speech_frac {speech_frac:.2f}) in the final mix",
                                      "speech_frac": round(speech_frac, 3)})
+                elif _wm is not None and (ocov is not None and ocov <= 0.0 and speech_frac >= 0.20):
+                    # clear speech present but NONE of the accepted line in order = wrong audio aired
+                    problems.append({"breakout": line[:44], "start": round(s, 2),
+                                     "reason": f"final-mix speech does NOT contain the accepted line "
+                                               f"(ordered coverage 0, speech_frac {speech_frac:.2f})",
+                                     "ordered_coverage": 0.0, "speech_frac": round(speech_frac, 3)})
                 elif log:
                     log(f"build: breakout audio @{s:.1f}s — mean {mean_db:.1f}dB · speech "
-                        f"{speech_frac:.0%} · line-coverage {cov:.0%}")
+                        f"{speech_frac:.0%} · ordered-coverage "
+                        f"{('n/a' if ocov is None else f'{ocov:.0%}')}")
             except Exception:
-                pass
+                problems.append({"breakout": line[:44], "start": round(s, 2),
+                                 "reason": "breakout audio QA probe raised an error — UNVERIFIED "
+                                           "(failing closed)"})
             finally:
                 wav.unlink(missing_ok=True)
     if log:
@@ -3004,24 +3079,54 @@ def _frame_card_uniformity(img_path) -> float:
         return 0.0
 
 
+def _ocr_layout_metrics(res, W: int, H: int):
+    """From an OCR result, (n_confident_boxes, text_area_frac, max_box_area_frac). A designed promo
+    card — even an IMAGE-BACKED one that isn't flat — carries large and/or many text boxes; an
+    in-scene sign or a lone subtitle is 1-2 small boxes."""
+    import re as _re3
+    area = float(max(1, W * H))
+    n, tot, mx = 0, 0.0, 0.0
+    for box, txt, conf in (res or []):
+        try:
+            if float(conf) < 0.30 or len(_re3.findall(r"[A-Za-z0-9]", str(txt))) < 2:
+                continue
+            xs = [p[0] for p in box]; ys = [p[1] for p in box]
+            a = (max(xs) - min(xs)) * (max(ys) - min(ys))
+            n += 1
+            tot += a
+            mx = max(mx, a)
+        except Exception:
+            continue
+    return n, tot / area, mx / area
+
+
 def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
-                         stride: float = 0.5) -> list:
-    """Scan the FINISHED video every `stride` seconds (default 0.5s — a 1-2s card cannot fit
-    between probes) for full-screen promotional / outro / CTA / streamer-brand slates that must
-    never ship. TWO-FACTOR to avoid false positives: a frame is flagged only when (a) a STRONG
-    promo token (_PROMO_RX) is read AND (b) the picture center is a near-uniform designed CARD
-    (_frame_card_uniformity >= floor). This distinguishes a full-screen promo card from an
-    in-scene sign, a small broadcaster corner bug, or our own narration caption over live footage
-    (all fail the card-geometry test). Returns a list of hit dicts (empty = clean)."""
-    if ocr_engine is None:
-        if log:
-            log("build: ⚠ final-video ad scan SKIPPED (no OCR engine) — relying on clip-stage gate")
-        return []
+                         stride: float = 0.5) -> dict:
+    """Scan the FINISHED video every `stride` seconds (0.5s — a 1-2s card cannot fit between probes)
+    for full-screen promotional / outro / CTA / streamer-brand slates that must never ship.
+
+    FAIL-CLOSED: returns {"status": clean|blocked|unverified, "hits": [...], "frames", "ocr_errors",
+    "reason"}. status 'unverified' means the scan could not run (no OCR engine, zero decoded frames,
+    or excessive OCR errors) — the GATE treats that as a block unless an explicit override is set.
+
+    TWO detection paths so an IMAGE-BACKED (non-uniform) promo card is caught too:
+      A) flat CARD: a strong promo token (_PROMO_RX) AND a near-uniform designed background.
+      B) LAYOUT-HEAVY: a strong promo token AND large/abundant on-screen text (big or many boxes),
+         even over a photographic background (pricing/URL/subscribe overlays on a movie still).
+    A candidate is CONFIRMED as a hit when it persists across >=2 consecutive samples (a real card
+    holds >= ~1s) OR a single frame is an unambiguous flat card (card >= strong). In-scene signs,
+    burned subtitles, corner bugs, and our own bottom captions are protected: the OCR crop drops the
+    bottom caption band, a lone small box never trips path B, and a transient single frame never
+    confirms unless it is a strong flat card."""
     import os as _os2
+    scan_dir = work / "_adscan"
+    if ocr_engine is None:
+        return {"status": "unverified", "hits": [], "frames": 0, "ocr_errors": 0,
+                "reason": "no OCR engine available — cannot verify the final video is ad-free"}
     ff = ffmpeg_exe()
     from .config import _f as _cfg_f3
     card_floor = _cfg_f3("VIDLORE_CLIPSTUDIO_AD_CARD_FLOOR", 0.40)
-    scan_dir = work / "_adscan"
+    card_strong = _cfg_f3("VIDLORE_CLIPSTUDIO_AD_CARD_STRONG", 0.55)
     try:
         scan_dir.mkdir(exist_ok=True)
         for _old in scan_dir.glob("fr_*.jpg"):
@@ -3029,69 +3134,95 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
     except Exception:
         pass
     fps = 1.0 / max(0.1, stride)
-    # one decode pass → all sample frames (downscaled); far cheaper than N seeks
-    subprocess.run([ff, "-y", "-loglevel", "error", "-i", str(result),
-                    "-vf", f"fps={fps:.4f},scale=854:-1", "-q:v", "4",
-                    str(scan_dir / "fr_%05d.jpg")], capture_output=True, timeout=900)
+    _p = subprocess.run([ff, "-y", "-loglevel", "error", "-i", str(result),
+                         "-vf", f"fps={fps:.4f},scale=854:-1", "-q:v", "4",
+                         str(scan_dir / "fr_%05d.jpg")], capture_output=True, timeout=1800)
     frames = sorted(scan_dir.glob("fr_*.jpg"))
-    hits = []
-    import re as _re2
+    if not frames:
+        return {"status": "unverified", "hits": [], "frames": 0, "ocr_errors": 0,
+                "reason": f"zero decoded scan frames (ffmpeg rc={_p.returncode}) — cannot verify"}
+    from PIL import Image
+    cand = []                                          # per-frame promo candidate (t, token, text, card, path)
+    ocr_errors = 0
     for i, fp in enumerate(frames):
         t = i * stride
-        # cheap card-geometry pre-filter first — OCR only the designed-card frames (a promo slate
-        # is ALWAYS a flat card, so photographic scene frames are skipped without OCR cost)
-        if _frame_card_uniformity(fp) < card_floor:
-            continue
         try:
-            # OCR the top ~82% only, so a burned narration caption at the bottom can never match
-            from PIL import Image
+            card = _frame_card_uniformity(fp)
             im = Image.open(fp).convert("RGB")
             W, H = im.size
-            top = im.crop((0, 0, W, int(0.82 * H)))
+            top = im.crop((0, 0, W, int(0.82 * H)))    # drop bottom caption band (our captions/subs)
             tpath = scan_dir / f"_ocr_{i:05d}.jpg"
             top.save(tpath)
             res, _el = ocr_engine(str(tpath))
             tpath.unlink(missing_ok=True)
             joined = " ".join(str(txt) for _b, txt, conf in (res or []) if float(conf) >= 0.30)
             m = _PROMO_RX.search(joined)
-            if m:
-                hits.append({"t": round(t, 2), "token": m.group(0)[:40],
-                             "text": joined[:160],
-                             "card_uniformity": round(_frame_card_uniformity(fp), 3)})
+            if not m:
+                continue
+            n_box, area_frac, max_frac = _ocr_layout_metrics(res, W, int(0.82 * H))
+            is_card = card >= card_floor
+            layout_heavy = (area_frac >= 0.06) or (n_box >= 5) or (max_frac >= 0.04)
+            if is_card or layout_heavy:
+                cand.append({"t": round(t, 2), "token": m.group(0)[:40], "text": joined[:160],
+                             "card": round(card, 3), "n_box": n_box,
+                             "text_area": round(area_frac, 3),
+                             "path": "flat_card" if is_card else "layout_heavy",
+                             "strong_single": bool(card >= card_strong)})
         except Exception:
-            pass
+            ocr_errors += 1
+            continue
     try:
-        for _f in scan_dir.glob("fr_*.jpg"):
+        for _f in scan_dir.glob("*.jpg"):
             _f.unlink(missing_ok=True)
     except Exception:
         pass
+    if frames and ocr_errors / len(frames) > 0.25:
+        return {"status": "unverified", "hits": [], "frames": len(frames), "ocr_errors": ocr_errors,
+                "reason": f"excessive OCR errors ({ocr_errors}/{len(frames)}) — cannot verify"}
+    # CONFIRM: >=2 consecutive candidate frames, OR a single unambiguous strong flat card
+    _ts = {c["t"] for c in cand}
+    hits = []
+    for c in cand:
+        consec = (round(c["t"] - stride, 2) in _ts) or (round(c["t"] + stride, 2) in _ts)
+        if consec or c["strong_single"]:
+            hits.append(c)
     if log:
         if hits:
             for h in hits[:12]:
                 log(f"build: final-video AD SCAN HIT @{h['t']}s token={h['token']!r} "
-                    f"card={h['card_uniformity']}")
+                    f"path={h['path']} card={h['card']} boxes={h['n_box']}")
         else:
             log(f"build: final-video ad scan clean — {len(frames)} frames @{stride}s, "
-                f"0 promo/outro/CTA cards")
-    return hits
+                f"{len(cand)} lone/transient promo candidate(s) (none confirmed), 0 cards")
+    return {"status": ("blocked" if hits else "clean"), "hits": hits,
+            "frames": len(frames), "ocr_errors": ocr_errors, "reason": ""}
 
 
 def _final_video_ad_gate(result: Path, work: Path, ocr_engine, *, log) -> Path:
-    """HARD publication gate against full-screen promo/outro/CTA/streamer-brand cards. Auto-repair
-    for these happens UPSTREAM at the clip stage (_clip_branding_text full-window probe →
-    _freeze_replace / clean re-window), so a survivor here means a card slipped every earlier
-    guard: rather than silently ship it, QUARANTINE the render (rename to *.FAILED_AD_QA.*) and
-    RAISE, exactly like the breakout release gate. Clean renders pass through unchanged."""
+    """HARD, FAIL-CLOSED publication gate against full-screen promo/outro/CTA/streamer-brand cards.
+    Auto-repair happens UPSTREAM at the clip stage (_clip_branding_text full-window probe →
+    _freeze_replace / clean re-window + Ken-Burns time-neutrality). A survivor here — OR an inability
+    to VERIFY the render is clean — quarantines the render (*.FAILED_AD_QA.*) and RAISES. A
+    verification failure (no OCR / zero frames / excessive OCR errors) can only be waved through with
+    an explicit emergency override (VIDLORE_CLIPSTUDIO_AD_GATE_OVERRIDE=1) that logs a LOUD warning."""
     import json as _json_ad
     import os as _os3
     if _os3.environ.get("VIDLORE_CLIPSTUDIO_FINAL_AD_GATE", "1").strip() in ("0", "false", "no"):
         return result
-    hits = _final_video_ad_scan(result, work, ocr_engine, log=log)
-    if not hits:
+    r = _final_video_ad_scan(result, work, ocr_engine, log=log)
+    status = r.get("status")
+    if status == "clean":
         return result
+    if status == "unverified":
+        if _os3.environ.get("VIDLORE_CLIPSTUDIO_AD_GATE_OVERRIDE", "0").strip() in ("1", "true", "yes"):
+            log(f"build: ⚠️⚠️ AD-GATE EMERGENCY OVERRIDE — could not verify the final video is ad-free "
+                f"({r.get('reason')}); PUBLISHING ANYWAY by explicit override. This render was NOT "
+                f"scanned for promo/outro/CTA material.")
+            return result
+        # fail closed: cannot verify → do not publish
     try:
         (work.parent / "final_ad_failures.json").write_text(
-            _json_ad.dumps({"failures": hits, "video": str(result)}, indent=1), encoding="utf-8")
+            _json_ad.dumps(r, indent=1), encoding="utf-8")
     except Exception:
         pass
     _quar = result.with_name(result.stem + ".FAILED_AD_QA" + result.suffix)
@@ -3101,12 +3232,18 @@ def _final_video_ad_gate(result: Path, work: Path, ocr_engine, *, log) -> Path:
         result.rename(_quar)
     except Exception:
         _quar = result
-    log(f"build: ⛔ RELEASE-BLOCKED — {len(hits)} promotional/outro/CTA frame(s) survived to the "
-        f"final video (first @{hits[0]['t']}s, token {hits[0]['token']!r}); quarantined → "
-        f"{_quar.name} (NOT published). See final_ad_failures.json.")
+    if status == "blocked":
+        log(f"build: ⛔ RELEASE-BLOCKED — {len(r['hits'])} promo/outro/CTA frame(s) survived to the "
+            f"final video (first @{r['hits'][0]['t']}s, {r['hits'][0]['token']!r}, "
+            f"path={r['hits'][0]['path']}); quarantined → {_quar.name}. See final_ad_failures.json.")
+        raise RuntimeError(
+            f"final-video ad gate failed — {len(r['hits'])} promo/outro/CTA frame(s) survived "
+            f"(quarantined at {_quar.name}); refusing to publish third-party promo material")
+    log(f"build: ⛔ RELEASE-BLOCKED (fail-closed) — could NOT verify the final video is ad-free "
+        f"({r.get('reason')}); quarantined → {_quar.name}. Set AD_GATE_OVERRIDE=1 to force-publish.")
     raise RuntimeError(
-        f"final-video ad gate failed — {len(hits)} promo/outro/CTA card frame(s) survived "
-        f"(quarantined at {_quar.name}); refusing to publish a video with third-party promo material")
+        f"final-video ad gate could not verify the render ({r.get('reason')}) — failing closed and "
+        f"refusing to publish (quarantined at {_quar.name}); set AD_GATE_OVERRIDE=1 to override")
 
 
 def _ass_ts(t: float) -> str:

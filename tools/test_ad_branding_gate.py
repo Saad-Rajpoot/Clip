@@ -32,14 +32,14 @@ def _say(ok, msg):
 
 
 class MockOCR:
-    """Callable like RapidOCR: returns (results, elapsed). `text` is returned for EVERY frame,
-    so only the card-geometry pre-filter can prevent a flag."""
-    def __init__(self, text):
+    """Callable like RapidOCR: returns (results, elapsed). `text` on every frame; `box` controls
+    layout (big box = a designed card / overlay; small box = an in-scene sign)."""
+    def __init__(self, text, box=None):
         self.text = text
+        self.box = box or [[500, 320], [640, 320], [640, 350], [500, 350]]   # small in-scene sign
 
     def __call__(self, img_path):
-        box = [[10, 10], [800, 10], [800, 80], [10, 80]]
-        return ([(box, self.text, 0.9)], 0.0)
+        return ([(self.box, self.text, 0.9)], 0.0)
 
 
 def _build_test_video(dest: Path) -> None:
@@ -96,40 +96,80 @@ def main():
     except Exception as e:
         _say(False, f"card-uniformity PIL test errored: {e}")
 
-    # (4) END-TO-END: scene+card video, mock OCR returns promo text on every frame
+    # (4) PATH A (flat card): scene+card video, mock returns promo text in a SMALL box (in-scene
+    #     sign). Only the flat-card half is flagged; the photographic half with a small sign is NOT.
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         work = td / "output" / "work"
         work.mkdir(parents=True)
         vid = work / "final.mp4"
         _build_test_video(vid)
-        ocr = MockOCR("max THE ONE TO WATCH $9.99/month mox.com")
-        hits = _final_video_ad_scan(vid, work, ocr, stride=0.5)
-        _say(len(hits) >= 3, f"scan flags the promo-card half ({len(hits)} hits)")
+        ocr_sign = MockOCR("max THE ONE TO WATCH $9.99/month mox.com")   # small box = in-scene sign
+        r = _final_video_ad_scan(vid, work, ocr_sign, stride=0.5)
+        hits = r["hits"]
+        _say(r["status"] == "blocked" and len(hits) >= 3,
+             f"path A: flat promo card flagged ({len(hits)} hits, status={r['status']})")
         _say(all(h["t"] >= 2.5 for h in hits),
-             f"scan flags ONLY the card half, never the photographic half "
-             f"(hit times {[h['t'] for h in hits]})")
-        # the gate must QUARANTINE + RAISE
+             f"path A: only the flat-card half flagged, NOT the photographic frame with a small "
+             f"in-scene sign (hit times {[h['t'] for h in hits]})")
         raised = False
         try:
-            _final_video_ad_gate(vid, work, ocr, log=lambda m: None)
+            _final_video_ad_gate(vid, work, ocr_sign, log=lambda m: None)
         except RuntimeError:
             raised = True
-        _say(raised, "ad gate RAISES on a surviving promo card")
-        _say(not vid.exists() and vid.with_name(vid.stem + ".FAILED_AD_QA.mp4").exists(),
-             "ad gate QUARANTINES the render (final.mp4 removed, *.FAILED_AD_QA.mp4 written)")
-        _say((work.parent / "final_ad_failures.json").exists(),
-             "ad gate writes final_ad_failures.json")
+        _say(raised and not vid.exists()
+             and vid.with_name(vid.stem + ".FAILED_AD_QA.mp4").exists(),
+             "gate RAISES + QUARANTINES on a surviving promo card")
 
-        # (5) a clean video with benign OCR passes untouched
+        # (5) PATH B (image-backed non-uniform card): photographic video + BIG promo text box that
+        #     persists → confirmed even though the background is not flat.
+        vidb = work / "finalB.mp4"
+        subprocess.run([FF, "-y", "-loglevel", "error", "-f", "lavfi",
+                        "-i", "mandelbrot=s=1280x720:rate=30", "-t", "3",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(vidb)], check=True,
+                       capture_output=True)
+        ocr_big = MockOCR("SUBSCRIBE now at www.channel.tv only on HBO Max",
+                          box=[[120, 120], [1160, 120], [1160, 300], [120, 300]])   # big overlay
+        rb = _final_video_ad_scan(vidb, work, ocr_big, stride=0.5)
+        _say(rb["status"] == "blocked" and rb["hits"],
+             f"path B: image-backed non-uniform promo overlay flagged ({len(rb['hits'])} hits)")
+
+        # (6) FAIL-CLOSED: no OCR engine → unverified → gate blocks (unless override)
         vid2 = work / "final2.mp4"
         subprocess.run([FF, "-y", "-loglevel", "error", "-f", "lavfi",
                         "-i", "mandelbrot=s=1280x720:rate=30", "-t", "3",
                         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(vid2)], check=True,
                        capture_output=True)
-        benign = MockOCR("the dragons already proved it")
-        out = _final_video_ad_gate(vid2, work, benign, log=lambda m: None)
-        _say(out == vid2 and vid2.exists(), "clean video passes the ad gate unchanged")
+        r_none = _final_video_ad_scan(vid2, work, None)
+        _say(r_none["status"] == "unverified", "no OCR engine → status 'unverified' (not clean)")
+        import os as _os
+        blocked = False
+        try:
+            _final_video_ad_gate(vid2, work, None, log=lambda m: None)
+        except RuntimeError:
+            blocked = True
+        _say(blocked, "fail-closed: no-OCR gate BLOCKS (does not silently pass)")
+        # restore the quarantined file, then test the explicit override
+        _q = vid2.with_name(vid2.stem + ".FAILED_AD_QA.mp4")
+        if _q.exists():
+            _q.rename(vid2)
+        _os.environ["VIDLORE_CLIPSTUDIO_AD_GATE_OVERRIDE"] = "1"
+        try:
+            out = _final_video_ad_gate(vid2, work, None, log=lambda m: None)
+            _say(out == vid2 and vid2.exists(), "explicit override publishes with a loud warning")
+        finally:
+            _os.environ.pop("VIDLORE_CLIPSTUDIO_AD_GATE_OVERRIDE", None)
+
+        # (7) a clean video with benign OCR (real card-geometry, benign text) passes untouched
+        vid3 = work / "final3.mp4"
+        subprocess.run([FF, "-y", "-loglevel", "error", "-f", "lavfi",
+                        "-i", "mandelbrot=s=1280x720:rate=30", "-t", "3",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(vid3)], check=True,
+                       capture_output=True)
+        benign = MockOCR("the dragons already proved it",
+                         box=[[120, 120], [1160, 120], [1160, 300], [120, 300]])
+        out = _final_video_ad_gate(vid3, work, benign, log=lambda m: None)
+        _say(out == vid3 and vid3.exists(), "clean video (benign text, no promo token) passes")
 
     print(f"\n{PASS} passed · {FAIL} failed")
     sys.exit(1 if FAIL else 0)
