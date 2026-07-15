@@ -215,25 +215,21 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
 
     def _still_deterministic_ok(sid, sidx, score, seg) -> bool:
         """When NO vision model is available, an exact/character recovery still may be installed ONLY
-        if it passes DETERMINISTIC checks (no arbitrary 'unverified_fallback' that could be a
-        contradictory frame): same-show (source title shares the movie tokens), beat-local era match
-        (or unconstrained), CLIP relevance above a floor, AND — for a character-required beat — the
-        required entity actually present in the shot's Face-ID."""
+        if it passes the module-level DETERMINISTIC gate (same-show via meaningful title identity +
+        explicit beat-local era vs the source's declared season + CLIP relevance + Face-ID for a
+        named character). No arbitrary 'unverified_fallback' that could be a contradictory frame."""
         try:
             src = proj.source(sid)
-            title = (getattr(src, "title", "") or "").lower()
-            if _movie_toks and not (_movie_toks & set(re.findall(r"[a-z0-9]+", title))):
-                return False                              # not the same title/show
-            if float(score or 0.0) < float(os.environ.get(
-                    "VIDLORE_CLIPSTUDIO_DET_STILL_MIN_CLIP", "0.30") or 0.30):
-                return False                              # CLIP relevance too low
-            _ent = (getattr(seg, "required_entity", "") or "").strip().lower()
+            title = getattr(src, "title", "") or ""
             _kind = (getattr(seg, "required_kind", "") or "").lower()
-            if _ent and _kind in ("character", "actor"):
-                faces = " ".join(_shot_face_ids(sid, sidx)).lower()
-                if _ent not in faces and not any(w in faces for w in _ent.split() if len(w) > 3):
-                    return False                          # required character not Face-ID-confirmed
-            return True
+            faces = _shot_face_ids(sid, sidx) if _kind in ("character", "actor") else []
+            ok, reason = _deterministic_still_ok(
+                source_title=title, score=score, seg=seg, faces=faces, movie_toks=_movie_toks,
+                global_era=_global_era_sv, single_scene=(_vtype_sv == "single_scene"),
+                min_clip=float(os.environ.get("VIDLORE_CLIPSTUDIO_DET_STILL_MIN_CLIP", "0.30") or 0.30))
+            if not ok:
+                log(f"image-fallback: beat {seg.index} — deterministic still rejected ({reason})")
+            return ok
         except Exception:
             return False
 
@@ -523,6 +519,76 @@ def _write_recovery_audit(proj, audit: dict) -> None:
                                                              encoding="utf-8")
     except Exception:
         pass
+
+
+# Generic title words that carry NO show identity — they must never manufacture a same-show match
+# (a shared 'of' / 'the' / 'season' can't make 'The Last of Us' the same show as 'Game of Thrones').
+_TITLE_STOP = set(
+    "the a an of to in on at for and or but with from into as it its this that is are was were be "
+    "s01 s02 season episode ep part pt scene clip full hd 4k official trailer teaser recap explained "
+    "breakdown analysis review reaction best moments compilation supercut vs versus ft feat featuring "
+    "movie series show tv hbo max netflix subscribe watch online".split())
+
+
+def _norm_title_toks(title: str) -> set:
+    """Meaningful (>2-char, non-generic) tokens of a source title — the show-identity fingerprint."""
+    import re as _re
+    return {w for w in _re.findall(r"[a-z0-9]+", (title or "").lower())
+            if w not in _TITLE_STOP and len(w) > 2}
+
+
+def _title_season(title: str) -> str:
+    """The season a source TITLE declares (S3E10 / 'season 3' / 3x10) as 'season N', else ''."""
+    from .verify import _SEASON_RX
+    m = _SEASON_RX.search(title or "")
+    if m:
+        n = m.group(1) or m.group(2) or m.group(3)
+        if n:
+            return f"season {int(n)}"
+    return ""
+
+
+def _deterministic_still_ok(*, source_title, score, seg, faces, movie_toks, global_era,
+                            single_scene, min_clip=0.30):
+    """R4-6 — the PURE deterministic gate for installing a recovery still when NO vision model is
+    available. Every claim is EVALUATED (never assumed): a still is accepted only when ALL of
+      (1) SAME-SHOW via meaningful normalized title identity (generic/stopwords removed — 'Game of
+          Thrones' shares no meaningful token with 'The Last of Us'),
+      (2) explicit BEAT-LOCAL season/era vs the SOURCE's declared season (a S5 clip can't cover a
+          S3 beat),
+      (3) CLIP relevance above a floor, and
+      (4) for a named character/actor, that entity actually present in the shot's Face-ID
+    pass. Returns (ok: bool, reason: str)."""
+    from .verify import _beat_era
+    # (1) same-show — meaningful token identity, not any incidental shared function word
+    mt = {w for w in (movie_toks or set()) if w not in _TITLE_STOP and len(w) > 2}
+    tt = _norm_title_toks(source_title)
+    if mt:
+        if not tt:
+            return False, "source title has no meaningful tokens (cannot confirm same show)"
+        _shared = mt & tt
+        if not _shared:
+            return False, f"different show (title {sorted(tt)} shares nothing with movie {sorted(mt)})"
+    # (2) explicit era: compare the beat's own era to the source title's declared season
+    era_beat = _beat_era(seg, global_era, single_scene)
+    era_src = _title_season(source_title)
+    if era_beat and era_src and era_beat != era_src:
+        return False, f"wrong era (beat {era_beat} vs source {era_src})"
+    # (3) CLIP relevance floor
+    if float(score or 0.0) < float(min_clip):
+        return False, f"CLIP relevance {float(score or 0.0):.2f} < floor {float(min_clip):.2f}"
+    # (4) named character must be Face-ID-present in the shot
+    _ent = (getattr(seg, "required_entity", "") or "").strip().lower()
+    _kind = (getattr(seg, "required_kind", "") or "").lower()
+    if _ent and _kind in ("character", "actor"):
+        _faces = " ".join(faces or []).lower()
+        # Match on the DISTINCTIVE given name (first token), not any shared word — a family name
+        # (Tywin Lannister vs Cersei Lannister) must NOT satisfy a different character.
+        _ent_toks = [w for w in _ent.split() if len(w) > 2]
+        _given = _ent_toks[0] if _ent_toks else _ent
+        if _ent not in _faces and _given not in _faces:
+            return False, f"required character '{_ent}' not Face-ID-confirmed in the shot"
+    return True, f"same-show + era({era_beat or 'any'}) + CLIP + Face-ID all pass"
 
 
 def _beat_is_unresolved(sel, seg, _policy) -> bool:
