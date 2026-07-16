@@ -4906,14 +4906,26 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 f"same-scene editorial HOLD ({_hold_total:.1f}s total, caps {_hold_single_cap:.1f}s/"
                 f"{_hold_total_cap:.1f}s; never the rejected footage)")
         if _rf_block:
-            _quar = out_path.with_name(out_path.stem + ".FAILED_REJECTED_FOOTAGE" + out_path.suffix)
-            log(f"build: ⛔ RELEASE-BLOCKED — {len(_rf_block)} verifier-rejected beat(s) have NO valid "
-                f"fallback (first scene {_rf_block[0]['seg_index']}: {_rf_block[0]['reason']}); refusing "
-                f"to air rejected/repeated-freeze/black footage. See rejected_footage_audit.json.")
-            raise RuntimeError(
-                f"rejected-footage gate: {len(_rf_block)} beat(s) unresolved (no valid editorial hold "
-                f"or contextual fallback) — rediscovery needed for scene(s) "
-                f"{[b['seg_index'] for b in _rf_block[:8]]}")
+            # RELEASE-BLOCK MODE (default 'block' = fail-closed, the production behaviour). 'warn'
+            # is an explicit REVIEW/acceptance opt-in: the gate still evaluates every beat and writes
+            # the same honest rejected_footage_audit.json, but the render COMPLETES so the video can
+            # actually be watched and audited, with the weak beats reported loudly instead of the
+            # whole render being thrown away. It never makes a beat's footage any less validated —
+            # it only chooses reporting over aborting.
+            _blk_mode = _os.environ.get("VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE", "block").strip().lower()
+            _msg = (f"{len(_rf_block)} verifier-rejected beat(s) have NO valid fallback (first scene "
+                    f"{_rf_block[0]['seg_index']}: {_rf_block[0]['reason']}) — scene(s) "
+                    f"{[b['seg_index'] for b in _rf_block[:8]]}. See rejected_footage_audit.json.")
+            if _blk_mode == "warn":
+                log(f"build: ⚠ RELEASE-BLOCK (mode=warn, REVIEW BUILD — not for publication) — {_msg}")
+            else:
+                _quar = out_path.with_name(out_path.stem + ".FAILED_REJECTED_FOOTAGE" + out_path.suffix)
+                log(f"build: ⛔ RELEASE-BLOCKED — {_msg} Refusing to air rejected/repeated-freeze/"
+                    f"black footage.")
+                raise RuntimeError(
+                    f"rejected-footage gate: {len(_rf_block)} beat(s) unresolved (no valid editorial "
+                    f"hold or contextual fallback) — rediscovery needed for scene(s) "
+                    f"{[b['seg_index'] for b in _rf_block[:8]]}")
 
     suppress_wins = []
     if _cap_on and _suppress_on:
