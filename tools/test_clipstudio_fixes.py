@@ -2309,6 +2309,44 @@ def test_generic_beat_filler_leniency():
           "is_specific" in vsrc and "GENERIC narration line" in vsrc and "Be STRICT" in vsrc)
 
 
+def test_dark_patch_prepass():
+    print("[dark] pre-pass catches a dark PATCH (same run-rule as the final black gate)")
+    import subprocess
+    from vidlore.clipstudio.build import _clip_too_dark
+    from vidlore.clipstudio.config import ffmpeg_exe
+    ff = ffmpeg_exe()
+    td = Path(tempfile.mkdtemp(prefix="csdark_"))
+
+    def _seg(color, dur, dest):
+        subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi",
+                        "-i", f"color=c={color}:s=640x360:rate=30", "-t", str(dur),
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dest)],
+                       check=True, capture_output=True)
+
+    def _cat(parts, dest):
+        lst = td / f"l_{dest.stem}.txt"
+        lst.write_text("".join(f"file '{p.name}'\n" for p in parts))
+        subprocess.run([ff, "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
+                        "-i", str(lst), "-c", "copy", str(dest)], check=True, capture_output=True)
+
+    bright, dark, blip = td / "b.mp4", td / "d.mp4", td / "x.mp4"
+    _seg("gray", 2, bright); _seg("0x060606", 1.2, dark); _seg("0x060606", 0.3, blip)
+    patch = td / "patch.mp4"; _cat([bright, dark, bright], patch)
+    allbright = td / "ok.mp4"; _seg("gray", 4, allbright)
+    alldark = td / "all.mp4"; _seg("0x060606", 3, alldark)
+    fade = td / "fade.mp4"; _cat([bright, blip, bright], fade)
+
+    # THE BUG: the old pre-pass asked "dark THROUGHOUT?" (max of 4 samples), so a clip with a dark
+    # PATCH passed here and then quarantined the whole render at the final gate (a 1s region at
+    # 274.5s failed a 15-minute render). It must use the gate's own sustained-run rule.
+    check("dark-clip pre-pass: a dark PATCH inside a bright clip is CAUGHT (the 274.5s render bug)",
+          _clip_too_dark(patch) is True)
+    check("dark-clip pre-pass: a fully bright clip passes", _clip_too_dark(allbright) is False)
+    check("dark-clip pre-pass: a fully dark clip is still caught", _clip_too_dark(alldark) is True)
+    check("dark-clip pre-pass: a short 0.3s dark blip (fade) is NOT over-flagged",
+          _clip_too_dark(fade) is False)
+
+
 def test_breakout_qa_whisper_generator():
     print("[breakout] post-render QA: whisper GENERATOR must be materialised once (speech_frac)")
     import subprocess
@@ -5096,6 +5134,7 @@ def main():
     test_caption_sync_per_scene_tolerant()
     test_source_budget_scales_with_script()
     test_generic_beat_filler_leniency()
+    test_dark_patch_prepass()
     test_breakout_qa_whisper_generator()
     test_character_present_unconfirmed()
     test_verify_only_indices_subset()

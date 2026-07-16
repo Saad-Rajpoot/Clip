@@ -3558,33 +3558,41 @@ def _frame_luma_hi(img_path):
         return None                                    # explicit failure → unverified
 
 
-def _clip_too_dark(clip_path, floor: float = 50.0) -> bool:
-    """True when a CUT clip is unreadable throughout — its brightest PICTURE content (center crop,
-    excluding edges; the clip has no letterbox yet at this stage) stays below `floor` at EVERY
-    sampled position. A clip with any legible stretch is kept. Unmeasurable → False (the final black
-    gate is the backstop)."""
+def _clip_too_dark(clip_path, floor: float = 50.0, min_dark_run: float = 0.8) -> bool:
+    """True when a CUT clip is unusable: EITHER unreadable throughout, OR it contains a SUSTAINED
+    dark RUN of at least `min_dark_run` seconds — the SAME run-based rule _final_video_black_gate
+    applies to the finished video.
+
+    This pre-pass previously sampled only 4 points and asked "is it dark THROUGHOUT?" (max < floor).
+    A clip that is mostly legible but has a dark PATCH therefore passed here and then tripped the
+    final gate, quarantining the whole render (observed: one 1s region at 274.5s failed a 15-minute
+    render). The pre-pass must PREVENT exactly what the gate DETECTS, so it now samples densely at
+    the gate's own 0.5s stride and looks for a sustained sub-floor run. Measures the PICTURE area
+    (centre crop, excluding edges; no letterbox at this stage). Unmeasurable → False (the final
+    black gate remains the backstop)."""
+    import shutil as _shutil
+    import tempfile as _tempfile
     ff = ffmpeg_exe()
-    dur = _probe_duration(clip_path) or 3.0
-    his = []
-    for r in (0.15, 0.4, 0.65, 0.9):
-        t = dur * r
-        tmp = f"{clip_path}.dk_{int(r * 100)}.jpg"
-        try:
-            subprocess.run([ff, "-y", "-loglevel", "error", "-ss", f"{t:.2f}", "-i", str(clip_path),
-                            "-frames:v", "1",
-                            "-vf", "crop=iw*0.9:ih*0.84:iw*0.05:ih*0.08,scale=320:-1", tmp],
-                           capture_output=True, timeout=20)
-            v = _frame_luma_hi(tmp)
-            if v is not None:
-                his.append(v)
-        except Exception:
-            pass
-        finally:
-            try:
-                Path(tmp).unlink(missing_ok=True)
-            except Exception:
-                pass
-    return bool(his) and max(his) < floor
+    _d = Path(_tempfile.mkdtemp(prefix="clipdark_"))
+    try:
+        subprocess.run([ff, "-y", "-loglevel", "error", "-i", str(clip_path),
+                        "-vf", "crop=iw*0.9:ih*0.84:iw*0.05:ih*0.08,fps=2,scale=320:-1",
+                        "-q:v", "5", str(_d / "f_%05d.jpg")], capture_output=True, timeout=90)
+        his = [v for v in (_frame_luma_hi(f) for f in sorted(_d.glob("f_*.jpg"))) if v is not None]
+        if not his:
+            return False                       # unmeasurable → the final gate is the backstop
+        if max(his) < floor:
+            return True                        # unreadable THROUGHOUT
+        _run = 0                               # frames are 0.5s apart (fps=2)
+        for _h in his:
+            _run = _run + 1 if _h < floor else 0
+            if _run * 0.5 >= min_dark_run:
+                return True                    # a SUSTAINED dark patch the final gate would flag
+        return False
+    except Exception:
+        return False
+    finally:
+        _shutil.rmtree(_d, ignore_errors=True)
 
 
 def _final_video_black_gate(result: Path, work: Path, *, log) -> Path:
