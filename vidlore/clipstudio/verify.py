@@ -219,7 +219,32 @@ def _season_num(text: str):
     return None
 
 
-def _present_unconfirmed_ok(vd, seg, src_title, faceid_names, beat_era) -> bool:
+def _beat_mention_tokens(seg) -> set:
+    """Every person/thing this beat MENTIONS (required_entity + its entities list). A shot showing
+    any of these characters is CO-MENTIONED — narratively relevant, not contradictory (e.g. a Tywin
+    shot on 'Joffrey calls Tywin a coward')."""
+    names = [getattr(seg, "required_entity", "") or ""] + list(getattr(seg, "entities", []) or [])
+    toks = set()
+    for nm in names:
+        toks |= {w for w in re.findall(r"[a-z0-9]+", (nm or "").lower()) if len(w) > 2}
+    return toks
+
+
+def _confirmed_wrong_character(seg, faceid_names, extra_ok_tokens=frozenset()) -> bool:
+    """True IFF Face-ID POSITIVELY identifies a specific person who is NEITHER the beat's required/
+    co-mentioned entity NOR in extra_ok_tokens (the scene roster for a single-scene deep-dive, where
+    any main-cast member is contextually valid). This is the ONLY hard block for a character
+    fallback — an EMPTY / unconfirmed Face-ID is NOT a confirmed wrong character (the required person
+    may be present off-face), so it does not block."""
+    ok = _beat_mention_tokens(seg) | set(extra_ok_tokens)
+    for nm in (faceid_names or []):
+        nt = {w for w in re.findall(r"[a-z0-9]+", (nm or "").lower()) if len(w) > 2}
+        if nt and ok and not (nt & ok):
+            return True                                # a DIFFERENT identified person → contradictory
+    return False
+
+
+def _present_unconfirmed_ok(vd, seg, src_title, faceid_names, beat_era, ok_tokens=frozenset()) -> bool:
     """A CHARACTER beat whose exact-moment footage was rejected with correct_subject_visible=False
     may STILL be a legitimate contextual fallback when the required person is PRESENT but not
     face-confirmed (a wide / reaction shot of the RIGHT scene) — as opposed to a DIFFERENT character
@@ -232,12 +257,8 @@ def _present_unconfirmed_ok(vd, seg, src_title, faceid_names, beat_era) -> bool:
           character or a wrong-era source."""
     if vd.get("wrong_subject_visible") is True:
         return False                                   # vision saw a different main subject
-    _need = (getattr(seg, "required_entity", "") or "").lower()
-    _need_toks = {w for w in re.findall(r"[a-z0-9]+", _need) if len(w) > 2}
-    for nm in (faceid_names or []):
-        _nm_toks = {w for w in re.findall(r"[a-z0-9]+", (nm or "").lower()) if len(w) > 2}
-        if _nm_toks and _need_toks and not (_nm_toks & _need_toks):
-            return False                               # a DIFFERENT identified person → contradictory
+    if _confirmed_wrong_character(seg, faceid_names, ok_tokens):
+        return False                                   # a DIFFERENT identified person → contradictory
     _bn = _season_num(beat_era)
     if _bn is None:
         return False                                   # unconstrained era → no positive signal → block
@@ -292,6 +313,18 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
     _vtype = str((proj.meta.get("analysis", {}) or {}).get("video_type", "") or "")
     _single = (_vtype == "single_scene")
     _global_era = str((proj.meta.get("analysis", {}) or {}).get("episode_hint", "") or "")
+    # SCENE ROSTER (single-scene deep-dive only): every main-cast character/actor of the video. In a
+    # single-scene deep-dive ANY roster member is contextually valid for any beat (they are all in
+    # the one scene), so a roster face is never a "wrong character". For a multi-scene essay the
+    # roster spans eras/scenes and is NOT auto-allowed — only the beat's own co-mentioned entities.
+    _roster_toks: set = set()
+    if _single:
+        _an = proj.meta.get("analysis", {}) or {}
+        for _c in (_an.get("characters") or []):
+            _nm = _c.get("name", "") if isinstance(_c, dict) else str(_c)
+            _roster_toks |= {w for w in re.findall(r"[a-z0-9]+", (_nm or "").lower()) if len(w) > 2}
+        for _a in (_an.get("actors") or []):
+            _roster_toks |= {w for w in re.findall(r"[a-z0-9]+", (str(_a) or "").lower()) if len(w) > 2}
     _mf_on = _os_ms.environ.get("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "1").strip() \
         not in ("0", "false", "no")
 
@@ -493,8 +526,10 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     and (getattr(seg, "required_kind", "") or "").lower() in ("character", "actor"):
                 _src_r = proj.source(sel.source_id)
                 _src_title = ((getattr(_src_r, "title", "") or "") + " " + (sel.source_id or ""))
+                _ok_toks = _roster_toks if _single else frozenset()
                 if _present_unconfirmed_ok(v, seg, _src_title, faceid_names,
-                                           _beat_era(seg, _global_era, _single)):
+                                           _beat_era(seg, _global_era, _single), _ok_toks):
+                    # right scene/era, subject present-but-unconfirmed → CONTEXTUAL
                     v["verdict"] = "keep"
                     v["downgraded"] = "exact→contextual(present-unconfirmed)"
                     v["relevance_class"] = "contextual_fallback"
@@ -503,6 +538,20 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     swapped = True
                     log(f"verify: seg{sel.segment_index} exact→contextual (character present-"
                         f"unconfirmed; right scene/era, no wrong character — contextual_fallback)")
+                elif not _confirmed_wrong_character(seg, faceid_names, _ok_toks):
+                    # No exact/contextual, no POSITIVE era signal — but Face-ID does NOT confirm a
+                    # different, unrelated character (empty/unconfirmed Face-ID, or a CO-MENTIONED
+                    # character like Tywin on a 'Joffrey calls Tywin a coward' beat, or — in a
+                    # single-scene deep-dive — any main-cast member). A thematic scene clip is a
+                    # legitimate GENERIC-FILLER last resort. NEVER a CONFIRMED wrong character.
+                    v["verdict"] = "keep"
+                    v["downgraded"] = "exact→generic_filler(character last-resort)"
+                    v["relevance_class"] = "generic_filler"
+                    sel.verifier = v
+                    replaced += 1
+                    swapped = True
+                    log(f"verify: seg{sel.segment_index} exact→generic_filler (character; no confirmed "
+                        f"wrong character — thematic scene clip, honestly labeled)")
 
             # EXACT→GENERIC-FILLER (the last hierarchy tier before an honest gap). When neither the
             # exact moment NOR a right-subject contextual clip exists, a NON-CHARACTER beat

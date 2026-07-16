@@ -2248,10 +2248,15 @@ def test_generic_beat_filler_leniency():
         return {"verdict": "replace", "matches_narration": False, "correct_subject_visible": subj,
                 "specific_enough": False, "confidence": 0.6, "reason": "not the exact moment"}
 
+    # the WRONG beat (shot_index 3) Face-IDs a CONFIRMED unrelated character (Cersei on a Jon Snow
+    # beat) so it is genuinely contradictory; the other shots have no Face-ID.
+    def _shot_for(sid, idx):
+        return types.SimpleNamespace(index=idx, keyframe_path="kf.jpg", identities=[],
+                                     face_ids=(["Cersei Lannister"] if idx == 3 else []))
     orig = (V.verify_frame, V._shot_lookup, V._cut.cut_selection, L.has_llm)
     try:
         V.verify_frame = fake_vf
-        V._shot_lookup = lambda p: (lambda sid, idx: fake_shot)
+        V._shot_lookup = lambda p: _shot_for
         V._cut.cut_selection = lambda p, s, c: None
         L.has_llm = lambda eng_cfg=None: True
         eng = types.SimpleNamespace(anthropic_model="test-model")
@@ -2266,9 +2271,9 @@ def test_generic_beat_filler_leniency():
     check("EXACT beat, right subject visible (meta narration) → DOWNGRADED to contextual",
           ctx.verifier.get("verdict") == "keep" and ctx.verifier.get("downgraded") == "exact→contextual"
           and not ctx.flagged and "verifier_failed" not in (ctx.flag_reasons or []))
-    # EXACT beat whose footage shows the WRONG subject → contradictory → NOT downgraded → flagged.
-    # A CHARACTER beat (required_kind character/actor) with the wrong subject is never filler-eligible.
-    check("EXACT character beat, WRONG subject → contradictory, NOT downgraded (flagged/blocked)",
+    # EXACT character beat whose shot Face-IDs a CONFIRMED unrelated character (Cersei on a Jon Snow
+    # beat) → contradictory → NOT downgraded (not contextual, not generic_filler) → flagged/blocked.
+    check("EXACT character beat, CONFIRMED wrong character in Face-ID → NOT downgraded (blocked)",
           wrong.verifier.get("verdict") == "replace" and wrong.flagged
           and "verifier_failed" in (wrong.flag_reasons or []))
 
@@ -2306,12 +2311,27 @@ def test_generic_beat_filler_leniency():
 
 def test_character_present_unconfirmed():
     print("[relevance] character beat, subject present-but-unconfirmed → era+FaceID-gated contextual")
-    from vidlore.clipstudio.verify import _present_unconfirmed_ok
+    from vidlore.clipstudio.verify import (_present_unconfirmed_ok, _confirmed_wrong_character,
+                                           _beat_mention_tokens)
     from vidlore.clipstudio import models as M
 
     joff = M.ScriptSegment(index=1, text="Joffrey is carried out screaming",
                            required_kind="character", required_entity="Joffrey Baratheon")
     V0 = {"correct_subject_visible": False}   # rejected pick, subject not face-confirmed
+
+    # --- CO-MENTIONED character guard (_confirmed_wrong_character) ---
+    joff_tywin = M.ScriptSegment(index=2, text="Joffrey calls Tywin a coward", required_kind="character",
+                                 required_entity="Joffrey Baratheon", entities=["Tywin Lannister"])
+    check("CO-MENTIONED character (Tywin on a 'Joffrey calls Tywin' beat) is NOT a wrong character",
+          _confirmed_wrong_character(joff_tywin, ["Tywin Lannister"]) is False)
+    check("EMPTY / unconfirmed Face-ID is NOT a confirmed wrong character",
+          _confirmed_wrong_character(joff, []) is False)
+    check("a CONFIRMED unrelated person (Sansa on a Joffrey beat) IS a wrong character",
+          _confirmed_wrong_character(joff, ["Sansa Stark"]) is True)
+    check("single-scene ROSTER member (Cersei) is allowed via extra_ok_tokens",
+          _confirmed_wrong_character(joff, ["Cersei Lannister"], {"cersei", "lannister"}) is False)
+    check("_beat_mention_tokens gathers required + co-mentioned entities",
+          _beat_mention_tokens(joff_tywin) >= {"joffrey", "baratheon", "tywin", "lannister"})
 
     # POSITIVE: right era (season 3) + same-season source + no wrong Face-ID → downgrade allowed
     check("right-era S03E10 shot, no wrong face → present-unconfirmed contextual ALLOWED",
@@ -2338,6 +2358,37 @@ def test_character_present_unconfirmed():
     # the SAME required character face present is fine (matches the required entity token)
     check("same character in Face-ID (Joffrey) + right era → ALLOWED",
           _present_unconfirmed_ok(V0, joff, "Game of Thrones S03E10", ["Joffrey Baratheon"], "season 3") is True)
+
+    # --- behavioral: a character beat, empty Face-ID, UNCONSTRAINED era → GENERIC-FILLER last resort
+    #     (not a block), because no CONFIRMED wrong character is present ---
+    import vidlore.clipstudio.verify as V
+    import vidlore.clipstudio.llm as L
+    from vidlore.clipstudio.config import ClipConfig
+    tmpc = tempfile.mkdtemp(prefix="cschar_")
+    projc = M.ClipProject(name="tc", root=tmpc)
+    projc.meta["analysis"] = {"video_type": "multi_scene"}          # roster NOT auto-allowed
+    cb = M.ClipSelection(segment_index=0, source_id="srcA", shot_index=1, in_point=1, out_point=4,
+                         confidence=0.8)
+    projc.selections = [cb]
+    csegs = [M.ScriptSegment(index=0, text="He calls Tywin a coward", required_kind="character",
+                             required_entity="Joffrey Baratheon", entities=["Tywin Lannister"],
+                             visual_policy="exact_scene", is_specific_claim=True)]
+    fshot = types.SimpleNamespace(index=1, keyframe_path="kf.jpg", face_ids=[], identities=[])
+    origc = (V.verify_frame, V._shot_lookup, V._cut.cut_selection, L.has_llm)
+    try:
+        V.verify_frame = lambda *a, **k: {"verdict": "replace", "matches_narration": False,
+                                          "correct_subject_visible": False, "wrong_subject_visible": True,
+                                          "specific_enough": False, "confidence": 0.5, "reason": "not Joffrey"}
+        V._shot_lookup = lambda p: (lambda sid, idx: fshot)
+        V._cut.cut_selection = lambda p, s, c: None
+        L.has_llm = lambda eng_cfg=None: True
+        V.verify_and_repair(projc, csegs, ClipConfig(),
+                            types.SimpleNamespace(anthropic_model="m"), progress=None)
+    finally:
+        V.verify_frame, V._shot_lookup, V._cut.cut_selection, L.has_llm = origc
+    check("character beat, empty Face-ID, no confirmed wrong char → GENERIC-FILLER (kept, not blocked)",
+          cb.verifier.get("verdict") == "keep"
+          and cb.verifier.get("relevance_class") == "generic_filler" and not cb.flagged)
 
 
 def test_verify_only_indices_subset():
