@@ -2309,6 +2309,59 @@ def test_generic_beat_filler_leniency():
           "is_specific" in vsrc and "GENERIC narration line" in vsrc and "Be STRICT" in vsrc)
 
 
+def test_breakout_qa_whisper_generator():
+    print("[breakout] post-render QA: whisper GENERATOR must be materialised once (speech_frac)")
+    import subprocess
+    import sys as _sys
+    import types as _t
+    from vidlore.clipstudio.build import _postrender_breakout_qa
+    from vidlore.clipstudio.config import ffmpeg_exe
+    ff = ffmpeg_exe()
+    tmp = Path(tempfile.mkdtemp(prefix="csqagen_"))
+    # a 4s video WITH audible audio so the loudness floor passes and only ASR decides
+    vid = tmp / "v.mp4"
+    subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=s=320x240:rate=30",
+                    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "4",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(vid)],
+                   check=True, capture_output=True)
+
+    class _Word:
+        def __init__(self, w, b, e):
+            self.word, self.start, self.end = w, b, e
+
+    class _Seg:
+        def __init__(self, words):
+            self.words = words
+
+    class _FakeModel:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, path, **k):
+            # faster-whisper returns a GENERATOR for segments — reproduce that exactly.
+            def _gen():
+                yield _Seg([_Word("real", 0.0, 0.5), _Word("war", 0.6, 1.2), _Word("king", 1.3, 2.4)])
+            return _gen(), None
+
+    fake = _t.ModuleType("faster_whisper")
+    fake.WhisperModel = _FakeModel
+    _old = _sys.modules.get("faster_whisper")
+    _sys.modules["faster_whisper"] = fake
+    try:
+        probs = _postrender_breakout_qa(vid, [{"start": 0.5, "dur": 3.0, "line": "real war king",
+                                               "video": str(vid)}], tmp, log=lambda m: None)
+    finally:
+        if _old is not None:
+            _sys.modules["faster_whisper"] = _old
+        else:
+            _sys.modules.pop("faster_whisper", None)
+    _no_speech = [p for p in probs if "NO detectable speech" in (p.get("reason") or "")]
+    # On the buggy code the _wds comprehension consumed the generator, leaving _dur empty →
+    # speech_frac 0.00 → EVERY breakout video was quarantined as "no detectable speech".
+    check("post-render QA: whisper generator consumed ONCE → speech detected (no false 'no speech')",
+          not _no_speech)
+
+
 def test_character_present_unconfirmed():
     print("[relevance] character beat, subject present-but-unconfirmed → era+FaceID-gated contextual")
     from vidlore.clipstudio.verify import (_present_unconfirmed_ok, _confirmed_wrong_character,
@@ -5043,6 +5096,7 @@ def main():
     test_caption_sync_per_scene_tolerant()
     test_source_budget_scales_with_script()
     test_generic_beat_filler_leniency()
+    test_breakout_qa_whisper_generator()
     test_character_present_unconfirmed()
     test_verify_only_indices_subset()
     test_unified_visual_policy()

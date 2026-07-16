@@ -2309,8 +2309,14 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
                 speech_frac, ocov = 0.0, None
                 if _wm is not None:
                     _segs, _inf = _wm.transcribe(str(wav), word_timestamps=True, vad_filter=False)
-                    _wds = [str(w.word or "").strip() for _sg in _segs for w in (_sg.words or [])]
-                    _dur = [(float(w.start), float(w.end)) for _sg in _segs for w in (_sg.words or [])]
+                    # faster-whisper returns a GENERATOR. It must be materialised ONCE: consuming it
+                    # in the _wds comprehension left the _dur comprehension iterating an EXHAUSTED
+                    # generator, so speech_frac was ALWAYS 0.00 and this gate quarantined every
+                    # breakout video as "no detectable speech" — even with the dialogue plainly
+                    # audible at normal level. (_asr_wav_words does a single pass for this reason.)
+                    _slist = list(_segs)
+                    _wds = [str(w.word or "").strip() for _sg in _slist for w in (_sg.words or [])]
+                    _dur = [(float(w.start), float(w.end)) for _sg in _slist for w in (_sg.words or [])]
                     if d > 0:
                         speech_frac = min(1.0, sum(e - b for b, e in _dur) / d)
                     ocov = _ordered_coverage(re.findall(r"[a-z']+", line.lower()), _wds)
