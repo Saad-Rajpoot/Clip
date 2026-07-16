@@ -21,6 +21,7 @@ from typing import Optional
 
 from .models import SourceVideo, ClipProject, PERMISSION_BLOCKS, SOURCE_OK, SOURCE_BLOCKED, SOURCE_FAILED
 from .config import ClipConfig, ffmpeg_exe, ffprobe_exe
+from ..ffmpeg_tool import ytdlp_ffmpeg_dir
 
 _VIDEO_EXTS = (".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".flv", ".ts")
 
@@ -197,7 +198,9 @@ def _ingest_url(spec: SourceSpec, sid: str, proj: ClipProject, cfg: ClipConfig) 
         "format": f"bestvideo[height<={maxh}]+bestaudio/best[height<={maxh}]/best",
         "outtmpl": str(dest_stem) + ".%(ext)s",
         "merge_output_format": "mp4",
-        "ffmpeg_location": str(Path(ffmpeg_exe()).parent),
+        # see ffmpeg_tool.ytdlp_ffmpeg_dir — the binary's own parent dir holds a VERSIONED name that
+        # yt-dlp never matches, which disables the merger and aborts every download on Windows.
+        "ffmpeg_location": (ytdlp_ffmpeg_dir() or str(Path(ffmpeg_exe()).parent)),
         "quiet": True, "no_warnings": True, "noprogress": True,
         "retries": cfg.download_retries, "fragment_retries": cfg.download_retries,
         "ignoreerrors": False, "noplaylist": True,

@@ -3,6 +3,12 @@ setlocal EnableExtensions EnableDelayedExpansion
 title ClipStudio Portal (Windows)
 cd /d "%~dp0"
 
+REM  Windows Python defaults to the ANSI codepage (cp1252) for open()/subprocess text. This
+REM  pipeline handles YouTube titles with accents/emoji and Arabic/Urdu/Spanish scripts, which
+REM  CRASH a cp1252 decode. Force UTF-8 everywhere (no-op on a UTF-8 locale).
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
+
 REM  CLIP visual model = the animated / video-game / toy footage filter. If the models ship next to
 REM  this launcher (models\clip), point the tool at them so it never falls back to an EMPTY user cache
 REM  (empty cache = filter OFF = cartoon/game footage leaks in; the pipeline now refuses in that case).

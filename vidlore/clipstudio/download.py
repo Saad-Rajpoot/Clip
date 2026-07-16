@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .models import SourceVideo, ClipProject, SOURCE_OK, SOURCE_BLOCKED, SOURCE_FAILED
 from .config import ClipConfig, ffmpeg_exe
+from ..ffmpeg_tool import ytdlp_ffmpeg_dir
 from .discover import SourceCandidate
 from .ingest import probe, _sha1_file, _slug, _VIDEO_EXTS, find_produced_video
 import hashlib
@@ -97,7 +98,11 @@ def _download_one(cand: SourceCandidate, sid: str, perm: str, note: str,
                    f"bestvideo[height<={maxh}]+bestaudio/best[height<={maxh}]/best"),
         "outtmpl": str(dest_stem) + ".%(ext)s",
         "merge_output_format": "mp4",                 # normalize container
-        "ffmpeg_location": str(Path(ffmpeg_exe()).parent),
+        # NEVER Path(ffmpeg_exe()).parent — the imageio binary is VERSIONED
+        # (ffmpeg-win-x86_64-v7.1.exe), and yt-dlp only recognises a file literally named
+        # ffmpeg/ffprobe in the dir it is given. Handing it the binary's own dir makes the merger
+        # unavailable and aborts every bestvideo+bestaudio download (no footage at all on Windows).
+        "ffmpeg_location": (ytdlp_ffmpeg_dir() or str(Path(ffmpeg_exe()).parent)),
         "quiet": True, "no_warnings": True, "noprogress": True,
         "continuedl": True,                           # RESUME partial downloads
         "retries": cfg.download_retries, "fragment_retries": cfg.download_retries,

@@ -76,6 +76,55 @@ def ffmpeg_exe() -> str:
     return _resolve_ffmpeg()[0]
 
 
+@lru_cache(maxsize=1)
+def ytdlp_ffmpeg_dir() -> str | None:
+    """A directory holding ffmpeg/ffprobe under the EXACT names yt-dlp looks for, or None.
+
+    Hand this to yt-dlp as ``ffmpeg_location`` — NEVER ``Path(ffmpeg_exe()).parent``.
+
+    yt-dlp's FFmpegPostProcessor._determine_executables() joins the directory it is given with the
+    LITERAL names 'ffmpeg'/'ffprobe' (Windows appends '.exe'). Our resolved binary is usually the
+    imageio one, whose filename is VERSIONED — 'ffmpeg-win-x86_64-v7.1.exe' on Windows,
+    'ffmpeg-macos-aarch64-v7.1' on macOS — so passing its own parent directory matches NOTHING:
+    yt-dlp then reports the merger as unavailable and every 'bestvideo+bestaudio' download aborts
+    ("You have requested merging of multiple formats but ffmpeg is not installed"), i.e. no footage
+    at all. On a dev Mac this is masked whenever a real `ffmpeg` happens to be on PATH.
+
+    So expose a small cached dir of correctly-named links (copies where symlinks are unavailable —
+    Windows needs Developer Mode/admin for symlinks) pointing at the resolved binary.
+    """
+    try:
+        import tempfile
+        exe = Path(ffmpeg_exe())
+        if not exe.exists():
+            return None
+        _win = platform.system() == "Windows"
+        suffix = ".exe" if _win else ""
+        d = Path(tempfile.gettempdir()) / "vidlore_ffbin"
+        d.mkdir(parents=True, exist_ok=True)
+        for nm in ("ffmpeg", "ffprobe"):
+            link = d / f"{nm}{suffix}"
+            if link.exists():
+                continue
+            try:
+                link.symlink_to(exe)
+            except Exception:                              # noqa: BLE001 — Windows / no privilege
+                shutil.copy2(exe, link)
+                try:
+                    os.chmod(link, 0o755)
+                except Exception:                          # noqa: BLE001
+                    pass
+        # yt-dlp's FFmpegFD.available() is a classmethod that scans PATH only (it ignores
+        # ffmpeg_location), and partial/range downloads gate on it — so put this dir on PATH too.
+        _ds = str(d)
+        _pth = os.environ.get("PATH", "")
+        if _ds not in _pth.split(os.pathsep):
+            os.environ["PATH"] = _ds + os.pathsep + _pth
+        return _ds
+    except Exception:                                      # noqa: BLE001
+        return None
+
+
 def ffmpeg_source() -> str:
     """Where the active ffmpeg came from: env|bundled_nvenc|system|imageio."""
     return _resolve_ffmpeg()[1]
