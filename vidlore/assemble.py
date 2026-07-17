@@ -8986,7 +8986,14 @@ def assemble(
     encode_plan: list[dict] = []
     prev_mode = -1
     _mg_off: dict = {}                 # scene pos -> cumulative MG slice offset
-    for bi, (j, bd, _last, m) in enumerate(plan):
+    for bi, (j, _bd_raw, _last, m) in enumerate(plan):
+        # RENDER THE CARRIED TIMELINE, not the raw plan float. beat_durs is the frame-snapped,
+        # carry-corrected clock built above; the encoder used to take `bd` straight from `plan` and
+        # re-round it per segment at `int(round((bd + pad) * FPS))`, so beat_durs was computed and
+        # then ignored by the very code it exists to constrain. Every segment then contributed its
+        # own independent rounding error: measured +0.193s (~6 frames) across 43 beats in the
+        # acceptance render, which the sync invariant refused to publish.
+        bd = beat_durs[bi] if bi < len(beat_durs) else _bd_raw
         pad = beat_pad[bi] if bi < nb else 0.0      # dissolve-tail overlap
         ns = scenes[j]
         base = by_idx[ns.index]
@@ -9327,7 +9334,11 @@ def assemble(
                 # seg[bi] was rendered (plan dur + xf) long; the transition
                 # begins after its nominal tail so merged == the two beats'
                 # sum (frame-exact, sync preserved).
-                seg0_fr = max(1, int(round((plan[bi][1] + xf) * FPS)))
+                # the CARRIED duration, matching what was actually encoded — reading plan[bi][1]
+                # here re-introduced the raw float the renderer no longer uses, so the xfade offset
+                # described a segment length that does not exist
+                _bd0 = beat_durs[bi] if bi < len(beat_durs) else plan[bi][1]
+                seg0_fr = max(1, int(round((_bd0 + xf) * FPS)))
                 off = max(0.0, (seg0_fr - xf_fr) / FPS)
                 merged = workdir / f"trans_{bi:04d}.mp4"
                 run([
