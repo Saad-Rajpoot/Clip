@@ -936,13 +936,39 @@ def test_index_cache_and_atomic_saves():
     check("faceid-less cache rejected for a faceid call",
           out == [] and any("re-indexing" in m and "faceid" in m for m in msgs))
 
-    # same cache, same (no-cap) call → still served from cache
-    msgs2 = []
+    # a pre-schema-2 cache (no word-level ASR) must NOT be served: quote location would silently
+    # fall back to per-shot substring search, which cannot see a line that straddles a cut.
+    msgs_w = []
     cfg_noocr = ClipConfig()
     cfg_noocr.detect_ocr = False
+    out_w = IX.index_source(proj, src, cfg_noocr, progress=msgs_w.append)
+    check("pre-schema-2 (word-less) cache rejected",
+          out_w == [] and any("re-indexing" in m and "words" in m for m in msgs_w))
+
+    # same cache, same (no-cap) call, now schema-2 complete → still served from cache
+    (proj.index_dir / "s1.index.meta.json").write_text(
+        json.dumps({"faceid": False, "ocr": False, "words": True,
+                    "schema": IX.INDEX_SCHEMA}), encoding="utf-8")
+    (proj.index_dir / "s1.words.json").write_text("[]", encoding="utf-8")
+    msgs2 = []
     out2 = IX.index_source(proj, src, cfg_noocr, progress=msgs2.append)
     check("matching-capability cache still served",
           len(out2) == 1 and any("cached" in m for m in msgs2))
+
+    # a silent source legitimately has ZERO words; its cache must still be served, never re-indexed
+    # forever (meta records that the pass RAN, not that it found anything)
+    msgs3 = []
+    out3 = IX.index_source(proj, src, cfg_noocr, progress=msgs3.append)
+    check("silent source (0 words) cache is stable, not re-indexed forever",
+          len(out3) == 1 and not any("re-indexing" in m for m in msgs3))
+
+    # meta claims words but the file is gone → re-index (don't trust the claim alone)
+    (proj.index_dir / "s1.words.json").unlink()
+    msgs4 = []
+    out4 = IX.index_source(proj, src, cfg_noocr, progress=msgs4.append)
+    check("words cache with a missing file is rejected",
+          out4 == [] and any("re-indexing" in m and "words" in m for m in msgs4))
+    (proj.index_dir / "s1.words.json").write_text("[]", encoding="utf-8")
 
     # atomic save: project.json gets replaced, no .tmp left behind
     proj.save()

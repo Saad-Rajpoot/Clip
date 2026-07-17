@@ -654,8 +654,10 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
     _tmp.write_text(json.dumps([s.to_dict() for s in shots], indent=1), encoding="utf-8")
     _tmp.replace(shots_file)
     _mtmp = meta_file.with_suffix(".json.tmp")
+    # "words" records that the word-level PASS RAN, never that it found anything — a genuinely
+    # silent source yields [] and must still be cacheable, or it re-indexes on every run forever.
     _mtmp.write_text(json.dumps({"faceid": do_faceid, "ocr": do_ocr,
-                                 "roster": bool(roster), "words": bool(words),
+                                 "roster": bool(roster), "words": True,
                                  "schema": INDEX_SCHEMA}), encoding="utf-8")
     _mtmp.replace(meta_file)
     log(f"index: {source.id} done — {len(shots)} shots, {len(embeds)} embeds, clip={use_clip}")
