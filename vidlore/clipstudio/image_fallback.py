@@ -381,19 +381,37 @@ def pick_source_still(sel, shots_by_key: dict, used_keys: set, used_phash: set,
 
 def pick_pool_still(seg, shots_by_key: dict, used_keys: set, used_phash: set,
                     *, distinct_from=None, min_rel: float = 0.30, min_quality: float = 0.42,
-                    scan_cap: int = 220):
+                    scan_cap: int = 220, want_faces=None):
     """Best RELEVANT downloaded source-video keyframe for a beat that has NO usable selection /
     alternates — CLIP-ranked over the indexed pool (real footage frames ONLY, never web/AI). Bounded
-    by `scan_cap` so a no-clip beat can't scan an unbounded pool. Returns (kf, sid, shot, rel, phash)
-    or None when nothing in the pool is relevant enough (then the beat stays empty / flagged)."""
+    by `scan_cap` so a no-clip beat can't scan an unbounded pool. `want_faces` (a list of accepted
+    NAME token-sets from orchestrate.entity_name_variants) makes the pick FACE-AWARE for a named-
+    character beat: a shot whose Face-ID confirms the required person strictly outranks any
+    face-less/other shot — without it the picker fed 3 no-face candidates to the still checks and
+    every one was (correctly) rejected, leaving the beat for the release gate. Returns
+    (kf, sid, shot, rel, phash) or None when nothing in the pool is relevant enough."""
     text = _clean(getattr(seg, "scene_query", "") or getattr(seg, "expected_visual", "")
                   or getattr(seg, "text", ""))
     if not text:
         return None
     distinct_from = distinct_from or set()
-    best = None
+    variants = [v for v in (want_faces or []) if v]
+
+    def _face_hit(sh):
+        ftoks = set(re.findall(r"[a-z0-9]+",
+                               " ".join(getattr(sh, "face_ids", []) or []).lower()))
+        return any(v <= ftoks for v in variants)
+
+    items = list(shots_by_key.items())
+    if variants:
+        # face-confirmed shots FIRST in scan order — the scan_cap bounds CLIP calls, and dict
+        # order is per-source, so the pool's few confirmed shots of the required character could
+        # sit entirely past the cap and never be scanned (observed: 1 surviving confirmed shot,
+        # never reached). The cheap Face-ID test is evaluated on every shot; only CLIP is capped.
+        items.sort(key=lambda kv: 0 if _face_hit(kv[1]) else 1)
+    best = None                                    # (face_hit, rel, kf, sid, sidx, ph)
     scanned = 0
-    for key, shot in shots_by_key.items():
+    for key, shot in items:
         if scanned >= scan_cap:
             break
         if key in used_keys:
@@ -414,10 +432,11 @@ def pick_pool_still(seg, shots_by_key: dict, used_keys: set, used_phash: set,
         if ph and _min_hamming(ph, distinct_from) <= 14:
             continue
         scanned += 1
+        hit = 1 if (variants and _face_hit(shot)) else 0
         rel = _clip_relevance(Path(kf), text)
-        if rel >= min_rel and (best is None or rel > best[3]):
-            best = (kf, key[0], key[1], rel, ph)
-    return best
+        if rel >= min_rel and (best is None or (hit, rel) > (best[0], best[1])):
+            best = (hit, rel, kf, key[0], key[1], ph)
+    return (best[2], best[3], best[4], best[1], best[5]) if best else None
 
 
 # Web-image SOURCE/CONTEXT guard — reject candidates that are NOT a real in-show scene still:

@@ -219,6 +219,33 @@ def _season_num(text: str):
     return None
 
 
+_EPISODE_RX = re.compile(r"\bS0?\d{1,2}\s?E0?(\d{1,2})\b|\b\d{1,2}\s?x\s?0?(\d{1,2})\b", re.I)
+
+
+def _episode_num(text: str):
+    """Episode number declared anywhere in a string (S03E10 / 3x10), else None."""
+    m = _EPISODE_RX.search(text or "")
+    if m:
+        n = m.group(1) or m.group(2)
+        return int(n) if n else None
+    return None
+
+
+def _era_conflict(era_a: str, era_b: str) -> bool:
+    """Do two era strings CONTRADICT each other? Era strings arrive in mixed formats —
+    _beat_era returns the project's raw episode hint ('S04E01') for single-scene videos while
+    _title_season normalizes to 'season 4' — so a naive string != is NOT an era test: it
+    rejected every same-season still candidate as 'wrong era (beat S04E01 vs source season 4)'
+    and release-blocked a finished render. Compare CANONICALLY: a conflict needs both sides to
+    declare a season and the seasons to differ, or (same/undeclared season) both to declare an
+    episode and the episodes to differ. An era only one side declares can't contradict."""
+    sa, sb = _season_num(era_a), _season_num(era_b)
+    if sa is not None and sb is not None and sa != sb:
+        return True
+    ea, eb = _episode_num(era_a), _episode_num(era_b)
+    return ea is not None and eb is not None and ea != eb
+
+
 def _beat_mention_tokens(seg) -> set:
     """Every person/thing this beat MENTIONS (required_entity + its entities list). A shot showing
     any of these characters is CO-MENTIONED — narratively relevant, not contradictory (e.g. a Tywin

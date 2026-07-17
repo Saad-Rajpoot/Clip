@@ -58,7 +58,7 @@ try:
     from vidlore.clipstudio.cut import cut_all
     from vidlore.clipstudio import verify as _verify
     from vidlore.clipstudio import ledger
-    from vidlore.clipstudio.orchestrate import _fill_image_fallbacks
+    from vidlore.clipstudio.orchestrate import _fill_image_fallbacks, _recover_unresolved_beats
     from vidlore.clipstudio import faceid as _faceid
     from vidlore.clipstudio.build import build_video
 
@@ -83,8 +83,20 @@ try:
     cut_all(proj, cfg, progress=log)
     log("3/5 AI verify + repair")
     _verify.verify_and_repair(proj, segs, cfg, eng, progress=log)
+    # bounded recovery (R4-5) — same stage order as the full pipeline (verify → recovery →
+    # stills). Without it a verifier-rejected beat with no valid hold FATALs the build at the
+    # very end ("rediscovery needed") with no rediscovery ever attempted.
+    log("3b/5 bounded recovery")
+    try:
+        _recover_unresolved_beats(proj, segs, analysis, cfg, eng, faceid_obj=faceid_obj,
+                                  refs=refs, roster=analysis.actors,
+                                  policy=str(proj.meta.get("policy", "") or "block"), log=log)
+    except Exception as e:  # noqa: BLE001
+        log(f"recovery: skipped ({type(e).__name__}: {e})")
     log("4/5 image fallbacks")
-    _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log)
+    # eng_cfg enables the vision-verified still path (same as the portal pipeline) — without it
+    # the stage silently fell to deterministic-only checks ("no vision model")
+    _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, eng_cfg=eng)
     summ = ledger.finalize(proj, segs, cfg)
     proj.save()
     log(f"QC: {summ['flagged_for_review']}/{summ['segments']} flagged · "

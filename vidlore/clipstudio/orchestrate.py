@@ -226,7 +226,8 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
             ok, reason = _deterministic_still_ok(
                 source_title=title, score=score, seg=seg, faces=faces, movie_toks=_movie_toks,
                 global_era=_global_era_sv, single_scene=(_vtype_sv == "single_scene"),
-                min_clip=float(os.environ.get("VIDLORE_CLIPSTUDIO_DET_STILL_MIN_CLIP", "0.30") or 0.30))
+                min_clip=float(os.environ.get("VIDLORE_CLIPSTUDIO_DET_STILL_MIN_CLIP", "0.30") or 0.30),
+                char2actor=char2actor)
             if not ok:
                 log(f"image-fallback: beat {seg.index} — deterministic still rejected ({reason})")
             return ok
@@ -255,6 +256,7 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
     # image source. No NOW-photos / recent-actor photos / AI images anywhere in this path.
     from . import discover as _discover
     shots_by_key: dict = {}
+    shots_lowres_by_key: dict = {}
     _skipped_src = 0
     _skipped_wm = 0
     _skipped_lowres = 0
@@ -282,15 +284,22 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
         if _discover.is_unwanted_source_title(getattr(s, "title", "") or ""):
             _skipped_src += 1
             continue
-        if _still_min_h and 0 < int(getattr(s, "height", 0) or 0) < _still_min_h:
-            _skipped_lowres += 1
-            continue
         try:
             _shots = _index.load_shots(proj, s.id)
         except Exception:
             continue
         if _src_wm(_shots) or (_corner_on and _src_logo(_shots)):
             _skipped_wm += 1
+            continue
+        if _still_min_h and 0 < int(getattr(s, "height", 0) or 0) < _still_min_h:
+            # kept OUT of the normal still pool, but retained as a LAST-RESORT pool for
+            # exact/character beats the HD pool can't cover (observed: every face-confirmed
+            # Tywin shot lived in 360p uploads, so the HD-only pool starved the whole fallback
+            # chain and the render release-blocked). Watermarked / reaction-essay sources are
+            # CONTENT exclusions and stay out of both pools.
+            _skipped_lowres += 1
+            for sh in _shots:
+                shots_lowres_by_key[(sh.source_id, sh.index)] = sh
             continue
         for sh in _shots:
             shots_by_key[(sh.source_id, sh.index)] = sh
@@ -337,7 +346,11 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
         want_still = no_clip or pol == _policy.ABSTRACT or (pol == _policy.FILLER and repeat) or weak
         # ESSENTIAL fills (a beat with NO clip, or an exact-scene recovery) must always proceed — the
         # still_cap only throttles OPTIONAL repeat-breaking / variety stills, not coverage (req. 5).
-        essential = no_clip or (pol == _policy.EXACT and weak)
+        # a verifier-REJECTED beat's still is COVERAGE, not variety — the release gate blocks
+        # ANY policy's rejected beat, so none of them may be starved by the variety cap
+        # (observed: an abstract outro beat hit `cap 24` late in the video, got no still, and
+        # release-blocked the render)
+        essential = no_clip or weak
         within_cap = essential or src_filled < still_cap
         if want_still and within_cap and not (sel and getattr(sel, "image_path", "")):
             # Collect several RANKED still candidates, then (for exact/character beats) install the
@@ -352,9 +365,19 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                                                distinct_from=aired_phash)
                 if _s0:
                     _cands.append(_s0); _seen_keys = _seen_keys | {(_s0[1], _s0[2])}
-            for _ in range(3):                         # a few ranked pool candidates
+            # FACE-AWARE pool pick for a named-character beat: without want_faces the picker fed
+            # 3 no-face candidates and every one was (correctly) rejected by the still checks —
+            # the beat then release-blocked despite the pool being FULL of the right character.
+            _wf = (entity_name_variants(getattr(seg, "required_entity", ""), char2actor)
+                   if (getattr(seg, "required_kind", "") or "").lower() in ("character", "actor")
+                   else None)
+            # candidate breadth is decisive: measured on a blocked render, the first ACCEPTED
+            # frame for one starved beat was candidate #4 — a cap of 3 release-blocked it every
+            # run. Each candidate is still individually vision/deterministically verified.
+            _cand_n = max(3, int(os.environ.get("VIDLORE_CLIPSTUDIO_STILL_CANDIDATES", "6") or 6))
+            for _ in range(_cand_n):                   # ranked pool candidates
                 _sp = _imgfb.pick_pool_still(seg, shots_by_key, _seen_keys, used_phash,
-                                             distinct_from=aired_phash)
+                                             distinct_from=aired_phash, want_faces=_wf)
                 if not _sp:
                     break
                 _cands.append(_sp); _seen_keys = _seen_keys | {(_sp[1], _sp[2])}
@@ -384,12 +407,65 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                         log(f"image-fallback: beat {seg.index} — no vision model and no candidate "
                             f"passed the deterministic same-show/era/CLIP/Face-ID checks → left "
                             f"unresolved (no arbitrary unverified still installed)")
+                _lowres_pick = False
+                if still is None and shots_lowres_by_key:
+                    # LAST-RESORT sub-HD retry: this project's only face-confirmed shots of the
+                    # required character may live entirely in sub-480p uploads (observed: ALL 73
+                    # Tywin-confirmed shots were 360p, so the HD-only pool starved every fallback
+                    # and the render release-blocked). A soft-but-CORRECT still of the right
+                    # person beats a dead render — relevance-first, same doctrine as match's
+                    # '360p exact beats irrelevant 1080p'. The SAME semantic verification
+                    # applies (vision verdict, else the deterministic same-show/era/CLIP/Face-ID
+                    # gate); watermarked and reaction/essay sources stay excluded from this pool.
+                    _lr_seen = set(used_keys)
+                    _lr_cands = []
+                    for _ in range(_cand_n):
+                        _lp = _imgfb.pick_pool_still(seg, shots_lowres_by_key, _lr_seen,
+                                                     used_phash, distinct_from=aired_phash,
+                                                     want_faces=_wf)
+                        if not _lp:
+                            break
+                        _lr_cands.append(_lp); _lr_seen = _lr_seen | {(_lp[1], _lp[2])}
+                    for _c in _lr_cands:
+                        _vd = _still_verdict(_c[0], seg, _c[1], _c[2])
+                        if _vd == "ok" or (_vd == "disabled"
+                                           and _still_deterministic_ok(_c[1], _c[2], _c[3], seg)):
+                            still, _still_verified, _lowres_pick = _c, True, True
+                            log(f"image-fallback: beat {seg.index} — LAST-RESORT sub-HD still "
+                                f"installed (semantically verified; the only confirmed footage "
+                                f"of the required subject is low-res)")
+                            break
+                        _rej += (_vd == "reject"); _unv += (_vd == "unverified")
+                        log(f"image-fallback: beat {seg.index} — last-resort candidate "
+                            f"src={str(_c[1])[:28]}#{_c[2]} verdict={_vd} (not installed)")
+                    if still is None and not _lr_cands:
+                        log(f"image-fallback: beat {seg.index} — last-resort pool offered no "
+                            f"candidate (face/quality/CLIP floors)")
+                if still is None and _unv > 0 and _rej == 0 and (_cands or _lr_cands):
+                    # VISION-OUTAGE signature: every judged candidate came back 'unverified'
+                    # (transport failures — NOT semantic rejections; a mixed batch with any real
+                    # 'reject' means the API works and the verdicts stand). A 2-minute API blip
+                    # starved a beat whose frames verified 'keep' an hour earlier — wait the blip
+                    # out ONCE and re-judge the top candidates; still fail-closed if the outage
+                    # persists.
+                    import time as _time_ov
+                    _time_ov.sleep(float(os.environ.get(
+                        "VIDLORE_CLIPSTUDIO_VISION_RETRY_SEC", "25") or 25))
+                    for _c in (list(_cands) + list(_lr_cands))[:3]:
+                        _vd = _still_verdict(_c[0], seg, _c[1], _c[2])
+                        if _vd == "ok":
+                            still, _still_verified = _c, True
+                            _lowres_pick = _c in _lr_cands
+                            log(f"image-fallback: beat {seg.index} — vision recovered after an "
+                                f"outage window; still installed on backoff retry")
+                            break
                 if still is None and _cands:
                     log(f"image-fallback: beat {seg.index} — {len(_cands)} recovery still(s) not "
                         f"installed ({_rej} rejected wrong-char/era, {_unv} unverified) → left for "
                         f"web-exact/review (no wrong still airs)")
             else:
                 still, _still_verified = (_cands[0] if _cands else None), True   # filler: CLIP-ranked ok
+                _lowres_pick = False
             if still:
                 kf, sid, sidx, score, sph = still
                 if sel is None:
@@ -412,6 +488,7 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                 sel.image_meta = {"source": _src, "score": round(float(score), 3),
                                   "src": sid, "shot": sidx, "relevance_class": _rclass,
                                   "still_verified": bool(_still_verified),
+                                  "lowres_still": bool(_lowres_pick),
                                   "exact_scene_missing": bool(pol == _policy.EXACT and (weak or no_clip))}
                 used_keys.add((sid, sidx))
                 if sph:
@@ -556,8 +633,36 @@ def _title_season(title: str) -> str:
     return ""
 
 
+_NAME_ARTICLES = {"the", "a", "an", "of", "and"}
+
+
+def entity_name_variants(entity: str, char2actor: dict | None = None) -> list:
+    """Accepted NAME token-sets for a required entity: the entity itself plus its analysis-roster
+    aliases BOTH ways (a beat naming the CHARACTER accepts the ACTOR's Face-ID name and vice
+    versa — Face-ID references are built from actor names, so 'joffrey baratheon' must accept a
+    'jack gleeson' face). Each variant keeps the ALL-distinctive-tokens rule (Jon Snow vs Jon
+    Arryn can never cross-match). Returns a list of lower-cased token sets."""
+    import re as _re
+
+    def _toks(s):
+        return {w for w in _re.findall(r"[a-z0-9]+", str(s or "").lower())
+                if len(w) > 2 and w not in _NAME_ARTICLES}
+
+    ent_toks = _toks(entity)
+    variants = [ent_toks] if ent_toks else []
+    for ch, ac in (char2actor or {}).items():
+        cht, act = _toks(ch), _toks(ac)
+        if not (cht and act):
+            continue
+        if cht <= ent_toks:                     # beat names this CHARACTER → its actor is the same person
+            variants.append(act)
+        if act <= ent_toks:                     # beat names the ACTOR → their character is the same person
+            variants.append(cht)
+    return variants
+
+
 def _deterministic_still_ok(*, source_title, score, seg, faces, movie_toks, global_era,
-                            single_scene, min_clip=0.30):
+                            single_scene, min_clip=0.30, char2actor=None):
     """R4-6 — the PURE deterministic gate for installing a recovery still when NO vision model is
     available. Every claim is EVALUATED (never assumed): a still is accepted only when ALL of
       (1) SAME-SHOW via meaningful normalized title identity (generic/stopwords removed — 'Game of
@@ -584,47 +689,63 @@ def _deterministic_still_ok(*, source_title, score, seg, faces, movie_toks, glob
         if len(_shared) < _need:
             return False, (f"different / unconfirmed show (title {sorted(tt)} shares only "
                            f"{sorted(_shared)} with movie {sorted(mt)}; need >= {_need})")
-    # (2) explicit era: compare the beat's own era to the source title's declared season
+    # (2) explicit era: compare the beat's own era to the source title's declared season —
+    # CANONICALLY (era strings arrive in mixed formats: 'S04E01' vs 'season 4' is the SAME era)
+    from .verify import _era_conflict
     era_beat = _beat_era(seg, global_era, single_scene)
     era_src = _title_season(source_title)
-    if era_beat and era_src and era_beat != era_src:
+    if _era_conflict(era_beat, era_src):
         return False, f"wrong era (beat {era_beat} vs source {era_src})"
     # (3) CLIP relevance floor
     if float(score or 0.0) < float(min_clip):
         return False, f"CLIP relevance {float(score or 0.0):.2f} < floor {float(min_clip):.2f}"
     # (4) named character must be Face-ID-present in the shot. Match on WHOLE-WORD tokens (not
     # substring — 'the' in 'theon' or 'jon' in 'jonas' must not count) and drop leading articles
-    # ('The Hound' -> distinctive token 'hound', not 'the'). Require ALL distinctive entity tokens
-    # present, so a shared given name or surname alone (Jon Snow vs Jon Arryn; Tywin vs Cersei
-    # Lannister) can NEVER satisfy a different character.
-    _articles = {"the", "a", "an", "of", "and"}
+    # ('The Hound' -> distinctive token 'hound', not 'the'). Require ALL distinctive tokens of ONE
+    # accepted NAME present, so a shared given name or surname alone (Jon Snow vs Jon Arryn; Tywin
+    # vs Cersei Lannister) can NEVER satisfy a different character. Face-ID identities are ACTOR
+    # names while beats usually name CHARACTERS — a perfect Joffrey frame carries face 'jack
+    # gleeson', so the accepted names include the roster (char2actor) mapping BOTH ways.
     _ent = (getattr(seg, "required_entity", "") or "").strip().lower()
     _kind = (getattr(seg, "required_kind", "") or "").lower()
     if _ent and _kind in ("character", "actor"):
         _face_toks = set(_re.findall(r"[a-z0-9]+", " ".join(faces or []).lower()))
-        _ent_toks = [w for w in _re.findall(r"[a-z0-9]+", _ent)
-                     if len(w) > 2 and w not in _articles]
-        _matched = bool(_ent_toks) and all(t in _face_toks for t in _ent_toks)
+        _variants = entity_name_variants(_ent, char2actor)
+        _matched = any(v and all(t in _face_toks for t in v) for v in _variants)
         if not _matched:
             return False, (f"required character '{_ent}' not Face-ID-confirmed "
-                           f"(need all of {_ent_toks} in {sorted(_face_toks)[:6]})")
+                           f"(need all tokens of one of {[sorted(v) for v in _variants[:4]]} "
+                           f"in {sorted(_face_toks)[:6]})")
     return True, f"same-show + era({era_beat or 'any'}) + CLIP + Face-ID all pass"
 
 
 def _beat_is_unresolved(sel, seg, _policy) -> bool:
-    """An EXACT beat with no trustworthy footage yet: no selection, a verifier REJECTION (replace),
-    or no source at all — and no real still (a source-frame / web-exact-scene still IS coverage).
-    Contextual/generic beats are never 'unresolved' (they have a legitimate fallback treatment)."""
-    if seg is None or not _policy.is_exact(seg):
+    """A beat the build-stage rejected-footage gate could RELEASE-BLOCK, i.e. one recovery must
+    try to fix. Two classes:
+      • EXACT beats — no selection, a verifier REJECTION (replace), or no source at all, and no
+        real still (a source-frame / web-exact-scene still IS coverage).
+      • EVERY OTHER policy — a verifier REJECTION with no still. The gate does NOT exempt
+        non-exact beats: a rejected character/filler clip whose editorial hold later fails the
+        R4-3/R4-4 validity checks release-blocks the finished render exactly like an exact one
+        (observed: 7 character_specific beats FATALed a 4½-hour render while recovery reported
+        zero unresolved, because this check filtered to exact_scene only). Recovery and the gate
+        must see the SAME set — the gate's own block message says 'rediscovery needed'."""
+    if seg is None:
         return False
+    exact = _policy.is_exact(seg)
     if sel is None:
-        return True
+        return exact                      # a discovery gap: only exact beats demand footage here
     _im = getattr(sel, "image_meta", {}) or {}
-    if getattr(sel, "image_path", "") and _im.get("source") in ("source-frame", "web-exact-scene"):
-        return False
+    if getattr(sel, "image_path", ""):
+        # exact beats accept only a REAL still as coverage; the gate skips any beat with an
+        # image_path, so for non-exact beats any still resolves it
+        if not exact or _im.get("source") in ("source-frame", "web-exact-scene"):
+            return False
     v = getattr(sel, "verifier", {}) or {}
     verifier_failed = v.get("status") == "ok" and v.get("verdict") == "replace"
-    return bool(verifier_failed or not getattr(sel, "source_id", ""))
+    if exact:
+        return bool(verifier_failed or not getattr(sel, "source_id", ""))
+    return bool(verifier_failed)
 
 
 def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, refs, roster,
@@ -663,8 +784,27 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
     if not unresolved:
         _write_recovery_audit(proj, audit)
         return 0
+    # GATE-VULNERABLE beats first when the cap trims. Evidence across four blocked renders:
+    # every blocker was a CHARACTER beat (their stills need a verified face — the hardest
+    # coverage) plus one capped abstract beat; abstract/filler rejected beats take a lenient
+    # CLIP-ranked still, and exact beats keep the deterministic-still fallback downstream. So:
+    # character first, then filler/abstract, exact last; script order within each class. Beats
+    # with NO query material (no scene_query/required_entity — e.g. an abstract outro line)
+    # can't be rediscovered and must not burn a slot; stills cover them.
+    def _rec_rank(i):
+        s = seg_by_idx.get(i)
+        p = _policy.policy_of(s) if s is not None else _policy.FILLER
+        return ({_policy.CHARACTER: 0, _policy.FILLER: 1, _policy.ABSTRACT: 1,
+                 _policy.EXACT: 2}.get(p, 1), i)
+    unresolved = [i for i in unresolved
+                  if ((getattr(seg_by_idx.get(i), "scene_query", "") or "").strip()
+                      or (getattr(seg_by_idx.get(i), "required_entity", "") or "").strip())]
+    unresolved.sort(key=_rec_rank)
     unresolved = unresolved[:max_beats]
-    log(f"recovery: {len(unresolved)} unresolved exact beat(s) → bounded rediscovery {unresolved}")
+    if not unresolved:
+        _write_recovery_audit(proj, audit)
+        return 0
+    log(f"recovery: {len(unresolved)} unresolved beat(s) → bounded rediscovery {unresolved}")
 
     # Snapshot EVERY current selection; the final selection list is snapshot ∪ (recovered new picks).
     snapshot = {s.segment_index: _copy.deepcopy(s) for s in proj.selections}

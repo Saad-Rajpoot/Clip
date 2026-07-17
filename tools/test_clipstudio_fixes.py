@@ -4932,6 +4932,251 @@ def test_breakout_correctness():
           and 'not in ("0", "false", "no")' in bsrc.split("SKIP_DUP_BREAKOUT")[1][:120])
 
 
+def test_release_gate_recovery_alignment():
+    print("[release-gate] recovery sees every gate-blockable beat + hold roster mapping")
+    from vidlore.clipstudio.orchestrate import _beat_is_unresolved
+    from vidlore.clipstudio.build import _hold_scene_compat
+    from vidlore.clipstudio import policy as _pol
+
+    def seg_of(policy, ent="", kind=""):
+        return types.SimpleNamespace(visual_policy=policy, required_entity=ent,
+                                     required_kind=kind, quote="", is_specific_claim=False,
+                                     text="", breakout_candidate=False)
+
+    def sel_of(verdict="", img="", img_src="", src="src1"):
+        return types.SimpleNamespace(
+            verifier=({"status": "ok", "verdict": verdict} if verdict else {}),
+            image_path=img, image_meta=({"source": img_src} if img_src else {}),
+            source_id=src)
+
+    # (1) the gate blocks ANY policy's verifier-rejected beat — recovery must see the same set.
+    # Observed failure: 7 character_specific beats FATALed a finished render while recovery
+    # reported zero unresolved (it filtered to exact_scene only).
+    check("rejected character beat IS unresolved (was invisible to recovery)",
+          _beat_is_unresolved(sel_of("replace"), seg_of("character_specific",
+                                                        "Sansa Stark", "character"), _pol))
+    check("rejected generic beat IS unresolved",
+          _beat_is_unresolved(sel_of("replace"), seg_of("generic_filler"), _pol))
+    check("kept character beat is NOT unresolved",
+          not _beat_is_unresolved(sel_of("keep"), seg_of("character_specific"), _pol))
+    check("rejected character beat WITH a still is NOT unresolved (gate skips image beats)",
+          not _beat_is_unresolved(sel_of("replace", img="/x/a.jpg", img_src="web-portrait"),
+                                  seg_of("character_specific"), _pol))
+    check("exact beat requires a REAL still (web-portrait does not cover it)",
+          _beat_is_unresolved(sel_of("replace", img="/x/a.jpg", img_src="web-portrait"),
+                              seg_of("exact_scene"), _pol))
+    check("exact beat with a source-frame still is covered",
+          not _beat_is_unresolved(sel_of("replace", img="/x/a.jpg", img_src="source-frame"),
+                                  seg_of("exact_scene"), _pol))
+    check("missing selection: unresolved for exact only",
+          _beat_is_unresolved(None, seg_of("exact_scene"), _pol)
+          and not _beat_is_unresolved(None, seg_of("character_specific"), _pol))
+
+    # (2) hold Face-ID identity check maps character↔actor through the roster: a
+    # 'sophie turner' held frame IS 'sansa stark' (was rejected as a different person).
+    def hseg(ent="", kind=""):
+        return types.SimpleNamespace(
+            scene_query="sansa stark red keep courtyard pleads", required_entity=ent,
+            required_kind=kind, expected_visual="", text="")
+    def hsel(identity, src="s1"):
+        return types.SimpleNamespace(identity=identity, source_id=src)
+    _c2a = {"Sansa Stark": "Sophie Turner", "Cersei Lannister": "Lena Headey"}
+    ok_map, ev_map = _hold_scene_compat(
+        hseg(), hseg("Sansa Stark", "character"), hsel("Sophie Turner"), hsel(""),
+        single_scene=False, global_era="", char2actor=_c2a)
+    check(f"hold accepts the SAME person across actor/character naming (roster-mapped) "
+          f"[{ev_map.get('reason', 'ok')}]", ok_map)
+    ok_wrong, _ = _hold_scene_compat(
+        hseg(), hseg("Sansa Stark", "character"), hsel("Lena Headey"), hsel(""),
+        single_scene=False, global_era="", char2actor=_c2a)
+    check("hold still rejects a genuinely DIFFERENT person", not ok_wrong)
+    ok_nomap, _ = _hold_scene_compat(
+        hseg(), hseg("Sansa Stark", "character"), hsel("Sophie Turner"), hsel(""),
+        single_scene=False, global_era="", char2actor=None)
+    check("without a roster the old conservative rejection stands (fail-closed)", not ok_nomap)
+
+    # (3) wiring: gate passes the roster; recovery prioritizes exact beats at the cap;
+    # the surgical re-render tool runs the recovery stage (it FATALed without it)
+    root = Path(__file__).resolve().parents[1]
+    bsrc = (root / "vidlore" / "clipstudio" / "build.py").read_text(encoding="utf-8")
+    osrc = (root / "vidlore" / "clipstudio" / "orchestrate.py").read_text(encoding="utf-8")
+    tsrc = (root / "tools" / "rerender_project.py").read_text(encoding="utf-8")
+    check("release gate passes the analysis roster into hold compat",
+          "char2actor=_c2a_rf" in bsrc)
+    check("recovery cap keeps GATE-VULNERABLE beats first (character-ranked)",
+          "unresolved.sort(key=_rec_rank)" in osrc)
+    check("surgical re-render tool runs bounded recovery before stills",
+          "_recover_unresolved_beats(" in tsrc)
+
+    # (4) era strings arrive in MIXED formats — canonical comparison, never string !=.
+    # Observed: every still candidate rejected as "wrong era (beat S04E01 vs source season 4)"
+    # (the SAME era), which release-blocked a finished render.
+    from vidlore.clipstudio.verify import _era_conflict
+    from vidlore.clipstudio.orchestrate import _deterministic_still_ok
+    check("S04E01 vs 'season 4' is the SAME era (no conflict)",
+          not _era_conflict("S04E01", "season 4"))
+    check("S04E01 vs 'season 3' conflicts", _era_conflict("S04E01", "season 3"))
+    check("same season, different EPISODE conflicts (S04E01 vs S04E10)",
+          _era_conflict("S04E01", "S04E10"))
+    check("a one-sided era never conflicts",
+          not _era_conflict("season 4", "") and not _era_conflict("", "S04E01"))
+    check("identical eras never conflict",
+          not _era_conflict("season 4", "season 4") and not _era_conflict("S04E01", "s04e01"))
+    _seg_e = types.SimpleNamespace(scene_query="", expected_visual="", text="",
+                                   required_entity="", required_kind="")
+    ok_e, why_e = _deterministic_still_ok(
+        source_title="Game of Thrones Season 4 Tywin scenes", score=0.9, seg=_seg_e,
+        faces=[], movie_toks={"game", "thrones"}, global_era="S04E01", single_scene=True)
+    check(f"deterministic still accepts a same-era source (S04E01 beat, 'Season 4' title) "
+          f"[{why_e[:40]}]", ok_e)
+    ok_e2, _ = _deterministic_still_ok(
+        source_title="Game of Thrones Season 3 Tywin scenes", score=0.9, seg=_seg_e,
+        faces=[], movie_toks={"game", "thrones"}, global_era="S04E01", single_scene=True)
+    check("deterministic still still rejects a genuinely WRONG season", not ok_e2)
+
+    # (5) Face-ID identities are ACTOR names; beats name CHARACTERS. The still checks and the
+    # pool picker must map through the roster (a perfect Joffrey frame carries 'jack gleeson').
+    from vidlore.clipstudio.orchestrate import entity_name_variants
+    _c2a2 = {"Joffrey Baratheon": "Jack Gleeson"}
+    _vars = entity_name_variants("joffrey baratheon", _c2a2)
+    check("entity variants include the roster ACTOR name",
+          {"jack", "gleeson"} in _vars and {"joffrey", "baratheon"} in _vars)
+    check("actor-named beat maps back to the CHARACTER",
+          {"joffrey", "baratheon"} in entity_name_variants("jack gleeson", _c2a2))
+    _seg_j = types.SimpleNamespace(scene_query="", expected_visual="", text="",
+                                   required_entity="Joffrey Baratheon", required_kind="character")
+    ok_j, _ = _deterministic_still_ok(
+        source_title="Game of Thrones Season 4", score=0.9, seg=_seg_j,
+        faces=["Jack Gleeson"], movie_toks={"game", "thrones"}, global_era="S04E01",
+        single_scene=True, char2actor=_c2a2)
+    check("deterministic still accepts the character's ACTOR Face-ID (roster-mapped)", ok_j)
+    ok_j2, _ = _deterministic_still_ok(
+        source_title="Game of Thrones Season 4", score=0.9, seg=_seg_j,
+        faces=["Lena Headey"], movie_toks={"game", "thrones"}, global_era="S04E01",
+        single_scene=True, char2actor=_c2a2)
+    check("deterministic still rejects a DIFFERENT person's face (roster active)", not ok_j2)
+
+    # (6) pool picker prefers a Face-ID-confirmed shot of the required character over a
+    # higher-CLIP shot with no face (3 no-face candidates previously all failed the checks)
+    from vidlore.clipstudio import image_fallback as _imgfb
+    from PIL import Image as _Img
+    with tempfile.TemporaryDirectory() as _td:
+        _kfa, _kfb = os.path.join(_td, "a.jpg"), os.path.join(_td, "b.jpg")
+        _Img.new("RGB", (32, 18), (40, 40, 40)).save(_kfa)
+        _Img.new("RGB", (32, 18), (90, 90, 90)).save(_kfb)
+
+        def _stub_shot(kf, faces, ph):
+            return types.SimpleNamespace(keyframe_path=kf, quality=0.9, phash=ph,
+                                         face_ids=faces, subs_flag=0, luma_avg=60.0,
+                                         luma_hi=200.0, corner_masks={}, ocr_text="",
+                                         ocr_names=[])
+        _pool = {("s1", 0): _stub_shot(_kfa, ["Jack Gleeson"], "a" * 16),
+                 ("s2", 0): _stub_shot(_kfb, [], "f" * 16)}
+        _seg_p = types.SimpleNamespace(scene_query="joffrey throne room", expected_visual="",
+                                       text="")
+        _old_rel = _imgfb._clip_relevance
+        _imgfb._clip_relevance = lambda p, t: 0.9 if str(p).endswith("b.jpg") else 0.5
+        try:
+            _pick_f = _imgfb.pick_pool_still(_seg_p, _pool, set(), set(),
+                                             want_faces=[{"jack", "gleeson"}])
+            _pick_n = _imgfb.pick_pool_still(_seg_p, _pool, set(), set())
+        finally:
+            _imgfb._clip_relevance = _old_rel
+        check("face-aware pick: the required character's shot outranks a higher-CLIP no-face shot",
+              _pick_f is not None and _pick_f[1] == "s1")
+        check("without want_faces the pick stays pure CLIP-ranked (no behavior change)",
+              _pick_n is not None and _pick_n[1] == "s2")
+        # scan_cap must never skip the pool's few face-confirmed shots: 3 no-face shots fill a
+        # cap of 3, with the ONLY confirmed shot inserted LAST in dict order
+        _pool_cap = {(f"n{i}", 0): _stub_shot(_kfb, [], f"{i:x}" * 16) for i in range(3)}
+        _pool_cap[("hit", 0)] = _stub_shot(_kfa, ["Jack Gleeson"], "a" * 16)
+        _imgfb._clip_relevance = lambda p, t: 0.6
+        try:
+            _pick_c = _imgfb.pick_pool_still(_seg_p, _pool_cap, set(), set(), scan_cap=3,
+                                             want_faces=[{"jack", "gleeson"}])
+        finally:
+            _imgfb._clip_relevance = _old_rel
+        check("face-confirmed shots are scanned FIRST (scan_cap can't hide them)",
+              _pick_c is not None and _pick_c[1] == "hit")
+    root2 = Path(__file__).resolve().parents[1]
+    osrc2 = (root2 / "vidlore" / "clipstudio" / "orchestrate.py").read_text(encoding="utf-8")
+    tsrc2 = (root2 / "tools" / "rerender_project.py").read_text(encoding="utf-8")
+    check("PASS-1 pool picks are face-aware for character beats",
+          "want_faces=_wf" in osrc2)
+    check("re-render tool enables the vision still verifier (eng_cfg)",
+          "eng_cfg=eng" in tsrc2)
+    # (7) sub-HD LAST-RESORT still pool: low-res sources are retained in a separate pool and
+    # retried ONLY when the HD pool produced nothing installable, under the SAME semantic
+    # verification; watermarked/reaction sources stay excluded from BOTH pools (content safety).
+    check("low-res sources retained as a last-resort still pool",
+          "shots_lowres_by_key[(sh.source_id, sh.index)]" in osrc2
+          and "LAST-RESORT sub-HD still" in osrc2)
+    check("last-resort retry verifies semantically (vision verdict / deterministic gate)",
+          "_vd == \"ok\" or (_vd == \"disabled\"" in osrc2)
+    check("watermark check runs BEFORE the low-res split (never in either pool)",
+          osrc2.index("_src_wm(_shots) or (_corner_on and _src_logo(_shots))")
+          < osrc2.index("shots_lowres_by_key[(sh.source_id, sh.index)]"))
+    check("low-res installs are labelled honestly for the ledger",
+          "\"lowres_still\": bool(_lowres_pick)" in osrc2)
+    # (8) rejected beats' stills are COVERAGE (never starved by the variety cap — an abstract
+    # outro beat hit `cap 24` and release-blocked), and the recovery cap ranks CHARACTER beats
+    # first (every observed blocker was one), skipping beats with no query material.
+    check("verifier-rejected beats' stills are essential (variety cap can't starve them)",
+          "essential = no_clip or weak" in osrc2)
+    check("recovery ranks CHARACTER beats first and skips query-less beats",
+          "_policy.CHARACTER: 0" in osrc2 and "can't be rediscovered" in osrc2)
+
+    # (9) a validated same-scene hold blocked ONLY by the frozen-frame duration caps becomes a
+    # Ken-Burns MOTION hold (the caps exist against long FROZEN frames; a push-in is the tool's
+    # own sanctioned still treatment). Any other blocker still release-blocks.
+    from vidlore.clipstudio.build import _hold_block_reason
+    _dur_block = _hold_block_reason(clips_present=True, has_predecessor=True, compat_ok=True,
+                                    compat_reason="", consec_holds=0, hold_cap=1,
+                                    beat_hold_dur=4.6, hold_total=0.0,
+                                    single_cap=2.5, total_cap=3.0)
+    _dur_only = _hold_block_reason(clips_present=True, has_predecessor=True, compat_ok=True,
+                                   compat_reason="", consec_holds=0, hold_cap=1,
+                                   beat_hold_dur=0.0, hold_total=0.0,
+                                   single_cap=2.5, total_cap=3.0)
+    _not_dur = _hold_block_reason(clips_present=True, has_predecessor=True, compat_ok=False,
+                                  compat_reason="scene tokens differ", consec_holds=0, hold_cap=1,
+                                  beat_hold_dur=0.0, hold_total=0.0,
+                                  single_cap=2.5, total_cap=3.0)
+    check("duration-capped hold is detected as DURATION-ONLY (zeroed re-check passes)",
+          _dur_block is not None and "cap" in _dur_block and _dur_only is None)
+    check("a compat-failed hold is NOT duration-only (still release-blocks)",
+          _not_dur is not None)
+    bsrc2 = (root2 / "vidlore" / "clipstudio" / "build.py").read_text(encoding="utf-8")
+    check("gate wires the Ken-Burns motion hold for duration-only blocks",
+          "_kenburns_hold(Path(_last_clean_r)" in bsrc2
+          and "same-scene Ken-Burns MOTION hold" in bsrc2)
+    check("motion holds don't count against the FROZEN-seconds caps",
+          "if not _motion_hold:" in bsrc2)
+
+    # (10) cast-interview / press-junket recap sources never enter any pool ('Richard Madden
+    # Relives the Red Wedding' matched a Tyrion beat and release-blocked it)
+    from vidlore.clipstudio.discover import is_unwanted_source_title as _unw
+    check("actor-interview recap titles are unwanted sources",
+          _unw("Richard Madden Relives the Red Wedding | Game of Thrones")
+          and _unw("Jaime Lannister Breaks Down His Best Scenes")
+          and _unw("Sophie Turner Looks Back at Sansa's Journey"))
+    check("REAL scene uploads still pass the source gate",
+          not _unw("Tywin Lannister Dismisses King Joffrey | Game Of Thrones")
+          and not _unw("The Scene Tywin Lannister proved his power | GoT S3E10")
+          and not _unw("Tyrion kills Tywin Lannister - Game of Thrones"))
+    # (11) candidate breadth: the first ACCEPTED frame for a starved beat was #4 — the cap of 3
+    # release-blocked it every run (measured offline: 6 candidates → keeps at #2/#3/#4/#6)
+    check("still search offers ≥6 verified candidates (env-tunable, default 6)",
+          "VIDLORE_CLIPSTUDIO_STILL_CANDIDATES" in osrc2
+          and "for _ in range(_cand_n)" in osrc2 and "for _ in range(3)" not in osrc2)
+    # (12) a vision-API outage (ALL candidates 'unverified', ZERO semantic rejections) gets ONE
+    # bounded backoff retry — a 2-minute blip must not permanently starve a beat's coverage;
+    # any real 'reject' in the batch means the API works and verdicts stand (no retry)
+    check("vision-outage signature gets a bounded backoff retry (fail-closed if it persists)",
+          "_unv > 0 and _rej == 0" in osrc2
+          and "VIDLORE_CLIPSTUDIO_VISION_RETRY_SEC" in osrc2)
+
+
 def test_music_dynamics_wiring():
     print("[stage-3] natural music dynamics — envelope + wiring (VO never touched)")
     import vidlore.clipstudio.build as B
@@ -5104,6 +5349,7 @@ def test_fps_and_ad_protection():
 
 def main():
     test_fps_and_ad_protection()
+    test_release_gate_recovery_alignment()
     test_source_quality_and_repetition()
     test_breakout_correctness()
     test_music_dynamics_wiring()

@@ -76,6 +76,11 @@ _REJECT_TITLE = re.compile(
     r"\bvlog(s|ger|gers)?\b|\bmakeup\b|prosthetics?|"
     r"transformed into|i got transformed|turn(ed|ing) into (the|a)|becom(e|es|ing) the (night king|character)|"
     r"script reading|table read(ing|s)?|read[- ]?throughs?|a decade of|"
+    # cast-interview / press-junket recap formats: '<Actor> Relives the Red Wedding', 'Breaks Down
+    # the ... Scene', 'Looks Back at ...' — an actor ON CAMERA discussing the scene, not the scene
+    # itself (observed: a Richard Madden interview matched a Tyrion beat and release-blocked it)
+    r"\breliv(es?|ing)\b|breaks? down (the|his|her|every)|looks? back (at|on)|"
+    r"remembers? (the|filming|shooting)|on filming|cast (interview|remembers|discusses)|"
     r"elaborate plans?|plan to (beat|defeat|stop|kill|save|destroy)|spiral symbols?|\bsymbolism\b|"
     r"hot/?badass|hot (scene|moment)s? timing|funniest|best moments compilation)\b", re.I)
 
