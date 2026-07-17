@@ -4998,10 +4998,49 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 _quar = out_path.with_name(out_path.stem + ".FAILED_REJECTED_FOOTAGE" + out_path.suffix)
                 log(f"build: ⛔ RELEASE-BLOCKED — {_msg} Refusing to air rejected/repeated-freeze/"
                     f"black footage.")
-                raise RuntimeError(
+                # NON-RETRYABLE: this is a judgment about the CONTENT, not a transient fault.
+                # Raised as a bare RuntimeError it was indistinguishable from a network blip, so a
+                # driver restarted the whole pipeline 8 times; the 8th "passed" only because the
+                # vision API had died by then. Re-running an unchanged render cannot resolve a
+                # rejected beat — only rediscovery/re-matching can.
+                from .verify import NonRetryableBuildError
+                raise NonRetryableBuildError(
                     f"rejected-footage gate: {len(_rf_block)} beat(s) unresolved (no valid editorial "
                     f"hold or contextual fallback) — rediscovery needed for scene(s) "
-                    f"{[b['seg_index'] for b in _rf_block[:8]]}")
+                    f"{[b['seg_index'] for b in _rf_block[:8]]}. This is a CONTENT failure: "
+                    f"re-running the same render will not fix it.")
+
+    # ---- UNVERIFIED-EXACT GATE -------------------------------------------------------------
+    # A separate gate from the rejected-footage one above, deliberately. That gate handles footage
+    # PROVEN wrong (freeze-replace it with a clean neighbour). This one handles footage nobody could
+    # check — which is not the same thing and must not be freeze-replaced, because we have no
+    # evidence it is wrong. It only has to stop the render from claiming it was verified.
+    #
+    # Without this, a vision outage was INDISTINGUISHABLE from a clean pass: 229 errored beats
+    # produced 0 rejections, the gate above found nothing to block, and the render shipped with 178
+    # exact_scene beats whose relevance_class was literally 'unverified'.
+    from . import policy as _policy_g
+    _unver_block = []
+    for seg in segments:
+        _s = sel_by_idx.get(seg.index)
+        if _s is None or not _policy_g.verify_strict(seg):
+            continue
+        if getattr(_s, "image_path", ""):
+            continue                       # a validated still already covers this beat
+        if str((getattr(_s, "verifier", None) or {}).get("status", "")) in ("error", "unavailable"):
+            _unver_block.append(seg.index)
+    if _unver_block:
+        _um = (f"{len(_unver_block)} exact_scene beat(s) were never verified (vision backend "
+               f"error/unavailable) — scene(s) {_unver_block[:8]}")
+        if _os.environ.get("VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE", "block").strip().lower() == "warn":
+            log(f"build: ⚠ UNVERIFIED-EXACT (mode=warn, REVIEW BUILD — not for publication) — {_um}")
+        else:
+            log(f"build: ⛔ RELEASE-BLOCKED — {_um}. An unverifiable beat is unresolved, not "
+                f"accepted; refusing to publish footage nobody could check.")
+            from .verify import NonRetryableBuildError
+            raise NonRetryableBuildError(
+                f"unverified-exact gate: {_um}. Restore the vision backend and re-verify — "
+                f"re-running with a dead verifier will only make this pass silently.")
 
     suppress_wins = []
     if _cap_on and _suppress_on:

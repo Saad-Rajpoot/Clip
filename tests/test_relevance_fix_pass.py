@@ -291,6 +291,34 @@ def test_circuit_breaker_and_liveness_are_reported():
         "the summary must distinguish 'found nothing wrong' from 'checked nothing'"
 
 
+def test_build_blocks_on_unverified_exact_beats():
+    """The 56e0467283 scenario exactly: 229 beats errored -> 0 rejections -> the rejected-footage
+    gate found nothing to block -> published, with 178 exact_scene beats whose relevance_class was
+    literally 'unverified'. A vision outage must not be indistinguishable from a clean pass."""
+    from pathlib import Path as _P
+    s = (_P(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "build.py").read_text(
+        encoding="utf-8")
+    assert "UNVERIFIED-EXACT GATE" in s, "need a gate for beats nobody could check"
+    i = s.index("UNVERIFIED-EXACT GATE")
+    g = s[i:i + 2200]
+    assert '("error", "unavailable")' in g, "must catch both error and unavailable"
+    assert "verify_strict" in g, "must apply to exact_scene beats"
+    assert "NonRetryableBuildError" in g, "an unverifiable render must not invite a blind retry"
+    assert "image_path" in g, "a validated still legitimately covers the beat"
+    # and it must be a SEPARATE gate from rejected-footage: unverified != proven wrong, so it must
+    # not be freeze-replaced
+    assert "must not be freeze-replaced" in g
+
+
+def test_rejected_footage_gate_is_non_retryable_too():
+    from pathlib import Path as _P
+    s = (_P(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "build.py").read_text(
+        encoding="utf-8")
+    i = s.index("rejected-footage gate:")
+    assert "NonRetryableBuildError" in s[max(0, i - 900):i + 200], \
+        "the release-block must be non-retryable"
+
+
 def test_release_block_is_non_retryable():
     """Release-blocks and relevance failures are CONTENT verdicts. Re-running unchanged cannot fix
     them — it only rolls the dice until the verifier dies."""
@@ -318,6 +346,8 @@ TESTS = [
     test_verifier_outage_fails_closed_not_open,
     test_circuit_breaker_and_liveness_are_reported,
     test_release_block_is_non_retryable,
+    test_build_blocks_on_unverified_exact_beats,
+    test_rejected_footage_gate_is_non_retryable_too,
 ]
 
 
