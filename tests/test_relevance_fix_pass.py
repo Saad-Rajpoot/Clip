@@ -319,6 +319,68 @@ def test_rejected_footage_gate_is_non_retryable_too():
         "the release-block must be non-retryable"
 
 
+# ---------------------------------------------------------------------------
+# F5 — the transition clock. 46 transitions planned, 44 emitted; the 2 dropped left their padding
+# in the stream = 1.200s, exactly concat(925.100) - final(923.900), and the 1.13/1.18s by which
+# both breakout pictures lagged their own audio.
+# ---------------------------------------------------------------------------
+def _select_pairs(cands):
+    """Mirror of the selection in assemble.py (pass 2). Kept in the test so the RULE is pinned even
+    if the surrounding code is refactored."""
+    taken, out = set(), {}
+    for bi in sorted(cands):
+        if bi in taken or (bi + 1) in taken:
+            continue
+        out[bi] = cands[bi]
+        taken.update((bi, bi + 1))
+    return out
+
+
+def test_adjacent_transition_tails_cannot_both_pad():
+    """The bug: beats 1 and 2 are BOTH motivated tails. Greedy merge emits trans_1 (consuming beats
+    1+2) and skips beat 2 — but beat 2 was already padded at plan time, ffmpeg's xfade copies input
+    2 whole, and trans_2 is never emitted. Nothing consumes that pad."""
+    cands = {1: (0.55, "fade"), 2: (0.55, "fade"), 5: (0.6, "fadeblack")}
+    sel = _select_pairs(cands)
+    assert 1 in sel and 2 not in sel, "beat 2 is consumed by trans_1; it must not also start one"
+    assert 5 in sel, "a non-colliding candidate is unaffected"
+    # every selected pair is disjoint → every pad is consumed by exactly one xfade
+    spans = [(bi, bi + 1) for bi in sel]
+    flat = [x for sp in spans for x in sp]
+    assert len(flat) == len(set(flat)), "pairs must not overlap"
+
+
+def test_pads_are_derived_from_selected_pairs_only():
+    from pathlib import Path as _P
+    s = (_P(__file__).resolve().parents[1] / "vidlore" / "assemble.py").read_text(encoding="utf-8")
+    i = s.index("PASS 1 — collect CANDIDATE tails")
+    blk = s[i:i + 3000]
+    assert "No padding is committed here" in blk
+    assert "_cand_tails[bi] = (xf, name, styj)" in blk, "pass 1 must only collect"
+    assert "for bi, (xf, _n) in trans_tails.items():" in blk and "beat_pad[bi] = xf" in blk, \
+        "pads must be derived from the SELECTED pairs, after the pairing is resolved"
+    # the pad must NOT be set inside the candidate loop any more
+    p1 = blk[:blk.index("PASS 2")]
+    assert "beat_pad[bi] = xf" not in p1, "pass 1 must not commit padding"
+
+
+def test_sync_invariant_compares_against_composed_audio():
+    """'video == composed audio, ±1 frame'. Comparing against the RAW pre-breakout narration would
+    be meaningless — the composed track is the clock the captions and breakout splices key to."""
+    from pathlib import Path as _P
+    from vidlore import assemble as A
+    assert issubclass(A.TimelineSyncError, RuntimeError)
+    s = (_P(__file__).resolve().parents[1] / "vidlore" / "assemble.py").read_text(encoding="utf-8")
+    assert "_assert_video_audio_sync(video_only, narration, workdir)" in s, "invariant must be wired"
+    i = s.index("def _assert_video_audio_sync")
+    fn = s[i:i + 1800]
+    assert "tol_frames: float = 1.0" in fn and "tol = tol_frames / float(FPS)" in fn
+    assert "never the raw" in fn, "must document that the reference is the COMPOSED audio"
+    # a constant offset must not be offered as a fix — the drift is variable
+    d = A.TimelineSyncError.__doc__ or ""
+    assert "variable" in d and "second bug" in d
+
+
 def test_release_block_is_non_retryable():
     """Release-blocks and relevance failures are CONTENT verdicts. Re-running unchanged cannot fix
     them — it only rolls the dice until the verifier dies."""
@@ -348,6 +410,9 @@ TESTS = [
     test_release_block_is_non_retryable,
     test_build_blocks_on_unverified_exact_beats,
     test_rejected_footage_gate_is_non_retryable_too,
+    test_adjacent_transition_tails_cannot_both_pad,
+    test_pads_are_derived_from_selected_pairs_only,
+    test_sync_invariant_compares_against_composed_audio,
 ]
 
 

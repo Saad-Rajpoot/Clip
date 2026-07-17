@@ -211,6 +211,52 @@ _DISS = 0.78  # slow reflective dissolve
 # `_edit_plan`. All are pairwise (never chained -> no freeze). Subtle, not
 # flashy: durations and picks are tuned to the MagnatesMedia/Johnny-Harris
 # register, never TikTok.
+class TimelineSyncError(RuntimeError):
+    """The video clock and the composed-audio clock disagree by more than a frame.
+
+    Not cosmetic. These are two independently-computed timelines (video = the sum of ENCODED
+    segment durations; audio = the narration with breakouts spliced in at sample offsets), and
+    nothing reconciled them. When they drifted, every breakout's picture landed late by the drift —
+    measured at 1.13s and 1.18s, with the concat overrunning the audio by 1.200s end to end.
+
+    Deliberately NOT recoverable by shifting a constant: the drift is variable, so 'subtract 1.1s'
+    would be a second bug on top of the first. If this fires, the pairing/padding accounting is
+    wrong and must be fixed at the source."""
+
+
+def _assert_video_audio_sync(video_only, narration, workdir, *, tol_frames: float = 1.0) -> None:
+    """final_video_duration == composed_audio_duration, within one frame.
+
+    Compared against the COMPOSED audio (narration WITH breakouts spliced in), never the raw
+    pre-breakout narration: the composed track is the clock the captions and the breakout splices
+    are all keyed to, so it is the only meaningful reference."""
+    import subprocess as _sp
+    from .clipstudio.config import ffprobe_exe as _ffprobe_exe
+
+    def _dur(p) -> float:
+        try:
+            out = _sp.check_output([str(_ffprobe_exe()), "-v", "error", "-show_entries",
+                                    "format=duration", "-of", "csv=p=0", str(p)],
+                                   stderr=_sp.DEVNULL)
+            return float(out.decode().strip())
+        except Exception:
+            return -1.0
+
+    va = _dur(video_only)
+    aud = getattr(narration, "audio", None)
+    if not aud or va <= 0:
+        return                                   # nothing to compare against — don't invent a fault
+    ad = _dur(aud)
+    if ad <= 0:
+        return
+    tol = tol_frames / float(FPS)
+    if abs(va - ad) > tol:
+        raise TimelineSyncError(
+            f"video/audio timeline drift {va - ad:+.3f}s exceeds {tol:.3f}s (1 frame): "
+            f"video={va:.3f}s composed-audio={ad:.3f}s. The transition padding and the pairing "
+            f"plan disagree — every breakout picture will lag its own audio by this much.")
+
+
 _TRANSITIONS = {
     # reflective / emotional exhale
     "dissolve":      ("fade",       0.55),
@@ -8776,6 +8822,8 @@ def assemble(
     # tail beat index -> (xf seconds, ffmpeg xfade transition name)
     trans_tails: dict[int, tuple] = {}
     _tcount: dict[str, int] = {}
+    # PASS 1 — collect CANDIDATE tails. No padding is committed here.
+    _cand_tails: dict[int, tuple] = {}
     for _j in range(n_sc - 1):
         styj = styles[_j] if 0 <= _j < len(styles) else "cut"
         if styj == "cut" or styj not in _TRANSITIONS:
@@ -8788,13 +8836,39 @@ def assemble(
         xf = max(0.16, min(0.95, xf))
         # only if BOTH adjacent beats can absorb the overlap cleanly
         if (beat_durs[bi] >= xf + 0.4 and beat_durs[bi + 1] >= xf + 0.4):
-            beat_pad[bi] = xf
-            trans_tails[bi] = (xf, name)
-            _tcount[styj] = _tcount.get(styj, 0) + 1
+            _cand_tails[bi] = (xf, name, styj)
+    # PASS 2 — resolve a NON-OVERLAPPING pairing BEFORE any padding exists, then derive the pads
+    # from the pairs that were actually selected.
+    #
+    # The pad used to be committed here, at plan time, for every candidate; the merge loop below
+    # then re-decided pairing GREEDILY and independently. When two ADJACENT beats were both tails,
+    # beat bi+1 got padded and was then consumed as the SECOND input of trans_{bi} — and ffmpeg's
+    # xfade copies input 2 in full, so that pad rode through untouched. trans_{bi+1} was never
+    # emitted, so nothing ever consumed it. Every later frame was permanently late by xf, the
+    # transition was silently dropped, and nothing checked.
+    #
+    # Measured on the render that exposed this: 46 motivated transitions planned, 44 trans_*.mp4 on
+    # disk. Two collisions × ~0.6s = the 1.200s by which the concat (925.100s) overran the audio
+    # (923.900s) — and the 1.13s/1.18s by which both breakouts' pictures lagged their own audio.
+    # Breakouts were merely where it became VISIBLE: a breakout is the only shot whose audio is
+    # locked to its own picture.
+    _taken: set = set()
+    for bi in sorted(_cand_tails):
+        if bi in _taken or (bi + 1) in _taken:
+            continue                       # consumed by an earlier pair → clean cut, and NO pad
+        xf, name, styj = _cand_tails[bi]
+        trans_tails[bi] = (xf, name)
+        _taken.update((bi, bi + 1))
+        _tcount[styj] = _tcount.get(styj, 0) + 1
+    for bi, (xf, _n) in trans_tails.items():
+        beat_pad[bi] = xf
     if trans_tails:
         _summ = ", ".join(f"{k}×{v}" for k, v in sorted(_tcount.items()))
+        _dropped = len(_cand_tails) - len(trans_tails)
         print(f"  [5/5] transitions: {len(trans_tails)} motivated "
-              f"({_summ}) · rest clean cuts", flush=True)
+              f"({_summ}) · rest clean cuts"
+              + (f" · {_dropped} candidate(s) yielded to an adjacent pair (no pad)"
+                 if _dropped else ""), flush=True)
 
     beat_clips = beat_clips or {}
     segs: list[Path] = []
@@ -9199,6 +9273,7 @@ def assemble(
             "-color_trc", "bt709", "-color_range", "tv",
             str(video_only),
         ])
+        _assert_video_audio_sync(video_only, narration, workdir)
 
     words = narration.all_words()
     _srt(words, out_path.with_suffix(".srt"))
