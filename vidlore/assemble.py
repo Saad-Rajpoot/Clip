@@ -8910,12 +8910,25 @@ def assemble(
                              getattr(narration, "total", sum(beat_durs))) * FPS))
     _cur_f = int(round(sum(beat_durs) * FPS))
     if beat_durs and _tgt_f != _cur_f:
-        _k = max(range(len(beat_durs)), key=lambda i: beat_durs[i])
-        _adj = (_tgt_f - _cur_f) / FPS
-        if beat_durs[_k] + _adj >= 0.2:      # never starve a beat below the floor
-            beat_durs[_k] = round((beat_durs[_k] + _adj) * FPS) / FPS
-            print(f"  [5/5] timeline conform: {_adj*1000:+.0f}ms into beat {_k} so video == "
-                  f"narration ({_tgt_f} frames)", flush=True)
+        # Absorb the delta into the longest NON-BREAKOUT beat. A breakout is a pre-rendered fixed
+        # mp4 inserted directly (bmap), NOT encoded from its beat_dur — and it is usually the
+        # LONGEST beat (8-10s vs 1-6s narration), so a naive argmax picks it and adjusting its
+        # beat_dur changes nothing about the file that actually plays. That was the silent no-op
+        # that survived four render attempts. A breakout / cold-open pseudo-scene is a NarratedScene
+        # with NO word timings (`words=[]`); normal narration scenes always carry words, so exclude
+        # the word-less ones and absorb into a real beat that the renderer actually encodes.
+        def _is_breakout_beat(_bi):
+            _j = plan[_bi][0] if _bi < len(plan) else -1
+            _sc = scenes[_j] if 0 <= _j < len(scenes) else None
+            return bool(_sc is not None and not getattr(_sc, "words", None))
+        _cands = [i for i in range(len(beat_durs)) if not _is_breakout_beat(i)]
+        if _cands:
+            _k = max(_cands, key=lambda i: beat_durs[i])
+            _adj = (_tgt_f - _cur_f) / FPS
+            if beat_durs[_k] + _adj >= 0.2:      # never starve a beat below the floor
+                beat_durs[_k] = round((beat_durs[_k] + _adj) * FPS) / FPS
+                print(f"  [5/5] timeline conform: {_adj*1000:+.0f}ms into beat {_k} (non-breakout) "
+                      f"so video == composed audio ({_tgt_f} frames)", flush=True)
     # Hard cuts by default — frame-exact concat, NO deep xfade chain (that
     # chain was the freeze source). The uneven RHYTHM lives in beat_durs,
     # independent of the join mechanism.
