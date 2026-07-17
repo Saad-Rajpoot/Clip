@@ -5437,5 +5437,16 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # (distinct from the assemble true-black repair). Short fades are allowed; sustained illegible
     # regions block publication.
     result = _final_video_black_gate(result, work, log=log)
+
+    # DELIVERED A/V SYNC — measured on the artifact the viewer actually receives, after everything
+    # above has re-encoded it: letterbox bake, caption burn, breakout QA, ad + black gates, mux.
+    # The pre-mux check in assemble() proves the concat matched the composed audio; it cannot speak
+    # for what any of those later passes did. Checks per-stream duration AND first/last PTS —
+    # two streams can share a duration and still not start together, which is silent lip-sync error.
+    from ..assemble import assert_delivered_av_sync as _avsync
+    _sync = _avsync(result)
+    log(f"build: delivered A/V sync OK — video {_sync['video'][0]:.3f}s "
+        f"[{_sync['video'][1]:.3f}→{_sync['video'][2]:.3f}] · audio {_sync['audio'][0]:.3f}s "
+        f"[{_sync['audio'][1]:.3f}→{_sync['audio'][2]:.3f}] (tol {_sync['tol_s']*1000:.0f}ms)")
     log(f"build: done → {result}")
     return result

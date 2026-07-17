@@ -1,0 +1,106 @@
+"""The timeline sync gate, exercised against REAL encoded files.
+
+Builds tiny a/v fixtures with ffmpeg and asserts the gate raises on drift, PTS skew, a missing
+stream, and anything unreadable. Pure gate behaviour — no project, no LLM.
+
+    python3 tests/test_timeline_sync_gate.py
+
+Skips (exit 0) if no ffmpeg is available.
+"""
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+FAILS = []
+
+
+def _ffmpeg():
+    from vidlore.clipstudio.config import ffmpeg_exe
+    try:
+        exe = ffmpeg_exe()
+        subprocess.run([exe, "-version"], capture_output=True, timeout=20)
+        return exe
+    except Exception:
+        return ""
+
+
+def _mk(exe, d):
+    """good / drift / skew / video-only fixtures."""
+    def run(*a):
+        subprocess.run([exe, "-v", "error", "-y", *a], capture_output=True, timeout=90)
+    p = lambda n: os.path.join(d, n)  # noqa: E731
+    run("-f", "lavfi", "-i", "color=c=blue:s=320x180:d=3:r=30", "-f", "lavfi", "-i", "sine=f=440:d=3",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", p("good.mp4"))
+    # video 3s, audio 2s → the shape of the 1.2s concat overrun that shipped
+    run("-f", "lavfi", "-i", "color=c=red:s=320x180:d=3:r=30", "-f", "lavfi", "-i", "sine=f=440:d=2",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", p("drift.mp4"))
+    # audio delayed 0.5s → streams do not START together: silent lip-sync error
+    run("-f", "lavfi", "-i", "color=c=green:s=320x180:d=3:r=30", "-f", "lavfi", "-i", "sine=f=440:d=3",
+        "-af", "adelay=500|500", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", p("skew.mp4"))
+    run("-f", "lavfi", "-i", "color=c=black:s=320x180:d=3:r=30", "-c:v", "libx264",
+        "-pix_fmt", "yuv420p", p("vonly.mp4"))
+    return p
+
+
+def test_delivered_gate_on_real_files():
+    from vidlore.assemble import assert_delivered_av_sync, TimelineSyncError
+    exe = _ffmpeg()
+    if not exe:
+        print("SKIP  no ffmpeg")
+        return
+    d = tempfile.mkdtemp()
+    try:
+        p = _mk(exe, d)
+        r = assert_delivered_av_sync(p("good.mp4"))
+        assert abs(r["video"][0] - r["audio"][0]) <= r["tol_s"], r
+
+        for name, why in (("drift.mp4", "a 1s duration drift must not ship"),
+                          ("skew.mp4", "streams that do not start together must not ship"),
+                          ("vonly.mp4", "a delivered render missing a stream must not ship")):
+            try:
+                assert_delivered_av_sync(p(name))
+                raise AssertionError(why)
+            except TimelineSyncError:
+                pass
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_gate_fails_closed_when_it_cannot_measure():
+    """A check that cannot run has NOT passed. The first cut returned early on a missing narration
+    or a failed ffprobe — the same shape as the verifier bug this branch exists to fix, where an
+    error looked exactly like an approval."""
+    from vidlore.assemble import (assert_delivered_av_sync, _probe_duration,
+                                  _assert_video_audio_sync, TimelineSyncError)
+    from types import SimpleNamespace as NS
+    for fn, arg in ((assert_delivered_av_sync, "/nope/none.mp4"),
+                    (_probe_duration, "/nope/none.mp4")):
+        try:
+            fn(arg)
+            raise AssertionError(f"{fn.__name__} must raise on an unreadable file, never pass")
+        except TimelineSyncError:
+            pass
+    # a missing composed narration must raise, not skip
+    try:
+        _assert_video_audio_sync("/tmp/x.mp4", NS(audio=None), "/tmp")
+        raise AssertionError("missing narration audio must raise, not silently skip the check")
+    except TimelineSyncError as e:
+        assert "cannot be verified" in str(e)
+
+
+TESTS = [test_delivered_gate_on_real_files, test_gate_fails_closed_when_it_cannot_measure]
+
+if __name__ == "__main__":
+    for fn in TESTS:
+        try:
+            fn()
+            print(f"PASS  {fn.__name__}")
+        except Exception as e:
+            FAILS.append(fn.__name__)
+            print(f"FAIL  {fn.__name__}: {type(e).__name__}: {e}")
+    print(f"\n{len(TESTS) - len(FAILS)}/{len(TESTS)} passed")
+    sys.exit(1 if FAILS else 0)

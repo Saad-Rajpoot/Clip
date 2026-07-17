@@ -224,37 +224,110 @@ class TimelineSyncError(RuntimeError):
     wrong and must be fixed at the source."""
 
 
+def _probe_duration(p) -> float:
+    """Container duration in seconds. Raises TimelineSyncError rather than returning a sentinel:
+    an unreadable duration is a FAILED CHECK, not a passed one."""
+    import subprocess as _sp
+    from .clipstudio.config import ffprobe_exe as _ffprobe_exe
+    try:
+        out = _sp.check_output([str(_ffprobe_exe()), "-v", "error", "-show_entries",
+                                "format=duration", "-of", "csv=p=0", str(p)], stderr=_sp.DEVNULL)
+        d = float(out.decode().strip())
+    except Exception as e:
+        raise TimelineSyncError(f"cannot read duration of {p!r} ({type(e).__name__}: {e}) — the "
+                                f"sync invariant cannot be checked, so it is not satisfied") from e
+    if not (d > 0):
+        raise TimelineSyncError(f"duration of {p!r} reads {d!r} — unusable; the sync invariant "
+                                f"cannot be checked, so it is not satisfied")
+    return d
+
+
+def _stream_times(p) -> dict:
+    """{stream_type: (duration, first_pts, last_pts)} for the delivered file. Raises on anything
+    unreadable — same reason as above."""
+    import json as _json
+    import subprocess as _sp
+    from .clipstudio.config import ffprobe_exe as _ffprobe_exe
+    out: dict = {}
+    for kind in ("v:0", "a:0"):
+        try:
+            raw = _sp.check_output(
+                [str(_ffprobe_exe()), "-v", "error", "-select_streams", kind,
+                 "-show_entries", "stream=codec_type,duration,start_time",
+                 "-of", "json", str(p)], stderr=_sp.DEVNULL)
+            d = _json.loads(raw.decode()).get("streams") or []
+        except Exception as e:
+            raise TimelineSyncError(
+                f"cannot probe {kind} of {p!r} ({type(e).__name__}: {e})") from e
+        if not d:
+            raise TimelineSyncError(f"{p!r} has no {kind} stream — a delivered render must carry "
+                                    f"both a video and an audio stream")
+        s = d[0]
+        try:
+            dur = float(s.get("duration"))
+            st = float(s.get("start_time") or 0.0)
+        except (TypeError, ValueError) as e:
+            raise TimelineSyncError(f"{kind} of {p!r} has an unreadable duration/start_time "
+                                    f"({s!r})") from e
+        out[s.get("codec_type") or kind] = (dur, st, st + dur)
+    return out
+
+
 def _assert_video_audio_sync(video_only, narration, workdir, *, tol_frames: float = 1.0) -> None:
-    """final_video_duration == composed_audio_duration, within one frame.
+    """PRE-MUX: final_video_duration == composed_audio_duration, within one frame.
 
     Compared against the COMPOSED audio (narration WITH breakouts spliced in), never the raw
     pre-breakout narration: the composed track is the clock the captions and the breakout splices
-    are all keyed to, so it is the only meaningful reference."""
-    import subprocess as _sp
-    from .clipstudio.config import ffprobe_exe as _ffprobe_exe
+    are all keyed to, so it is the only meaningful reference.
 
-    def _dur(p) -> float:
-        try:
-            out = _sp.check_output([str(_ffprobe_exe()), "-v", "error", "-show_entries",
-                                    "format=duration", "-of", "csv=p=0", str(p)],
-                                   stderr=_sp.DEVNULL)
-            return float(out.decode().strip())
-        except Exception:
-            return -1.0
-
-    va = _dur(video_only)
+    FAILS CLOSED throughout. The first cut of this returned early when the narration was missing or
+    ffprobe failed, on the theory that it shouldn't "invent a fault" — but a check that cannot run
+    has not passed, and silently skipping it is exactly the shape of the bug this whole branch
+    exists to fix (a verifier that errored looked like a verifier that approved)."""
     aud = getattr(narration, "audio", None)
-    if not aud or va <= 0:
-        return                                   # nothing to compare against — don't invent a fault
-    ad = _dur(aud)
-    if ad <= 0:
-        return
+    if not aud:
+        raise TimelineSyncError(
+            "no composed narration audio to check the video against — the sync invariant cannot be "
+            "verified, so it is not satisfied")
+    va = _probe_duration(video_only)
+    ad = _probe_duration(aud)
     tol = tol_frames / float(FPS)
     if abs(va - ad) > tol:
         raise TimelineSyncError(
             f"video/audio timeline drift {va - ad:+.3f}s exceeds {tol:.3f}s (1 frame): "
             f"video={va:.3f}s composed-audio={ad:.3f}s. The transition padding and the pairing "
             f"plan disagree — every breakout picture will lag its own audio by this much.")
+
+
+def assert_delivered_av_sync(out_path, *, tol_frames: float = 1.0) -> dict:
+    """POST-MUX: the FINAL delivered file, after overlays, captions, bars and muxing.
+
+    The pre-mux check proves the concat matches the composed audio. It cannot prove the thing the
+    viewer actually receives: everything after it — overlay bake, caption burn, letterboxing, the
+    mux itself — re-encodes and re-times, and any of those can reintroduce drift or truncate a
+    stream. So the delivered artifact is measured on its own terms: per-stream duration AND
+    first/last PTS, because two streams can share a duration while starting at different offsets
+    (a non-zero audio start_time is silent lip-sync error).
+
+    Returns the measured facts so the caller can log them as evidence."""
+    st = _stream_times(out_path)
+    if "video" not in st or "audio" not in st:
+        raise TimelineSyncError(f"delivered file {out_path!r} is missing a stream: {sorted(st)}")
+    (vd, v0, v1), (ad, a0, a1) = st["video"], st["audio"]
+    tol = tol_frames / float(FPS)
+    if abs(vd - ad) > tol:
+        raise TimelineSyncError(
+            f"DELIVERED a/v duration drift {vd - ad:+.3f}s > {tol:.3f}s (1 frame): "
+            f"video={vd:.3f}s audio={ad:.3f}s in {out_path}")
+    if abs(v0 - a0) > tol:
+        raise TimelineSyncError(
+            f"DELIVERED first-PTS skew {v0 - a0:+.3f}s > {tol:.3f}s: video starts {v0:.3f}s, "
+            f"audio starts {a0:.3f}s in {out_path} — the streams do not begin together")
+    if abs(v1 - a1) > tol:
+        raise TimelineSyncError(
+            f"DELIVERED last-PTS skew {v1 - a1:+.3f}s > {tol:.3f}s: video ends {v1:.3f}s, "
+            f"audio ends {a1:.3f}s in {out_path} — one stream was truncated")
+    return {"video": [vd, v0, v1], "audio": [ad, a0, a1], "tol_s": tol}
 
 
 _TRANSITIONS = {
