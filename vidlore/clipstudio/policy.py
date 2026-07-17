@@ -43,9 +43,36 @@ _ABSTRACT_RX = re.compile(
     r"matters? (because|is)|the real (reason|question|tragedy))\b", re.I)
 
 
+# DEIXIS — a pointing word bound to a scene noun ("at THAT TABLE", "in THOSE NINETY SECONDS",
+# "THERE IT IS"). The referent is the anchor scene, so the line is as specific as a named one even
+# though it names nothing: the essayist is pointing at the moment on screen. Measured failure this
+# guards: "The point is what everyone else at that table heard" shipped as generic_filler over Ned
+# Stark's execution, and "Somewhere in those ninety seconds" as abstract_effect over an inn brawl —
+# both because deixis reads as vague to a keyword classifier. Worse, _ABSTRACT_RX below matches
+# "the point is", so deictic lines were actively pushed AWAY from exact.
+#
+# Deliberately TIGHT: a pointing determiner (or a fixed phrase) plus a noun from a closed SCENE
+# vocabulary, within 2 intervening words ("those NINETY seconds"). Bare anaphora ("that's the
+# tragedy", "this is why") must NOT match, or genuinely generic beats lose their filler.
+_DEICTIC_RX = re.compile(
+    r"\b(?:that|this|those|these)\s+(?:\w+\s+){0,2}"
+    r"(?:tables?|rooms?|chambers?|scenes?|moments?|meetings?|councils?|seconds?|minutes?|"
+    r"exchanges?|conversations?|sentences?|lines?|pauses?|silences?|dinners?|suppers?|feasts?)\b"
+    r"|\bthere it is\b|\bright there\b|\bwatch it again\b", re.I)
+
+
+def is_deictic(seg) -> bool:
+    """True when the beat POINTS at the anchor scene instead of naming it. Such a beat inherits the
+    exact_scene treatment: 'that table' can only ever be satisfied by THAT table."""
+    return bool(_DEICTIC_RX.search(getattr(seg, "text", "") or ""))
+
+
 def classify(seg) -> str:
     """Heuristic policy from the signals the analyzer already produces. Deterministic — always works
     even with no LLM. The LLM's explicit `visual_policy` (when present + valid) takes precedence."""
+    # deixis outranks every other signal, including the abstract heuristic below
+    if is_deictic(seg):
+        return EXACT
     kind = (getattr(seg, "required_kind", "") or "").lower()
     ent = (getattr(seg, "required_entity", "") or "").strip()
     specific = bool(getattr(seg, "is_specific_claim", False))
@@ -65,7 +92,13 @@ def classify(seg) -> str:
 
 
 def policy_of(seg) -> str:
-    """The beat's resolved policy: an explicit (LLM-set) visual_policy if valid, else the heuristic."""
+    """The beat's resolved policy: an explicit (LLM-set) visual_policy if valid, else the heuristic.
+
+    Deixis overrides the LLM label. The LLM sees one beat's words, not what they point AT, so it
+    labels 'at that table' generic — and a generic label is a licence to air anything. The pointing
+    word is objective evidence about the referent that outranks the model's guess."""
+    if is_deictic(seg):
+        return EXACT
     p = (getattr(seg, "visual_policy", "") or "").strip().lower()
     return p if p in POLICIES else classify(seg)
 
