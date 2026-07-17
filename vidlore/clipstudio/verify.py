@@ -117,6 +117,9 @@ _SEASON_RX = re.compile(
 # Bump whenever the verifier PROMPT or its JSON contract changes: a verdict is only reusable if it
 # was produced by the same question. Part of the fingerprint below.
 PROMPT_VERSION = "v3-2026-07"
+# Bump when the contact-sheet SAMPLING changes (frame count/positions/layout). The sheet is the
+# image the verifier judges, so a different sampling is a different question even for the same shot.
+SHEET_VERSION = "sheet-v1-startmidend"
 # Consecutive transient failures after which the vision backend is declared DOWN. Measured: over an
 # 11-hour run the verifier degraded 176 replaced -> 180 -> 55 -> 0, and at exactly 0 the release
 # gate passed and published. Nothing noticed, because "0 rejections" and "nothing checked" were the
@@ -136,40 +139,111 @@ class NonRetryableBuildError(RuntimeError):
     Retry transient plumbing. Never retry a judgment."""
 
 
-def _source_fingerprint(path) -> str:
-    """Cheap, stable content id: size + a hash of the head. Full hashing of multi-GB sources every
-    run costs more than the verdicts it protects."""
+def _file_fingerprint(path) -> str:
+    """Content id for a file: a FULL sha256, memoized on disk against (size, mtime).
+
+    Head-only + size was too weak — a re-encode or a trim can preserve both while changing every
+    frame the verifier judged, and container metadata lives at the head, so two different cuts of
+    one upload can share a head block. Sampling head/middle/tail is better but still blind to a
+    change between the sampled windows, and "probably caught it" is not an identity.
+
+    So: hash the whole file, once. The cost is bounded, not repeated — the digest is cached beside
+    the media keyed by (size, mtime), so a 200MB source costs ~1s on first sight and nothing
+    thereafter. Anything that rewrites the bytes moves mtime and re-hashes. This is the strong
+    option and it is affordable precisely because it is memoized."""
     import hashlib
-    p = Path(path or "")
-    if not p.exists():
+    # is_file(), not exists(): Path("") is PosixPath('.') — the CWD — which exists, so an empty
+    # local_path sailed past an exists() guard and then blew up in with_suffix, taking the whole
+    # verify pass with it. A directory is not a source either.
+    if not path:
         return "missing"
-    h = hashlib.sha256()
-    h.update(str(p.stat().st_size).encode())
+    p = Path(path)
+    if not p.is_file():
+        return "missing"
     try:
+        st = p.stat()
+        stamp = f"{st.st_size}:{int(st.st_mtime)}"
+        side = p.with_suffix(p.suffix + ".fp.json")
+        try:
+            prev = json.loads(side.read_text(encoding="utf-8"))
+            if prev.get("stamp") == stamp and prev.get("fp"):
+                return str(prev["fp"])
+        except Exception:
+            pass
+        h = hashlib.sha256()
         with p.open("rb") as fh:
-            h.update(fh.read(1 << 20))
+            for blk in iter(lambda: fh.read(1 << 22), b""):
+                h.update(blk)
+        fp = h.hexdigest()[:20]
+        try:
+            side.write_text(json.dumps({"stamp": stamp, "fp": fp}), encoding="utf-8")
+        except OSError:
+            pass                                        # a read-only cache dir must not fail a build
+        return fp
     except OSError:
         return "unreadable"
-    return h.hexdigest()[:16]
+
+
+def _norm_faces(names) -> str:
+    """Face-ID names, order-independent and case-folded. They are IN the prompt ('Automatic Face-ID
+    on this frame detected: …'), so they change the answer and must change the key — but a reordered
+    list is the same evidence and must not."""
+    toks = sorted({(n or "").strip().lower() for n in (names or []) if (n or "").strip()})
+    return ",".join(toks)
 
 
 def verdict_fingerprint(*, src_hash: str, source_id: str, shot_start: float, shot_end: float,
-                        beat_text: str, required_entity: str, era: str, visual_policy: str,
-                        model: str) -> str:
-    """Identity of a verdict: every input that could change the answer.
+                        beat_text: str, required_entity: str, required_kind: str = "",
+                        expected_visual: str = "", scene_query: str = "", era: str = "",
+                        visual_policy: str = "", is_specific: bool = True,
+                        faceid_names=(), multiframe: bool = False, image_id: str = "",
+                        model: str = "") -> str:
+    """Identity of a verdict: EVERY input that can change the answer.
 
-    A verdict may only be reused when the QUESTION is identical. Keying on the beat alone would
-    silently reuse a verdict across a re-matched shot, a changed era constraint, a policy
-    promotion (deixis!), or a different verifier model — each of which changes the answer."""
+    A verdict is reusable only when the QUESTION is byte-identical. The first cut of this keyed on
+    beat text + shot + era + policy + model, which left real holes — each of these is interpolated
+    into the prompt or decides which prompt is sent, so omitting any of them silently reuses the
+    answer to a DIFFERENT question:
+
+      required_kind    -> "(kind: character)" in the prompt
+      expected_visual  -> "The exact moment should LOOK LIKE: …"
+      scene_query      -> "Target scene: …"
+      is_specific      -> selects the STRICT rule vs the lenient one. Same frame, opposite verdict.
+      faceid_names     -> "Automatic Face-ID on this frame detected: …"
+      multiframe       -> a start/mid/end contact sheet asks a different question than one frame
+      image_id         -> the actual pixels judged (keyframe/sheet), which shot bounds do not pin:
+                          a re-index can rewrite a keyframe while start/end stay put
+      model            -> the REAL vision provider+model (see llm.vision_config), not the configured
+                          text brain: with the deepseek default, vision is really Gemini, so keying
+                          on eng_cfg.anthropic_model made Gemini and Claude verdicts collide."""
     import hashlib
     h = hashlib.sha256()
     for part in (src_hash, source_id, f"{float(shot_start):.3f}", f"{float(shot_end):.3f}",
                  (beat_text or "").strip(), (required_entity or "").strip().lower(),
-                 (era or "").strip().lower(), (visual_policy or "").strip().lower(),
-                 (model or "").strip(), PROMPT_VERSION):
+                 (required_kind or "").strip().lower(), (expected_visual or "").strip(),
+                 (scene_query or "").strip(), (era or "").strip().lower(),
+                 (visual_policy or "").strip().lower(), "1" if is_specific else "0",
+                 _norm_faces(faceid_names), "mf" if multiframe else "sf",
+                 (image_id or ""), (model or "").strip(),
+                 PROMPT_VERSION, SHEET_VERSION):
         h.update(str(part).encode("utf-8", "replace"))
         h.update(b"\x1f")
     return h.hexdigest()[:32]
+
+
+def _verdict_schema_ok(v) -> bool:
+    """A cached verdict is reusable only if it is a SUCCESSFUL, well-formed one.
+
+    Guards two ways of poisoning the cache with something that was never a judgment: storing an
+    error/unavailable stub, and storing a malformed reply whose missing `verdict` key would later
+    read as falsy ("not a replace") and quietly pass."""
+    if not isinstance(v, dict):
+        return False
+    if str(v.get("status", "ok")) not in ("ok", ""):
+        return False
+    if v.get("verdict") not in ("keep", "replace"):
+        return False
+    return isinstance(v.get("confidence", 0.0), (int, float))
 
 
 def _load_verdict_cache(proj) -> dict:
@@ -466,15 +540,22 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
 
     _vcache = _load_verdict_cache(proj)
     _vcache_n0 = len(_vcache)
-    _errored = _reused = _consec_err = 0
+    _errored = _reused = _consec_err = _skipped_breaker = _fp_mismatch = 0
     _breaker_open = False
-    _vmodel = str(getattr(eng_cfg, "anthropic_model", "") or "")
+    # The REAL vision provider+model, not the configured text brain. With the deepseek default a
+    # vision call is actually served by Gemini (DeepSeek cannot see images), so keying on
+    # eng_cfg.anthropic_model named a model that never ran and let Gemini/Claude verdicts collide.
+    try:
+        from . import llm as _llm_id
+        _vmodel = _llm_id.vision_config(eng_cfg)
+    except Exception:
+        _vmodel = str(getattr(eng_cfg, "anthropic_model", "") or "")
     _src_hash_cache: dict = {}
 
     def _src_hash_of(src):
         sid = getattr(src, "id", "") or ""
         if sid not in _src_hash_cache:
-            _src_hash_cache[sid] = _source_fingerprint(getattr(src, "local_path", "") or "")
+            _src_hash_cache[sid] = _file_fingerprint(getattr(src, "local_path", "") or "")
         return _src_hash_cache[sid]
     # SCENE ROSTER (single-scene deep-dive only): every main-cast character/actor of the video. In a
     # single-scene deep-dive ANY roster member is contextually valid for any beat (they are all in
@@ -491,9 +572,33 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
     _mf_on = _os_ms.environ.get("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "1").strip() \
         not in ("0", "false", "no")
 
+    def _will_sheet(ashot, _exact) -> bool:
+        """Predict, WITHOUT building it, whether this call uses a contact sheet. Must mirror
+        _verify_ctx's own condition — the prediction is part of the cache key, and _verify_ctx
+        reports what actually happened so a wrong prediction can never be stored."""
+        if not (_mf_on and _exact and ashot is not None):
+            return False
+        _sid = getattr(ashot, "source_id", "") or ""
+        _src = proj.source(_sid) if _sid else None
+        return bool(getattr(_src, "local_path", "") if _src else "")
+
+    def _image_id(kf_path, ashot, want_sheet: bool) -> str:
+        """Identity of the PIXELS the verifier will judge.
+
+        Shot bounds do not pin this: a re-index can rewrite a keyframe while start/end stay put, and
+        the stale verdict would be reused against a different image. For a sheet the id is derived
+        (source content + span + SHEET_VERSION) rather than measured, so a cache HIT costs no ffmpeg
+        work — the sheet is a pure function of those inputs."""
+        if want_sheet and ashot is not None:
+            _src = proj.source(getattr(ashot, "source_id", "") or "")
+            return (f"sheet:{_src_hash_of(_src)}:{float(getattr(ashot, 'start', 0.0)):.3f}"
+                    f"-{float(getattr(ashot, 'end', 0.0)):.3f}")
+        return f"kf:{_file_fingerprint(kf_path)}" if kf_path else "kf:none"
+
     def _verify_ctx(kf_path, ashot, _seg, _exact, faceids):
         """verify one candidate with the beat's storyboard context + (for specific action beats) a
-        start/mid/end contact sheet built from the shot's source span."""
+        start/mid/end contact sheet built from the shot's source span.
+        -> (verdict|None, actually_used_a_sheet)"""
         sheet, is_mf = kf_path, False
         if _mf_on and _exact and ashot is not None:
             try:
@@ -513,7 +618,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                                 eng_cfg, model, is_specific=_exact,
                                 expected_visual=getattr(_seg, "expected_visual", "") or "",
                                 scene_query=getattr(_seg, "scene_query", "") or "",
-                                era_hint=_era_of(_seg), multiframe=is_mf)
+                                era_hint=_era_of(_seg), multiframe=is_mf), is_mf
         finally:
             if is_mf:
                 try:
@@ -536,46 +641,74 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         # REUSE a verdict only when the QUESTION is byte-identical (see verdict_fingerprint). This
         # is what lets a restart keep explicitly-proven judgments instead of re-rolling them against
         # a dying API — the failure mode that published this render.
-        _fp = ""
+        _fp, _want_sheet = "", False
         if shot is not None:
             _src_obj = proj.source(sel.source_id)
+            _want_sheet = _will_sheet(shot, _exact)
             _fp = verdict_fingerprint(
                 src_hash=_src_hash_of(_src_obj), source_id=sel.source_id or "",
                 shot_start=getattr(shot, "start", 0.0), shot_end=getattr(shot, "end", 0.0),
-                beat_text=getattr(seg, "text", ""), required_entity=getattr(seg, "required_entity", ""),
-                era=_era_of(seg), visual_policy=_policy.policy_of(seg), model=_vmodel)
+                beat_text=getattr(seg, "text", ""),
+                required_entity=getattr(seg, "required_entity", ""),
+                required_kind=getattr(seg, "required_kind", ""),
+                expected_visual=getattr(seg, "expected_visual", "") or "",
+                scene_query=getattr(seg, "scene_query", "") or "",
+                era=_era_of(seg), visual_policy=_policy.policy_of(seg), is_specific=_exact,
+                faceid_names=faceid_names, multiframe=_want_sheet,
+                image_id=_image_id(kf, shot, _want_sheet), model=_vmodel)
+        # only a SUCCESSFUL, schema-valid verdict is reusable — never an error stub or a malformed
+        # reply whose missing "verdict" key would read as falsy and quietly pass
         _cached = _vcache.get(_fp) if _fp else None
-        if _cached:
+        _used_sheet = _want_sheet
+        if _cached is not None and _verdict_schema_ok(_cached):
             v = dict(_cached)
             v["reused"] = True
             _reused += 1
         else:
-            v = _verify_ctx(kf, shot, seg, _exact, faceid_names)
+            if _cached is not None:
+                _vcache.pop(_fp, None)                 # poisoned entry — drop it
+            if _breaker_open:
+                # BREAKER OPEN — do not call. See the note where it trips: past the threshold the
+                # backend is down, and every further call is latency spent to learn that again.
+                v, _used_sheet = None, _want_sheet
+            else:
+                v, _used_sheet = _verify_ctx(kf, shot, seg, _exact, faceid_names)
         if v is None:
             # FAIL CLOSED. "No judgment" is not a synonym for "acceptable". The old code set
             # status=error and `continue`d, so a beat nobody could check looked exactly like a beat
             # that passed — and a TOTAL outage produced zero rejections, which the release gate read
             # as "nothing wrong" and shipped.
-            sel.verifier = {"status": "error"}
+            sel.verifier = {"status": "breaker_open" if _breaker_open else "error"}
             _errored += 1
-            _consec_err += 1
+            if _breaker_open:
+                _skipped_breaker += 1
+            else:
+                _consec_err += 1
             if FLAG_VERIFIER_UNVERIFIED not in sel.flag_reasons:
                 sel.flag_reasons.append(FLAG_VERIFIER_UNVERIFIED)
             sel.flagged = True
             if _exact:
                 # an exact_scene beat we could not check is UNRESOLVED, never a pass
                 failed += 1
-                log(f"verify: seg{sel.segment_index} UNVERIFIED (verifier error) — exact_scene "
+                log(f"verify: seg{sel.segment_index} UNVERIFIED "
+                    f"({'breaker open' if _breaker_open else 'verifier error'}) — exact_scene "
                     f"beat is unresolved, not accepted")
             if _consec_err >= VERIFIER_BREAKER_TRIP and not _breaker_open:
                 _breaker_open = True
-                log(f"verify: ⛔ CIRCUIT BREAKER — {_consec_err} consecutive verifier errors; the "
-                    f"vision backend is down. Remaining beats will NOT be silently accepted.")
+                log(f"verify: ⛔ CIRCUIT BREAKER OPEN — {_consec_err} consecutive verifier errors; "
+                    f"the vision backend is down. NO further verifier requests will be made; every "
+                    f"remaining beat is marked unverified and exact beats will release-block.")
             continue
         _consec_err = 0
         verified += 1                    # counts SUCCESSES — never attempts (see the breaker note)
-        if _fp and not v.get("reused"):
-            _vcache[_fp] = {k: val for k, val in v.items() if k != "reused"}
+        # STORE only a schema-valid verdict, and only when the sheet prediction that went INTO the
+        # key actually held. A sheet build can fail and silently fall back to one frame — storing
+        # that single-frame answer under a multiframe key would hand back the wrong judgment later.
+        if _fp and not v.get("reused") and _verdict_schema_ok({**v, "status": "ok"}):
+            if _used_sheet == _want_sheet:
+                _vcache[_fp] = {k: val for k, val in v.items() if k != "reused"}
+            else:
+                _fp_mismatch += 1
         v["status"] = "ok"
         v["visual_policy"] = _policy.policy_of(seg)
         # NON-EXACT LENIENCY (user rule: exact clip only for a SPECIFIC scene; a relevant FILLER is
@@ -608,8 +741,10 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     if ashot is None:
                         continue
                     anames = ashot.face_ids or []
-                    av = _verify_ctx(ashot.keyframe_path, ashot, seg,
-                                     (False if downgrade else _exact), anames)
+                    if _breaker_open:
+                        break                           # backend is down — promotion cannot verify
+                    av, _ = _verify_ctx(ashot.keyframe_path, ashot, seg,
+                                        (False if downgrade else _exact), anames)
                     if av is None:
                         continue                        # transport error, NOT a judgment
                     if downgrade:
@@ -796,8 +931,12 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
     if len(_vcache) != _vcache_n0:
         _save_verdict_cache(proj, _vcache)
     _attempted = verified + _errored
-    log(f"verify: done — {verified} verified ({_reused} reused), {_errored} ERRORED, "
-        f"{replaced} replaced, {failed} unresolved")
+    log(f"verify: done — {verified} verified ({_reused} reused), {_errored} ERRORED"
+        + (f" ({_skipped_breaker} skipped, breaker open)" if _skipped_breaker else "")
+        + f", {replaced} replaced, {failed} unresolved")
+    if _fp_mismatch:
+        log(f"verify: {_fp_mismatch} verdict(s) not cached — the contact-sheet build fell back to a "
+            f"single frame, so the answer does not match the key")
     # LIVENESS. Reported as its own fact, never folded into 'unresolved': a run that checked
     # nothing must not read like a run that found nothing wrong. This is a SECOND line of defence —
     # the primary one is per-beat (an unverifiable exact beat is already unresolved above), because
@@ -807,5 +946,6 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             f"(backend errors){' — CIRCUIT BREAKER OPEN' if _breaker_open else ''}")
     return {"verified": verified, "replaced": replaced, "failed": failed, "available": True,
             "errored": _errored, "reused": _reused, "attempted": _attempted,
-            "verifier_down": bool(_breaker_open),
+            "verifier_down": bool(_breaker_open), "breaker_skipped": _skipped_breaker,
+            "vision_config": _vmodel,
             "verified_frac": (verified / _attempted) if _attempted else 1.0}

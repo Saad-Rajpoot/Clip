@@ -392,6 +392,28 @@ def has_llm(eng_cfg=None) -> bool:
     return bool(_deepseek_key(eng_cfg)) or gemini_available() or bool(_claude_key(eng_cfg))
 
 
+def vision_config(eng_cfg=None) -> str:
+    """Identity of the provider+model that will actually serve a VISION call.
+
+    NOT the same as `active_provider`, which answers for TEXT. A vision call skips both DeepSeek
+    models (they cannot see images, `_msgs_have_image`), so the brain selected in config is
+    routinely NOT the brain that judges a frame: with the default deepseek primary, footage QC is
+    really served by Gemini, and by Claude only if Gemini is unavailable.
+
+    This exists to be hashed into the verifier's cache key. Keying on `eng_cfg.anthropic_model`
+    described a model that may never have run, so a Gemini verdict and a Claude verdict for the same
+    frame collided on one key — and swapping GEMINI_API_KEY in or out silently reused the other
+    provider's judgment. The string must therefore change whenever the answer could:
+    provider, model id, and (for Gemini) the API-key vs Vertex transport."""
+    if gemini_available() and _provider() not in ("anthropic", "claude"):
+        return f"gemini:{_gemini_model()}:{'apikey' if _gemini_api_key() else 'vertex'}"
+    if _claude_key(eng_cfg):
+        return f"anthropic:{_claude_model()}"
+    if gemini_available():
+        return f"gemini:{_gemini_model()}:{'apikey' if _gemini_api_key() else 'vertex'}"
+    return "none"
+
+
 def active_provider(eng_cfg=None) -> str:
     """The provider that will actually serve a (text) call — the selected primary if available,
     else the first available fallback in order."""
