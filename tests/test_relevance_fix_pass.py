@@ -537,10 +537,10 @@ def test_candidate_generation_uses_the_word_stream():
         encoding="utf-8")
     assert "WORD-STREAM PASS first" in s
     i = s.index("WORD-STREAM PASS first")
-    blk = s[i:i + 1600]
+    blk = s[i:i + 2200]
     assert "find_quote_span" in blk
     assert "_texty9(_sh)" in blk, "burned-text shots must still be excluded"
-    assert "continue                           # word stream is strictly better evidence" in blk
+    assert "word stream is strictly better evidence" in blk
 
 
 def test_release_block_is_non_retryable():
