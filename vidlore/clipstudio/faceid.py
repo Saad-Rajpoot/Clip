@@ -20,6 +20,7 @@ YUNET = MODELS_DIR / "yunet.onnx"
 SFACE = MODELS_DIR / "sface.onnx"
 SFACE_COS_THRESH = 0.363          # cv2 SFace "same identity" cosine threshold
 MARGIN = 0.06                     # best must beat 2nd-best by this for a confident ID
+DET_MAX_SIDE = 1024               # retry detection here when a big still yields no faces (see _detect)
 
 
 def available() -> bool:
@@ -35,11 +36,31 @@ class FaceID:
         self.det = cv2.FaceDetectorYN_create(str(YUNET), "", det_size, score_thresh, 0.3, 5000)
         self.rec = cv2.FaceRecognizerSF_create(str(SFACE), "")
 
-    def _detect(self, img):
+    def _detect_at(self, img):
         h, w = img.shape[:2]
         self.det.setInputSize((w, h))
         _n, faces = self.det.detect(img)
         return faces if faces is not None else []
+
+    def _detect(self, img):
+        """YuNet is a fixed-scale detector: fed a multi-thousand-pixel still it returns NOTHING
+        (measured: 3858x4804 → 0 faces, the same photo at ≤1024 → 1). Wiki reference photos are
+        routinely that big, so leads silently became unidentifiable — and an unidentifiable lead
+        makes every "no CONFIRMED wrong character" gate vacuously true. Detect at native size
+        first (so nothing that works today changes), and only on a MISS retry downscaled, mapping
+        the boxes + landmarks back to original coordinates so alignCrop still uses full-res pixels."""
+        faces = self._detect_at(img)
+        if len(faces) or max(img.shape[:2]) <= DET_MAX_SIDE:
+            return faces
+        h, w = img.shape[:2]
+        s = DET_MAX_SIDE / float(max(h, w))
+        small = self.cv2.resize(img, (max(1, int(round(w * s))), max(1, int(round(h * s)))),
+                                interpolation=self.cv2.INTER_AREA)
+        faces = self._detect_at(small)
+        if len(faces):
+            faces = faces.copy()
+            faces[:, :14] /= s          # cols 0-13 are bbox + the 5 landmarks; col 14 is the score
+        return faces
 
     def embeddings(self, img):
         """[(bbox(x,y,w,h), area, embed[np.float32,128 L2-normed]), ...] for every face."""
