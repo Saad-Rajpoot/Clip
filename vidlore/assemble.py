@@ -8922,6 +8922,14 @@ def assemble(
         name, _base = _TRANSITIONS[styj]
         xf = float(ts[_j]) if 0 <= _j < len(ts) else _base
         xf = max(0.16, min(0.95, xf))
+        # QUANTISE THE PAD TO WHOLE FRAMES. It is added to an already frame-aligned beat_durs and
+        # the sum is then re-rounded at int(round((bd + pad) * FPS)) — so a fractional-frame pad
+        # reintroduces up to half a frame of error on every PADDED segment. Measured: after the
+        # pairing and carry fixes the acceptance render still drifted +0.127s ~= 3.8 frames, with 8
+        # motivated transitions. Frame-aligned, (bd + xf) * FPS is an integer, so round() is
+        # identity and the xfade offset arithmetic (off = seg0_fr - xf_fr) becomes exact instead of
+        # approximately right.
+        xf = max(1, int(round(xf * FPS))) / FPS
         # only if BOTH adjacent beats can absorb the overlap cleanly
         if (beat_durs[bi] >= xf + 0.4 and beat_durs[bi + 1] >= xf + 0.4):
             _cand_tails[bi] = (xf, name, styj)
