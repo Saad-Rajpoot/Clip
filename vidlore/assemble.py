@@ -8888,6 +8888,23 @@ def assemble(
         _fr[_k] = max(1, _fr[_k] + (_tot_f - sum(_fr)))
         _emitted_f += sum(_fr)
         beat_durs.extend(f / FPS for f in _fr)
+    # CONFORM THE VIDEO TO THE NARRATION CLOCK. The carry above snaps beat_durs to the SCENE
+    # durations (ns.duration), but those are the engine's per-scene bookkeeping and they diverge
+    # from the composed narration the viewer hears by a sub-frame per scene — over ~40 scenes that
+    # accumulated to +0.127s (measured; video 188.367s vs composed audio 188.240s), which the sync
+    # invariant refuses to publish. The audio IS the authority (it is what plays), so absorb the
+    # whole-frame difference between the video total and narration.total into the longest beat.
+    # After this, sum(beat_durs) == round(narration.total * FPS)/FPS exactly, and the invariant is
+    # satisfiable by construction rather than by luck.
+    _tgt_f = int(round(float(getattr(narration, "total", sum(beat_durs))) * FPS))
+    _cur_f = int(round(sum(beat_durs) * FPS))
+    if beat_durs and _tgt_f != _cur_f:
+        _k = max(range(len(beat_durs)), key=lambda i: beat_durs[i])
+        _adj = (_tgt_f - _cur_f) / FPS
+        if beat_durs[_k] + _adj >= 0.2:      # never starve a beat below the floor
+            beat_durs[_k] = round((beat_durs[_k] + _adj) * FPS) / FPS
+            print(f"  [5/5] timeline conform: {_adj*1000:+.0f}ms into beat {_k} so video == "
+                  f"narration ({_tgt_f} frames)", flush=True)
     # Hard cuts by default — frame-exact concat, NO deep xfade chain (that
     # chain was the freeze source). The uneven RHYTHM lives in beat_durs,
     # independent of the join mechanism.
