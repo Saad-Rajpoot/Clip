@@ -8888,15 +8888,26 @@ def assemble(
         _fr[_k] = max(1, _fr[_k] + (_tot_f - sum(_fr)))
         _emitted_f += sum(_fr)
         beat_durs.extend(f / FPS for f in _fr)
-    # CONFORM THE VIDEO TO THE NARRATION CLOCK. The carry above snaps beat_durs to the SCENE
-    # durations (ns.duration), but those are the engine's per-scene bookkeeping and they diverge
-    # from the composed narration the viewer hears by a sub-frame per scene — over ~40 scenes that
-    # accumulated to +0.127s (measured; video 188.367s vs composed audio 188.240s), which the sync
-    # invariant refuses to publish. The audio IS the authority (it is what plays), so absorb the
-    # whole-frame difference between the video total and narration.total into the longest beat.
-    # After this, sum(beat_durs) == round(narration.total * FPS)/FPS exactly, and the invariant is
-    # satisfiable by construction rather than by luck.
-    _tgt_f = int(round(float(getattr(narration, "total", sum(beat_durs))) * FPS))
+    # CONFORM THE VIDEO TO THE COMPOSED-AUDIO CLOCK. The carry above snaps beat_durs to the SCENE
+    # durations (ns.duration), but those are the engine's per-scene bookkeeping and diverge from the
+    # audio the viewer actually hears by a sub-frame per scene — accumulating to ~0.13s over ~40
+    # scenes, which the sync invariant refuses to publish.
+    #
+    # Target the DURATION OF narration.audio — the exact file the invariant probes — NOT
+    # narration.total. They are different objects: for an uploaded VO with breakouts spliced,
+    # narration.total is the intended scene sum (measured 188.367s) while the composed wav is
+    # 188.227s. An earlier cut targeted narration.total and was a silent no-op because it equals the
+    # scene sum the video already had. Probe the wav so the conform and the invariant share one
+    # authority; fall back to narration.total only if the file cannot be read.
+    _audio_f = getattr(narration, "audio", None)
+    _audio_dur = None
+    if _audio_f:
+        try:
+            _audio_dur = _probe_duration(_audio_f)
+        except Exception:
+            _audio_dur = None
+    _tgt_f = int(round(float(_audio_dur if _audio_dur else
+                             getattr(narration, "total", sum(beat_durs))) * FPS))
     _cur_f = int(round(sum(beat_durs) * FPS))
     if beat_durs and _tgt_f != _cur_f:
         _k = max(range(len(beat_durs)), key=lambda i: beat_durs[i])
