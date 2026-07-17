@@ -70,6 +70,41 @@ def test_delivered_gate_on_real_files():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_post_concat_conform_retimes_video_to_audio():
+    """The finished concat is retimed to the composed-audio frame count before the invariant — a
+    belt-and-suspenders over the beat-level accounting, since a small STABLE residual (measured +4
+    frames) entered at the breakout-insertion boundary and survived every beat-level fix. Bounded so
+    a gross error still reaches the invariant."""
+    from vidlore.assemble import _conform_video_to_audio, _probe_duration, FPS
+    from types import SimpleNamespace as NS
+    exe = _ffmpeg()
+    if not exe:
+        print("SKIP  no ffmpeg")
+        return
+    d = tempfile.mkdtemp()
+    try:
+        def run(*a):
+            subprocess.run([exe, "-v", "error", "-y", *a], capture_output=True, timeout=90)
+        run("-f", "lavfi", "-i", "sine=f=440", "-t", "5.0333", "-c:a", "pcm_s16le",
+            os.path.join(d, "a.wav"))                       # 151 frames
+        for name, frames, tag in (("long.mp4", 155, "trim"), ("short.mp4", 148, "pad")):
+            run("-f", "lavfi", "-i", "color=c=blue:s=320x180:r=30", "-frames:v", str(frames),
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", os.path.join(d, name))
+            _conform_video_to_audio(os.path.join(d, name), NS(audio=os.path.join(d, "a.wav")), d)
+            vd = _probe_duration(os.path.join(d, name))
+            ad = _probe_duration(os.path.join(d, "a.wav"))
+            assert abs(vd - ad) <= 1 / FPS, f"{tag}: video {vd} not conformed to audio {ad}"
+
+        # a GROSS gap must NOT be papered over — it must reach the invariant
+        run("-f", "lavfi", "-i", "color=c=green:s=320x180:r=30", "-frames:v", "300",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", os.path.join(d, "gross.mp4"))
+        _conform_video_to_audio(os.path.join(d, "gross.mp4"), NS(audio=os.path.join(d, "a.wav")), d)
+        assert abs(_probe_duration(os.path.join(d, "gross.mp4")) - 10.0) < 0.2, \
+            "a >max_fix_frames gap must be left for the invariant, not silently trimmed"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_gate_fails_closed_when_it_cannot_measure():
     """A check that cannot run has NOT passed. The first cut returned early on a missing narration
     or a failed ffprobe — the same shape as the verifier bug this branch exists to fix, where an
@@ -92,7 +127,7 @@ def test_gate_fails_closed_when_it_cannot_measure():
         assert "cannot be verified" in str(e)
 
 
-TESTS = [test_delivered_gate_on_real_files, test_gate_fails_closed_when_it_cannot_measure]
+TESTS = [test_delivered_gate_on_real_files, test_post_concat_conform_retimes_video_to_audio, test_gate_fails_closed_when_it_cannot_measure]
 
 if __name__ == "__main__":
     for fn in TESTS:

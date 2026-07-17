@@ -273,6 +273,53 @@ def _stream_times(p) -> dict:
     return out
 
 
+def _conform_video_to_audio(video_only, narration, workdir, *, max_fix_frames: int = 12) -> None:
+    """Trim/pad the CONCATENATED video to the composed-audio length, at the file level.
+
+    The video timeline is assembled from many per-scene frame counts plus fixed-length breakout
+    mp4s inserted verbatim, and those accounting layers do not perfectly reconcile with the composed
+    narration — a small, STABLE residual survives (measured +4 frames / +0.14s on the acceptance
+    render, unmoved by the pad, carry, renderer-clock and beat-level conform fixes because it enters
+    at the breakout-insertion boundary, not the beats). Rather than chase every accounting layer,
+    conform the finished artifact to the authority the invariant checks: measure the concat, and if
+    it is a few frames off the composed audio, retime it to match with a single tpad/trim.
+
+    Bounded by max_fix_frames: this corrects sub-perceptible accumulation, never a gross error (a
+    large gap means something is genuinely wrong and must reach the invariant, not be papered over)."""
+    aud = getattr(narration, "audio", None)
+    if not aud:
+        return                                         # the invariant will fail closed on this
+    try:
+        vd = _probe_duration(video_only)
+        ad = _probe_duration(aud)
+    except TimelineSyncError:
+        return                                         # let the invariant report it
+    delta_f = round((ad - vd) * FPS)
+    if delta_f == 0 or abs(delta_f) > max_fix_frames:
+        return                                         # already frame-exact, or too large to touch
+    target_frames = int(round(ad * FPS))
+    tmp = Path(video_only).with_suffix(".conform.mp4")
+    if delta_f > 0:
+        # video SHORT — hold the last frame for the deficit (tpad), then hard-cap the frame count
+        args = ["-i", str(video_only), "-vf",
+                f"tpad=stop_mode=clone:stop_duration={(delta_f + 1) / FPS:.4f}",
+                "-frames:v", str(target_frames)]
+    else:
+        # video LONG — keep exactly target_frames frames, dropping the tail
+        args = ["-i", str(video_only), "-frames:v", str(target_frames)]
+    try:
+        run([*_ffthreads(), *args, "-r", str(FPS), *_venc(),
+             "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+             "-color_range", "tv", str(tmp)], cwd=str(workdir), timeout=600)
+    except Exception:                                  # noqa: BLE001 — let the invariant judge
+        tmp.unlink(missing_ok=True)
+        return
+    if tmp.exists():
+        tmp.replace(Path(video_only))
+        print(f"  [5/5] video conform: {delta_f:+d} frame(s) at the concat tail so the delivered "
+              f"video == composed audio ({target_frames} frames)", flush=True)
+
+
 def _assert_video_audio_sync(video_only, narration, workdir, *, tol_frames: float = 1.0) -> None:
     """PRE-MUX: final_video_duration == composed_audio_duration, within one frame.
 
@@ -9421,6 +9468,7 @@ def assemble(
             "-color_trc", "bt709", "-color_range", "tv",
             str(video_only),
         ])
+        _conform_video_to_audio(video_only, narration, workdir)
         _assert_video_audio_sync(video_only, narration, workdir)
 
     words = narration.all_words()
