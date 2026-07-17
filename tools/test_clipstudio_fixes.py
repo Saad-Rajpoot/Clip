@@ -2329,9 +2329,13 @@ def test_generic_beat_filler_leniency():
                             types.SimpleNamespace(anthropic_model="m"), progress=None)
     finally:
         V.verify_frame, V._shot_lookup, V._cut.cut_selection, L.has_llm = orig2
-    check("NON-CHARACTER off-pool beat → exact→generic_filler (thematic, kept, not blocked)",
-          fill.verifier.get("verdict") == "keep"
-          and fill.verifier.get("relevance_class") == "generic_filler" and not fill.flagged)
+    # The stubbed verifier rejects this footage on BOTH passes (strict AND lenient:
+    # matches_narration=False, "off-pool event not shown"). Generic filler is a claim that the clip
+    # is at least on-topic — nothing here proves that. The old code relabelled the SAME rejecting
+    # verdict as "keep" and aired it, overwriting the verifier's own judgment.
+    check("NON-CHARACTER beat the lenient pass ALSO rejects → NOT filler-eligible (unresolved)",
+          fill.verifier.get("verdict") != "keep"
+          and fill.verifier.get("relevance_class") != "generic_filler" and fill.flagged)
     # the prompt actually carries the specific/generic instruction
     vsrc = (Path(__file__).resolve().parent.parent / "vidlore" / "clipstudio" /
             "verify.py").read_text(encoding="utf-8")
@@ -2516,9 +2520,13 @@ def test_character_present_unconfirmed():
                             types.SimpleNamespace(anthropic_model="m"), progress=None)
     finally:
         V.verify_frame, V._shot_lookup, V._cut.cut_selection, L.has_llm = origc
-    check("character beat, empty Face-ID, no confirmed wrong char → GENERIC-FILLER (kept, not blocked)",
-          cb.verifier.get("verdict") == "keep"
-          and cb.verifier.get("relevance_class") == "generic_filler" and not cb.flagged)
+    # The stub says wrong_subject_visible=True and reason="not Joffrey" — the verifier LOOKED and
+    # saw the wrong person. The old rung kept it as generic filler regardless, because Face-ID was
+    # empty and so `not _confirmed_wrong_character(...)` held: an absent accusation outranked an
+    # explicit one. With the leads unresolvable that was true of every frame in existence.
+    check("character beat the verifier says shows the WRONG subject → NOT filler-eligible",
+          cb.verifier.get("verdict") != "keep"
+          and cb.verifier.get("relevance_class") != "generic_filler" and cb.flagged)
 
 
 def test_verify_only_indices_subset():

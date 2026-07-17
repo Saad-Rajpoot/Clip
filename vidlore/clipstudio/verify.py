@@ -446,6 +446,43 @@ def _entity_face_confirmed(seg, faceid_names, char2actor=None) -> bool:
     return False
 
 
+def _generic_filler_ok(vd, seg, src_title, faceid_names, beat_era, ok_tokens=frozenset(),
+                       char2actor=None) -> tuple:
+    """May an exact beat air its clip as honestly-labelled GENERIC FILLER? -> (ok, why).
+
+    `vd` must be a FRESH LENIENT verdict on the footage that would actually air — not the strict
+    verdict that just rejected it, and never a recycled one. The old code had no fresh pass at all:
+    it relabelled the rejecting verdict as "keep", so the verifier's own judgment was overwritten
+    and shipped.
+
+    Every condition is POSITIVE. "No wrong face was confirmed" is not evidence of anything — it was
+    vacuously true for every frame in the failing render, because Face-ID could not resolve the
+    leads. Requires all of:
+      1. a judgment exists (an outage is not a pass);
+      2. the LENIENT pass still says keep — asked the easy question, it must at least answer yes;
+      3. it affirms matches_narration — on-topic, asserted, not merely un-refuted;
+      4. quality is not rejected — a blurry/unreadable frame is not editorially relevant;
+      5. no different identified person, and no wrong main subject seen (contradictory);
+      6. no era conflict with the source's declared season (same-show/era)."""
+    if vd is None:
+        return False, "no lenient judgment (verifier unavailable) — an outage is not a pass"
+    if vd.get("verdict") != "keep":
+        return False, "the lenient pass ALSO rejected this footage"
+    if vd.get("matches_narration") is not True:
+        return False, "lenient pass did not affirm the footage is on-topic"
+    if vd.get("quality_ok") is False:
+        return False, "lenient pass rejected the quality"
+    if vd.get("wrong_subject_visible") is True:
+        return False, "a different character is the main subject (contradictory)"
+    if _confirmed_wrong_character(seg, faceid_names, ok_tokens, char2actor):
+        return False, "Face-ID confirms a DIFFERENT person in this shot (contradictory)"
+    _bn, _sn = _season_num(beat_era), _season_num(src_title)
+    if _bn is not None and _sn is not None and _bn != _sn:
+        return False, f"wrong era (beat season {_bn} vs source season {_sn})"
+    return True, (f"lenient keep + matches_narration, no wrong subject, era ok "
+                  f"(conf {vd.get('confidence', 0.0)})")
+
+
 def _present_unconfirmed_ok(vd, seg, src_title, faceid_names, beat_era, ok_tokens=frozenset(),
                             *, char2actor=None) -> bool:
     """May a CHARACTER beat whose exact footage the verifier rejected still air as CONTEXTUAL?
@@ -530,6 +567,10 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
     def _era_of(_s):
         return _beat_era(_s, _global_era, _single, global_verified=_global_ok,
                          event_eras=_event_eras)
+
+    def _src_title_of(_sel):
+        _s = proj.source(_sel.source_id)
+        return ((getattr(_s, "title", "") or "") + " " + (_sel.source_id or ""))
 
     # character -> actor. Face-ID reports ACTOR names while beats name CHARACTERS, so confirming
     # "Joffrey is on screen" from a face labelled 'jack gleeson' needs the roster mapping.
@@ -874,41 +915,47 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     swapped = True
                     log(f"verify: seg{sel.segment_index} exact→contextual (character present-"
                         f"unconfirmed; right scene/era, no wrong character — contextual_fallback)")
-                elif not _confirmed_wrong_character(seg, faceid_names, _ok_toks):
-                    # No exact/contextual, no POSITIVE era signal — but Face-ID does NOT confirm a
-                    # different, unrelated character (empty/unconfirmed Face-ID, or a CO-MENTIONED
-                    # character like Tywin on a 'Joffrey calls Tywin a coward' beat, or — in a
-                    # single-scene deep-dive — any main-cast member). A thematic scene clip is a
-                    # legitimate GENERIC-FILLER last resort. NEVER a CONFIRMED wrong character.
-                    v["verdict"] = "keep"
-                    v["downgraded"] = "exact→generic_filler(character last-resort)"
-                    v["relevance_class"] = "generic_filler"
-                    sel.verifier = v
-                    replaced += 1
-                    swapped = True
-                    log(f"verify: seg{sel.segment_index} exact→generic_filler (character; no confirmed "
-                        f"wrong character — thematic scene clip, honestly labeled)")
-
-            # EXACT→GENERIC-FILLER (the last hierarchy tier before an honest gap). When neither the
-            # exact moment NOR a right-subject contextual clip exists, a NON-CHARACTER beat
-            # (scene / event / object / location / abstract) may air its thematic clip as honestly
-            # labelled generic_filler — a thematic same-show clip is NOT contradictory and beats a
-            # frozen still / black. A CHARACTER/actor beat is NOT filler-eligible: a clip that does
-            # not show the required person risks a WRONG-CHARACTER read (contradictory), so it stays
-            # unresolved for the still / hold / honest release-block. env-gated (default ON).
+            # EXACT→GENERIC-FILLER — the last rung before an honest gap, and the one that used to
+            # give everything away. It had two holes, both of which aired footage on NO new evidence:
+            #
+            #   * a CHARACTER beat was kept whenever `not _confirmed_wrong_character(...)` — i.e. on
+            #     the ABSENCE of an accusation. With Face-ID unable to resolve Joffrey/Varys/Pycelle
+            #     that was true of every frame in existence.
+            #   * a NON-CHARACTER beat was kept unconditionally, by relabelling the SAME verdict `v`
+            #     that had just said "replace". The verifier's rejection was overwritten with
+            #     "keep" and shipped as "honestly labeled" filler.
+            #
+            # Now: exact and contextual must be genuinely exhausted (both promotion passes ran and
+            # swapped nothing), AND a FRESH LENIENT verdict on the footage that would actually air
+            # must POSITIVELY prove it is on-topic, same-show/era, non-contradictory and worth
+            # airing. No proof → exact_scene_missing → still/hold/manual review → release-block.
+            # This does not touch genuinely generic narration: a beat whose own policy is
+            # generic_filler never reaches here (it is not `_exact`).
             _filler_on = _os_ms.environ.get(
                 "VIDLORE_CLIPSTUDIO_GENERIC_FILLER_DOWNGRADE", "1").strip() \
                 not in ("0", "false", "no")
-            if not swapped and _exact and _downgrade_on and _filler_on \
-                    and (getattr(seg, "required_kind", "") or "").lower() not in ("character", "actor"):
-                v["verdict"] = "keep"
-                v["downgraded"] = "exact→generic_filler"
-                v["relevance_class"] = "generic_filler"
-                sel.verifier = v
-                replaced += 1
-                swapped = True
-                log(f"verify: seg{sel.segment_index} exact→generic_filler "
-                    f"(non-character beat; exact+contextual absent — thematic clip, honestly labeled)")
+            if not swapped and _exact and _downgrade_on and _filler_on:
+                _fresh = None
+                if not _breaker_open:
+                    _fresh, _ = _verify_ctx(kf, shot, seg, False, faceid_names)   # LENIENT re-ask
+                _ok_f, _why_f = _generic_filler_ok(
+                    _fresh, seg, _src_title_of(sel), faceid_names, _era_of(seg),
+                    _ok_toks if _single else frozenset(), _char2actor)
+                if _ok_f:
+                    v = dict(_fresh)
+                    v["status"] = "ok"
+                    v["verdict"] = "keep"
+                    v["downgraded"] = "exact→generic_filler"
+                    v["relevance_class"] = "generic_filler"
+                    v["filler_evidence"] = _why_f
+                    sel.verifier = v
+                    replaced += 1
+                    swapped = True
+                    log(f"verify: seg{sel.segment_index} exact→generic_filler — a fresh lenient "
+                        f"pass PROVES relevance ({_why_f}); honestly labeled")
+                else:
+                    log(f"verify: seg{sel.segment_index} generic-filler fallback REFUSED — "
+                        f"{_why_f}; the beat stays unresolved rather than airing unproven footage")
 
             if not swapped:
                 failed += 1

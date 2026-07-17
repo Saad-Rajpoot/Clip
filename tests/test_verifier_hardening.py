@@ -245,6 +245,58 @@ def test_a_poisoned_cache_entry_is_dropped_not_served():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# H2 — the generic-filler rung. Positive proof required; the beat is NOT unreachable.
+# ---------------------------------------------------------------------------
+_SEG_C = NS(required_entity="Joffrey Baratheon", required_kind="character",
+            text="Joffrey comes apart.", scene_query="", expected_visual="")
+_C2A = {"joffrey baratheon": "Jack Gleeson", "sandor clegane": "Rory McCann"}
+_T3 = "Game of Thrones Season 3 small council"
+_LENIENT_KEEP = {"verdict": "keep", "matches_narration": True, "quality_ok": True,
+                 "wrong_subject_visible": False, "confidence": 0.8}
+
+
+def test_generic_filler_needs_a_fresh_positive_lenient_verdict():
+    ok, why = V._generic_filler_ok(_LENIENT_KEEP, _SEG_C, _T3, [], "season 3",
+                                   frozenset(), _C2A)
+    assert ok, f"a proven-relevant clip MUST still be filler-eligible: {why}"
+    assert "matches_narration" in why
+
+
+def test_generic_filler_refuses_without_proof():
+    for vd, expect in (
+            (None, "no lenient judgment"),                       # outage is not a pass
+            ({"verdict": "replace", "matches_narration": False}, "ALSO rejected"),
+            ({"verdict": "keep", "matches_narration": False}, "did not affirm"),
+            ({**_LENIENT_KEEP, "quality_ok": False}, "quality"),
+            ({**_LENIENT_KEEP, "wrong_subject_visible": True}, "contradictory"),
+    ):
+        ok, why = V._generic_filler_ok(vd, _SEG_C, _T3, [], "season 3", frozenset(), _C2A)
+        assert not ok, f"must refuse: {vd}"
+        assert expect in why, f"{why!r} should mention {expect!r}"
+
+
+def test_generic_filler_refuses_a_confirmed_wrong_person_and_wrong_era():
+    ok, why = V._generic_filler_ok(_LENIENT_KEEP, _SEG_C, _T3, ["rory mccann"], "season 3",
+                                   frozenset(), _C2A)
+    assert not ok and "DIFFERENT person" in why
+    # the RIGHT actor for the character is not a wrong person
+    ok2, _ = V._generic_filler_ok(_LENIENT_KEEP, _SEG_C, _T3, ["jack gleeson"], "season 3",
+                                  frozenset(), _C2A)
+    assert ok2, "Face-ID confirming the required entity must not read as contradictory"
+    ok3, why3 = V._generic_filler_ok(_LENIENT_KEEP, _SEG_C, "Game of Thrones Season 5 scenes",
+                                     [], "season 3", frozenset(), _C2A)
+    assert not ok3 and "wrong era" in why3
+
+
+def test_empty_faceid_alone_never_grants_filler():
+    """The measured loophole: 'no confirmed wrong character' + empty Face-ID was enough. Absence of
+    an accusation is not proof of anything — it must still need the positive lenient verdict."""
+    ok, _ = V._generic_filler_ok({"verdict": "replace", "matches_narration": False},
+                                 _SEG_C, _T3, [], "season 3", frozenset(), _C2A)
+    assert not ok
+
+
 TESTS = [
     test_every_prompt_affecting_field_invalidates_the_cache,
     test_faceid_names_are_order_independent_but_content_sensitive,
@@ -255,6 +307,10 @@ TESTS = [
     test_healthy_backend_verifies_every_beat_and_caches,
     test_a_poisoned_cache_entry_is_dropped_not_served,
     test_a_verdict_is_not_cached_when_the_sheet_prediction_did_not_hold,
+    test_generic_filler_needs_a_fresh_positive_lenient_verdict,
+    test_generic_filler_refuses_without_proof,
+    test_generic_filler_refuses_a_confirmed_wrong_person_and_wrong_era,
+    test_empty_faceid_alone_never_grants_filler,
 ]
 
 if __name__ == "__main__":
