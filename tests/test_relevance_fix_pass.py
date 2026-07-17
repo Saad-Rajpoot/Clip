@@ -678,6 +678,27 @@ def test_breakout_caption_fixes_garble_with_phonetic_corroboration():
     assert "essence" in " ".join(w[0] for w in out), "'messence'->'essence' is a 0.93 near-miss"
 
 
+def test_aired_coverage_matches_how_candidates_are_found():
+    """The aired-coverage gate must judge the same way find_quote_span FINDS — else a line located
+    through ASR garble is dropped here on that same garble. Two real bugs, one measured:
+      1. the greedy matcher burned its pointer on a missing word, so "Perhaps SOME essence" vs aired
+         "Perhaps A messence" scored 1/6 and dropped the video's nightshade payoff;
+      2. exact word-match rejected the 'messence'/'essence' near-miss.
+    """
+    from vidlore.clipstudio.build import _ordered_coverage
+    w = str.split
+    # the exact failing case — must now clear the 0.70 verbatim floor
+    cov = _ordered_coverage(w("Perhaps some essence of nightshade to help him sleep"),
+                            w("Perhaps a messence of nightshade to help him sleep"))
+    assert cov >= 0.70, f"garble-tolerant, pointer-safe coverage must pass the payoff, got {cov}"
+    # a genuinely different line must still score low — the tolerance must not become a pass-all
+    assert _ordered_coverage(w("The king is tired see him to his chambers"),
+                             w("My father won the real war he killed Prince Rhaegar")) < 0.5
+    # a TRUNCATED aired window (only the prefix) must stay below floor — we won't air half a line
+    assert _ordered_coverage(w("any man who must say I am the king is no true king"),
+                             w("any man who must")) < 0.70
+
+
 def test_promised_payoff_is_detected_and_the_tease_is_not():
     """The video spends 9 minutes promising one word and never plays it. The promise beat
     ('listen for something') names nothing; the PAYOFF beat ("That's the word I told you to listen
@@ -755,6 +776,7 @@ TESTS = [
     test_breakout_caption_never_takes_the_script_blindly,
     test_breakout_caption_will_not_rewrite_a_semantic_opposite,
     test_breakout_caption_fixes_garble_with_phonetic_corroboration,
+    test_aired_coverage_matches_how_candidates_are_found,
     test_promised_payoff_is_detected_and_the_tease_is_not,
     test_promised_payoff_is_priority_not_a_bypass,
 ]

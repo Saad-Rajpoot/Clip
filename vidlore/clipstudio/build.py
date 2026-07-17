@@ -753,14 +753,36 @@ def _ordered_coverage(quote_words: list, aired_words: list) -> float:
         return 0.0                                     # <2 distinctive content words (e.g. "don't",
         # "can't"→"cannot", "I've", a bare possessive, or a generic "do you know" prefix) is
         # INSUFFICIENT EVIDENCE — never a full match, so unrelated audio can never pass it.
-    i = matched = 0                                    # greedy in-order (LCS-style) match
+    # ASR-NEAR-MISS TOLERANCE. This gate must judge the same way candidates are FOUND
+    # (index.find_quote_span), or a line located through garble is then dropped here on that same
+    # garble. Measured: "Perhaps some ESSENCE of nightshade" aired as "a MESSENCE of nightshade" —
+    # the candidate was generated (fuzzy) then this exact-match gate scored it 0.17 and dropped the
+    # video's promised nightshade payoff. A content word counts when it matches exactly OR is a
+    # clear phonetic near-miss (SequenceMatcher ≥ 0.8) — never a mere prefix, so distinct words stay
+    # distinct.
+    from difflib import SequenceMatcher as _SM
+
+    def _same(x, y):
+        if x == y:
+            return True
+        if abs(len(x) - len(y)) > 3:
+            return False
+        return _SM(None, x, y).ratio() >= 0.8
+    # In-order match that SKIPS a missing quote word instead of burning the aired pointer to the
+    # end. The old greedy loop advanced `i` to len(a) whenever a quote word was absent, so one
+    # substitution killed every later word: "Perhaps SOME essence…" vs aired "Perhaps A messence…"
+    # scored 1/6 because 'some'≠'a' consumed the whole remainder, dropping the nightshade payoff.
+    # Now a word that cannot be found (from the current position) is simply not counted, and the
+    # pointer stays put for the next word.
+    i = matched = 0
     for w in qc:
-        while i < len(a):
-            if a[i] == w:
-                matched += 1
-                i += 1
-                break
-            i += 1
+        j = i
+        while j < len(a) and not _same(a[j], w):
+            j += 1
+        if j < len(a):                                 # found in order → consume up to it
+            matched += 1
+            i = j + 1
+        # not found → skip this quote word, keep i for the next (do NOT burn the pointer)
     return matched / len(qc)
 
 
