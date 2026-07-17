@@ -1198,7 +1198,11 @@ def test_breakout_audio_gate():
           "def _dialogue_aware_dur" in src and "lo: float = 3.0" in src
           and "hi: float = 10.0" in src)
     check("breakout passes 10s max cap (not a hard 5.5s chop)",
-          "dur = 10.0" in src and "_dialogue_aware_dur(str(src_path), start, lo=3.0" in src)
+          "dur = 10.0" in src and "_dialogue_aware_dur(str(src_path), start, lo=_lo, hi=_hi)" in src
+          # the 3s floor still holds; `lo` is now raised to the QUOTE's own length on a
+          # quote-anchored window so the search can't end on an EARLIER complete line and truncate
+          # the iconic one (how the nightshade payoff was lost)
+          and "_lo = max(3.0, min(float(min_dur or 0.0), _hi))" in src)
     check("breakout content dedup (no repeated spoken line)",
           "_picked_word_sets" in src and "never airs the SAME moment twice" in src
           and "_same_src_win" in src and "_substr" in src)
@@ -1559,7 +1563,7 @@ def test_image_fallback():
           and not _is_narration("What was she like"))
     check("narration guard wired into breakout extraction",
           "_is_narration(_bk_text)" in bsrc and "BREAKOUT_VOICE_GUARD" in bsrc
-          and "_dialogue_aware_dur(str(src_path), start, lo=3.0" in bsrc)
+          and "_dialogue_aware_dur(str(src_path), start, lo=_lo, hi=_hi)" in bsrc)
     check("essay/interview titles excluded from breakout sources",
           bool(_ESSAYISH_RX.search("The Toxic Psychology of Robert & Cersei"))
           and bool(_ESSAYISH_RX.search("Best Scenes: Robert and Cersei"))

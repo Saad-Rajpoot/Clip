@@ -458,8 +458,15 @@ def _pick_breakout_stop(words: list, lo: float, hi: float) -> float:
     return round(max(2.0, min(hi, last_end)), 3)
 
 
+# Quote-anchored breakout window padding. Small: the in-point is the line's own audio onset, so
+# these only stop the first consonant / last syllable being clipped.
+_BK_LEAD_S = 0.35
+_BK_TAIL_S = 0.45
+
+
 def _extract_breakout(src_path: str, start: float, dur: float, vdest: Path,
-                      adest: Path, src_w: int = 0, crop_corner: str = "") -> Optional[float]:
+                      adest: Path, src_w: int = 0, crop_corner: str = "",
+                      min_dur: float = 0.0) -> Optional[float]:
     """Cut the breakout VIDEO (enhanced, 1080p30, silent) + its AUDIO (2-pass loudnorm to
     narration level, faded) from the source. Skips leading scene silence so the narration
     pause never dangles over a mute shot; `dur` is treated as the MAX — the real length is
@@ -469,14 +476,16 @@ def _extract_breakout(src_path: str, start: float, dur: float, vdest: Path,
     import json as _json10
     import re as _re10
     try:
-        # 1) leading-silence probe — a shot often opens 1-2s before anyone speaks
+        # 1) leading-silence probe — a shot often opens 1-2s before anyone speaks.
+        # SKIPPED for a quote-anchored window (min_dur>0): `start` is then the QUOTE's own audio
+        # onset, so there is no dead lead to trim and skipping ahead would clip the first word.
         ps = subprocess.run(
             [ffmpeg_exe(), "-y", "-ss", f"{max(0.0, start):.3f}", "-i", str(src_path),
              "-t", f"{dur:.3f}", "-vn", "-af", "silencedetect=noise=-30dB:d=0.4",
              "-f", "null", "-"], capture_output=True, timeout=120)
         _txt = (ps.stderr or b"").decode("utf-8", "ignore")
         _m0 = _re10.search(r"silence_start:\s*(-?[\d.]+)", _txt)
-        if _m0 and float(_m0.group(1)) <= 0.15:
+        if min_dur <= 0 and _m0 and float(_m0.group(1)) <= 0.15:
             _m1 = _re10.search(r"silence_end:\s*([\d.]+)", _txt)
             if _m1:
                 _lead = float(_m1.group(1))
@@ -491,7 +500,13 @@ def _extract_breakout(src_path: str, start: float, dur: float, vdest: Path,
             _srcdur = 0.0
         _hi = min(float(dur), (_srcdur - start - 0.1) if _srcdur else float(dur))
         if _hi >= 3.2:
-            dur, _bk_text = _dialogue_aware_dur(str(src_path), start, lo=3.0, hi=_hi)
+            # `lo` is the floor the dialogue-aware search may not undercut. For a quote-anchored
+            # window that floor is the QUOTE'S OWN LENGTH: the whole point is to air the complete
+            # intended line, so a search that ends on "a complete spoken line" earlier than the
+            # quote's last word would still truncate it. This is how the payoff was lost —
+            # breakout #2 ended 5.15s before "…essence of nightshade to help him sleep".
+            _lo = max(3.0, min(float(min_dur or 0.0), _hi))
+            dur, _bk_text = _dialogue_aware_dur(str(src_path), start, lo=_lo, hi=_hi)
         else:
             dur, _bk_text = max(2.0, _hi), ""
         # COMPETITOR-VOICEOVER GUARD: a breakout must be the movie's OWN dialogue, never another
@@ -1257,6 +1272,7 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                 f"{_top}={_rej.get(_top, 0)} (not the Face-ID gate).")
 
     out = []
+    _seg_by_idx = {s.index: s for s in segments}
     for score, idx, src, sh, _q in sorted(picked, key=lambda p: p[1]):
         # pass the 10s MAX cap — _extract_breakout finds the real length that ends on a
         # complete spoken line (3-10s), so an iconic quote is never chopped mid-word
@@ -1266,8 +1282,33 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         # corner-bug sources: breakouts are cut straight from the source (build_video's per-clip
         # watermark crop never sees them), so punch-in-crop the bug corner here (memoized detector)
         _bk_corner = _logo9(shots_of.get(src.id) or []) if _cngate9 else ""
-        real = _extract_breakout(src.local_path, float(sh.start), dur, v, a,
-                                 int(getattr(src, "width", 0) or 0), crop_corner=_bk_corner)
+        # QUOTE-ANCHORED WINDOW. The in-point used to be the SHOT boundary (float(sh.start)), and
+        # the window only ever grew forward — so a line that begins before its shot was unreachable
+        # by construction. Measured: the thesis line "Any man who must say I am the king is no true
+        # king" ends at 129.64s and its shot starts at 130.05s, so breakout #1 opened 0.36s AFTER
+        # the most important line in the video and could never have included it.
+        #
+        # Anchor on the quote's own audio span instead (word-level ASR, so shot boundaries are
+        # irrelevant) and size the window to CONTAIN the whole line.
+        _bk_start, _bk_min = float(sh.start), 0.0
+        _qtext = (getattr(_seg_by_idx.get(idx), "quote", "") or "").strip()
+        _span = None
+        if _qtext:
+            try:
+                _span = _index.find_quote_span(_index.load_words(proj, src.id), _qtext)
+            except Exception:
+                _span = None
+        if _span:
+            _qs, _qe, _qr = _span
+            _bk_start = max(0.0, _qs - _BK_LEAD_S)
+            _bk_min = (_qe - _bk_start) + _BK_TAIL_S      # never end before the line does
+            dur = max(dur, _bk_min + 0.5)
+            log(f"build: breakout scene {idx} — quote-anchored window "
+                f"[{_bk_start:.2f}→{_bk_start + _bk_min:.2f}] (shot starts {float(sh.start):.2f}, "
+                f"phrase match {_qr})")
+        real = _extract_breakout(src.local_path, _bk_start, dur, v, a,
+                                 int(getattr(src, "width", 0) or 0), crop_corner=_bk_corner,
+                                 min_dur=_bk_min)
         if not (real and real > 1.5):
             continue
         # POST-EXTRACTION WINDOW-AUDIO gate — the matched SHOT line passed the commentary gate, but
@@ -1276,7 +1317,9 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         # Mistake ...' analysis source matched the in-character "chaos is a ladder" line, but the
         # aired window continued into "...Cersei spent multiple seasons after the purple wedding").
         # Validate the AIRED window's transcript (every shot it spans), not just the matched line.
-        _w0, _w1 = float(sh.start), float(sh.start) + float(real)
+        # validate the window that ACTUALLY aired — with a quote-anchored in-point that is no
+        # longer the shot's start, so reading sh.start here would gate the wrong span
+        _w0, _w1 = float(_bk_start), float(_bk_start) + float(real)
         _wtxt = " ".join(
             (getattr(s2, "transcript", "") or "").strip()
             for s2 in shots_of.get(src.id, [])
@@ -1377,9 +1420,13 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         _aired_tx = _atext if _aw else (_wtxt or "")
         _cov = _ocov
         _fid = getattr(sh, "face_ids", None) or []
+        # source_t records the in-point that ACTUALLY aired (quote-anchored when we located the
+        # line), not the shot boundary — it is provenance, and it is also the dedup/identity key
         _entry["_audit"] = {"seg_index": idx, "cold_open": _is_cold, "dur_s": round(real, 2),
                             "source_id": src.id, "source_title": (src.title or "")[:120],
-                            "source_t": round(float(sh.start), 1), "line": _q[:160],
+                            "source_t": round(float(_bk_start), 1), "line": _q[:160],
+                            "shot_t": round(float(sh.start), 1),
+                            "quote_anchored": bool(_span),
                             "aired_transcript": _aired_tx[:300],
                             "line_coverage": round(_cov, 2),
                             "candidate_type": _cand_type,

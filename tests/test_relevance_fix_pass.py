@@ -447,6 +447,64 @@ def test_faceid_recovers_oversized_reference_stills():
     assert "faces[:, :14] /= s" in fn, "boxes+landmarks must map back to original coordinates"
 
 
+# ---------------------------------------------------------------------------
+# F7 — quote-anchored breakout windows.
+# ---------------------------------------------------------------------------
+def test_breakout_window_contains_the_complete_iconic_line():
+    """Shipped: breakout #1 cut at source 130.00 -- the shot boundary -- 0.36s AFTER the thesis
+    line ended at 129.64, with a forward-only window, so the line was unreachable by construction.
+    Breakout #2 ended 5.15s before the nightshade payoff."""
+    from vidlore.clipstudio.index import find_quote_span
+    from vidlore.clipstudio.build import _BK_LEAD_S, _BK_TAIL_S
+    words = _real_words()
+    for q, shot_start in (("Any man who must say 'I am the king' is no true king.", 130.05),
+                          ("Perhaps some essence of nightshade to help him sleep.", 169.67)):
+        sp = find_quote_span(words, q)
+        assert sp is not None, f"not located: {q!r}"
+        qs, qe, _ = sp
+        start = max(0.0, qs - _BK_LEAD_S)
+        min_dur = (qe - start) + _BK_TAIL_S
+        assert start <= qs, "window must open at or before the line"
+        assert start + min_dur >= qe, "window must contain the COMPLETE line"
+    # the thesis window must reach BACK before its shot boundary — the old code never could
+    qs, _, _ = find_quote_span(words, "Any man who must say 'I am the king' is no true king.")
+    assert max(0.0, qs - _BK_LEAD_S) < 130.05, "window must precede the shot boundary"
+
+
+def test_breakout_in_point_is_the_quote_not_the_shot():
+    from pathlib import Path as _P
+    s = (_P(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "build.py").read_text(
+        encoding="utf-8")
+    assert "QUOTE-ANCHORED WINDOW" in s
+    i = s.index("QUOTE-ANCHORED WINDOW")
+    blk = s[i:i + 1800]
+    assert "find_quote_span" in blk, "the in-point must come from the quote's audio span"
+    assert "_bk_start = max(0.0, _qs - _BK_LEAD_S)" in blk
+    assert "min_dur=_bk_min" in blk, "the window must be forbidden from ending before the line does"
+    # the post-extract window gate must validate the window that ACTUALLY aired
+    assert "_w0, _w1 = float(_bk_start)" in s, "the aired-window gate must use the anchored start"
+
+
+def test_min_dur_floor_prevents_truncating_the_line():
+    """_dialogue_aware_dur ends on 'a complete spoken line' -- which can be an EARLIER line than the
+    quote's last word. Without a floor it would still truncate the payoff."""
+    from pathlib import Path as _P
+    s = (_P(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "build.py").read_text(
+        encoding="utf-8")
+    assert "_lo = max(3.0, min(float(min_dur or 0.0), _hi))" in s
+    i = s.index("_lo = max(3.0, min(float(min_dur or 0.0), _hi))")
+    assert "nightshade" in s[max(0, i - 700):i], "the floor must be documented by the failure it fixes"
+
+
+def test_quote_anchored_window_skips_the_silence_trim():
+    """The leading-silence probe exists to skip dead air at a SHOT's head. With a quote-anchored
+    in-point there is none, and skipping ahead would clip the first word."""
+    from pathlib import Path as _P
+    s = (_P(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "build.py").read_text(
+        encoding="utf-8")
+    assert "if min_dur <= 0 and _m0 and float(_m0.group(1)) <= 0.15:" in s
+
+
 def test_release_block_is_non_retryable():
     """Release-blocks and relevance failures are CONTENT verdicts. Re-running unchanged cannot fix
     them — it only rolls the dice until the verifier dies."""
@@ -485,6 +543,10 @@ TESTS = [
     test_a_different_identified_person_still_blocks,
     test_correct_actor_face_is_not_a_wrong_character,
     test_faceid_recovers_oversized_reference_stills,
+    test_breakout_window_contains_the_complete_iconic_line,
+    test_breakout_in_point_is_the_quote_not_the_shot,
+    test_min_dur_floor_prevents_truncating_the_line,
+    test_quote_anchored_window_skips_the_silence_trim,
 ]
 
 
