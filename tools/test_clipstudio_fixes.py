@@ -2450,9 +2450,18 @@ def test_character_present_unconfirmed():
     check("_beat_mention_tokens gathers required + co-mentioned entities",
           _beat_mention_tokens(joff_tywin) >= {"joffrey", "baratheon", "tywin", "lannister"})
 
-    # POSITIVE: right era (season 3) + same-season source + no wrong Face-ID → downgrade allowed
-    check("right-era S03E10 shot, no wrong face → present-unconfirmed contextual ALLOWED",
-          _present_unconfirmed_ok(V0, joff, "Game of Thrones S03E10 small council", [], "season 3") is True)
+    # Right era + no wrong Face-ID but an EMPTY one → BLOCKS. Absence of a wrong face is not
+    # presence of the right one, and this rule was vacuously true in the render that exposed it:
+    # Face-ID had NO REFERENCE for Joffrey, Varys or Pycelle (oversized wiki stills defeated
+    # YuNet), so "no confirmed wrong character" held for every frame in existence and 121 exact
+    # beats were downgraded to contextual over whatever happened to be on screen.
+    check("right era but EMPTY Face-ID → present-unconfirmed contextual BLOCKS (unknown ≠ present)",
+          _present_unconfirmed_ok(V0, joff, "Game of Thrones S03E10 small council", [],
+                                  "season 3") is False)
+    # POSITIVE evidence — Face-ID actually places the required entity in the shot → allowed
+    check("right era + Face-ID CONFIRMS the required entity → contextual ALLOWED",
+          _present_unconfirmed_ok(V0, joff, "Game of Thrones S03E10 small council",
+                                  ["Joffrey Baratheon"], "season 3") is True)
 
     # REGRESSION CORNER (the exact hole the reviewer flagged): UNCONSTRAINED era + empty Face-ID +
     # no wrong_subject_visible → MUST still block (never gamble a wrong character through).

@@ -328,13 +328,24 @@ def _beat_mention_tokens(seg) -> set:
     return toks
 
 
-def _confirmed_wrong_character(seg, faceid_names, extra_ok_tokens=frozenset()) -> bool:
+def _confirmed_wrong_character(seg, faceid_names, extra_ok_tokens=frozenset(),
+                               char2actor=None) -> bool:
     """True IFF Face-ID POSITIVELY identifies a specific person who is NEITHER the beat's required/
     co-mentioned entity NOR in extra_ok_tokens (the scene roster for a single-scene deep-dive, where
     any main-cast member is contextually valid). This is the ONLY hard block for a character
     fallback — an EMPTY / unconfirmed Face-ID is NOT a confirmed wrong character (the required person
-    may be present off-face), so it does not block."""
+    may be present off-face), so it does not block.
+
+    Face-ID reports ACTOR names while beats name CHARACTERS, so the roster must map between them:
+    without it a PERFECT Joffrey frame (face 'jack gleeson') reads as a confirmed WRONG character
+    for a beat about 'Joffrey Baratheon'. That never bit before only because Face-ID resolved no
+    leads at all in the failing render — fixing the reference builder would have activated it."""
     ok = _beat_mention_tokens(seg) | set(extra_ok_tokens)
+    for ch, ac in (char2actor or {}).items():
+        cht = {w for w in re.findall(r"[a-z0-9]+", (ch or "").lower()) if len(w) > 2}
+        act = {w for w in re.findall(r"[a-z0-9]+", (ac or "").lower()) if len(w) > 2}
+        if cht and act and (cht <= ok or act <= ok):
+            ok |= cht | act                            # same person under either naming
     for nm in (faceid_names or []):
         nt = {w for w in re.findall(r"[a-z0-9]+", (nm or "").lower()) if len(w) > 2}
         if nt and ok and not (nt & ok):
@@ -342,28 +353,54 @@ def _confirmed_wrong_character(seg, faceid_names, extra_ok_tokens=frozenset()) -
     return False
 
 
-def _present_unconfirmed_ok(vd, seg, src_title, faceid_names, beat_era, ok_tokens=frozenset()) -> bool:
-    """A CHARACTER beat whose exact-moment footage was rejected with correct_subject_visible=False
-    may STILL be a legitimate contextual fallback when the required person is PRESENT but not
-    face-confirmed (a wide / reaction shot of the RIGHT scene) — as opposed to a DIFFERENT character
-    dominating the frame (contradictory). Because a single boolean cannot tell these apart, the
-    downgrade requires a POSITIVE confirmation and fails CLOSED otherwise:
-      (1) NO different identified main character in the shot's Face-ID (a non-target name ⇒ block); and
-      (2) a POSITIVE same-era signal — the beat's era is CONSTRAINED and the source's declared season
-          matches it. An UNCONSTRAINED era gives no positive signal → block (never gamble that an
-          empty Face-ID + missing era means the right person). This never fires for a confirmed wrong
-          character or a wrong-era source."""
+def _entity_face_confirmed(seg, faceid_names, char2actor=None) -> bool:
+    """True IFF Face-ID POSITIVELY places the beat's required entity in the shot.
+
+    The counterpart to _confirmed_wrong_character, and the one that was missing. Beats were kept on
+    the ABSENCE of a wrong face; nothing ever required the PRESENCE of the right one. Face-ID
+    identifies actors while beats name characters, so match either way round."""
+    ent = (getattr(seg, "required_entity", "") or "").strip().lower()
+    if not ent or not faceid_names:
+        return False
+    from .orchestrate import entity_name_variants
+    face_toks = {w for w in re.findall(r"[a-z0-9]+", " ".join(faceid_names).lower()) if len(w) > 2}
+    if not face_toks:
+        return False
+    for v in entity_name_variants(ent, char2actor):
+        if v and all(t in face_toks for t in v):
+            return True
+    return False
+
+
+def _present_unconfirmed_ok(vd, seg, src_title, faceid_names, beat_era, ok_tokens=frozenset(),
+                            *, char2actor=None) -> bool:
+    """May a CHARACTER beat whose exact footage the verifier rejected still air as CONTEXTUAL?
+
+    Only on POSITIVE evidence that the required person is there. The old rule accepted on the
+    absence of a wrong one, which is not the same claim — and in the render that exposed this it was
+    vacuously true everywhere, because Face-ID had NO REFERENCE for Jack Gleeson (Joffrey, the
+    co-lead), Conleth Hill (Varys) or Julian Glover (Pycelle). With the leads unidentifiable, "no
+    confirmed wrong character" is satisfied by every frame in existence, so 121 exact beats were
+    downgraded to contextual and kept, "honestly labeled", over whatever happened to be there.
+
+    An empty Face-ID is UNKNOWN, never innocent. Requires ALL of:
+      (1) vision did not see a different main subject (wrong_subject_visible is a hard rejection);
+      (2) no DIFFERENT identified person in the shot;
+      (3) Face-ID POSITIVELY confirms the required entity — the evidence that was never demanded;
+      (4) a POSITIVE same-era signal (an unconstrained era proves nothing)."""
     if vd.get("wrong_subject_visible") is True:
         return False                                   # vision saw a different main subject
-    if _confirmed_wrong_character(seg, faceid_names, ok_tokens):
+    if _confirmed_wrong_character(seg, faceid_names, ok_tokens, char2actor):
         return False                                   # a DIFFERENT identified person → contradictory
+    if not _entity_face_confirmed(seg, faceid_names, char2actor):
+        return False                                   # UNKNOWN ≠ present. Positive evidence only.
     _bn = _season_num(beat_era)
     if _bn is None:
         return False                                   # unconstrained era → no positive signal → block
     _sn = _season_num(src_title)
     if _sn is not None and _sn != _bn:
         return False                                   # source declares a DIFFERENT season → wrong era
-    return True                                        # right era, no wrong character present
+    return True                                        # right person, right era, no wrong character
 
 
 def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfig,
@@ -419,6 +456,13 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
     def _era_of(_s):
         return _beat_era(_s, _global_era, _single, global_verified=_global_ok,
                          event_eras=_event_eras)
+
+    # character -> actor. Face-ID reports ACTOR names while beats name CHARACTERS, so confirming
+    # "Joffrey is on screen" from a face labelled 'jack gleeson' needs the roster mapping.
+    _char2actor: dict = {}
+    for _c in ((proj.meta.get("analysis", {}) or {}).get("characters") or []):
+        if isinstance(_c, dict) and _c.get("name") and _c.get("actor"):
+            _char2actor[str(_c["name"]).strip().lower()] = str(_c["actor"]).strip()
 
     _vcache = _load_verdict_cache(proj)
     _vcache_n0 = len(_vcache)
@@ -685,7 +729,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 _src_title = ((getattr(_src_r, "title", "") or "") + " " + (sel.source_id or ""))
                 _ok_toks = _roster_toks if _single else frozenset()
                 if _present_unconfirmed_ok(v, seg, _src_title, faceid_names,
-                                           _era_of(seg), _ok_toks):
+                                           _era_of(seg), _ok_toks, char2actor=_char2actor):
                     # right scene/era, subject present-but-unconfirmed → CONTEXTUAL
                     v["verdict"] = "keep"
                     v["downgraded"] = "exact→contextual(present-unconfirmed)"

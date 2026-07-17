@@ -381,6 +381,72 @@ def test_sync_invariant_compares_against_composed_audio():
     assert "variable" in d and "second bug" in d
 
 
+# ---------------------------------------------------------------------------
+# F4 — positive evidence. 121 exact beats were downgraded to contextual and kept because no WRONG
+# character was confirmed — vacuously true, since Face-ID had no reference for Joffrey, Varys or
+# Pycelle. Absence of a wrong face is not presence of the right one.
+# ---------------------------------------------------------------------------
+_C2A = {"joffrey baratheon": "Jack Gleeson", "sandor clegane": "Rory McCann"}
+_SEG_J = NS(required_entity="Joffrey Baratheon", required_kind="character",
+            text="Joffrey comes apart.", scene_query="", expected_visual="")
+_TITLE = "Game of Thrones Season 3 council"
+
+
+def test_empty_faceid_is_unknown_not_innocent():
+    """The shipped rule: 'no confirmed wrong character' + right era -> keep. With the leads
+    unidentifiable that was satisfied by every frame in existence."""
+    from vidlore.clipstudio import verify as V
+    got = V._present_unconfirmed_ok({"correct_subject_visible": False}, _SEG_J, _TITLE, [],
+                                    "season 3", frozenset(), char2actor=_C2A)
+    assert got is False, "an empty Face-ID must be UNKNOWN, never a pass"
+
+
+def test_positive_faceid_confirmation_allows_the_contextual_downgrade():
+    from vidlore.clipstudio import verify as V
+    got = V._present_unconfirmed_ok({"correct_subject_visible": False}, _SEG_J, _TITLE,
+                                    ["jack gleeson"], "season 3", frozenset(), char2actor=_C2A)
+    assert got is True, "Face-ID positively placing the required entity IS positive evidence"
+
+
+def test_wrong_subject_visible_is_a_hard_rejection():
+    from vidlore.clipstudio import verify as V
+    got = V._present_unconfirmed_ok({"correct_subject_visible": False, "wrong_subject_visible": True},
+                                    _SEG_J, _TITLE, ["jack gleeson"], "season 3", frozenset(),
+                                    char2actor=_C2A)
+    assert got is False, "wrong_subject_visible=true must reject even with the right face present"
+
+
+def test_a_different_identified_person_still_blocks():
+    from vidlore.clipstudio import verify as V
+    got = V._present_unconfirmed_ok({"correct_subject_visible": False}, _SEG_J, _TITLE,
+                                    ["rory mccann"], "season 3", frozenset(), char2actor=_C2A)
+    assert got is False
+
+
+def test_correct_actor_face_is_not_a_wrong_character():
+    """Latent bug that fixing the Face-ID reference builder would have ACTIVATED: Face-ID reports
+    ACTORS, beats name CHARACTERS. Without the roster a perfect Joffrey frame ('jack gleeson')
+    reads as a confirmed WRONG character. It never bit only because Face-ID resolved nobody."""
+    from vidlore.clipstudio import verify as V
+    assert V._confirmed_wrong_character(_SEG_J, ["jack gleeson"], frozenset(), _C2A) is False
+    assert V._confirmed_wrong_character(_SEG_J, ["rory mccann"], frozenset(), _C2A) is True
+
+
+def test_faceid_recovers_oversized_reference_stills():
+    """YuNet is fixed-scale: 3858x4804 -> 0 faces, the same photo at <=1024 -> 1. Three of eight
+    leads were unidentifiable this way, including Joffrey."""
+    from pathlib import Path as _P
+    from vidlore.clipstudio import faceid as F
+    assert F.DET_MAX_SIDE >= 512
+    s = (_P(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "faceid.py").read_text(
+        encoding="utf-8")
+    i = s.index("def _detect(self, img)")
+    fn = s[i:i + 1600]
+    assert "_detect_at(img)" in fn, "must try native size FIRST so working cases cannot regress"
+    assert "DET_MAX_SIDE" in fn and "INTER_AREA" in fn, "must retry downscaled on a miss"
+    assert "faces[:, :14] /= s" in fn, "boxes+landmarks must map back to original coordinates"
+
+
 def test_release_block_is_non_retryable():
     """Release-blocks and relevance failures are CONTENT verdicts. Re-running unchanged cannot fix
     them — it only rolls the dice until the verifier dies."""
@@ -413,6 +479,12 @@ TESTS = [
     test_adjacent_transition_tails_cannot_both_pad,
     test_pads_are_derived_from_selected_pairs_only,
     test_sync_invariant_compares_against_composed_audio,
+    test_empty_faceid_is_unknown_not_innocent,
+    test_positive_faceid_confirmation_allows_the_contextual_downgrade,
+    test_wrong_subject_visible_is_a_hard_rejection,
+    test_a_different_identified_person_still_blocks,
+    test_correct_actor_face_is_not_a_wrong_character,
+    test_faceid_recovers_oversized_reference_stills,
 ]
 
 
