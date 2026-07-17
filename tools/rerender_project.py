@@ -27,6 +27,9 @@ args = ap.parse_args()
 PD = os.path.abspath(args.project_dir)
 LOG = os.path.join(PD, "output", "_rerender.log")
 DONE = os.path.join(PD, "output", "_rerender.done")
+# Machine-readable outcome for whatever drives this job. `_rerender.done` is a human sentinel whose
+# only contract is "the process stopped"; a driver needs to know WHY before deciding to retry.
+STATUS = os.path.join(PD, "output", "_rerender.status.json")
 if not os.path.exists(os.path.join(PD, "project.json")):
     sys.exit(f"not a ClipStudio project dir (no project.json): {PD}")
 os.makedirs(os.path.join(PD, "output"), exist_ok=True)
@@ -116,8 +119,37 @@ try:
     log(f"BUILD DONE -> {out}")
     with open(DONE, "w") as fh:
         fh.write(str(out))
+    with open(STATUS, "w") as fh:
+        json.dump({"status": "ok", "retryable": False, "output": str(out), "project": PD}, fh,
+                  indent=1)
 except Exception as e:  # noqa: BLE001
+    # MACHINE-READABLE OUTCOME. The old sentinel was the string "ERROR: <repr>", which gave a
+    # driver no way to tell a content verdict from a network blip — so a release-block looked
+    # retryable and the pipeline was restarted 8 times over 11 hours. The 8th attempt "passed" only
+    # because the vision API had died by then: 0 verdicts, 0 rejections, 0 unresolved, publish.
+    # Scene 25 was never fixed; it stopped being checked.
+    #
+    # A CONTENT failure is a judgment about this render. Re-running it unchanged cannot help, and
+    # retrying until a gate goes quiet is not success — it is the absence of measurement.
+    from vidlore.clipstudio.verify import NonRetryableBuildError
+    _content = isinstance(e, NonRetryableBuildError)
     log("ERROR: " + repr(e))
     log(traceback.format_exc())
+    _status = {
+        "status": "content_failure" if _content else "error",
+        "retryable": not _content,
+        "error_type": type(e).__name__,
+        "error": str(e)[:2000],
+        "project": PD,
+    }
+    if _content:
+        log("BUILD FAILED (content_failure, retryable=false) — re-running this render unchanged "
+            "cannot fix it; it needs rediscovery/re-matching or a working verifier.")
     with open(DONE, "w") as fh:
-        fh.write("ERROR: " + repr(e))
+        fh.write("ERROR: " + repr(e))          # keep the legacy line: existing readers grep it
+    with open(STATUS, "w") as fh:
+        json.dump(_status, fh, indent=1)
+    # NOTE: this process double-forks + setsids above, so the exit code reaches nobody — the parent
+    # returned 0 long ago. The STATUS FILE is the only channel a driver can actually read, which is
+    # precisely why the outcome had to become a persisted fact rather than a return value.
+    sys.exit(2 if _content else 1)

@@ -129,16 +129,33 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
             j["ok"] = bool(res.get("output"))
             j["output"] = res.get("output")
             j["summary"] = res.get("summary", {})
+            j["status"] = "ok" if j["ok"] else "error"
+            j["retryable"] = not j["ok"]
     except BaseException as e:                            # noqa: BLE001
         # BaseException: a stray SystemExit from a dependency dies silently in a thread —
         # the job would spin "running…" forever with done never set
+        #
+        # CONTENT vs TRANSIENT. A release-block is a judgment about this render: re-running it
+        # unchanged cannot help. Reported as a bare error it looked retryable, and the pipeline was
+        # restarted 8 times over 11 hours until the vision API died — at which point the gate had
+        # nothing left to reject and the render published. `retryable` is persisted so no driver
+        # (or human watching the portal) has to infer that from a message string.
+        try:
+            from .verify import NonRetryableBuildError as _NRB
+            _content = isinstance(e, _NRB)
+        except Exception:
+            _content = False
         with _LOCK:
             j = _JOBS[jid]
             j["done"] = True
             j["finished"] = time.time()
             j["ok"] = False
             j["error"] = str(e)[:600]
-            j["log"].append("FATAL: " + str(e)[:300])
+            j["status"] = "content_failure" if _content else "error"
+            j["retryable"] = not _content
+            j["error_type"] = type(e).__name__
+            j["log"].append(("CONTENT FAILURE (not retryable): " if _content else "FATAL: ")
+                            + str(e)[:300])
         # full traceback (absolute paths) only to the server console, not the browser
         traceback.print_exc()
         if _log_fh is not None:
@@ -467,6 +484,10 @@ def create():
     with _LOCK:
         _JOBS[jid] = {"phase": "queued", "log": [], "done": False, "ok": False,
                       "output": None, "error": "", "summary": {}, "started": time.time(),
+                      # machine-readable outcome (see _run_job): "queued"/"ok"/"error"/
+                      # "content_failure". `retryable` says whether re-running unchanged could
+                      # possibly help — a content verdict never can.
+                      "status": "queued", "retryable": True, "error_type": "",
                       # per-job caption settings (shown on the status page; no cross-job leakage)
                       "captions_enabled": captions_enabled, "caption_style": caption_style}
 
@@ -495,7 +516,10 @@ def status(jid):
         j = _JOBS.get(jid)
         if not j:
             return jsonify({"error": "unknown job"}), 404
-        return jsonify({k: j[k] for k in ("phase", "log", "done", "ok", "error", "summary")})
+        # status/retryable are part of the contract: a caller deciding whether to re-run must not
+        # have to pattern-match an error string to learn that a content verdict cannot be retried
+        return jsonify({k: j.get(k) for k in ("phase", "log", "done", "ok", "error", "summary",
+                                              "status", "retryable", "error_type")})
 
 
 @app.route("/download/<jid>")
