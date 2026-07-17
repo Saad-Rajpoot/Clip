@@ -543,6 +543,48 @@ def test_candidate_generation_uses_the_word_stream():
     assert "word stream is strictly better evidence" in blk
 
 
+def _cap_words(t):
+    return [(w, i * 0.4, i * 0.4 + 0.35, 0.9) for i, w in enumerate(t.split())]
+
+
+def test_breakout_caption_corrects_the_measured_meaning_inversion():
+    """The burned caption read 'and I've won your war for you'; Tywin says 'WHEN I've won your war
+    for you' — a conditional threat rendered as a past-tense boast, over the very line the
+    narration then unpacks. No word-level test could catch it: 'and' vs 'when' is 0.29
+    character-wise. Only the surrounding phrase can."""
+    from vidlore.clipstudio.build import _correct_breakout_words
+    asr = _cap_words("I'll make sure you understand that, and I've won your war for you.")
+    out = _correct_breakout_words(
+        asr, "I'll make sure you understand that, when I've won your war for you.")
+    assert "when" in " ".join(w[0] for w in out).lower()
+    assert len(out) == len(asr), "must never insert or delete words"
+    assert all(a[1:] == b[1:] for a, b in zip(asr, out)), "timings must stay the ASR's"
+
+
+def test_breakout_caption_never_takes_the_script_blindly():
+    """A breakout that drifted onto different dialogue must keep its own words — the script
+    proposes, the audio disposes."""
+    from vidlore.clipstudio.build import _correct_breakout_words
+    asr = _cap_words("My father won the real war. He killed Prince Rhaegar.")
+    out = _correct_breakout_words(asr, "The king is tired. See him to his chambers.")
+    assert [w[0] for w in out] == [w[0] for w in asr]
+
+
+def test_breakout_caption_will_not_rewrite_a_semantic_opposite():
+    """'I am the king' vs a known 'I am the queen' aligns at 0.75 — but king/queen is 0.44
+    phonetically, so the audio keeps its word. Semantic opposites are what must never be rewritten."""
+    from vidlore.clipstudio.build import _correct_breakout_words
+    out = _correct_breakout_words(_cap_words("I am the king"), "I am the queen")
+    assert "king" in [w[0] for w in out]
+
+
+def test_breakout_caption_fixes_garble_with_phonetic_corroboration():
+    from vidlore.clipstudio.build import _correct_breakout_words
+    out = _correct_breakout_words(_cap_words("a messence of nightshade to help him sleep"),
+                                  "some essence of nightshade to help him sleep")
+    assert "essence" in " ".join(w[0] for w in out), "'messence'->'essence' is a 0.93 near-miss"
+
+
 def test_release_block_is_non_retryable():
     """Release-blocks and relevance failures are CONTENT verdicts. Re-running unchanged cannot fix
     them — it only rolls the dice until the verifier dies."""
@@ -587,6 +629,10 @@ TESTS = [
     test_quote_anchored_window_skips_the_silence_trim,
     test_split_line_earns_the_verbatim_strength_it_actually_has,
     test_candidate_generation_uses_the_word_stream,
+    test_breakout_caption_corrects_the_measured_meaning_inversion,
+    test_breakout_caption_never_takes_the_script_blindly,
+    test_breakout_caption_will_not_rewrite_a_semantic_opposite,
+    test_breakout_caption_fixes_garble_with_phonetic_corroboration,
 ]
 
 

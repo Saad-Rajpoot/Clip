@@ -462,6 +462,11 @@ def _pick_breakout_stop(words: list, lo: float, hi: float) -> float:
 # these only stop the first consonant / last syllable being clipped.
 _BK_LEAD_S = 0.35
 _BK_TAIL_S = 0.45
+# Phrase-alignment tiers for correcting a breakout caption against the known source line — see
+# _correct_breakout_words. Above MIN, context alone decides; between FUZZY and MIN a slot must also
+# look phonetically like an ASR slip; below FUZZY the audio is speaking a different line entirely.
+_BK_CAP_ALIGN_MIN = 0.80
+_BK_CAP_ALIGN_FUZZY = 0.60
 
 
 def _extract_breakout(src_path: str, start: float, dur: float, vdest: Path,
@@ -3809,6 +3814,71 @@ def _ass_ts(t: float) -> str:
     return f"{h}:{m:02d}:{s:05.2f}"
 
 
+def _correct_breakout_words(words: list, known_line: str, *, log=None) -> list:
+    """Repair ASR slips in a breakout caption using the KNOWN dialogue line, keeping ASR timings.
+
+    Breakout captions are re-ASR'd from the extracted audio, so they inherit its mistakes — and a
+    burned caption asserts, in the show's own voice, that a character said something. Measured:
+
+        burned : "I'll make sure you understand that, and I've won your war for you"
+        actual : "I'll make sure you understand that, WHEN I've won your war for you"
+
+    which inverts a conditional threat into a past-tense boast — over the very line the narration
+    then unpacks. ("Come on off" for "Come along" is the same class, less costly.)
+
+    Deliberately narrow, because a caption is a claim about what was SAID:
+      * the PHRASE must align to the known line with high confidence. That is the whole safeguard,
+        and it is a contextual one: a breakout that drifted onto different dialogue never aligns,
+        so it is never overwritten with a line it does not speak. The script proposes; the audio
+        disposes.
+      * only 1:1 slots the aligner already matched — never inserts, deletes, or re-times;
+      * timings stay the ASR's, since they came from the actual audio.
+
+    Note what is deliberately NOT here: a per-word similarity check. "and"/"when" scores 0.29
+    character-wise, so a word-level gate would reject the exact repair that matters most — and
+    judging one word in isolation is what produced the error in the first place. Context decides."""
+    kw = [w for w in re.findall(r"[\w']+", known_line or "")]
+    if not words or len(kw) < 3:
+        return words
+    from difflib import SequenceMatcher as _SM
+
+    def _n(s):
+        return re.sub(r"[^a-z0-9']", "", (s or "").lower())
+
+    aw = [_n(w[0]) for w in words]
+    kn = [_n(w) for w in kw]
+    sm = _SM(None, aw, kn)
+    ratio = sm.ratio()
+    if ratio < _BK_CAP_ALIGN_FUZZY:
+        return words                       # not the same line — leave the audio's own words alone
+    # TWO TIERS, because context and phonetics corroborate each other:
+    #   strong context (>= 0.80) — the surrounding phrase is unmistakably this line, so a lone
+    #     differing slot is an ASR slip. This is the tier that fixes "and"/"when", which no word-
+    #     level test could ever pass (0.29 character-wise).
+    #   weaker context (0.60-0.80) — correct only a slot that ALSO looks phonetically like a slip
+    #     ("messence"/"essence" = 0.93). Short lines live here, where one word is a big fraction of
+    #     the phrase: "I am the king" vs "…queen" reaches 0.75, and queen/king is 0.44, so the
+    #     audio keeps its word. Semantic opposites are exactly what must never be rewritten.
+    _strong = ratio >= _BK_CAP_ALIGN_MIN
+    out = list(words)
+    fixed = 0
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag != "replace" or (i2 - i1) != (j2 - j1):
+            continue                       # 1:1 slots only — never insert/delete/re-time
+        for oi, kj in zip(range(i1, i2), range(j1, j2)):
+            if not aw[oi] or not kn[kj] or aw[oi] == kn[kj]:
+                continue
+            if not _strong and _SM(None, aw[oi], kn[kj]).ratio() < 0.60:
+                continue                   # weak context needs phonetic corroboration
+            w = out[oi]
+            out[oi] = (kw[kj], w[1], w[2], w[3])
+            fixed += 1
+    if fixed and log:
+        log(f"build: breakout caption — corrected {fixed} ASR slip(s) against the verified source "
+            f"line (phrase align {ratio:.2f})")
+    return out
+
+
 def _breakout_caption_ass(caps: list, out_ass: Path, log=None, *, preset=None) -> Optional[Path]:
     """Build an ASS overlay that captions the SPOKEN dialogue during each real-audio breakout,
     word-by-word (karaoke fill) — distinct from the white narration caption but in the SAME
@@ -3860,6 +3930,7 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None, *, preset=None) -
                                   float(getattr(w, "probability", 1.0) or 1.0)))
         if not words:
             continue
+        words = _correct_breakout_words(words, cap.get("line", ""), log=log)
         base = float(cap["start"])
         dur = float(cap["dur"])
         # WIDTH-AWARE grouping: accumulate words into karaoke lines whose 2-row layout fits the BK
