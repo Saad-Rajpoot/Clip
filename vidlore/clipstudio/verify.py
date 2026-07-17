@@ -17,7 +17,8 @@ import json
 import re
 from pathlib import Path
 
-from .models import ClipProject, ScriptSegment, ClipSelection, FLAG_EXACT_MISSING
+from .models import (ClipProject, ScriptSegment, ClipSelection, FLAG_EXACT_MISSING,
+                     FLAG_VERIFIER_UNVERIFIED)
 from .config import ClipConfig
 from . import index as _index
 from . import cut as _cut
@@ -112,6 +113,84 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
 
 _SEASON_RX = re.compile(
     r"\bS0?(\d{1,2})\s?E0?\d{1,2}\b|\bseason\s+(\d{1,2})\b|\b(\d{1,2})\s?x\s?\d{2}\b", re.I)
+
+# Bump whenever the verifier PROMPT or its JSON contract changes: a verdict is only reusable if it
+# was produced by the same question. Part of the fingerprint below.
+PROMPT_VERSION = "v3-2026-07"
+# Consecutive transient failures after which the vision backend is declared DOWN. Measured: over an
+# 11-hour run the verifier degraded 176 replaced -> 180 -> 55 -> 0, and at exactly 0 the release
+# gate passed and published. Nothing noticed, because "0 rejections" and "nothing checked" were the
+# same number. The breaker exists so the pipeline can tell those two apart.
+VERIFIER_BREAKER_TRIP = 8
+
+
+class NonRetryableBuildError(RuntimeError):
+    """A CONTENT verdict: the render is wrong and re-running it unchanged cannot help.
+
+    Release-blocks and relevance failures are of this kind. They were being raised as bare
+    RuntimeErrors, so an outer driver happily restarted the whole pipeline — 8 times in the render
+    that prompted this. Each attempt re-ran the verifier, and the last attempt "passed" only
+    because the vision API had finally died: 0 verdicts, 0 rejections, 0 unresolved, publish.
+    Scene 25 was never fixed. It just stopped being checked.
+
+    Retry transient plumbing. Never retry a judgment."""
+
+
+def _source_fingerprint(path) -> str:
+    """Cheap, stable content id: size + a hash of the head. Full hashing of multi-GB sources every
+    run costs more than the verdicts it protects."""
+    import hashlib
+    p = Path(path or "")
+    if not p.exists():
+        return "missing"
+    h = hashlib.sha256()
+    h.update(str(p.stat().st_size).encode())
+    try:
+        with p.open("rb") as fh:
+            h.update(fh.read(1 << 20))
+    except OSError:
+        return "unreadable"
+    return h.hexdigest()[:16]
+
+
+def verdict_fingerprint(*, src_hash: str, source_id: str, shot_start: float, shot_end: float,
+                        beat_text: str, required_entity: str, era: str, visual_policy: str,
+                        model: str) -> str:
+    """Identity of a verdict: every input that could change the answer.
+
+    A verdict may only be reused when the QUESTION is identical. Keying on the beat alone would
+    silently reuse a verdict across a re-matched shot, a changed era constraint, a policy
+    promotion (deixis!), or a different verifier model — each of which changes the answer."""
+    import hashlib
+    h = hashlib.sha256()
+    for part in (src_hash, source_id, f"{float(shot_start):.3f}", f"{float(shot_end):.3f}",
+                 (beat_text or "").strip(), (required_entity or "").strip().lower(),
+                 (era or "").strip().lower(), (visual_policy or "").strip().lower(),
+                 (model or "").strip(), PROMPT_VERSION):
+        h.update(str(part).encode("utf-8", "replace"))
+        h.update(b"\x1f")
+    return h.hexdigest()[:32]
+
+
+def _load_verdict_cache(proj) -> dict:
+    f = Path(proj.root) / "verdict_cache.json"
+    if not f.exists():
+        return {}
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_verdict_cache(proj, cache: dict) -> None:
+    f = Path(proj.root) / "verdict_cache.json"
+    try:
+        tmp = f.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cache), encoding="utf-8")
+        tmp.replace(f)
+    except OSError:
+        pass
 
 
 def _beat_era(seg, global_era: str, single_scene: bool, *, global_verified: bool = False,
@@ -340,6 +419,19 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
     def _era_of(_s):
         return _beat_era(_s, _global_era, _single, global_verified=_global_ok,
                          event_eras=_event_eras)
+
+    _vcache = _load_verdict_cache(proj)
+    _vcache_n0 = len(_vcache)
+    _errored = _reused = _consec_err = 0
+    _breaker_open = False
+    _vmodel = str(getattr(eng_cfg, "anthropic_model", "") or "")
+    _src_hash_cache: dict = {}
+
+    def _src_hash_of(src):
+        sid = getattr(src, "id", "") or ""
+        if sid not in _src_hash_cache:
+            _src_hash_cache[sid] = _source_fingerprint(getattr(src, "local_path", "") or "")
+        return _src_hash_cache[sid]
     # SCENE ROSTER (single-scene deep-dive only): every main-cast character/actor of the video. In a
     # single-scene deep-dive ANY roster member is contextually valid for any beat (they are all in
     # the one scene), so a roster face is never a "wrong character". For a multi-scene essay the
@@ -397,11 +489,49 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         kf = shot.keyframe_path if shot else ""
         faceid_names = (shot.face_ids if shot else []) or ([sel.identity] if sel.identity else [])
         _exact = _policy.verify_strict(seg)               # exact_scene → strict; else lenient (filler ok)
-        v = _verify_ctx(kf, shot, seg, _exact, faceid_names)
-        verified += 1
+        # REUSE a verdict only when the QUESTION is byte-identical (see verdict_fingerprint). This
+        # is what lets a restart keep explicitly-proven judgments instead of re-rolling them against
+        # a dying API — the failure mode that published this render.
+        _fp = ""
+        if shot is not None:
+            _src_obj = proj.source(sel.source_id)
+            _fp = verdict_fingerprint(
+                src_hash=_src_hash_of(_src_obj), source_id=sel.source_id or "",
+                shot_start=getattr(shot, "start", 0.0), shot_end=getattr(shot, "end", 0.0),
+                beat_text=getattr(seg, "text", ""), required_entity=getattr(seg, "required_entity", ""),
+                era=_era_of(seg), visual_policy=_policy.policy_of(seg), model=_vmodel)
+        _cached = _vcache.get(_fp) if _fp else None
+        if _cached:
+            v = dict(_cached)
+            v["reused"] = True
+            _reused += 1
+        else:
+            v = _verify_ctx(kf, shot, seg, _exact, faceid_names)
         if v is None:
+            # FAIL CLOSED. "No judgment" is not a synonym for "acceptable". The old code set
+            # status=error and `continue`d, so a beat nobody could check looked exactly like a beat
+            # that passed — and a TOTAL outage produced zero rejections, which the release gate read
+            # as "nothing wrong" and shipped.
             sel.verifier = {"status": "error"}
+            _errored += 1
+            _consec_err += 1
+            if FLAG_VERIFIER_UNVERIFIED not in sel.flag_reasons:
+                sel.flag_reasons.append(FLAG_VERIFIER_UNVERIFIED)
+            sel.flagged = True
+            if _exact:
+                # an exact_scene beat we could not check is UNRESOLVED, never a pass
+                failed += 1
+                log(f"verify: seg{sel.segment_index} UNVERIFIED (verifier error) — exact_scene "
+                    f"beat is unresolved, not accepted")
+            if _consec_err >= VERIFIER_BREAKER_TRIP and not _breaker_open:
+                _breaker_open = True
+                log(f"verify: ⛔ CIRCUIT BREAKER — {_consec_err} consecutive verifier errors; the "
+                    f"vision backend is down. Remaining beats will NOT be silently accepted.")
             continue
+        _consec_err = 0
+        verified += 1                    # counts SUCCESSES — never attempts (see the breaker note)
+        if _fp and not v.get("reused"):
+            _vcache[_fp] = {k: val for k, val in v.items() if k != "reused"}
         v["status"] = "ok"
         v["visual_policy"] = _policy.policy_of(seg)
         # NON-EXACT LENIENCY (user rule: exact clip only for a SPECIFIC scene; a relevant FILLER is
@@ -619,5 +749,19 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             log(f"verify: {verified} checked, {replaced} replaced, {failed} unresolved")
 
     proj.save()
-    log(f"verify: done — {verified} checked, {replaced} replaced, {failed} unresolved")
-    return {"verified": verified, "replaced": replaced, "failed": failed, "available": True}
+    if len(_vcache) != _vcache_n0:
+        _save_verdict_cache(proj, _vcache)
+    _attempted = verified + _errored
+    log(f"verify: done — {verified} verified ({_reused} reused), {_errored} ERRORED, "
+        f"{replaced} replaced, {failed} unresolved")
+    # LIVENESS. Reported as its own fact, never folded into 'unresolved': a run that checked
+    # nothing must not read like a run that found nothing wrong. This is a SECOND line of defence —
+    # the primary one is per-beat (an unverifiable exact beat is already unresolved above), because
+    # a global ratio alone would happily pass a render whose 20% of failures were all exact beats.
+    if _errored:
+        log(f"verify: ⚠ {_errored}/{_attempted} beats could not be verified "
+            f"(backend errors){' — CIRCUIT BREAKER OPEN' if _breaker_open else ''}")
+    return {"verified": verified, "replaced": replaced, "failed": failed, "available": True,
+            "errored": _errored, "reused": _reused, "attempted": _attempted,
+            "verifier_down": bool(_breaker_open),
+            "verified_frac": (verified / _attempted) if _attempted else 1.0}

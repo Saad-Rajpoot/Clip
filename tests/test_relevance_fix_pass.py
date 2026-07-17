@@ -232,6 +232,74 @@ def test_unverified_hint_may_not_purge_or_anchor():
     assert "and _ep_verified" in src
 
 
+# ---------------------------------------------------------------------------
+# F2 — the verifier must fail closed. FAILURE INJECTION: reproduce the outage that shipped this
+# render. Real trace: 176 replaced/23 unresolved -> 180/25 -> 55/11 -> 0 replaced, 0 unresolved,
+# PUBLISH. Scene 25 release-blocked on all 8 attempts and was never fixed; it stopped being checked.
+# ---------------------------------------------------------------------------
+def test_verdict_fingerprint_covers_every_input_that_changes_the_answer():
+    from vidlore.clipstudio import verify as V
+    base = dict(src_hash="a", source_id="s", shot_start=1.0, shot_end=2.0, beat_text="t",
+                required_entity="Tywin", era="S03E10", visual_policy="exact_scene", model="m")
+    fp0 = V.verdict_fingerprint(**base)
+    assert fp0 == V.verdict_fingerprint(**base), "must be deterministic"
+    for k, alt in (("src_hash", "b"), ("source_id", "s2"), ("shot_start", 1.5), ("shot_end", 9.0),
+                   ("beat_text", "other"), ("required_entity", "Joffrey"), ("era", "S04E01"),
+                   ("visual_policy", "generic_filler"), ("model", "m2")):
+        d = dict(base)
+        d[k] = alt
+        assert V.verdict_fingerprint(**d) != fp0, f"{k} must change the fingerprint"
+
+
+def test_prompt_version_is_in_the_fingerprint():
+    """A verdict is only reusable if it answered the SAME question — a changed prompt invalidates."""
+    import re as _re
+    from pathlib import Path as _P
+    src = _P(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "verify.py"
+    s = src.read_text(encoding="utf-8")
+    assert "PROMPT_VERSION" in s
+    m = _re.search(r"def verdict_fingerprint\(.*?return h\.hexdigest", s, _re.S)
+    assert m and "PROMPT_VERSION" in m.group(0), "PROMPT_VERSION must be hashed into the verdict id"
+
+
+def test_verifier_outage_fails_closed_not_open():
+    """The measured failure: a total outage yields 0 rejections, and '0 rejections' was read as
+    'nothing wrong'. An exact_scene beat nobody could check must be UNRESOLVED."""
+    import inspect
+    from vidlore.clipstudio import verify as V
+    s = inspect.getsource(V.verify_and_repair)
+    # the None branch must no longer be a bare `continue` that leaves the beat looking fine
+    assert "FAIL CLOSED" in s, "the v-is-None branch must fail closed"
+    assert "_errored += 1" in s
+    assert "FLAG_VERIFIER_UNVERIFIED" in s, "an unverifiable beat must be flagged"
+    # an exact beat with no verdict counts as unresolved
+    i = s.index("FAIL CLOSED")
+    branch = s[i:i + 1400]
+    assert "if _exact:" in branch and "failed += 1" in branch, \
+        "an unverifiable exact_scene beat must count as unresolved"
+    # 'verified' must count successes, not attempts (it counted attempts, so 229 errors read as
+    # '229 checked')
+    assert "verified += 1                    # counts SUCCESSES" in s
+
+
+def test_circuit_breaker_and_liveness_are_reported():
+    import inspect
+    from vidlore.clipstudio import verify as V
+    s = inspect.getsource(V.verify_and_repair)
+    assert "VERIFIER_BREAKER_TRIP" in s and "_consec_err" in s, "need a circuit breaker"
+    assert '"verifier_down"' in s and '"errored"' in s and '"verified_frac"' in s, \
+        "the summary must distinguish 'found nothing wrong' from 'checked nothing'"
+
+
+def test_release_block_is_non_retryable():
+    """Release-blocks and relevance failures are CONTENT verdicts. Re-running unchanged cannot fix
+    them — it only rolls the dice until the verifier dies."""
+    from vidlore.clipstudio import verify as V
+    assert issubclass(V.NonRetryableBuildError, RuntimeError)
+    d = V.NonRetryableBuildError.__doc__ or ""
+    assert "Retry transient plumbing" in d and "Never retry a judgment" in d
+
+
 TESTS = [
     test_deixis_promotes_the_lines_that_actually_failed,
     test_deixis_does_not_swallow_generic_narration,
@@ -245,6 +313,11 @@ TESTS = [
     test_agreeing_hint_is_verified,
     test_beat_local_era_beats_the_global_hint,
     test_unverified_hint_may_not_purge_or_anchor,
+    test_verdict_fingerprint_covers_every_input_that_changes_the_answer,
+    test_prompt_version_is_in_the_fingerprint,
+    test_verifier_outage_fails_closed_not_open,
+    test_circuit_breaker_and_liveness_are_reported,
+    test_release_block_is_non_retryable,
 ]
 
 
