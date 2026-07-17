@@ -565,6 +565,46 @@ def _extract_breakout(src_path: str, start: float, dur: float, vdest: Path,
         return None
 
 
+# The narration making an explicit promise to the viewer ("listen for…", "the word I told you to
+# listen for"). Such a promise names its payoff, and the edit owes the viewer that line.
+_PROMISE_RX = re.compile(
+    r"\b(?:listen (?:out )?for|watch for|told you to listen(?: for)?|"
+    r"the word i told you|keep an ear (?:out )?for|there it is)\b", re.I)
+# Words that are ABOUT the promise, not the promised thing. A promise followed by one of these is a
+# TEASE ("listen for SOMETHING") — it names nothing yet, so it yields nothing.
+_PROMISE_STOP = {"something", "anything", "word", "words", "name", "line", "moment", "thing",
+                 "this", "that", "these", "those", "it's", "its", "the", "one", "listen",
+                 "hear", "here", "there", "when", "what", "which", "somewhere"}
+
+
+def _promised_terms(segments) -> set:
+    """Content words the narration explicitly promises the viewer will HEAR.
+
+    Take the LAST promise phrase in a beat (so "the word I told you to listen for" ends after
+    "for", not after "told you") and then the FIRST content word following it, in that beat only:
+
+        "That's the word I told you to listen for. Nightshade."   -> {"nightshade"}
+        "Before we go in, I want you to listen for something."    -> {}   (a tease; names nothing)
+
+    Not spilling into the next beat is deliberate. The hook teases for ~15 seconds before naming
+    anything ("...one word gets spoken. It isn't an insult... It's the name of a poison"), so
+    reading ahead just harvests the next sentence's first noun. The PAYOFF beat is where the word is
+    finally said, and that is the one worth reserving a breakout slot for."""
+    out: set = set()
+    for s in (segments or []):
+        t = getattr(s, "text", "") or ""
+        ms = list(_PROMISE_RX.finditer(t))
+        if not ms:
+            continue
+        for w in re.findall(r"[A-Za-z']{4,}", t[ms[-1].end():]):
+            wl = w.lower()
+            if wl in _PROMISE_STOP or wl in _BK_FUNC:
+                break                      # a tease, or promise-vocabulary → this beat names nothing
+            out.add(wl)
+            break
+    return out
+
+
 def _quote_run_in(qwords: list, twords: list) -> int:
     """Longest leading-run of the quote spoken in the transcript (1-word ASR drift tolerated
     via 3-word sub-windows). 0 = not spoken here."""
@@ -1137,7 +1177,24 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     cands = [c for c in cands
              if c[1] >= 1 or (c[1], c[2].id, round(float(c[3].start), 1)) in _verbatim_strong]
     # process the cold-open FIRST (reserve its slot before n_max / spacing fills up), then by score
+    # PROMISED PAYOFF — a line the narration explicitly tells the viewer to listen for outranks a
+    # merely high-scoring one. This video spends 9 minutes on "Somewhere in those ninety seconds,
+    # one word gets spoken… It's the name of a poison", then says "There it is. That's the word I
+    # told you to listen for. Nightshade." over footage of a garden wedding — and the viewer never
+    # hears Tywin say it. A promise the edit doesn't keep is worse than no promise.
+    #
+    # Priority ONLY, never a bypass: this reorders candidates, and every gate below (wrong-character,
+    # commentary, era, dark, burned-text, dedup, spacing) still has to pass. A promised line that
+    # can't be aired safely still doesn't air.
+    _promised = _promised_terms(segments)
+    if _promised:
+        log(f"build: breakout — narration promises the viewer will hear: {sorted(_promised)}")
+
+    def _keeps_a_promise(c) -> bool:
+        return bool(_promised and any(t in (c[4] or "").lower() for t in _promised))
+
     cands.sort(key=lambda x: (0 if (x[1], x[2].id, round(float(x[3].start), 1)) == _cold_key else 1,
+                              0 if _keeps_a_promise(x) else 1,
                               -x[0]))
     # competitor density: one real-audio evidence moment every ~28s where material allows
     # (their edit: 13 in 180s on a single-scene essay; ours stays match-gated so sparse

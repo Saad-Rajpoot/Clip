@@ -585,6 +585,33 @@ def test_breakout_caption_fixes_garble_with_phonetic_corroboration():
     assert "essence" in " ".join(w[0] for w in out), "'messence'->'essence' is a 0.93 near-miss"
 
 
+def test_promised_payoff_is_detected_and_the_tease_is_not():
+    """The video spends 9 minutes promising one word and never plays it. The promise beat
+    ('listen for something') names nothing; the PAYOFF beat ("That's the word I told you to listen
+    for. Nightshade.") names it."""
+    from vidlore.clipstudio.build import _promised_terms
+    segs = [NS(index=0, text="Before we go in, I want you to listen for something."),
+            NS(index=1, text="Somewhere in those ninety seconds, one word gets spoken."),
+            NS(index=2, text="It's the name of a poison."),
+            NS(index=3, text="That's the word I told you to listen for. Nightshade.")]
+    assert _promised_terms(segs) == {"nightshade"}, _promised_terms(segs)
+    # a tease alone promises nothing concrete
+    assert _promised_terms(segs[:3]) == set()
+
+
+def test_promised_payoff_is_priority_not_a_bypass():
+    """Priority reorders candidates; every safety gate still runs. A promised line that cannot be
+    aired safely still must not air."""
+    from pathlib import Path as _P
+    s = (_P(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "build.py").read_text(
+        encoding="utf-8")
+    assert "PROMISED PAYOFF" in s
+    i = s.index("PROMISED PAYOFF")
+    blk = s[i:i + 1400]
+    assert "Priority ONLY, never a bypass" in blk
+    assert "_keeps_a_promise" in blk and "cands.sort" in blk, "must act on the SORT, not the gates"
+
+
 def test_release_block_is_non_retryable():
     """Release-blocks and relevance failures are CONTENT verdicts. Re-running unchanged cannot fix
     them — it only rolls the dice until the verifier dies."""
@@ -633,6 +660,8 @@ TESTS = [
     test_breakout_caption_never_takes_the_script_blindly,
     test_breakout_caption_will_not_rewrite_a_semantic_opposite,
     test_breakout_caption_fixes_garble_with_phonetic_corroboration,
+    test_promised_payoff_is_detected_and_the_tease_is_not,
+    test_promised_payoff_is_priority_not_a_bypass,
 ]
 
 
