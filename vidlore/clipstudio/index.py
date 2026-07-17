@@ -14,13 +14,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
 
 from .models import Shot, SourceVideo, ClipProject, SOURCE_OK
 from .config import ClipConfig, ffmpeg_exe
 from .ingest import probe
+
+# Index schema. Bump to invalidate caches whose SHAPE changed (not merely their capabilities).
+#   1 → shots + per-shot transcript only
+#   2 → + <sid>.words.json (word-level ASR start/end/text) for quote-span location
+INDEX_SCHEMA = 2
 
 _WHISPER = {}   # cache: model_name -> WhisperModel
 
@@ -121,10 +128,14 @@ def transcribe_words(path: Path, cfg: ClipConfig) -> list[tuple[float, float, st
 
 
 def _assign_transcript(shots: list[Shot], words: list[tuple[float, float, str]]) -> None:
-    """Attach to each shot the words whose midpoint falls inside it."""
+    """Attach to each shot the words whose midpoint falls inside it.
+
+    NOTE: this bins by midpoint, so a single spoken SENTENCE routinely splits across two shots
+    whenever the cut lands mid-line. That is correct for "what is said during this shot" but makes
+    per-shot transcripts useless for locating a QUOTE — see `find_quote_span`, which matches the
+    word stream instead. The (ws, we) timings are preserved separately by `save_words`."""
     if not words:
         return
-    wi = 0
     for sh in shots:
         toks = []
         for (ws, we, wt) in words:
@@ -132,6 +143,85 @@ def _assign_transcript(shots: list[Shot], words: list[tuple[float, float, str]])
             if sh.start <= mid < sh.end:
                 toks.append(wt)
         sh.transcript = " ".join(toks).strip()
+
+
+# --- word-level ASR: persistence + quote location -------------------------------------------
+# The shipped render proved why this must survive indexing. `transcribe_words` already produced
+# word timings, then _assign_transcript threw the timecodes away and kept only per-shot strings.
+# Two measured consequences in tywin_lannister_dismis_f4c81b75:
+#   * "Any man who must say I am the king is no true king" straddles a cut, so it lands as
+#     "...Any man who must" + "say I am the king is no true king." — no single shot contains it,
+#     so a per-shot substring search can never find the most iconic line in the video.
+#   * The breakout in-point could only be a SHOT boundary (130.05s), 0.41s after that line ends
+#     (129.64s) — and the window only extends forward, so the line was unreachable by construction.
+def _norm_tok(t: str) -> str:
+    return re.sub(r"[^a-z0-9']", "", (t or "").lower())
+
+
+def save_words(proj: ClipProject, source_id: str, words: list[tuple[float, float, str]]) -> None:
+    f = proj.index_dir / f"{source_id}.words.json"
+    tmp = f.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps([[round(float(a), 3), round(float(b), 3), str(c)] for a, b, c in words]),
+                   encoding="utf-8")
+    tmp.replace(f)
+
+
+def load_words(proj: ClipProject, source_id: str) -> list[tuple[float, float, str]]:
+    f = proj.index_dir / f"{source_id}.words.json"
+    if not f.exists():
+        return []
+    try:
+        return [(float(a), float(b), str(c)) for a, b, c in
+                json.loads(f.read_text(encoding="utf-8"))]
+    except Exception:
+        return []
+
+
+def _tok_close(a: str, b: str, thresh: float = 0.8) -> bool:
+    """Two tokens are 'the same word' if ASR merely garbled it. Never used to accept a match on its
+    own — only ever as one term inside the PHRASE score in `find_quote_span`."""
+    if a == b:
+        return True
+    if not a or not b or abs(len(a) - len(b)) > 3:
+        return False
+    return SequenceMatcher(None, a, b).ratio() >= thresh
+
+
+def find_quote_span(words, quote: str, *, min_ratio: float = 0.72,
+                    window_slack: int = 3):
+    """Locate `quote` in a source's word stream. -> (start_s, end_s, ratio) or None.
+
+    Aligns the quote against a sliding window of the word stream and scores the WHOLE PHRASE. A
+    single garbled word cannot carry a match (that would let "sleep" alone anchor anywhere), and a
+    single garbled word cannot break one either — which is what the measured data demands:
+
+        source ASR : "Maester. Perhaps" | "a messence of nightshade to help him" | "sleep."
+        script quote: "Perhaps some essence of nightshade to help him sleep."
+
+    "messence"/"essence" and "a"/"some" differ, yet the phrase is unmistakably the same line. Shot
+    boundaries are irrelevant here by construction — the stream is continuous."""
+    qt = [t for t in (_norm_tok(w) for w in re.findall(r"[\w']+", quote or "")) if t]
+    if len(qt) < 2 or not words:
+        return None
+    st = [(_norm_tok(w[2]), w[0], w[1]) for w in words]
+    st = [x for x in st if x[0]]
+    if not st:
+        return None
+    n = len(qt)
+    best = None
+    for i in range(len(st)):
+        if not _tok_close(st[i][0], qt[0]) and not any(_tok_close(st[i][0], q) for q in qt[:2]):
+            continue                      # cheap anchor: only start where the head plausibly begins
+        for L in range(max(2, n - window_slack), min(len(st) - i, n + window_slack) + 1):
+            win = [x[0] for x in st[i:i + L]]
+            m = SequenceMatcher(None, win, qt)
+            hits = sum(bl.size for bl in m.get_matching_blocks())
+            # credit near-miss tokens the block matcher rejected (ASR garble), positionally
+            fuzzy = sum(1 for a, b in zip(win, qt) if a != b and _tok_close(a, b))
+            ratio = (2.0 * (hits + fuzzy)) / float(L + n)
+            if ratio >= min_ratio and (best is None or ratio > best[2]):
+                best = (st[i][1], st[i + L - 1][2], round(min(1.0, ratio), 3))
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +510,10 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
     # roster gives ocr_names (name-card corroboration) — a roster-less OCR cache must not
     # satisfy a roster-bearing auto run; only meaningful when OCR itself can run
     want_caps["roster"] = bool(roster) and want_caps["ocr"]
+    # word-level ASR timings (INDEX_SCHEMA 2). A pre-schema cache has shots but no <sid>.words.json,
+    # so quote location would silently fall back to per-shot substring search — the exact failure
+    # that lost "…is no true king". Treat it as a missing capability so those sources re-index.
+    want_caps["words"] = True
     if shots_file.exists() and not force:
         try:
             have_caps = json.loads(meta_file.read_text(encoding="utf-8"))
@@ -427,6 +521,10 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
             have_caps = {}
         if not isinstance(have_caps, dict):      # 'null'/list/string parses fine but isn't caps
             have_caps = {}
+        if int(have_caps.get("schema", 1) or 1) < INDEX_SCHEMA:
+            have_caps["words"] = False           # schema bump invalidates the word cache
+        if want_caps["words"] and not (proj.index_dir / f"{source.id}.words.json").exists():
+            have_caps["words"] = False           # meta may claim words while the file is gone
         missing = [k for k, v in want_caps.items() if v and not have_caps.get(k)]
         if missing:
             log(f"index: {source.id} re-indexing (cache lacks {'+'.join(missing)})")
@@ -548,12 +646,17 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
         _etmp = proj.embeds_path(source.id).with_suffix(".tmp.npy")
         np.save(_etmp, np.vstack(embeds))
         _etmp.replace(proj.embeds_path(source.id))
+    # words BEFORE shots: shots.json presence gates the cache, so writing words first means a kill
+    # between the two re-indexes (safe) rather than serving shots with no word stream (silent
+    # degradation back to per-shot quote search).
+    save_words(proj, source.id, words)
     _tmp = shots_file.with_suffix(".json.tmp")
     _tmp.write_text(json.dumps([s.to_dict() for s in shots], indent=1), encoding="utf-8")
     _tmp.replace(shots_file)
     _mtmp = meta_file.with_suffix(".json.tmp")
     _mtmp.write_text(json.dumps({"faceid": do_faceid, "ocr": do_ocr,
-                                 "roster": bool(roster)}), encoding="utf-8")
+                                 "roster": bool(roster), "words": bool(words),
+                                 "schema": INDEX_SCHEMA}), encoding="utf-8")
     _mtmp.replace(meta_file)
     log(f"index: {source.id} done — {len(shots)} shots, {len(embeds)} embeds, clip={use_clip}")
     return shots

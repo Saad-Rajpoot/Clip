@@ -83,10 +83,79 @@ def test_deixis_survives_finalize_and_is_idempotent():
     assert policy.policy_of(s) == policy.EXACT, "must be stable on a second pass"
 
 
+# ---------------------------------------------------------------------------
+# F6 — word-level ASR + quote-span location.
+# The word stream below is the REAL one from tywin_lannister_dismis_f4c81b75 (shipped index +
+# isolated whisper of the source), garble included. These are the two lines the render lost.
+# ---------------------------------------------------------------------------
+_REAL_ASR_CHUNKS = [
+    (121.25, 122.46, "I am the"), (122.46, 124.17, "king."),
+    (124.17, 126.58, "I will punish you. Any man who must"),
+    (126.58, 130.05, "say I am the king is no true king."),
+    (130.05, 132.42, "I'll make sure you understand"),
+    (132.42, 134.51, "up and I've won your war for you."),
+    (134.51, 140.31, "My father won the real war. He killed Prince Rhaegar. He took the crown while"),
+    (140.31, 142.89, "you hid on a costly rock."),
+    (154.99, 158.70, "The king is tired. See him to"),
+    (158.70, 162.75, "his chambers. Come on off. I'm not tired. We have"),
+    (162.75, 163.96, "so much to celebrate."), (163.96, 166.00, "A wedding to plan."),
+    (166.00, 169.67, "You must rest. Grand"), (169.67, 171.38, "Maester. Perhaps"),
+    (171.38, 173.55, "a messence of nightshade to help him"),
+    (173.55, 178.68, "sleep. I'm not fired."),
+]
+
+
+def _real_words():
+    out = []
+    for a, b, txt in _REAL_ASR_CHUNKS:
+        ws = txt.split()
+        step = (b - a) / len(ws)
+        out.extend((round(a + i * step, 3), round(a + (i + 1) * step, 3), w)
+                   for i, w in enumerate(ws))
+    return out
+
+
+def test_thesis_line_locatable_across_a_shot_boundary():
+    """'Any man who must say I am the king is no true king' straddles the cut at 126.58, so it
+    lands as '...Any man who must' + 'say I am the king...'. No single shot contains it, which is
+    why per-shot substring search never found the most iconic line in the video."""
+    from vidlore.clipstudio.index import find_quote_span
+    r = find_quote_span(_real_words(), "Any man who must say 'I am the king' is no true king.")
+    assert r is not None, "thesis line not located"
+    s, e, ratio = r
+    assert abs(s - 125.6) <= 2.0, f"span start {s} not at the real line start (~125.6)"
+    assert e >= 129.0, f"span end {e} truncates the line"
+    assert ratio >= 0.8, f"phrase ratio too low: {ratio}"
+
+
+def test_payoff_line_locatable_through_asr_garble_and_four_shots():
+    """The nightshade line spans 4 shots AND is garbled ('a messence of nightshade', 'I'm not
+    fired'). No breakout candidate was ever generated for it in the shipped render."""
+    from vidlore.clipstudio.index import find_quote_span
+    r = find_quote_span(_real_words(), "Perhaps some essence of nightshade to help him sleep.")
+    assert r is not None, "payoff line not located through garble"
+    s, e, ratio = r
+    assert abs(s - 170.0) <= 2.0, f"span start {s} wrong"
+    assert e >= 173.5, f"span end {e} cuts the line short of 'sleep'"
+    assert ratio >= 0.75, f"phrase ratio too low: {ratio}"
+
+
+def test_single_garbled_word_cannot_anchor_a_match():
+    """A lone fuzzy token must never carry a match — otherwise 'sleep' anchors anywhere. The
+    acceptance is per-PHRASE; fuzziness is only ever one term inside that score."""
+    from vidlore.clipstudio.index import find_quote_span
+    assert find_quote_span(_real_words(), "sleep") is None
+    assert find_quote_span(_real_words(), "Winter is coming to the North this year") is None
+    assert find_quote_span(_real_words(), "dragons burned the fleet at anchor") is None
+
+
 TESTS = [
     test_deixis_promotes_the_lines_that_actually_failed,
     test_deixis_does_not_swallow_generic_narration,
     test_deixis_survives_finalize_and_is_idempotent,
+    test_thesis_line_locatable_across_a_shot_boundary,
+    test_payoff_line_locatable_through_asr_garble_and_four_shots,
+    test_single_garbled_word_cannot_anchor_a_match,
 ]
 
 
