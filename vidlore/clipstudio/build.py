@@ -504,6 +504,15 @@ def _extract_breakout(src_path: str, start: float, dur: float, vdest: Path,
         except Exception:
             _srcdur = 0.0
         _hi = min(float(dur), (_srcdur - start - 0.1) if _srcdur else float(dur))
+        # FRAME-LOCK the breakout length. The video is cut with fps=30, so it lands on
+        # round(len*30)/30; the audio was cut with -t len, so it lands on exactly len. They differ
+        # by up to half a frame EACH — measured 9.480s audio vs 9.467s video — and downstream the
+        # audio splice uses its length while the video segment uses its own, so every breakout
+        # leaked that mismatch into the timeline (the residual +0.127s the sync invariant caught
+        # after the three assemble-side drift fixes). Quantise the target to whole frames up front
+        # and cut BOTH to it, so audio == video == a frame-multiple by construction.
+        _qfps = 30.0
+        _hi = round(_hi * _qfps) / _qfps
         if _hi >= 3.2:
             # `lo` is the floor the dialogue-aware search may not undercut. For a quote-anchored
             # window that floor is the QUOTE'S OWN LENGTH: the whole point is to air the complete
@@ -514,6 +523,9 @@ def _extract_breakout(src_path: str, start: float, dur: float, vdest: Path,
             dur, _bk_text = _dialogue_aware_dur(str(src_path), start, lo=_lo, hi=_hi)
         else:
             dur, _bk_text = max(2.0, _hi), ""
+        # the dialogue-aware search returns a fresh length ending on a spoken line; re-lock it to a
+        # whole frame so the -t below cuts audio and video to the SAME frame-multiple
+        dur = round(float(dur) * _qfps) / _qfps
         # COMPETITOR-VOICEOVER GUARD: a breakout must be the movie's OWN dialogue, never another
         # YouTuber's narration. If the clip's audio reads as commentary/CTA (essay voice-over),
         # reject it — the beat keeps its footage. (env VIDLORE_CLIPSTUDIO_BREAKOUT_VOICE_GUARD)
@@ -558,9 +570,25 @@ def _extract_breakout(src_path: str, start: float, dur: float, vdest: Path,
         if pv.returncode != 0 or pa.returncode != 0 or not vdest.exists() or not adest.exists():
             return None
         from .ingest import probe
-        da = probe(adest).get("duration", 0.0) or dur
         dv = probe(vdest).get("duration", 0.0) or dur
-        return round(min(da, dv), 3)
+        da = probe(adest).get("duration", 0.0) or dur
+        # CONFORM AUDIO TO VIDEO, exactly. The video is authoritative — it is quantised to whole
+        # frames and a segment cannot be a fractional frame — but `-t` on a 30fps video and a
+        # 44100Hz wav land on different grids (measured 278 vs 279 frames for the same request), so
+        # a request-side quantise alone still leaves a 1-frame gap. Trim-or-pad the audio to the
+        # video's measured length so the breakout's audio splice and its video segment are the SAME
+        # length by construction — the guarantee F5's atomicity needs.
+        if abs(da - dv) > 1e-3:
+            _tmp = adest.with_suffix(".conform.wav")
+            _cf = subprocess.run(
+                [ffmpeg_exe(), "-y", "-i", str(adest),
+                 "-af", f"apad,atrim=end={dv:.6f},asetpts=N/SR/TB",
+                 "-ar", "44100", "-ac", "2", str(_tmp)],
+                capture_output=True, timeout=120)
+            if _cf.returncode == 0 and _tmp.exists():
+                _tmp.replace(adest)
+                da = probe(adest).get("duration", 0.0) or dv
+        return round(dv, 3)
     except Exception:
         return None
 
