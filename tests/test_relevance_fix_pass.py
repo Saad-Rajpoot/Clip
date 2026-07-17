@@ -448,8 +448,13 @@ def test_video_total_conforms_to_the_narration_clock():
 
     from pathlib import Path as _P
     s = (_P(__file__).resolve().parents[1] / "vidlore" / "assemble.py").read_text(encoding="utf-8")
-    assert "CONFORM THE VIDEO TO THE NARRATION CLOCK" in s
-    assert 'getattr(narration, "total"' in s, "the conform must target narration.total"
+    assert "CONFORM THE VIDEO TO THE COMPOSED-AUDIO CLOCK" in s
+    # must target the composed-audio FILE the invariant probes (not narration.total, which equals
+    # the scene sum the video already has — that was a silent no-op), and absorb into a real beat,
+    # not the word-less breakout pseudo-scene
+    assert "_probe_duration(_audio_f)" in s, "conform must probe the composed audio file"
+    assert '_is_breakout_beat' in s and 'getattr(_sc, "words"' in s, \
+        "conform must exclude the word-less breakout beat"
 
 
 def test_sync_invariant_compares_against_composed_audio():
