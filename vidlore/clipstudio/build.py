@@ -3381,10 +3381,18 @@ def _scan_coverage_reason(n_frames: int, stride: float, dur: float, rc: int = 0)
     eps = 0.15
     tol = stride + eps
     last_t = (n_frames - 1) * stride
-    if last_t < dur - tol:
-        return (f"partial decode — last sampled frame at {last_t:.2f}s is > one stride ({tol:.2f}s) "
-                f"short of the {dur:.2f}s timeline (final frame not sampled)")
     expected = int(dur / stride) + 1
+    if last_t < dur - tol:
+        # The last SAMPLE time can fall one fps-grid step short of the timeline purely by rounding
+        # when the video is trimmed to an exact frame-length (the timeline-conform does this to lock
+        # A/V sync): a 188.233s video yields 376 samples ending at 187.50s, 0.08s past tol, even
+        # though every frame decoded. The frame COUNT is the reliable coverage signal — when it is
+        # within one of `expected`, coverage is real and this is a grid artifact, not a decode gap.
+        # Only when the count ALSO falls short is the tail genuinely missing.
+        if n_frames < expected - 1:
+            return (f"partial decode — last sampled frame at {last_t:.2f}s is > one stride "
+                    f"({tol:.2f}s) short of the {dur:.2f}s timeline AND only {n_frames}/{expected} "
+                    f"frames decoded (final frame not sampled)")
     if n_frames < expected - 2:
         return (f"missing scan frames — {n_frames} decoded but ~{expected} expected @{stride}s "
                 f"(mid-timeline decode gap)")

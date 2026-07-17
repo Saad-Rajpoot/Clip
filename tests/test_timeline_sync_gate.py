@@ -105,6 +105,22 @@ def test_post_concat_conform_retimes_video_to_audio():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_ad_scan_coverage_tolerates_the_conform_grid_artifact():
+    """The timeline-conform trims the video to an exact frame-length to lock A/V sync, which makes
+    the ad gate's fps=1/stride extraction land its LAST sample one grid step short (376 frames of a
+    188.233s video, last at 187.50s, 0.08s past tolerance) even though every frame decoded. The
+    frame COUNT is the reliable coverage signal — a count within one of expected is a grid artifact,
+    not a decode gap. Genuine tail gaps (the count also falls short) must still fail."""
+    from vidlore.clipstudio.build import _scan_coverage_reason as cov
+    # grid artifact: video conformed to 188.233s, 376/377 frames -> covered
+    assert cov(376, 0.5, 188.233) is None, "the conform grid artifact must read as covered"
+    # genuine gaps must still fail closed
+    assert cov(376, 0.5, 200.0) is not None, "a real 12s tail gap must fail"
+    assert cov(197, 0.5, 100.0) is not None, "a real ~2s tail gap must fail (count 197 << 201)"
+    assert cov(0, 0.5, 100.0) is not None, "zero frames must fail"
+    assert cov(200, 0.5, 0.0) is not None, "unprobeable duration must fail"
+
+
 def test_gate_fails_closed_when_it_cannot_measure():
     """A check that cannot run has NOT passed. The first cut returned early on a missing narration
     or a failed ffprobe — the same shape as the verifier bug this branch exists to fix, where an
@@ -127,7 +143,7 @@ def test_gate_fails_closed_when_it_cannot_measure():
         assert "cannot be verified" in str(e)
 
 
-TESTS = [test_delivered_gate_on_real_files, test_post_concat_conform_retimes_video_to_audio, test_gate_fails_closed_when_it_cannot_measure]
+TESTS = [test_delivered_gate_on_real_files, test_post_concat_conform_retimes_video_to_audio, test_ad_scan_coverage_tolerates_the_conform_grid_artifact, test_gate_fails_closed_when_it_cannot_measure]
 
 if __name__ == "__main__":
     for fn in TESTS:
