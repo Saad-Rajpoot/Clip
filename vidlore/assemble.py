@@ -8864,14 +8864,29 @@ def assemble(
     # testing.) Each SCENE's beats are snapped to sum to that scene's
     # exact frame count, so the audio / caption / graphic timelines —
     # which key off scene durations — never drift.
+    # CARRY THE ROUNDING. Each scene used to snap to its OWN frame count —
+    # int(round(scene_seconds * FPS)) — which absorbs rounding WITHIN a scene but lets every
+    # scene contribute up to half a frame of independent error. Across ~43 scenes that random
+    # walk reached +0.227s in the acceptance render (~7 frames), which the sync invariant caught:
+    # video 188.467s vs composed audio 188.240s. Fixing the transition pairing was necessary but
+    # not sufficient — this was the other half.
+    #
+    # So allocate against the RUNNING clock instead of per scene: a scene's frame count is
+    # whatever makes the cumulative total land on the exact cumulative narration time. Per-scene
+    # error stays under a frame and the TOTAL is exact by construction, because each scene absorbs
+    # its predecessor's remainder rather than starting a fresh one.
     from itertools import groupby as _gb
     beat_durs: list[float] = []
+    _emitted_f = 0                       # frames committed so far
+    _cum_t = 0.0                         # exact narration time up to and including this scene
     for _j, _grp in _gb(plan, key=lambda p: p[0]):
         _g = list(_grp)
-        _tot_f = max(len(_g), int(round(sum(x[1] for x in _g) * FPS)))
+        _cum_t += sum(x[1] for x in _g)
+        _tot_f = max(len(_g), int(round(_cum_t * FPS)) - _emitted_f)
         _fr = [max(1, int(round(x[1] * FPS))) for x in _g]
         _k = _fr.index(max(_fr))         # absorb rounding on longest beat
         _fr[_k] = max(1, _fr[_k] + (_tot_f - sum(_fr)))
+        _emitted_f += sum(_fr)
         beat_durs.extend(f / FPS for f in _fr)
     # Hard cuts by default — frame-exact concat, NO deep xfade chain (that
     # chain was the freeze source). The uneven RHYTHM lives in beat_durs,

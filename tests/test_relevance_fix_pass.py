@@ -364,6 +364,60 @@ def test_pads_are_derived_from_selected_pairs_only():
     assert "beat_pad[bi] = xf" not in p1, "pass 1 must not commit padding"
 
 
+def test_frame_allocation_carries_so_drift_cannot_accumulate():
+    """The SECOND drift source, found by the sync invariant during the acceptance render (the
+    pairing fix was necessary but not sufficient): each scene snapped to its OWN frame count, so
+    every scene contributed up to half a frame of independent error and ~43 of them random-walked
+    to +0.227s -- video 188.467s vs composed audio 188.240s.
+
+    Allocating against the RUNNING clock makes the total exact by construction: each scene absorbs
+    its predecessor's remainder instead of starting a fresh one."""
+    import random
+    FPS = 30.0
+
+    def old(groups):
+        out = []
+        for g in groups:
+            tot = max(len(g), int(round(sum(g) * FPS)))
+            fr = [max(1, int(round(x * FPS))) for x in g]
+            k = fr.index(max(fr))
+            fr[k] = max(1, fr[k] + (tot - sum(fr)))
+            out += [f / FPS for f in fr]
+        return out
+
+    def new(groups):
+        out, emitted, cum = [], 0, 0.0
+        for g in groups:
+            cum += sum(g)
+            tot = max(len(g), int(round(cum * FPS)) - emitted)
+            fr = [max(1, int(round(x * FPS))) for x in g]
+            k = fr.index(max(fr))
+            fr[k] = max(1, fr[k] + (tot - sum(fr)))
+            emitted += sum(fr)
+            out += [f / FPS for f in fr]
+        return out
+
+    random.seed(7)
+    one, worst_old, worst_new = 1 / FPS, 0.0, 0.0
+    for _ in range(200):
+        groups = [[random.uniform(0.8, 6.0) for _ in range(random.randint(1, 3))]
+                  for _ in range(random.randint(35, 60))]
+        tgt = sum(sum(g) for g in groups)
+        worst_old = max(worst_old, abs(sum(old(groups)) - tgt))
+        worst_new = max(worst_new, abs(sum(new(groups)) - tgt))
+    assert worst_old > one, "the old allocator must demonstrably breach one frame (it did: +227ms)"
+    assert worst_new <= one + 1e-9, f"carry must bound TOTAL drift under a frame, got {worst_new}"
+
+    # and the shipped code must actually carry
+    from pathlib import Path as _P
+    s = (_P(__file__).resolve().parents[1] / "vidlore" / "assemble.py").read_text(encoding="utf-8")
+    assert "CARRY THE ROUNDING" in s
+    i = s.index("CARRY THE ROUNDING")
+    blk = s[i:i + 1800]
+    assert "int(round(_cum_t * FPS)) - _emitted_f" in blk, "frames must derive from the running clock"
+    assert "_emitted_f += sum(_fr)" in blk
+
+
 def test_sync_invariant_compares_against_composed_audio():
     """'video == composed audio, ±1 frame'. Comparing against the RAW pre-breakout narration would
     be meaningless — the composed track is the clock the captions and breakout splices key to."""
@@ -643,6 +697,7 @@ TESTS = [
     test_rejected_footage_gate_is_non_retryable_too,
     test_adjacent_transition_tails_cannot_both_pad,
     test_pads_are_derived_from_selected_pairs_only,
+    test_frame_allocation_carries_so_drift_cannot_accumulate,
     test_sync_invariant_compares_against_composed_audio,
     test_empty_faceid_is_unknown_not_innocent,
     test_positive_faceid_confirmation_allows_the_contextual_downgrade,
