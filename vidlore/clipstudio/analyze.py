@@ -37,8 +37,14 @@ class ScriptAnalysis:
     # For a single-scene video this is the one canonical scene the editor anchors everything on.
     anchor_scenes: list[dict] = field(default_factory=list)   # [{"name":..., "query":...}]
     # "S02E09"-style code when the LLM names the episode — used as a high-precision search
-    # variant (the raw-scene uploads are very often titled with it)
+    # variant (the raw-scene uploads are very often titled with it).
+    # It is a HINT, not a fact: it comes from one LLM field with no second opinion and has been
+    # measured wrong (S04E01 for a scene that is S03E10). Until `episode_hint_verified` is True it
+    # may be used to SEARCH but never to purge sources, confer anchor status, or constrain a beat's
+    # era — see era.verified_episode_hint.
     episode_hint: str = ""
+    episode_hint_verified: bool = False
+    episode_hint_reason: str = ""
     actors: list[str] = field(default_factory=list)
     characters: list[dict] = field(default_factory=list)   # {"name":..., "actor":...}
     locations: list[str] = field(default_factory=list)
@@ -356,6 +362,20 @@ def analyze_script(script_text: str, *, topic: str = "", movie_hint: str = "",
                 g = [x for x in m2.groups() if x]
                 analysis.episode_hint = f"S{int(g[0]):02d}E{int(g[1]):02d}"
                 break
+    # CORROBORATE. The hint arrives from a single LLM field with no second opinion, and it is wrong
+    # often enough to matter: for the small-council scene in S03E10 "Mhysa" the model returned
+    # "S04E01 Two Swords" while, in the SAME dict, quoting the S03E10 dialogue verbatim — and the
+    # script said "This is the last episode of season three" out loud. Both signals were in hand and
+    # neither was read, so one wrong string purged 354 shots and made wrong-episode clips anchors.
+    # An unverified hint stays a fine search keyword; it just may not gate anything downstream.
+    from . import era as _era_mod
+    _h, _ok, _why = _era_mod.verified_episode_hint(analysis, script_text=script_text or "")
+    analysis.episode_hint_verified = _ok
+    analysis.episode_hint_reason = _why
+    if _h:
+        log(f"analyze: episode hint {_h!r} — {'CORROBORATED' if _ok else 'UNVERIFIED'} ({_why})"
+            + ("" if _ok else "; it will NOT purge sources, confer anchor status, or "
+                              "constrain beats"))
     def _beat_i(o):
         try:
             return int(o.get("i", -1))

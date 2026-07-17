@@ -4706,10 +4706,15 @@ def test_era_policy_and_still_verification():
     print("[gap-2] beat-local era policy + semantic recovery-still verification")
     from vidlore.clipstudio.verify import _beat_era
     from vidlore.clipstudio import models as M
-    # (1) single-scene video → global episode hint may be used
+    # (1) single-scene video → a CORROBORATED global episode hint may be used
     s = M.ScriptSegment(index=0, text="Tywin dismisses Joffrey")
-    check("single-scene uses the global episode hint",
-          _beat_era(s, "S03E04", single_scene=True) == "S03E04")
+    check("single-scene uses the global episode hint once corroborated",
+          _beat_era(s, "S03E04", single_scene=True, global_verified=True) == "S03E04")
+    # (1b) an UNVERIFIED hint constrains nothing, even single-scene. A wrong hint doesn't merely
+    # mis-tag a beat: it purges the right footage. Measured — "S04E01" for a scene that is S03E10
+    # dropped 354 shots including the correct episode's own upload.
+    check("single-scene IGNORES an uncorroborated global hint",
+          _beat_era(s, "S03E04", single_scene=True, global_verified=False) == "")
     # (2) multi-scene → NO global hint; era must come from the beat's own evidence
     check("multi-scene ignores the unsafe global hint when the beat has no local era",
           _beat_era(s, "S03E04", single_scene=False) == "")
@@ -4725,7 +4730,8 @@ def test_era_policy_and_still_verification():
     osrc = (Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "orchestrate.py").read_text()
     bsrc = (Path(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "build.py").read_text()
     check("verifier uses beat-local era (not a global multi-scene hint)",
-          "_beat_era(_seg, _global_era, _single)" in vsrc and '_vtype == "single_scene"' in vsrc)
+          "_era_of(_seg)" in vsrc and '_vtype == "single_scene"' in vsrc
+          and "global_verified=_global_ok" in vsrc)
     check("recovery stills semantically verified before install (tri-state; real face_ids)",
           "_still_verdict" in osrc and "_shot_face_ids" in osrc
           and "NOT the beat's requested entities" in osrc)
@@ -5052,13 +5058,24 @@ def test_release_gate_recovery_alignment():
                                    required_entity="", required_kind="")
     ok_e, why_e = _deterministic_still_ok(
         source_title="Game of Thrones Season 4 Tywin scenes", score=0.9, seg=_seg_e,
-        faces=[], movie_toks={"game", "thrones"}, global_era="S04E01", single_scene=True)
+        faces=[], movie_toks={"game", "thrones"}, global_era="S04E01", single_scene=True,
+        global_verified=True)
     check(f"deterministic still accepts a same-era source (S04E01 beat, 'Season 4' title) "
           f"[{why_e[:40]}]", ok_e)
     ok_e2, _ = _deterministic_still_ok(
         source_title="Game of Thrones Season 3 Tywin scenes", score=0.9, seg=_seg_e,
-        faces=[], movie_toks={"game", "thrones"}, global_era="S04E01", single_scene=True)
-    check("deterministic still still rejects a genuinely WRONG season", not ok_e2)
+        faces=[], movie_toks={"game", "thrones"}, global_era="S04E01", single_scene=True,
+        global_verified=True)
+    check("deterministic still still rejects a genuinely WRONG season (hint corroborated)",
+          not ok_e2)
+    # …but an UNCORROBORATED hint may not reject on era grounds. "Wrong era" on the strength of a
+    # guess is exactly how 'Game Of Thrones S03E10 Red Wedding Aftermath scene' -- the CORRECT
+    # episode -- contributed zero shots to a video about S03E10. The other gates still apply.
+    ok_e3, _ = _deterministic_still_ok(
+        source_title="Game of Thrones Season 3 Tywin scenes", score=0.9, seg=_seg_e,
+        faces=[], movie_toks={"game", "thrones"}, global_era="S04E01", single_scene=True,
+        global_verified=False)
+    check("an UNCORROBORATED era hint cannot reject a still on era grounds", ok_e3)
 
     # (5) Face-ID identities are ACTOR names; beats name CHARACTERS. The still checks and the
     # pool picker must map through the roster (a perfect Joffrey frame carries 'jack gleeson').

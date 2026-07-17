@@ -1141,18 +1141,33 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
              or re.search(r"\bs0*(\d{1,2})\b(?![\dex])", t))
         return int(m.group(1)) if m else None
     _ep = (getattr(analysis, "episode_hint", "") or "") if analysis is not None else ""
+    _ep_verified = bool(getattr(analysis, "episode_hint_verified", False))
     _tgt_season = _title_season(_ep)
-    if single_scene and _tgt_season and _os.environ.get(
+    # ERA PURGE — deletes shots outright, so it demands the strongest evidence in the pipeline.
+    # Measured: an UNVERIFIED hint of "S04E01" (the scene is S03E10) dropped 354 shots on every
+    # run, including 'Game Of Thrones S03E10 Red Wedding Aftermath scene' — the correct episode,
+    # zero shots used. Sources with no season in the title survived, so the filter punished honest
+    # labelling and rewarded vague titles.
+    #
+    # Two conditions now: the hint must be CORROBORATED, and a source whose own audio speaks the
+    # anchor dialogue can never be purged on a title string. Content beats labels.
+    if single_scene and _tgt_season and _ep_verified and _os.environ.get(
             "VIDLORE_CLIPSTUDIO_ERA_FILTER", "1").strip() not in ("0", "false", "no"):
         _t2 = {s.id: (s.title or "") for s in proj.sources}
+        _dialogue_ok = {s.id for s in proj.sources
+                        if (getattr(s, "extra", None) or {}).get("anchor_verified")}
         _ok_ids = {ps.sid for ps in pool
-                   if (_title_season(_t2.get(ps.sid, "")) in (None, _tgt_season))}
+                   if (_title_season(_t2.get(ps.sid, "")) in (None, _tgt_season)
+                       or ps.sid in _dialogue_ok)}
         if len({ps.sid for ps in pool}) - len(_ok_ids) >= 1 and len(_ok_ids) >= 1:
             _before = len(pool)
             pool = [ps for ps in pool if ps.sid in _ok_ids]
             if progress and len(pool) < _before:
                 progress(f"match: era filter — dropped {_before - len(pool)} off-season shot(s) "
-                         f"(target season {_tgt_season})")
+                         f"(target season {_tgt_season}, hint corroborated)")
+    elif single_scene and _tgt_season and not _ep_verified and progress:
+        progress(f"match: era filter SKIPPED — episode hint {_ep!r} is uncorroborated; "
+                 f"an unverified hint may not purge sources")
     _purity = _os.environ.get("VIDLORE_CLIPSTUDIO_SINGLE_SCENE_PURITY", "1").strip() \
         not in ("0", "false", "no")
     if single_scene and _purity:
@@ -1232,11 +1247,15 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
             if (getattr(src, "extra", None) or {}).get("anchor_verified"):
                 anchor_sids.add(src.id)
                 continue
-            # (a2) the exact EPISODE CODE in the title = the raw scene itself (a "chair scraping
-            # scene S03E03" upload has no character name but IS the scene) — strong enough alone
-            if _ep and _ep in (src.title or "").lower().replace(" ", ""):
-                anchor_sids.add(src.id)
-                continue
+            # (a2) an EPISODE CODE in the title proves which EPISODE, never which SCENE — an
+            # episode is ~56 minutes of unrelated material. Granting anchor status on the code
+            # ALONE (and `continue`-ing past the dialogue check below) is how
+            # 'S04E01 - Arya Stark and the Hound' and 'S04E01 Jon Snow meets Janos Slynt' became
+            # anchors of a small-council video and collected the +0.45 bonus. The code is now a
+            # corroborating hint: it still has to pass the dialogue/title evidence below, and only
+            # counts at all once the hint itself is verified.
+            _code_hit = bool(_ep and _ep_verified
+                             and _ep in (src.title or "").lower().replace(" ", ""))
             # (b) the source's own ASR SPEAKS one of the scene's DIALOGUE lines (scene-specific →
             # one solid hit is decisive). Music sources are already dropped from the pool upstream.
             joined = " " + " ".join(_raw_words(" ".join(_tr_by_sid.get(src.id, [])))) + " "
@@ -1251,12 +1270,17 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
                 continue
             # (c) title fallback: ≥2 scene tokens AND at least one is a character/actor name.
             # Token match, not raw substring — prefix only for short plural/possessive suffixes.
+            # A verified episode code corroborates (drops the bar to 1 scene token) but can never
+            # substitute for the entity evidence: 'S04E01 - Arya Stark and the Hound' carries the
+            # code and no small-council entity, so it stays a non-anchor no matter how right the
+            # code is.
+            _need = 1 if _code_hit else 2
             twords = set(re.findall(r"\w+", (src.title or "").lower()))
             for ts in atok_sets:
                 hits = {t for t in ts
                         if any(w == t or (w.startswith(t) and len(w) - len(t) <= 2)
                                for w in twords)}
-                if len(hits) >= 2 and (not ent_toks or hits & ent_toks):
+                if len(hits) >= _need and (not ent_toks or hits & ent_toks):
                     anchor_sids.add(src.id)
                     break
         anchor_bonus = _f_env("VIDLORE_CLIPSTUDIO_ANCHOR_BONUS", 0.45 if single_scene else 0.12)

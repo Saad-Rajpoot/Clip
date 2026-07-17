@@ -623,14 +623,10 @@ def _norm_title_toks(title: str) -> set:
 
 
 def _title_season(title: str) -> str:
-    """The season a source TITLE declares (S3E10 / 'season 3' / 3x10) as 'season N', else ''."""
-    from .verify import _SEASON_RX
-    m = _SEASON_RX.search(title or "")
-    if m:
-        n = m.group(1) or m.group(2) or m.group(3)
-        if n:
-            return f"season {int(n)}"
-    return ""
+    """The season a source TITLE declares (S3E10 / 'season 3' / 'season three' / 3x10) as
+    'season N', else ''."""
+    from . import era as _era
+    return _era.as_era(title or "")
 
 
 _NAME_ARTICLES = {"the", "a", "an", "of", "and"}
@@ -662,7 +658,8 @@ def entity_name_variants(entity: str, char2actor: dict | None = None) -> list:
 
 
 def _deterministic_still_ok(*, source_title, score, seg, faces, movie_toks, global_era,
-                            single_scene, min_clip=0.30, char2actor=None):
+                            single_scene, min_clip=0.30, char2actor=None,
+                            global_verified=False):
     """R4-6 — the PURE deterministic gate for installing a recovery still when NO vision model is
     available. Every claim is EVALUATED (never assumed): a still is accepted only when ALL of
       (1) SAME-SHOW via meaningful normalized title identity (generic/stopwords removed — 'Game of
@@ -690,9 +687,12 @@ def _deterministic_still_ok(*, source_title, score, seg, faces, movie_toks, glob
             return False, (f"different / unconfirmed show (title {sorted(tt)} shares only "
                            f"{sorted(_shared)} with movie {sorted(mt)}; need >= {_need})")
     # (2) explicit era: compare the beat's own era to the source title's declared season —
-    # CANONICALLY (era strings arrive in mixed formats: 'S04E01' vs 'season 4' is the SAME era)
+    # CANONICALLY (era strings arrive in mixed formats: 'S04E01' vs 'season 4' is the SAME era).
+    # An UNCORROBORATED global hint yields no beat era, so nothing is rejected on era grounds here:
+    # calling a source "wrong era" on the strength of a guess is how the correct episode's own
+    # upload scored zero shots. The same-show / CLIP / Face-ID gates below still apply.
     from .verify import _era_conflict
-    era_beat = _beat_era(seg, global_era, single_scene)
+    era_beat = _beat_era(seg, global_era, single_scene, global_verified=global_verified)
     era_src = _title_season(source_title)
     if _era_conflict(era_beat, era_src):
         return False, f"wrong era (beat {era_beat} vs source {era_src})"

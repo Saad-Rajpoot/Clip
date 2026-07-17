@@ -149,6 +149,89 @@ def test_single_garbled_word_cannot_anchor_a_match():
     assert find_quote_span(_real_words(), "dragons burned the fleet at anchor") is None
 
 
+# ---------------------------------------------------------------------------
+# F1 — beat-local era. The analyzer labelled the S03E10 "Mhysa" council scene as
+# "S04E01 Two Swords"; that one string purged 354 shots (including the correct episode) and made
+# wrong-episode clips anchors.
+# ---------------------------------------------------------------------------
+_REAL_ANALYSIS = NS(
+    episode_hint="S04E01",
+    anchor_scenes=[{"name": "Tywin sends Joffrey to bed",
+                    "episode": "S04E01 Two Swords",
+                    "dialogue": ["Any man who must say 'I am the king' is no true king.",
+                                 "The king is tired. See him to his chambers."]}])
+_REAL_SCRIPT = ("An old man ends a king's reign without raising his voice. "
+                "This is the last episode of season 3. "
+                "Days earlier, at a wedding, an entire army was butchered.")
+
+
+def test_season_parsing_reads_spelled_out_numerals():
+    """The script said 'the last episode of season three'. The old digits-only regex could not see
+    the single disconfirming signal the pipeline already had."""
+    from vidlore.clipstudio import era
+    assert era.parse_season("This is the last episode of season three.") == 3
+    for t, exp in (("season 4", 4), ("S03E10", 3), ("3x10", 3), ("Game of Thrones S4", 4),
+                   ("S04E01 Two Swords", 4), ("no era here", None)):
+        assert era.parse_season(t) == exp, f"{t!r} -> {era.parse_season(t)}"
+
+
+def test_contradicted_hint_is_not_verified():
+    from vidlore.clipstudio import era
+    h, ok, why = era.verified_episode_hint(_REAL_ANALYSIS, _REAL_SCRIPT)
+    assert h == "S04E01"
+    assert ok is False, "a hint the script contradicts must never be verified"
+    assert "CONTRADICTED" in why, why
+
+
+def test_uncorroborated_hint_is_not_verified_either():
+    from vidlore.clipstudio import era
+    _, ok, why = era.verified_episode_hint(_REAL_ANALYSIS, "a script that names no season at all")
+    assert ok is False and "uncorroborated" in why
+
+
+def test_agreeing_hint_is_verified():
+    from vidlore.clipstudio import era
+    ana = NS(episode_hint="S03E10", anchor_scenes=[])
+    _, ok, _ = era.verified_episode_hint(ana, "This is the last episode of season three.")
+    assert ok is True
+
+
+def test_beat_local_era_beats_the_global_hint():
+    """A beat naming its own event uses THAT event's era. The Red Wedding is S03E09 no matter what
+    the anchor scene is — forcing it to the anchor era is how Red Wedding beats got S04E01 clips."""
+    from vidlore.clipstudio import era
+    ev = era.event_eras_from(_REAL_ANALYSIS)
+    core = NS(text="And at the end of that table sits his grandfather.",
+              scene_query="", expected_visual="")
+    rw = NS(text="Days earlier at the Red Wedding, an entire army was butchered.",
+            scene_query="Game of Thrones Red Wedding season 3", expected_visual="")
+
+    # an UNVERIFIED global hint constrains nothing
+    assert era.beat_era(core, "S04E01", single_scene=True, global_verified=False,
+                        event_eras=ev) == ""
+    # a VERIFIED hint fills the gap for a core/deictic beat — returned VERBATIM, not normalised to
+    # 'season N', so downstream episode-granular comparisons (S04E01 vs S04E10) still conflict
+    assert era.beat_era(core, "S03E10", single_scene=True, global_verified=True,
+                        event_eras=ev) == "S03E10"
+    # local evidence wins even over a verified global hint
+    assert era.beat_era(rw, "S04E01", single_scene=True, global_verified=True,
+                        event_eras=ev) == "season 3"
+    assert era.episodes_conflict("S04E01", "S04E10"), "episode granularity must survive"
+    assert not era.episodes_conflict("S04E01", "season 4")
+
+
+def test_unverified_hint_may_not_purge_or_anchor():
+    """The two hard powers an unverified hint must never have. Measured: 354 shots purged every
+    run, including 'Game Of Thrones S03E10 Red Wedding Aftermath scene' -- the correct episode,
+    which contributed zero shots to a video about that episode."""
+    import inspect
+    from vidlore.clipstudio import match as M
+    src = inspect.getsource(M.match_project) if hasattr(M, "match_project") else inspect.getsource(M)
+    assert "_ep_verified" in src, "era purge / anchor promotion must consult episode_hint_verified"
+    # the purge must be conditioned on verification, not merely on a season being parseable
+    assert "and _ep_verified" in src
+
+
 TESTS = [
     test_deixis_promotes_the_lines_that_actually_failed,
     test_deixis_does_not_swallow_generic_narration,
@@ -156,6 +239,12 @@ TESTS = [
     test_thesis_line_locatable_across_a_shot_boundary,
     test_payoff_line_locatable_through_asr_garble_and_four_shots,
     test_single_garbled_word_cannot_anchor_a_match,
+    test_season_parsing_reads_spelled_out_numerals,
+    test_contradicted_hint_is_not_verified,
+    test_uncorroborated_hint_is_not_verified_either,
+    test_agreeing_hint_is_verified,
+    test_beat_local_era_beats_the_global_hint,
+    test_unverified_hint_may_not_purge_or_anchor,
 ]
 
 

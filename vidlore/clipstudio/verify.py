@@ -22,6 +22,7 @@ from .config import ClipConfig
 from . import index as _index
 from . import cut as _cut
 from . import policy as _policy
+from . import era as _era
 
 _VSYS = (
     "You are a strict film-footage QC editor. You judge whether ONE clip's representative frame "
@@ -113,21 +114,16 @@ _SEASON_RX = re.compile(
     r"\bS0?(\d{1,2})\s?E0?\d{1,2}\b|\bseason\s+(\d{1,2})\b|\b(\d{1,2})\s?x\s?\d{2}\b", re.I)
 
 
-def _beat_era(seg, global_era: str, single_scene: bool) -> str:
-    """The era/season constraint for ONE beat (Gap 2). Single-scene videos may use the project's
-    global episode hint. Multi-scene videos derive era ONLY from the beat's own local evidence
-    (scene_query / expected_visual / narration); if none names a season, the era is left
-    UNCONSTRAINED ('') rather than guessed with a wrong global hint."""
-    if single_scene:
-        return global_era or ""
-    for txt in (getattr(seg, "scene_query", "") or "", getattr(seg, "expected_visual", "") or "",
-                getattr(seg, "text", "") or ""):
-        m = _SEASON_RX.search(txt)
-        if m:
-            n = m.group(1) or m.group(2) or m.group(3)
-            if n:
-                return f"season {int(n)}"
-    return ""
+def _beat_era(seg, global_era: str, single_scene: bool, *, global_verified: bool = False,
+              event_eras: dict | None = None) -> str:
+    """The era/season constraint for ONE beat — see `era.beat_era` for the ordering and why.
+
+    This used to return the global hint IMMEDIATELY for single-scene videos, never reading the
+    beat. That made one unvalidated LLM string ("S04E01" for a scene that is S03E10) the era of all
+    229 beats at once, including the ones about the Red Wedding (S03E09). Era is beat-local now,
+    and an unverified global hint constrains nothing."""
+    return _era.beat_era(seg, global_era, single_scene=single_scene,
+                         global_verified=global_verified, event_eras=event_eras)
 
 
 def _action_contact_sheet(src_path: str, shot_start: float, shot_end: float, dest: Path):
@@ -211,12 +207,8 @@ def _contextual_subject_ok(vd) -> bool:
 
 
 def _season_num(text: str):
-    """Season number declared anywhere in a string (S03E10 / 'season 3' / 3x10), else None."""
-    m = _SEASON_RX.search(text or "")
-    if m:
-        n = m.group(1) or m.group(2) or m.group(3)
-        return int(n) if n else None
-    return None
+    """Season number declared anywhere in a string (S03E10 / 'season 3' / 'season three' / 3x10)."""
+    return _era.parse_season(text or "")
 
 
 _EPISODE_RX = re.compile(r"\bS0?\d{1,2}\s?E0?(\d{1,2})\b|\b\d{1,2}\s?x\s?0?(\d{1,2})\b", re.I)
@@ -340,6 +332,14 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
     _vtype = str((proj.meta.get("analysis", {}) or {}).get("video_type", "") or "")
     _single = (_vtype == "single_scene")
     _global_era = str((proj.meta.get("analysis", {}) or {}).get("episode_hint", "") or "")
+    # an episode hint only constrains a beat once corroborated — see era.verified_episode_hint
+    _global_ok = bool((proj.meta.get("analysis", {}) or {}).get("episode_hint_verified", False))
+    _event_eras = _era.event_eras_from(
+        type("A", (), {"anchor_scenes": (proj.meta.get("analysis", {}) or {}).get("anchor_scenes")})())
+
+    def _era_of(_s):
+        return _beat_era(_s, _global_era, _single, global_verified=_global_ok,
+                         event_eras=_event_eras)
     # SCENE ROSTER (single-scene deep-dive only): every main-cast character/actor of the video. In a
     # single-scene deep-dive ANY roster member is contextually valid for any beat (they are all in
     # the one scene), so a roster face is never a "wrong character". For a multi-scene essay the
@@ -377,7 +377,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                                 eng_cfg, model, is_specific=_exact,
                                 expected_visual=getattr(_seg, "expected_visual", "") or "",
                                 scene_query=getattr(_seg, "scene_query", "") or "",
-                                era_hint=_beat_era(_seg, _global_era, _single), multiframe=is_mf)
+                                era_hint=_era_of(_seg), multiframe=is_mf)
         finally:
             if is_mf:
                 try:
@@ -555,7 +555,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 _src_title = ((getattr(_src_r, "title", "") or "") + " " + (sel.source_id or ""))
                 _ok_toks = _roster_toks if _single else frozenset()
                 if _present_unconfirmed_ok(v, seg, _src_title, faceid_names,
-                                           _beat_era(seg, _global_era, _single), _ok_toks):
+                                           _era_of(seg), _ok_toks):
                     # right scene/era, subject present-but-unconfirmed → CONTEXTUAL
                     v["verdict"] = "keep"
                     v["downgraded"] = "exact→contextual(present-unconfirmed)"
