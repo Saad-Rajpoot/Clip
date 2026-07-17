@@ -505,6 +505,44 @@ def test_quote_anchored_window_skips_the_silence_trim():
     assert "if min_dur <= 0 and _m0 and float(_m0.group(1)) <= 0.15:" in s
 
 
+def test_split_line_earns_the_verbatim_strength_it_actually_has():
+    """Why the payoff never aired, precisely.
+
+    A candidate WAS generated for the nightshade quote — but per-shot matching could only find a
+    3-word sub-window ("run=3"), because the line is split across 4 shots and garbled. run=3 fails
+    _verbatim_bypass_ok (needs >=4 words + >=70% coverage), so the candidate fell back to the
+    Face-ID wrong-character gate; Face-ID could confirm nobody (no reference for Joffrey/Pycelle,
+    and the council shots carry faces=[]), so it was skipped as "no confirmed main character" —
+    one of the audit's wrong_char=45 rejections.
+
+    The word stream scores the same line at 0.889 → run=7 → the bypass is earned honestly. The fix
+    works THROUGH the safety gate, not around it."""
+    import re as _re
+    from vidlore.clipstudio.build import _verbatim_bypass_ok
+    from vidlore.clipstudio.index import find_quote_span
+    q = "Perhaps some essence of nightshade to help him sleep."
+    qw = [w for w in _re.findall(r"[a-z0-9']+", q.lower())][:8]
+
+    assert _verbatim_bypass_ok(qw, 3) is False, "run=3 must NOT bypass Face-ID (that is the guard)"
+    sp = find_quote_span(_real_words(), q)
+    assert sp is not None
+    run = max(3, int(round(sp[2] * len(qw))))
+    assert run >= 4, f"word-stream run {run} still too weak"
+    assert _verbatim_bypass_ok(qw, run) is True, "an honestly-matched full line must earn the bypass"
+
+
+def test_candidate_generation_uses_the_word_stream():
+    from pathlib import Path as _P
+    s = (_P(__file__).resolve().parents[1] / "vidlore" / "clipstudio" / "build.py").read_text(
+        encoding="utf-8")
+    assert "WORD-STREAM PASS first" in s
+    i = s.index("WORD-STREAM PASS first")
+    blk = s[i:i + 1600]
+    assert "find_quote_span" in blk
+    assert "_texty9(_sh)" in blk, "burned-text shots must still be excluded"
+    assert "continue                           # word stream is strictly better evidence" in blk
+
+
 def test_release_block_is_non_retryable():
     """Release-blocks and relevance failures are CONTENT verdicts. Re-running unchanged cannot fix
     them — it only rolls the dice until the verifier dies."""
@@ -547,6 +585,8 @@ TESTS = [
     test_breakout_in_point_is_the_quote_not_the_shot,
     test_min_dur_floor_prevents_truncating_the_line,
     test_quote_anchored_window_skips_the_silence_trim,
+    test_split_line_earns_the_verbatim_strength_it_actually_has,
+    test_candidate_generation_uses_the_word_stream,
 ]
 
 

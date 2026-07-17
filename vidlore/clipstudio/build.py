@@ -949,6 +949,31 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         for s in srcs:
             if s.id not in ok_audio:
                 continue
+            # WORD-STREAM PASS first. Per-shot matching below can only see a line that lies wholly
+            # inside ONE shot, because _assign_transcript bins ASR words into shots by midpoint. Two
+            # measured losses in the same clip:
+            #   "Any man who must | say I am the king is no true king."  (split at the 126.58 cut)
+            #   "Maester. Perhaps | a messence of nightshade to help him | sleep."  (4 shots + garble)
+            # The second produced NO candidate at all — the video's promised payoff, never even
+            # considered. The word stream is continuous, so cuts and garble stop mattering.
+            _span = None
+            try:
+                _span = _index.find_quote_span(_index.load_words(proj, s.id), _q)
+            except Exception:
+                _span = None
+            if _span:
+                _qs, _qe, _ratio = _span
+                _sh = next((x for x in shots_of.get(s.id, [])
+                            if float(x.start) <= _qs < float(x.end)), None)
+                if _sh is not None and not _texty9(_sh):
+                    # scale the phrase ratio onto the same run-length currency the per-shot path
+                    # scores in, so the two paths remain comparable
+                    _run = max(3, int(round(_ratio * len(qw))))
+                    score = _run + 3 + (2 if (getattr(s, "extra", None) or {}).get("anchor_verified")
+                                        else 0)
+                    if best is None or score > best[0]:
+                        best = (score, s, _sh, _run)
+                    continue                           # word stream is strictly better evidence
             for sh in shots_of.get(s.id, []):
                 if _texty9(sh):
                     continue                           # burned-in text never airs
