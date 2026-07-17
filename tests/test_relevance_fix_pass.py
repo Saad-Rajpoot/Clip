@@ -418,6 +418,40 @@ def test_frame_allocation_carries_so_drift_cannot_accumulate():
     assert "_emitted_f += sum(_fr)" in blk
 
 
+def test_video_total_conforms_to_the_narration_clock():
+    """The fifth and deepest drift source: the carry snaps beat_durs to the SCENE durations, but
+    those diverge from the composed narration the viewer hears by a sub-frame per scene, and over
+    ~40 scenes that reached +0.127s -- identical across four renders because it is neither the
+    cold-open nor the pads. The audio is the authority, so the whole-frame delta is absorbed into
+    the longest beat; the totals then match by construction."""
+    FPS = 30.0
+
+    def conform(beat_durs, narr_total):
+        tgt, cur = int(round(narr_total * FPS)), int(round(sum(beat_durs) * FPS))
+        if beat_durs and tgt != cur:
+            k = max(range(len(beat_durs)), key=lambda i: beat_durs[i])
+            adj = (tgt - cur) / FPS
+            if beat_durs[k] + adj >= 0.2:
+                beat_durs[k] = round((beat_durs[k] + adj) * FPS) / FPS
+        return beat_durs
+
+    import random
+    random.seed(3)
+    worst = 0.0
+    for _ in range(300):
+        n = random.randint(30, 60)
+        bd = [round(random.uniform(0.5, 6.0) * FPS) / FPS for _ in range(n)]
+        narr = sum(bd) + random.uniform(-0.2, 0.2)     # narration differs sub-frame per scene
+        out = conform(list(bd), narr)
+        worst = max(worst, abs(sum(out) - round(narr * FPS) / FPS))
+    assert worst < 1e-6, f"conform must make video total == narration exactly, off by {worst}"
+
+    from pathlib import Path as _P
+    s = (_P(__file__).resolve().parents[1] / "vidlore" / "assemble.py").read_text(encoding="utf-8")
+    assert "CONFORM THE VIDEO TO THE NARRATION CLOCK" in s
+    assert 'getattr(narration, "total"' in s, "the conform must target narration.total"
+
+
 def test_sync_invariant_compares_against_composed_audio():
     """'video == composed audio, ±1 frame'. Comparing against the RAW pre-breakout narration would
     be meaningless — the composed track is the clock the captions and breakout splices key to."""
@@ -698,6 +732,7 @@ TESTS = [
     test_adjacent_transition_tails_cannot_both_pad,
     test_pads_are_derived_from_selected_pairs_only,
     test_frame_allocation_carries_so_drift_cannot_accumulate,
+    test_video_total_conforms_to_the_narration_clock,
     test_sync_invariant_compares_against_composed_audio,
     test_empty_faceid_is_unknown_not_innocent,
     test_positive_faceid_confirmation_allows_the_contextual_downgrade,
