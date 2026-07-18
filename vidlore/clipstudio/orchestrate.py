@@ -303,7 +303,10 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                     getattr(eng_cfg, "anthropic_model", ""), is_specific=False,
                     expected_visual=getattr(seg, "expected_visual", "") or "",
                     scene_query=getattr(seg, "scene_query", "") or "",
-                    era_hint=_verify_mod._beat_era(seg, _global_era_sv, _vtype_sv == "single_scene"))
+                    era_hint=_verify_mod._beat_era(seg, _global_era_sv, _vtype_sv == "single_scene"),
+                    # every strict layer already refused this beat — ask the still layer's real
+                    # question (right scene/venue, no contradiction), not the micro-action's
+                    venue_fallback=True)
                 if v is None:
                     continue                              # transport error → retry, then unverified
                 return "reject" if v.get("verdict") == "replace" else "ok"

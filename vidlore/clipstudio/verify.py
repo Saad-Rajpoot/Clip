@@ -41,7 +41,7 @@ def _img_block(path: Path) -> dict:
 def verify_frame(keyframe_path, narration: str, required_entity: str, required_kind: str,
                  faceid_names: list[str], eng_cfg, model: str = "", is_specific: bool = True,
                  *, expected_visual: str = "", scene_query: str = "", era_hint: str = "",
-                 multiframe: bool = False) -> dict | None:
+                 multiframe: bool = False, venue_fallback: bool = False) -> dict | None:
     """One vision verdict for a frame (Gemini brain → Claude fallback). None on error.
 
     `is_specific` carries the beat's is_specific_claim: a SPECIFIC line ("Tyrion shoots Tywin with a
@@ -98,11 +98,27 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         "if the object is not resolvable. A wrong scene, wrong characters, or wrong era is still "
         "'replace'.\n"
         if "object" in (required_kind or "").lower() else "")
+    # VENUE-FALLBACK stills: this question is only asked AFTER every strict layer (match pick,
+    # alternates, contextual downgrade, venue promotion, rediscovery) refused — the exact footage
+    # is established as unobtainable, and the still layer's whole design is "a right-scene frame
+    # beats a dead render, subject to no contradiction". The measured failure: for a beat citing a
+    # micro-action inside a known scene (a witness examining evidence at the trial), every
+    # right-VENUE frame was rejected because the micro-action wasn't visible in it — which it never
+    # can be. Scene/era/character contradictions still fail; the still is installed honestly
+    # labeled contextual_fallback.
+    _venue = (
+        "FALLBACK CONTEXT — the exact footage of this moment is unavailable; this frame is a "
+        "candidate HOLDING IMAGE. Mark 'keep' when the frame shows the right SCENE/VENUE for the "
+        "moment: the correct location and era, featuring the moment's characters or setting (see "
+        "the storyboard). Do NOT demand the described action/subject itself be visible. Mark "
+        "'replace' only for a DIFFERENT scene/location, a different era/season, unrelated or wrong "
+        "characters, or footage that would contradict the narration.\n"
+        if venue_fallback else "")
     txt = (
         f'Narration line: "{narration}"\n'
         f"This clip should show: {required_entity or '(a general scene fitting the line)'} "
         f"(kind: {required_kind or 'any'}).\n"
-        + _story + _mf + _rule + _obj +
+        + _story + _mf + _rule + _obj + _venue +
         f"Automatic Face-ID on this frame detected: {', '.join(faceid_names) if faceid_names else 'none'}.\n\n"
         "For wrong_subject_visible: set true ONLY if a DIFFERENT specific character (clearly NOT the "
         "one this line is about) is the main subject of the frame; set false for a wide / crowd / "
@@ -134,7 +150,7 @@ _SEASON_RX = re.compile(
 
 # Bump whenever the verifier PROMPT or its JSON contract changes: a verdict is only reusable if it
 # was produced by the same question. Part of the fingerprint below.
-PROMPT_VERSION = "v5-2026-07"          # v5: micro-OBJECT clause + framing release (E2/E2b)
+PROMPT_VERSION = "v6-2026-07"          # v6: + venue-fallback still question (S1); v5: E2/E2b
 # Bump when the contact-sheet SAMPLING changes (frame count/positions/layout). The sheet is the
 # image the verifier judges, so a different sampling is a different question even for the same shot.
 SHEET_VERSION = "sheet-v1-startmidend"

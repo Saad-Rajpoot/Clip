@@ -530,8 +530,23 @@ def test_e2_object_beats_get_the_context_clause():
     assert "FRAMING is aspirational" in seen[0], \
         "object beats must release the storyboard's framing demand (E2b)"
     assert "OBJECT/PROP" not in seen[1], "character beats must keep the strict subject question"
-    assert V.PROMPT_VERSION not in ("v3-2026-07", "v4-2026-07"), \
+    assert V.PROMPT_VERSION not in ("v3-2026-07", "v4-2026-07", "v5-2026-07"), \
         "prompt change must bump PROMPT_VERSION (cache identity)"
+    # S1 — the venue-fallback still question (only when the flag is passed)
+    L.complete = fake
+    try:
+        V.verify_frame(img, "a maester examines that exact necklace", "Maester and necklace",
+                       "object/scene", [], None, is_specific=False,
+                       scene_query="the hero trial", venue_fallback=True)
+        V.verify_frame(img, "a maester examines that exact necklace", "Maester and necklace",
+                       "object/scene", [], None, is_specific=False,
+                       scene_query="the hero trial")
+    finally:
+        L.complete = orig
+    assert "HOLDING IMAGE" in seen[2], "venue_fallback must ask the scene/venue question"
+    assert "Do NOT demand the described action/subject itself be visible" in seen[2]
+    assert "HOLDING IMAGE" not in seen[3], \
+        "without the flag the still question must stay unchanged"
 
 
 TESTS = [
