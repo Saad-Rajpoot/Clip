@@ -638,7 +638,46 @@ def test_g3_caption_name_canonicalization():
     assert len(words) == 13 and words[2].start == 1.0
 
 
+# ---------------------------------------------------------------------------
+# Q1 — post-render-QA breakout exclusion (build.py)
+# ---------------------------------------------------------------------------
+def test_q1_qa_failures_persist_and_exclude():
+    from vidlore.clipstudio.build import _persist_breakout_qa_exclusions, _norm_bk_line
+    import json, tempfile
+    work = Path(tempfile.mkdtemp()) / "work"
+    work.mkdir(parents=True)
+    logs = []
+    _persist_breakout_qa_exclusions(
+        work, [{"breakout": "What gold is an empty cup? Fill it.",
+                "reason": "final-mix ordered coverage 0.25 < 0.30", "start": 331.0}],
+        lambda m: logs.append(m))
+    d = json.loads((work / "breakout_qa_exclude.json").read_text())
+    assert d["exclude"] and _norm_bk_line(d["exclude"][0]["line"]) == \
+        _norm_bk_line("What GOLD is an empty cup?  Fill it"), "identity must be normalization-stable"
+    # append is idempotent
+    _persist_breakout_qa_exclusions(
+        work, [{"breakout": "What gold is an empty cup? Fill it.", "reason": "x", "start": 1}],
+        lambda m: None)
+    assert len(json.loads((work / "breakout_qa_exclude.json").read_text())["exclude"]) == 1
+    # selection honors the exclusion: the same located line is dropped with its own counter
+    import shutil
+    accept_work = Path("/tmp")
+    (accept_work / "breakout_qa_exclude.json").write_text(json.dumps(
+        {"exclude": [{"line": "Seize him. Cut his throat."}]}))
+    try:
+        out, logs2, _ = _breakout_fixture(
+            quote="Seize him. Cut his throat.", asr=_SC,
+            seg0_text="the narration describes the arrest",
+            env={"VIDLORE_CLIPSTUDIO_QUOTE_CORRECT": "0"})
+        assert not any(o["seg_index"] == 0 for o in out), "excluded line must not air"
+        assert "post-render QA (excluded)" in logs2
+    finally:
+        (accept_work / "breakout_qa_exclude.json").unlink(missing_ok=True)
+    shutil.rmtree(work.parent, ignore_errors=True)
+
+
 TESTS = [
+    test_q1_qa_failures_persist_and_exclude,
     test_a1_connectors_demote_to_abstract,
     test_a1_specific_beats_keep_their_labels,
     test_a1_deixis_still_outranks_everything,

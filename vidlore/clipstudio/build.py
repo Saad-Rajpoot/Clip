@@ -1025,7 +1025,23 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     # many candidates were found and why each was rejected (commentary / recap-wrong-era /
     # wrong-character / dark / dedup / later-era source).
     _rej = {"later_era_source": 0, "commentary": 0, "recap": 0, "wrong_char": 0,
-            "dark": 0, "burned_text": 0, "dedup": 0, "spacing": 0, "window_commentary": 0}
+            "dark": 0, "burned_text": 0, "dedup": 0, "spacing": 0, "window_commentary": 0,
+            "qa_excluded": 0}
+    # lines a PRIOR render's post-render QA proved un-airable (audio masked / black window) —
+    # see _persist_breakout_qa_exclusions; the beat gets a different candidate or none
+    _qa_excl: set = set()
+    try:
+        import json as _json_qx
+        _qxf = work / "breakout_qa_exclude.json"
+        if _qxf.exists():
+            _qa_excl = {_norm_bk_line(e.get("line", ""))
+                        for e in (_json_qx.loads(_qxf.read_text(encoding="utf-8")) or {})
+                        .get("exclude", []) if e.get("line")}
+            if _qa_excl:
+                log(f"build: breakout selection honors {len(_qa_excl)} post-render-QA "
+                    f"exclusion(s) from a prior run")
+    except Exception:                                      # noqa: BLE001
+        _qa_excl = set()
     from .match import _ocr_text_heavy as _txt9
     from .match import _shot_subtitle_band as _sub9
     from .match import _source_corner_logo as _logo9
@@ -1387,6 +1403,12 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
             _rej["commentary"] += 1
             log(f"build: breakout skipped before scene {c[1]} — source audio is commentary/"
                 f"narration, not in-character movie dialogue")
+            continue
+        # POST-RENDER-QA exclusion (prior run proved this line un-airable in the final mix)
+        if _qa_excl and _norm_bk_line(c[4]) in _qa_excl:
+            _rej["qa_excluded"] += 1
+            log(f"build: breakout skipped before scene {c[1]} — line failed a prior render's "
+                f"post-render QA (excluded)")
             continue
         # WRONG-ERA / WRONG-SCENE RECAP gate: a later-scene retrospective ("Last time I was here, I
         # killed my father with a crossbow" = S7 Tyrion recapping the S4 act) is in-character but the
@@ -2677,6 +2699,40 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
     return problems
 
 
+def _norm_bk_line(s: str) -> str:
+    """Stable identity for a breakout's spoken line across re-runs (exclusion matching)."""
+    import re as _re_nb
+    t = _re_nb.sub(r"[^a-z0-9 ]", "", (s or "").lower())
+    return _re_nb.sub(r"\s+", " ", t).strip()[:48]
+
+
+def _persist_breakout_qa_exclusions(work: Path, problems: list, log) -> None:
+    """Append post-render-QA-failed breakouts to work/breakout_qa_exclude.json so the NEXT run of
+    _select_breakouts recomposes WITHOUT them. A failed insert is not a failed video: the editorial
+    answer is to cut the broken insert and keep the rest — but never silently in the SAME artifact
+    (the gate below still quarantines this render). The exclusion is by the line's stable identity,
+    so re-selection can pick a different, passing candidate for the same beat or none at all; the
+    re-run's own post-render QA still applies to whatever airs."""
+    import json as _json_px
+    try:
+        xf = work / "breakout_qa_exclude.json"
+        prev = []
+        if xf.exists():
+            prev = (_json_px.loads(xf.read_text(encoding="utf-8")) or {}).get("exclude", [])
+        have = {_norm_bk_line(e.get("line", "")) for e in prev}
+        for p in problems or []:
+            ln = str(p.get("breakout") or "")
+            if ln and _norm_bk_line(ln) not in have:
+                prev.append({"line": ln, "reason": str(p.get("reason", ""))[:160],
+                             "at": p.get("start")})
+                have.add(_norm_bk_line(ln))
+        xf.write_text(_json_px.dumps({"exclude": prev}, indent=1), encoding="utf-8")
+        log(f"build: {len(problems)} failing breakout(s) persisted to breakout_qa_exclude.json — "
+            f"a RE-RUN recomposes without them (their beats keep normal footage)")
+    except Exception:                                      # noqa: BLE001
+        pass
+
+
 def _breakout_qa_gate(result: Path, caps, work: Path, *, log) -> Path:
     """HARD publication gate. Runs the post-render breakout QA on the finished video and stamps the
     verdict into breakout_audit.json (qa_passed). On ANY QA failure it: writes breakout_qa_failures.
@@ -2701,6 +2757,7 @@ def _breakout_qa_gate(result: Path, caps, work: Path, *, log) -> Path:
             _json_qa.dumps({"failures": problems, "video": str(result)}, indent=1), encoding="utf-8")
     except Exception:
         pass
+    _persist_breakout_qa_exclusions(work, problems, log)
     # QUARANTINE the failed render so nothing downstream can publish it
     _quar = result.with_name(result.stem + ".FAILED_BREAKOUT_QA" + result.suffix)
     try:
