@@ -302,7 +302,7 @@ def _save_verdict_cache(proj, cache: dict) -> None:
 
 
 def _beat_era(seg, global_era: str, single_scene: bool, *, global_verified: bool = False,
-              event_eras: dict | None = None) -> str:
+              event_eras: dict | None = None, anchor_eras: list | None = None) -> str:
     """The era/season constraint for ONE beat — see `era.beat_era` for the ordering and why.
 
     This used to return the global hint IMMEDIATELY for single-scene videos, never reading the
@@ -310,7 +310,8 @@ def _beat_era(seg, global_era: str, single_scene: bool, *, global_verified: bool
     229 beats at once, including the ones about the Red Wedding (S03E09). Era is beat-local now,
     and an unverified global hint constrains nothing."""
     return _era.beat_era(seg, global_era, single_scene=single_scene,
-                         global_verified=global_verified, event_eras=event_eras)
+                         global_verified=global_verified, event_eras=event_eras,
+                         anchor_eras=anchor_eras)
 
 
 def _action_contact_sheet(src_path: str, shot_start: float, shot_end: float, dest: Path):
@@ -708,12 +709,15 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
     _global_era = str((proj.meta.get("analysis", {}) or {}).get("episode_hint", "") or "")
     # an episode hint only constrains a beat once corroborated — see era.verified_episode_hint
     _global_ok = bool((proj.meta.get("analysis", {}) or {}).get("episode_hint_verified", False))
-    _event_eras = _era.event_eras_from(
-        type("A", (), {"anchor_scenes": (proj.meta.get("analysis", {}) or {}).get("anchor_scenes")})())
+    _ana_shim = type("A", (), {
+        "anchor_scenes": (proj.meta.get("analysis", {}) or {}).get("anchor_scenes"),
+        "movie_title": (proj.meta.get("analysis", {}) or {}).get("movie_title", "")})()
+    _event_eras = _era.event_eras_from(_ana_shim)
+    _anchor_eras = _era.anchor_token_eras(_ana_shim)
 
     def _era_of(_s):
         return _beat_era(_s, _global_era, _single, global_verified=_global_ok,
-                         event_eras=_event_eras)
+                         event_eras=_event_eras, anchor_eras=_anchor_eras)
 
     def _src_title_of(_sel):
         _s = proj.source(_sel.source_id)

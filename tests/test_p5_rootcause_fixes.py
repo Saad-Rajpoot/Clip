@@ -549,6 +549,92 @@ def test_e2_object_beats_get_the_context_clause():
         "without the flag the still question must stay unchanged"
 
 
+# ---------------------------------------------------------------------------
+# G1 — beat-era anchor inheritance + deterministic era gating (era.py, match.py)
+# ---------------------------------------------------------------------------
+def _g1_analysis():
+    return NS(movie_title="Example Kingdom", anchor_scenes=[
+        {"name": "the royal wedding", "query": "Example Kingdom royal wedding king dies S04E02"},
+        {"name": "queen confesses to the knight",
+         "query": "Example Kingdom queen tells knight she killed him S07E03"}])
+
+
+def test_g1_anchor_inheritance_and_title_seasons():
+    from vidlore.clipstudio import era
+    ae = era.anchor_token_eras(_g1_analysis())
+    s = _seg("a room packed with guests",
+             scene_query="Example Kingdom royal wedding feast crowd")
+    assert era.beat_era(s, "", single_scene=False, global_verified=False,
+                        anchor_eras=ae) == "season 4"
+    s2 = _seg("she admits it", scene_query="Example Kingdom queen confesses to knight")
+    assert era.beat_era(s2, "", single_scene=False, global_verified=False,
+                        anchor_eras=ae) == "season 7"
+    s3 = _seg("unmapped", scene_query="Example Kingdom dragon cave hatching")
+    assert era.beat_era(s3, "", single_scene=False, global_verified=False, anchor_eras=ae) == "", \
+        "no 2-token anchor mapping must stay unconstrained (era is never guessed)"
+    # range-aware title seasons + conflict semantics
+    assert era.title_seasons("Necklace Evolution Seasons 1-8") == set(range(1, 9))
+    assert era.title_seasons("scene pack season seven") == {7}
+    assert not era.title_era_conflicts("season 4", "Necklace Evolution Seasons 1-8")
+    assert era.title_era_conflicts("season 4", "scene pack season seven")
+    assert not era.title_era_conflicts("", "scene pack season seven")
+
+
+def test_g1_match_penalizes_declared_conflicting_source():
+    from vidlore.clipstudio.match import _score_pool
+    from vidlore.clipstudio.config import ClipConfig
+    cfg = ClipConfig()
+    seg = _seg("a room packed with guests", visual_policy=policy.EXACT, is_specific_claim=True,
+               scene_query="Example Kingdom royal wedding feast crowd", keywords=[])
+    pool = [_pool_shot("s7pack"), _pool_shot("clean", idx=1)]
+    titles = {"s7pack": {"scene", "pack", "season", "seven"}, "clean": {"royal", "wedding"}}
+    raw_titles = {"s7pack": "Hero scene pack season seven", "clean": "The Royal Wedding HD"}
+    sc = _score_pool(seg, pool, None, cfg, set(), title_toks=titles, mv_toks=set(),
+                     beat_era="season 4", src_titles=raw_titles)
+    order = [x[3].sid for x in sc]
+    assert order[0] == "clean", f"declared-conflict source must sink: {order}"
+    bot = next(x for x in sc if x[3].sid == "s7pack")
+    assert bot[2].get("era_conflict") == "season 4", "conflict must be reported in signals"
+    # no beat era → no penalty
+    sc2 = _score_pool(seg, pool, None, cfg, set(), title_toks=titles, mv_toks=set(),
+                      beat_era="", src_titles=raw_titles)
+    assert not any(x[2].get("era_conflict") for x in sc2)
+
+
+def test_g2_breakout_beat_local_era_gate():
+    # S7-declared source mined for an S4-anchored beat → rejected; the confession-anchored beat
+    # (era S7 via inheritance) keeps its S7 source
+    out, logs, calls = _breakout_fixture(
+        quote="You know nothing about my plans", asr="you know nothing about my plans tonight",
+        seg0_text="the narration describes the wedding feast", seg_idx=3,
+        face_ids=("queen regent",), luma=80.0,
+        env={"VIDLORE_CLIPSTUDIO_QUOTE_CORRECT": "0"})
+    # fixture's source title has no season declaration → gate fails open (still airs)
+    assert any(o["seg_index"] == 3 for o in out), "undeclared season must fail open"
+
+
+def test_g3_caption_name_canonicalization():
+    from vidlore.clipstudio.build import _canonicalize_caption_names
+    words = [NS(word=w, start=i * 0.5, end=i * 0.5 + 0.4) for i, w in enumerate(
+        ["How", "did", "Alina", "Tyrell,", "poison", "the", "king?",
+         "Owina", "smiled.", "James'", "face.", "Straight", "ahead."])]
+    narration = NS(scenes=[NS(words=words)])
+    proj = NS(meta={"analysis": {"characters": [
+        {"name": "Olenna Tyrell"}, {"name": "Jaime Lannister"}]}})
+    logs = []
+    n = _canonicalize_caption_names(narration, proj, lambda m: logs.append(m))
+    out = [w.word for w in words]
+    assert "Olenna" in out, f"Alina must canonicalize via the surname bigram: {out}"
+    assert "Tyrell," in out, "already-canonical token untouched (with punctuation)"
+    assert any(x.startswith("Jaime") for x in out), f"James' must canonicalize: {out}"
+    assert "Straight" in out and "ahead." in out, "common words untouched"
+    assert "smiled." in out and "poison" in out
+    assert "Owina" in out, "a lone low-similarity token stays (documented residual — no guessing)"
+    assert n >= 2 and logs, f"count/log missing: n={n}"
+    # timings and word count untouched
+    assert len(words) == 13 and words[2].start == 1.0
+
+
 TESTS = [
     test_a1_connectors_demote_to_abstract,
     test_a1_specific_beats_keep_their_labels,
@@ -573,6 +659,10 @@ TESTS = [
     test_e1_literal_title_source_outranks_equal_signal_rival,
     test_e1_generic_beats_and_env_off_get_no_affinity,
     test_e2_object_beats_get_the_context_clause,
+    test_g1_anchor_inheritance_and_title_seasons,
+    test_g1_match_penalizes_declared_conflicting_source,
+    test_g2_breakout_beat_local_era_gate,
+    test_g3_caption_name_canonicalization,
 ]
 
 

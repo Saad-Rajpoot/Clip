@@ -110,8 +110,70 @@ def verified_episode_hint(analysis, script_text: str = "") -> tuple[str, bool, s
     return hint, False, "uncorroborated (no era claim in the script)"
 
 
+_TITLE_SEASON_RANGE_RX = re.compile(r"\bseasons?\s*0?(\d{1,2})\s*[-–—]\s*0?(\d{1,2})\b", re.I)
+
+
+def title_seasons(title: str) -> set:
+    """EVERY season a source title declares, range-aware. 'Seasons 1-8' → {1..8}; 'S04E02 + 7x03
+    compilation' → {4, 7}. Empty set = the title declares nothing (never a conflict). parse_season
+    returns only the FIRST hit, which mis-read span compilations as single-season sources."""
+    t = title or ""
+    out: set = set()
+    for m in _TITLE_SEASON_RANGE_RX.finditer(t):
+        a, b = int(m.group(1)), int(m.group(2))
+        if 0 < a <= b <= 20:
+            out |= set(range(a, b + 1))
+    for m in _SXXEYY_RX.finditer(t):
+        out.add(int(m.group(1)))
+    for m in _NXNN_RX.finditer(t):
+        out.add(int(m.group(1)))
+    for m in _SEASON_ONLY_RX.finditer(t):
+        out.add(int(m.group(1)) if m.group(1) else _WORD_NUM[m.group(2).lower()])
+    return out
+
+
+def title_era_conflicts(beat_era_str: str, title: str) -> bool:
+    """Deterministic beat-vs-source-title era test: True ONLY when the beat declares a season AND
+    the title declares seasons AND the beat's season is not among them. Range compilations that
+    INCLUDE the beat's season never conflict; undeclared either side never conflicts."""
+    s = parse_season(beat_era_str or "")
+    if not s:
+        return False
+    declared = title_seasons(title)
+    return bool(declared) and s not in declared
+
+
+def anchor_token_eras(analysis) -> list:
+    """[(scene-token set, era string)] for every anchor scene that DECLARES an episode. Tokens are
+    the anchor's scene-specific words (movie-title + stop tokens removed) — the same token currency
+    as discover's anchor/key-scene coverage and verify's venue mapping."""
+    def _get(obj, key):
+        if isinstance(obj, dict):
+            return obj.get(key)
+        return getattr(obj, key, None)
+    out = []
+    mv = {w for w in re.findall(r"[a-z']+", str(_get(analysis, "movie_title") or "").lower())
+          if len(w) > 2}
+    try:
+        from .discover import _STOPQ as _STOP
+    except Exception:
+        _STOP = set()
+    for sc in (_get(analysis, "anchor_scenes") or []):
+        if not isinstance(sc, dict):
+            continue
+        era = as_era(sc.get("episode") or "") or as_era(sc.get("query") or "")
+        if not era:
+            continue
+        toks = {w for w in re.findall(
+                    r"[a-z']+", ((sc.get("name", "") or "") + " " + (sc.get("query", "") or "")).lower())
+                if len(w) > 2 and w not in mv and w not in _STOP}
+        if toks:
+            out.append((toks, era))
+    return out
+
+
 def beat_era(seg, global_era: str, *, single_scene: bool, global_verified: bool,
-             event_eras: dict | None = None) -> str:
+             event_eras: dict | None = None, anchor_eras: list | None = None) -> str:
     """The era constraint for ONE beat.
 
     Order matters, and it is the inverse of what the pipeline used to do (which returned the global
@@ -136,6 +198,26 @@ def beat_era(seg, global_era: str, *, single_scene: bool, global_verified: bool,
         for name, era in event_eras.items():
             if name and era and name.lower() in blob:
                 return era
+    # ANCHOR-SCENE INHERITANCE: the beat's scene_query names the SCENE (not the episode) — 'the
+    # Purple Wedding feast crowd' declares no era itself, so its beats ran unconstrained and a
+    # S7/S8 Winterfell great-hall shot aired under S4 wedding narration (the vision verifier
+    # cannot read a season off a torch-lit hall). When the scene_query shares >=2 scene-specific
+    # tokens with an anchor scene that DECLARES an episode, the beat inherits that anchor's era.
+    # Same token currency as coverage/venue mapping; >=2 avoids one-word collisions ('poison').
+    # This never guesses: no declared anchor era, or no 2-token mapping → next rung.
+    if anchor_eras:
+        sq = {w for w in re.findall(r"[a-z']+", (getattr(seg, "scene_query", "") or "").lower())
+              if len(w) > 2}
+        if sq:
+            best_era, best_hits = "", 0
+            for toks, era in anchor_eras:
+                hits = sum(1 for w in toks
+                           if any(t == w or (t.startswith(w) and len(t) - len(w) <= 2)
+                                  for t in sq))
+                if hits > best_hits:
+                    best_hits, best_era = hits, era
+            if best_hits >= 2:
+                return best_era
     if single_scene and global_verified and global_era:
         # verbatim, NOT normalised to 'season N': the hint may carry a full episode code and
         # callers compare at episode granularity (S04E01 vs S04E10 must still conflict).

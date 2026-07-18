@@ -241,6 +241,10 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                         not in ("0", "false", "no"))
     _vtype_sv = (proj.meta.get("analysis", {}) or {}).get("video_type", "")
     _global_era_sv = str((proj.meta.get("analysis", {}) or {}).get("episode_hint", "") or "")
+    from . import era as _era_sv
+    _anchor_eras_sv = _era_sv.anchor_token_eras(
+        type("A", (), {"anchor_scenes": (proj.meta.get("analysis", {}) or {}).get("anchor_scenes"),
+                       "movie_title": (proj.meta.get("analysis", {}) or {}).get("movie_title", "")})())
 
     from . import index as _index_sv
 
@@ -286,7 +290,7 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                 source_title=title, score=score, seg=seg, faces=faces, movie_toks=_movie_toks,
                 global_era=_global_era_sv, single_scene=(_vtype_sv == "single_scene"),
                 min_clip=float(os.environ.get("VIDLORE_CLIPSTUDIO_DET_STILL_MIN_CLIP", "0.30") or 0.30),
-                char2actor=char2actor)
+                char2actor=char2actor, anchor_eras=_anchor_eras_sv)
             if not ok:
                 log(f"image-fallback: beat {seg.index} — deterministic still rejected ({reason})")
             return ok
@@ -303,7 +307,8 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                     getattr(eng_cfg, "anthropic_model", ""), is_specific=False,
                     expected_visual=getattr(seg, "expected_visual", "") or "",
                     scene_query=getattr(seg, "scene_query", "") or "",
-                    era_hint=_verify_mod._beat_era(seg, _global_era_sv, _vtype_sv == "single_scene"),
+                    era_hint=_verify_mod._beat_era(seg, _global_era_sv, _vtype_sv == "single_scene",
+                                                   anchor_eras=_anchor_eras_sv),
                     # every strict layer already refused this beat — ask the still layer's real
                     # question (right scene/venue, no contradiction), not the micro-action's
                     venue_fallback=True)
@@ -721,7 +726,7 @@ def entity_name_variants(entity: str, char2actor: dict | None = None) -> list:
 
 def _deterministic_still_ok(*, source_title, score, seg, faces, movie_toks, global_era,
                             single_scene, min_clip=0.30, char2actor=None,
-                            global_verified=False):
+                            global_verified=False, anchor_eras=None):
     """R4-6 — the PURE deterministic gate for installing a recovery still when NO vision model is
     available. Every claim is EVALUATED (never assumed): a still is accepted only when ALL of
       (1) SAME-SHOW via meaningful normalized title identity (generic/stopwords removed — 'Game of
@@ -754,7 +759,8 @@ def _deterministic_still_ok(*, source_title, score, seg, faces, movie_toks, glob
     # calling a source "wrong era" on the strength of a guess is how the correct episode's own
     # upload scored zero shots. The same-show / CLIP / Face-ID gates below still apply.
     from .verify import _era_conflict
-    era_beat = _beat_era(seg, global_era, single_scene, global_verified=global_verified)
+    era_beat = _beat_era(seg, global_era, single_scene, global_verified=global_verified,
+                         anchor_eras=anchor_eras)
     era_src = _title_season(source_title)
     if _era_conflict(era_beat, era_src):
         return False, f"wrong era (beat {era_beat} vs source {era_src})"

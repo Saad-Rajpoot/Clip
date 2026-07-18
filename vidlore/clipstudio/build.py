@@ -1209,6 +1209,30 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
             _core_seasons9 |= _seasons9((_sc9.get("episode", "") or "") + " "
                                         + (_sc9.get("query", "") or ""))
         _core_max9 = max(_core_seasons9) if _core_seasons9 else 0
+        # BEAT-LOCAL breakout era (see the gate below): the beat the breakout airs before has its
+        # own era (own words / event mapping / anchor-scene inheritance) — computed with the same
+        # machinery verify uses, so a multi-era video (S4 wedding + S7 confession anchors) stops
+        # legitimizing S7 sources for S4 beats.
+        from . import era as _era9
+        _ana_shim9 = type("A", (), {"anchor_scenes": _ana9.get("anchor_scenes"),
+                                    "movie_title": _ana9.get("movie_title", "")})()
+        _event_eras9 = _era9.event_eras_from(_ana_shim9)
+        _anchor_eras9 = _era9.anchor_token_eras(_ana_shim9)
+        _global_era9v = str(_ana9.get("episode_hint") or "")
+        _gver9 = bool(_ana9.get("episode_hint_verified"))
+        _single9v = (_ana9.get("video_type") == "single_scene")
+
+        def _beat_season9(sidx):
+            s = next((x for x in segments if getattr(x, "index", None) == sidx), None)
+            if s is None:
+                return None
+            try:
+                be = _era9.beat_era(s, _global_era9v, single_scene=_single9v,
+                                    global_verified=_gver9, event_eras=_event_eras9,
+                                    anchor_eras=_anchor_eras9)
+                return _era9.parse_season(be) if be else None
+            except Exception:
+                return None
         # comparison exception: a later-era / different-installment clip may air ONLY when the script
         # explicitly compares ("unlike House of the Dragon ...") — otherwise the era-gate stays strict.
         _allow_compare9 = _script_wants_comparison(segments)
@@ -1383,6 +1407,23 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                 log(f"build: breakout skipped before scene {c[1]} — later-era source "
                     f"(declares season > core scene S{_core_max9})")
                 continue
+        # BEAT-LOCAL era gate. The core-max above spans ALL anchors, so a multi-era video (S4
+        # wedding + S7 confession anchors → core_max 7) legitimized S7 sources for S4 beats:
+        # measured, 2 of 3 aired breakouts were S7 Winterfell scenes spliced under S4 King's
+        # Landing narration and graded WRONG on era — the exact flaw the competitor was marked
+        # down for. The breakout airs BEFORE scene c[1]; when THAT beat declares a season (own
+        # words / event mapping / anchor inheritance) a source declaring ONLY later seasons never
+        # airs there. The confession-anchored beats keep their S7 breakouts (their beat era IS
+        # season 7); comparison scripts stay exempt.
+        if not _allow_compare9:
+            _bs9 = _beat_season9(c[1])
+            if _bs9:
+                _css9b = _era9.title_seasons(c[2].title or "")
+                if _css9b and min(_css9b) > _bs9:
+                    _rej["later_era_source"] += 1
+                    log(f"build: breakout skipped before scene {c[1]} — source declares only "
+                        f"season(s) later than the beat's era (S{_bs9})")
+                    continue
         # WRONG-CHARACTER gate: a breakout airs an iconic MOMENT, so the shot must feature a confirmed
         # MAIN character (Face-ID). A shot showing no main-cast face (e.g. a bearded man on a boat over
         # a Tyrion/Tywin scene) must not air. Active only when the cast is known; a breakout is optional
@@ -2989,6 +3030,97 @@ def _align_words_to_hyp(flat: list, hyp: list):
     return [t if t is not None else (0.0, 0.0) for t in times]
 
 
+def _canonicalize_caption_names(narration, proj, log) -> int:
+    """Fix ASR-spelled character names in the caption word stream ('Alina Tyrell', 'Owina',
+    'James'' for Jaime) against the analysis' canonical cast list. The narration script IS a
+    voiceover transcript, so proper nouns arrive with whisper spellings and burn into every
+    caption — the very first caption of a measured render misspelled the video's protagonist.
+
+    Conservative by construction: only capitalized tokens are considered; a token already equal
+    to any cast token is never touched; a rewrite needs >=0.75 difflib similarity to a cast
+    first/last name of >=4 chars. Possessives and edge punctuation are preserved. Word COUNT and
+    timings are untouched (1:1 token rewrite), so karaoke sync is unchanged."""
+    import difflib as _dl
+    import re as _re_cn
+    chars = ((getattr(proj, "meta", None) or {}).get("analysis", {}) or {}).get("characters") or []
+    canon: dict = {}
+    # surname → the character's FIRST name: 'Alina Tyrell' is only 0.55 similar to 'Olenna'
+    # (whisper dropped the leading O), but the SURNAME anchors it — a capitalized unknown token
+    # immediately before a cast surname is that character's first name with near-certainty, so
+    # the bigram rule rewrites at a much lower similarity bar than a lone token ever could.
+    surname_first: dict = {}
+    for ch in chars:
+        parts = [p for p in (str((ch or {}).get("name", "") or "").split()) if p]
+        toks = []
+        for tok in parts:
+            t = _re_cn.sub(r"[^A-Za-z']", "", tok)
+            if len(t) >= 4:
+                canon[t.lower()] = t[0].upper() + t[1:]
+                toks.append(t)
+        if len(toks) >= 2:
+            surname_first[toks[-1].lower()] = toks[0][0].upper() + toks[0][1:]
+    if not canon:
+        return 0
+    def _parse(raw):
+        m = _re_cn.match(r"^(\W*)([A-Za-z']+)(\W*)$", raw.strip())
+        if not m:
+            return None
+        pre, core, post = m.groups()
+        poss, base = "", core
+        for sfx in ("'s", "'"):
+            if base.lower().endswith(sfx):
+                poss, base = base[len(base) - len(sfx):], base[:len(base) - len(sfx)]
+                break
+        return pre, base, poss, post
+
+    fixed = 0
+    examples = []
+    for sc in getattr(narration, "scenes", []) or []:
+        ws = getattr(sc, "words", []) or []
+        for i, w in enumerate(ws):
+            raw = str(getattr(w, "word", "") or "")
+            p = _parse(raw)
+            if p is None:
+                continue
+            pre, base, poss, post = p
+            if not base[:1].isupper() or len(base) < 4:
+                continue
+            low = base.lower()
+            if low in canon:
+                continue                                  # already canonical
+            target, target_r = None, 0.0
+            # bigram rule: the NEXT token is (or canonicalizes to) a cast surname
+            if i + 1 < len(ws):
+                p2 = _parse(str(getattr(ws[i + 1], "word", "") or ""))
+                if p2 is not None:
+                    low2 = p2[1].lower()
+                    sname = surname_first.get(low2) or surname_first.get(
+                        (canon.get(low2) or "").lower())
+                    if sname:
+                        r = _dl.SequenceMatcher(None, low, sname.lower()).ratio()
+                        if r >= 0.40:
+                            target, target_r = sname, r
+            if target is None:
+                best, best_r = None, 0.0
+                for k, v in canon.items():
+                    r = _dl.SequenceMatcher(None, low, k).ratio()
+                    if r > best_r:
+                        best_r, best = r, v
+                if best is not None and best_r >= 0.75:
+                    target, target_r = best, best_r
+            if target is not None:
+                lead = raw[:len(raw) - len(raw.lstrip())]
+                trail = raw[len(raw.rstrip()):]
+                w.word = f"{lead}{pre}{target}{poss}{post}{trail}"
+                fixed += 1
+                if len(examples) < 3 and (base, target) not in [e[:2] for e in examples]:
+                    examples.append((base, target, round(target_r, 2)))
+    if fixed:
+        log(f"build: caption names canonicalized — {fixed} token(s) "
+            f"(e.g. {', '.join(f'{a}→{b} ({r})' for a, b, r in examples)})")
+    return fixed
+
+
 def _narration_from_hyp(hyp, n_scenes, total, master, workdir):
     """Caption from the voiceover's OWN whisper transcription when the pasted script can't be aligned
     to it (script != voiceover — wrong file / edited draft). The transcription words ARE what is
@@ -3255,6 +3387,85 @@ def _hold_block_reason(*, clips_present, has_predecessor, compat_ok, compat_reas
         return (f"cumulative holds {hold_total + beat_hold_dur:.1f}s > total cap "
                 f"{total_cap:.1f}s (too much frozen footage)")
     return None
+
+
+def preassemble_release_block_reason(proj, segments, analysis=None):
+    """FAIL-FAST predictor for the end-of-assembly rejected-footage release gate (the
+    '3a-3) REJECTED-FOOTAGE HANDLING' block in build_video). That gate's verdict is fully
+    determined by the — now frozen — selections + segment metadata; it reads no encoded pixel. So a
+    footage-gap render can learn it will release-block BEFORE assembly, instead of only after the
+    ~20-minute per-beat re-encode loop that a doomed render then discards.
+
+    SOUND & FAIL-OPEN by construction. It flags a rejected beat as doomed ONLY when NO preceding
+    air-worthy beat anywhere in the timeline is same-scene-compatible with it (durations ignored,
+    via the very same `_hold_scene_compat`/`_hold_block_reason` primitives the real gate uses). The
+    real gate's only rescue for a verifier-rejected, still-less beat is an editorial hold from its
+    nearest compatible clean predecessor — so 'no compatible predecessor exists at all' guarantees
+    the real gate blocks it too. It therefore reports a SUBSET of the gate's blocks: it can only
+    ever save wasted work, never wrongly kill a render the gate would have let through. The
+    authoritative gate at assembly remains the final word.
+
+    Returns a human-readable block reason (mirroring the gate's message), or None to proceed.
+    Honors VIDLORE_CLIPSTUDIO_REJECTED_FOOTAGE_GATE (disabled → None)."""
+    import os as _os
+    if _os.environ.get("VIDLORE_CLIPSTUDIO_REJECTED_FOOTAGE_GATE", "1").strip() in ("0", "false", "no"):
+        return None
+    from .config import _f as _cfg_f, _i as _cfg_i
+    a = (proj.meta.get("analysis", {}) or {})
+    if analysis is not None:
+        a = analysis if isinstance(analysis, dict) else analysis.to_dict()
+    single_scene = a.get("video_type", "") == "single_scene"
+    global_era = str(a.get("episode_hint", "") or "")
+    overlap_min = _cfg_f("VIDLORE_CLIPSTUDIO_HOLD_SCENE_OVERLAP", 0.4)
+    hold_cap = int(_cfg_i("VIDLORE_CLIPSTUDIO_MAX_CONSEC_HOLD", 1))
+    c2a = {str(c.get("name", "")): str(c.get("actor", ""))
+           for c in (a.get("characters") or []) if isinstance(c, dict)}
+    sel_by_idx = {s.segment_index: s for s in proj.selections}
+
+    def _rejected(sel):
+        return bool(sel is not None
+                    and "verifier_failed" in (getattr(sel, "flag_reasons", None) or [])
+                    and not getattr(sel, "image_path", ""))
+
+    def _air_worthy(sel):
+        # a beat that will show real, non-rejected content — the only legitimate hold source
+        if sel is None:
+            return False
+        if getattr(sel, "image_path", ""):
+            return True                                  # a validated still airs
+        if _rejected(sel):
+            return False                                 # a rejected/held beat can't anchor a hold
+        return bool(getattr(sel, "source_id", "") or getattr(sel, "beat_windows", None))
+
+    blocked = []
+    for pos, seg in enumerate(segments):
+        if not _rejected(sel_by_idx.get(seg.index)):
+            continue
+        _has_pred = False
+        for prev in segments[:pos]:                      # ALL preceding beats (not just the nearest)
+            psel = sel_by_idx.get(prev.index)
+            if not _air_worthy(psel):
+                continue
+            compat_ok, ev = _hold_scene_compat(
+                prev, seg, psel, sel_by_idx.get(seg.index),
+                single_scene=single_scene, global_era=global_era,
+                overlap_min=overlap_min, char2actor=c2a)
+            if _hold_block_reason(
+                    clips_present=True, has_predecessor=True, compat_ok=compat_ok,
+                    compat_reason=ev.get("reason", "incompatible"), consec_holds=0,
+                    hold_cap=hold_cap, beat_hold_dur=0.0, hold_total=0.0,
+                    single_cap=1e9, total_cap=1e9) is None:
+                _has_pred = True
+                break
+        if not _has_pred:
+            blocked.append(seg.index)
+    if not blocked:
+        return None
+    # Deliberately worded differently from the authoritative build-stage release gate — this is the
+    # EARLY predictor, and distinct wording keeps the two messages independently greppable/testable.
+    return (f"pre-assembly footage feasibility: {len(blocked)} verifier-rejected beat(s) have no "
+            f"valid same-scene fallback anywhere in the timeline — scene(s) {blocked[:8]}. "
+            f"Rediscovery / more footage needed (CONTENT failure: re-running unchanged will not fix it).")
 
 
 def _resolve_music(music, theme_name: str, total: float, work: Path):
@@ -4468,6 +4679,14 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     if narration is None:
         narration = _silent_narration(segments, work / "silent", cfg)
         log(f"build: narration {narration.total:.1f}s (silent fallback)")
+    # ASR-spelled character names ('Alina Tyrell') would burn into every caption — canonicalize
+    # against the analysis cast list (1:1 token rewrite; timings untouched). Env-gated default ON.
+    if os.environ.get("VIDLORE_CLIPSTUDIO_CAPTION_NAME_FIX", "1").strip() \
+            not in ("0", "false", "no"):
+        try:
+            _canonicalize_caption_names(narration, proj, log)
+        except Exception as _e_cn:                        # noqa: BLE001
+            log(f"build: caption name canonicalization skipped ({str(_e_cn)[:60]})")
 
     # 2b) REAL-AUDIO BREAKOUTS — narration pauses, the source scene plays with its OWN voice
     #     (cold-open/evidence moments, 1-3 per video, only on dialogue-locked beats). ALWAYS ON

@@ -900,9 +900,29 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
                 anchor_bonus: float = 0.0,
                 all_faces: set | None = None,
                 title_toks: dict | None = None,
-                mv_toks: set | None = None) -> list[tuple[float, float, dict, _PoolShot]]:
+                mv_toks: set | None = None,
+                beat_era: str = "",
+                src_titles: dict | None = None) -> list[tuple[float, float, dict, _PoolShot]]:
     import numpy as np
     import os
+    # DETERMINISTIC ERA PENALTY. The vision verifier cannot read a season off a torch-lit hall —
+    # measured: an S7/S8 Winterfell great-hall shot (Bran's wheelchair in frame) aired under S4
+    # Purple Wedding narration, sandwiched between two correct S4E2 shots, because the only era
+    # gates were prompt-side. When the beat DECLARES an era (its own words, an event mapping, or
+    # anchor-scene inheritance — see era.beat_era) and a source's TITLE declares seasons that do
+    # NOT include it (range-aware: 'Seasons 1-8' includes 4), the shot is hard-penalized, same
+    # doctrine as wrongface: it loses to any non-conflicting shot but remains a last resort.
+    # Undeclared on either side never penalizes (era is never guessed).
+    _era_pen = _f_env("VIDLORE_CLIPSTUDIO_ERA_PENALTY", 0.5)
+    _era_conf_sids: set = set()
+    if _era_pen > 0 and beat_era and src_titles:
+        from . import era as _era_sp
+        for _sid, _t in src_titles.items():
+            try:
+                if _era_sp.title_era_conflicts(beat_era, _t):
+                    _era_conf_sids.add(_sid)
+            except Exception:
+                pass
     # SCENE-TITLE AFFINITY (ranking-only, the same decoupling as the anchor-continuity bonus).
     # CLIP + transcript are blind to MICRO-moments: a beat about plucking a tiny stone off a
     # necklace has no distinctive thumbnail (the action is 1-2s and the object centimetres wide)
@@ -1016,6 +1036,9 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
         # but it is still a fallback if literally nothing else exists for the beat)
         if wrongface:
             base -= cfg.wrongface_penalty
+        _era_conf = ps.sid in _era_conf_sids
+        if _era_conf:
+            base -= _era_pen
         sig = {"clip": round(clip01, 4), "clip_cos": round(clip_cos, 4),
                "transcript": round(trans, 4), "faceid": round(faceid, 3),
                "object": round(obj, 3), "dialogue": round(dlg, 3),
@@ -1024,6 +1047,8 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
             sig["anchor_bonus"] = round(bonus, 3)
         if _tbonus:
             sig["title_affinity"] = round(_tbonus, 3)
+        if _era_conf:
+            sig["era_conflict"] = beat_era
         if wrongface:
             sig["wrongface"] = True
         scored.append((base, bonus, sig, ps))
@@ -1410,11 +1435,27 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         face_targets = _face_targets(seg, char2actor)
         _ta_titles = {src.id: set(re.findall(r"[a-z']+", (src.title or "").lower()))
                       for src in proj.sources}
+        _ana_m = (getattr(proj, "meta", None) or {}).get("analysis", {}) or {}
         _ta_mv = {w for w in re.findall(
-                      r"[a-z']+", (((getattr(proj, "meta", None) or {}).get("analysis", {}) or {})
-                                   .get("movie_title", "") or "").lower()) if len(w) > 2}
+                      r"[a-z']+", (_ana_m.get("movie_title", "") or "").lower()) if len(w) > 2}
+        # the beat's declared era (own words / event mapping / anchor inheritance) for the
+        # deterministic era penalty — computed with the same machinery verify uses
+        try:
+            from . import era as _era_mm
+            _ana_shim_m = type("A", (), {"anchor_scenes": _ana_m.get("anchor_scenes"),
+                                         "movie_title": _ana_m.get("movie_title", "")})()
+            _beat_era_m = _era_mm.beat_era(
+                seg, str(_ana_m.get("episode_hint") or ""),
+                single_scene=(_ana_m.get("video_type") == "single_scene"),
+                global_verified=bool(_ana_m.get("episode_hint_verified")),
+                event_eras=_era_mm.event_eras_from(_ana_shim_m),
+                anchor_eras=_era_mm.anchor_token_eras(_ana_shim_m))
+        except Exception:
+            _beat_era_m = ""
+        _src_titles_m = {src.id: (src.title or "") for src in proj.sources}
         scored = _score_pool(seg, pool, text_vec, cfg, face_targets, anchor_sids, anchor_bonus,
-                             all_faces=all_faces, title_toks=_ta_titles, mv_toks=_ta_mv)
+                             all_faces=all_faces, title_toks=_ta_titles, mv_toks=_ta_mv,
+                             beat_era=_beat_era_m, src_titles=_src_titles_m)
 
         # `base` = match QUALITY (drives the reported confidence + flagging).
         # `adj`  = base + anchor bonus minus diversity penalties (drives only WHICH is picked).
