@@ -514,6 +514,52 @@ def _present_unconfirmed_ok(vd, seg, src_title, faceid_names, beat_era, ok_token
     return True                                        # right person, right era, no wrong character
 
 
+def _scene_affinity_order(alts, seg, proj, orig_source_id: str):
+    """Stable reorder of a beat's alternates so SCENE-AFFINE sources are tried first when repairing
+    an exact beat. The vision verifier judges one frame against one narration line — it cannot see
+    what episode a frame comes from, so visually-plausible wrong-scene shots pass ('the king at a
+    table with wine' verifies against a pie-moment beat even from a different season's dinner).
+    Measured in a full render: a beat whose scene_query named the cited scene was repaired with a
+    shot from a source sharing ZERO scene tokens while four sources titled with the cited scene sat
+    in the pool — 3 of the 5 wrong-footage beats in that render's audit shared this signature.
+
+    Tiers (relevance order preserved within each — the sort is stable):
+      0  source is dialogue-verified for the anchor scene (anchor_verified), or its TITLE shares
+         >=2 scene-specific tokens with the beat's scene_query (same token rule as discover's
+         anchor/key-scene coverage: word/prefix match, movie-title + stop tokens excluded)
+      1  the source of the ORIGINAL rejected pick — match chose this source for the scene; the
+         verifier rejected one FRAME of it, which is no evidence against its other shots
+      2  everything else
+    Ordering only — every candidate still faces the same verifier, window-QC, and reuse gates."""
+    import re as _re_aff
+    try:
+        from .discover import _STOPQ as _AFF_STOP
+    except Exception:
+        _AFF_STOP = set()
+    _mv = {w for w in _re_aff.findall(
+        r"[a-z']+", (((getattr(proj, "meta", None) or {}).get("analysis", {}) or {})
+                     .get("movie_title", "") or "").lower()) if len(w) > 2}
+    toks = {w for w in _re_aff.findall(r"[a-z']+", (getattr(seg, "scene_query", "") or "").lower())
+            if len(w) > 2 and w not in _mv and w not in _AFF_STOP}
+
+    def _tier(a):
+        try:
+            src = proj.source(a.source_id)
+        except Exception:
+            src = None
+        if src is not None and (getattr(src, "extra", None) or {}).get("anchor_verified"):
+            return 0
+        tw = set(_re_aff.findall(r"[a-z']+", ((getattr(src, "title", "") if src else "") or "").lower()))
+        if toks and sum(1 for w in toks
+                        if any(t == w or (t.startswith(w) and len(t) - len(w) <= 2)
+                               for t in tw)) >= 2:
+            return 0
+        if a.source_id == orig_source_id:
+            return 1
+        return 2
+    return sorted(alts, key=_tier)
+
+
 def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfig,
                       eng_cfg, *, max_replacements: int = 3, only_indices=None, progress=None) -> dict:
     """Verify every selection; replace failures with the best passing alternate; re-cut swaps.
@@ -774,7 +820,17 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 re-cut) are shared by both modes."""
                 nonlocal swapped, replaced
                 tried = 0
-                for alt in sel.alternates:
+                # SCENE-AFFINITY ordering for exact beats — try same-scene sources first (see
+                # _scene_affinity_order). Ordering only; every gate below still applies.
+                import os as _os_aff
+                _alts = sel.alternates
+                if _exact and _os_aff.environ.get("VIDLORE_CLIPSTUDIO_SCENE_AFFINITY", "1").strip() \
+                        not in ("0", "false", "no", ""):
+                    try:
+                        _alts = _scene_affinity_order(sel.alternates, seg, proj, sel.source_id)
+                    except Exception:
+                        _alts = sel.alternates
+                for alt in _alts:
                     if tried >= max_replacements:
                         break
                     tried += 1

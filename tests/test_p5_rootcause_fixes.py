@@ -319,6 +319,61 @@ def test_b3_unconfirmed_dim_candidate_still_rejected():
     assert "dark" in logs.lower() or "luma" in logs.lower()
 
 
+# ---------------------------------------------------------------------------
+# C1 — scene-affinity ordering of verifier-replacement alternates (verify.py)
+# ---------------------------------------------------------------------------
+def _aff_proj(sources):
+    class P:
+        meta = {"analysis": {"movie_title": "Example Kingdom"}}
+        def source(self, sid):
+            return sources.get(sid)
+    return P()
+
+
+def test_c1_scene_affine_sources_ordered_first():
+    from vidlore.clipstudio.verify import _scene_affinity_order
+    sources = {
+        "dinner": NS(title="King & Queen Dinner Scene Example Kingdom S03E01", extra={}),
+        "wed1": NS(title="The Royal Wedding Feast - Example Kingdom S04E02", extra={}),
+        "ver1": NS(title="some compilation upload", extra={"anchor_verified": True}),
+        "misc": NS(title="Example Kingdom best moments", extra={}),
+    }
+    # relevance-ranked as match left them: the wrong-scene dinner first (the measured failure)
+    alts = [NS(source_id="dinner", shot_index=1), NS(source_id="wed1", shot_index=4),
+            NS(source_id="misc", shot_index=2), NS(source_id="ver1", shot_index=7)]
+    seg = _seg("he complains the pie is dry and demands wine",
+               scene_query="Example Kingdom royal wedding feast pie wine")
+    out = _scene_affinity_order(alts, seg, _aff_proj(sources), "wed1")
+    order = [a.source_id for a in out]
+    assert order[0] in ("wed1", "ver1") and order[1] in ("wed1", "ver1"), \
+        f"scene-affine sources must lead: {order}"
+    assert order[0] == "wed1", f"stable sort must keep relevance order within a tier: {order}"
+    assert order[-1] in ("dinner", "misc"), f"wrong-scene source must not lead: {order}"
+
+
+def test_c1_original_source_outranks_strangers():
+    # the verifier rejected one FRAME of the original source — its other shots are tier 1
+    from vidlore.clipstudio.verify import _scene_affinity_order
+    sources = {
+        "orig": NS(title="untitled clip", extra={}),
+        "other": NS(title="another untitled clip", extra={}),
+    }
+    alts = [NS(source_id="other", shot_index=0), NS(source_id="orig", shot_index=3)]
+    seg = _seg("beat with no scene query")
+    out = _scene_affinity_order(alts, seg, _aff_proj(sources), "orig")
+    assert [a.source_id for a in out] == ["orig", "other"]
+
+
+def test_c1_no_signal_preserves_relevance_order():
+    # no scene_query tokens, no anchor flags, no original in the list → order unchanged
+    from vidlore.clipstudio.verify import _scene_affinity_order
+    sources = {f"s{i}": NS(title=f"clip number {i}", extra={}) for i in range(4)}
+    alts = [NS(source_id=f"s{i}", shot_index=i) for i in range(4)]
+    seg = _seg("a beat", scene_query="")
+    out = _scene_affinity_order(alts, seg, _aff_proj(sources), "absent")
+    assert [a.source_id for a in out] == ["s0", "s1", "s2", "s3"]
+
+
 TESTS = [
     test_a1_connectors_demote_to_abstract,
     test_a1_specific_beats_keep_their_labels,
@@ -334,6 +389,9 @@ TESTS = [
     test_b1_locatable_quote_never_triggers_the_reask,
     test_b3_face_confirmed_candidate_survives_dim_footage,
     test_b3_unconfirmed_dim_candidate_still_rejected,
+    test_c1_scene_affine_sources_ordered_first,
+    test_c1_original_source_outranks_strangers,
+    test_c1_no_signal_preserves_relevance_order,
 ]
 
 
