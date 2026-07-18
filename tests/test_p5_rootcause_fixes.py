@@ -374,6 +374,73 @@ def test_c1_no_signal_preserves_relevance_order():
     assert [a.source_id for a in out] == ["s0", "s1", "s2", "s3"]
 
 
+# ---------------------------------------------------------------------------
+# D1 — scene-venue contextual candidate pool (verify.py _venue_candidates)
+# ---------------------------------------------------------------------------
+def _venue_fixture():
+    shots = {
+        "trial_full": [NS(index=i, start=10.0 * i, end=10.0 * i + 8.0) for i in range(4)],
+        "speech": [NS(index=0, start=0.0, end=6.0)],
+        "wedding": [NS(index=0, start=0.0, end=9.0)],
+        "later": [NS(index=0, start=0.0, end=9.0)],
+        "short": [NS(index=0, start=0.0, end=1.0)],
+    }
+    def get_shot(sid, i):
+        return next((s for s in shots.get(sid, []) if s.index == i), None)
+    get_shot.all_shots = lambda sid: shots.get(sid, [])
+    srcs = [
+        NS(id="trial_full", status="ok", title="The Hero's Trial - Example Kingdom", extra={}),
+        NS(id="speech", status="ok", title="Epic Hero Speech During Trial", extra={"anchor_verified": True}),
+        NS(id="wedding", status="ok", title="Royal Wedding Feast - Example Kingdom", extra={}),
+        NS(id="later", status="ok", title="Hero trial verdict Season 7 Example Kingdom", extra={}),
+        NS(id="short", status="ok", title="Hero Trial moments Example Kingdom", extra={}),
+    ]
+    proj = NS(sources=srcs, meta={"analysis": {
+        "movie_title": "Example Kingdom",
+        "anchor_scenes": [
+            {"name": "the hero's trial", "query": "Example Kingdom hero trial necklace poison S04E06"},
+            {"name": "royal wedding feast", "query": "Example Kingdom royal wedding feast"},
+        ]}})
+    sel = NS(segment_index=8, source_id="wedding", shot_index=0, in_point=0.0, out_point=6.8,
+             alternates=[NS(source_id="wedding", shot_index=0)])
+    seg = _seg("at trial a maester examines that exact necklace and finds poison residue",
+               scene_query="Example Kingdom maester examines necklace at trial")
+    return sel, seg, proj, get_shot
+
+
+def test_d1_venue_pool_from_anchor_affine_sources():
+    from vidlore.clipstudio.verify import _venue_candidates
+    sel, seg, proj, get_shot = _venue_fixture()
+    pool = _venue_candidates(sel, seg, proj, get_shot, "S04E06")
+    ids = [c.source_id for c in pool]
+    assert ids, "venue pool must not be empty when the trial anchor has sources"
+    assert ids[0] == "speech", f"anchor_verified source must lead: {ids}"
+    assert "trial_full" in ids, f"trial-titled source must qualify: {ids}"
+    assert "wedding" not in ids, "the beat's own wrong-scene source must not re-enter"
+    assert "later" not in ids, "a declared later-season source must be era-excluded"
+    assert "short" not in ids, "sub-2s shots are not airable venue evidence"
+    assert all(c.signals.get("venue_fallback") for c in pool)
+    assert len(pool) <= 8
+
+
+def test_d1_no_scene_query_or_no_anchor_overlap_is_empty():
+    from vidlore.clipstudio.verify import _venue_candidates
+    sel, seg, proj, get_shot = _venue_fixture()
+    seg2 = _seg("some narration", scene_query="")
+    assert _venue_candidates(sel, seg2, proj, get_shot, "") == []
+    seg3 = _seg("some narration", scene_query="Example Kingdom dragon cave hatching")
+    assert _venue_candidates(sel, seg3, proj, get_shot, "") == [], \
+        "a scene_query pointing at NO anchor must yield no venue pool"
+
+
+def test_d1_already_tried_shots_are_excluded():
+    from vidlore.clipstudio.verify import _venue_candidates
+    sel, seg, proj, get_shot = _venue_fixture()
+    sel.alternates.append(NS(source_id="trial_full", shot_index=0))
+    pool = _venue_candidates(sel, seg, proj, get_shot, "S04E06")
+    assert ("trial_full", 0) not in {(c.source_id, c.shot_index) for c in pool}
+
+
 TESTS = [
     test_a1_connectors_demote_to_abstract,
     test_a1_specific_beats_keep_their_labels,
@@ -392,6 +459,9 @@ TESTS = [
     test_c1_scene_affine_sources_ordered_first,
     test_c1_original_source_outranks_strangers,
     test_c1_no_signal_preserves_relevance_order,
+    test_d1_venue_pool_from_anchor_affine_sources,
+    test_d1_no_scene_query_or_no_anchor_overlap_is_empty,
+    test_d1_already_tried_shots_are_excluded,
 ]
 
 

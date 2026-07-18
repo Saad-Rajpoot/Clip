@@ -560,6 +560,73 @@ def _scene_affinity_order(alts, seg, proj, orig_source_id: str):
     return sorted(alts, key=_tier)
 
 
+def _venue_candidates(sel, seg, proj, get_shot, beat_era: str, cap: int = 8):
+    """Bounded candidate pool for the scene-VENUE contextual rung (see the call site for the full
+    rationale). Finds the anchor scene the beat's scene_query points at (>=1 shared scene-specific
+    token), then returns ClipCandidates from sources matching THAT anchor — anchor_verified, or a
+    >=2 anchor-token title match — skipping shots already tried as alternates, era-conflicting
+    sources, and sub-2s shots. Ordered: anchor_verified sources first, then title-match strength,
+    then shot length (legibility proxy). Empty list = no venue evidence → the beat still blocks."""
+    import re as _re_v
+    from .models import ClipCandidate
+    try:
+        from .discover import _STOPQ as _VSTOP
+    except Exception:
+        _VSTOP = set()
+    ana = (getattr(proj, "meta", None) or {}).get("analysis", {}) or {}
+    _mv = {w for w in _re_v.findall(r"[a-z']+", (ana.get("movie_title", "") or "").lower())
+           if len(w) > 2}
+    sqt = {w for w in _re_v.findall(r"[a-z']+", (getattr(seg, "scene_query", "") or "").lower())
+           if len(w) > 2 and w not in _mv and w not in _VSTOP}
+    if not sqt:
+        return []
+    best_st, best_ov = set(), 0
+    for sc in (ana.get("anchor_scenes") or []):
+        st = {w for w in _re_v.findall(
+                  r"[a-z']+", ((sc.get("name", "") or "") + " " + (sc.get("query", "") or "")).lower())
+              if len(w) > 2 and w not in _mv and w not in _VSTOP}
+        ov = len(sqt & st)
+        if ov > best_ov:
+            best_ov, best_st = ov, st
+    if best_ov < 1:
+        return []
+    tried = {(a.source_id, a.shot_index) for a in (sel.alternates or [])}
+    tried.add((sel.source_id, sel.shot_index))
+    hold = max(0.0, float(getattr(sel, "out_point", 0.0)) - float(getattr(sel, "in_point", 0.0)))
+    want_dur = max(4.0, min(8.0, hold or 4.0))
+    scored = []
+    for src in proj.sources:
+        if getattr(src, "status", "") != "ok":
+            continue
+        title = (getattr(src, "title", "") or "")
+        if _era_conflict(beat_era, title):
+            continue                                   # a declared wrong-season source never airs
+        tw = set(_re_v.findall(r"[a-z']+", title.lower()))
+        hits = sum(1 for w in best_st
+                   if any(t == w or (t.startswith(w) and len(t) - len(w) <= 2) for t in tw))
+        averi = bool((getattr(src, "extra", None) or {}).get("anchor_verified"))
+        if not averi and hits < 2:
+            continue
+        all_shots = getattr(get_shot, "all_shots", lambda _s: [])(src.id)
+        for sh in all_shots or []:
+            k = (src.id, getattr(sh, "index", -1))
+            if k in tried:
+                continue
+            d = float(getattr(sh, "end", 0.0)) - float(getattr(sh, "start", 0.0))
+            if d < 2.0:
+                continue
+            scored.append(((0 if averi else 1, -hits, -d), src.id, sh))
+    scored.sort(key=lambda x: x[0])
+    out = []
+    for _k, sid, sh in scored[:cap]:
+        s0 = float(sh.start)
+        out.append(ClipCandidate(segment_index=sel.segment_index, source_id=sid,
+                                 shot_index=int(sh.index), score=0.30, in_point=s0,
+                                 out_point=min(float(sh.end), s0 + want_dur),
+                                 signals={"venue_fallback": True}))
+    return out
+
+
 def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfig,
                       eng_cfg, *, max_replacements: int = 3, only_indices=None, progress=None) -> dict:
     """Verify every selection; replace failures with the best passing alternate; re-cut swaps.
@@ -810,21 +877,24 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             swapped = False
             failed_wins: list = []      # alternates the verifier explicitly REJECTED on the way
 
-            def _try_promote(downgrade: bool) -> bool:
+            def _try_promote(downgrade: bool, pool=None, label: str = "") -> bool:
                 """Scan the beat's relevance-ranked alternates and promote the first acceptable one.
                 downgrade=False → the ORIGINAL strict promotion (verify at the beat's own strictness,
                 accept only an explicit verdict==keep). downgrade=True → the EXACT→CONTEXTUAL rung:
                 verify LENIENTLY and accept a right-subject / on-topic clip that simply isn't the
-                exact moment (wrong-show/era/character still fail and are skipped). Returns True on a
-                swap. All the production safeguards (reuse-ledger cap, Window-QC, beat_windows rewrite,
-                re-cut) are shared by both modes."""
+                exact moment (wrong-show/era/character still fail and are skipped). `pool` overrides
+                the candidate list (the scene-VENUE rung passes its bounded venue candidates); `label`
+                overrides the downgrade tag for honest audit labeling. Returns True on a swap. All
+                the production safeguards (reuse-ledger cap, Window-QC, beat_windows rewrite,
+                re-cut) are shared by all modes."""
                 nonlocal swapped, replaced
                 tried = 0
                 # SCENE-AFFINITY ordering for exact beats — try same-scene sources first (see
                 # _scene_affinity_order). Ordering only; every gate below still applies.
                 import os as _os_aff
-                _alts = sel.alternates
-                if _exact and _os_aff.environ.get("VIDLORE_CLIPSTUDIO_SCENE_AFFINITY", "1").strip() \
+                _alts = pool if pool is not None else sel.alternates
+                if pool is None and _exact \
+                        and _os_aff.environ.get("VIDLORE_CLIPSTUDIO_SCENE_AFFINITY", "1").strip() \
                         not in ("0", "false", "no", ""):
                     try:
                         _alts = _scene_affinity_order(sel.alternates, seg, proj, sel.source_id)
@@ -907,7 +977,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     av["replaced_from"] = {"shot": shot.index if shot else -1}
                     if downgrade:
                         av["verdict"] = "keep"
-                        av["downgraded"] = "exact→contextual"
+                        av["downgraded"] = label or "exact→contextual"
                         av["relevance_class"] = "contextual_fallback"
                     sel.verifier = av
                     _cut.cut_selection(proj, sel, cfg)     # re-cut the new in/out
@@ -947,6 +1017,34 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         f"(required subject on screen — kept, honestly labeled contextual_fallback)")
                 else:
                     _try_promote(downgrade=True)     # scan alternates for a right-subject clip
+
+            # SCENE-VENUE CONTEXTUAL EXPANSION — the rung between "no alternate passes" and the
+            # honest gap. The alternates come from match's visual ranking, so when a beat cites a
+            # MICRO-moment whose footage simply isn't in the pool (measured: 'a maester examines
+            # the necklace at trial' — no downloaded source contains the testimony; the word
+            # 'strangler' appears only in an essay upload's ASR), every alternate is a wrong-scene
+            # candidate and all rungs above correctly refuse. But the SCENE the moment belongs to
+            # (the trial itself) IS in the pool — its uploads just never entered this beat's
+            # alternates because they share one query token and rank low visually. What a human
+            # editor airs there is the venue: the verified scene the narration's moment happens
+            # inside. So: find the ANCHOR scene this beat's scene_query points at (>=1 shared
+            # scene token), build a bounded candidate pool from sources matching THAT anchor
+            # (anchor_verified or >=2 anchor-token title match, era non-conflicting), and run the
+            # SAME contextual promotion over it — lenient vision verdict, _contextual_subject_ok
+            # acceptance, reuse cap, window-QC. No gate is weakened: a shot that doesn't
+            # positively show the right subject/scene is still refused, and the beat still
+            # release-blocks. Env VIDLORE_CLIPSTUDIO_VENUE_FALLBACK=0 disables.
+            _venue_on = _os_ms.environ.get("VIDLORE_CLIPSTUDIO_VENUE_FALLBACK", "1").strip() \
+                not in ("0", "false", "no")
+            if not swapped and _exact and _downgrade_on and _venue_on:
+                try:
+                    _vpool = _venue_candidates(sel, seg, proj, get_shot, _era_of(seg))
+                except Exception:
+                    _vpool = []
+                if _vpool:
+                    log(f"verify: seg{sel.segment_index} venue fallback — trying "
+                        f"{len(_vpool)} scene-venue candidate(s) from anchor-affine sources")
+                    _try_promote(downgrade=True, pool=_vpool, label="exact→venue_contextual")
 
             # CHARACTER beat, subject PRESENT-BUT-UNCONFIRMED. A character beat whose exact-moment
             # footage was rejected with correct_subject_visible=False is normally left unresolved (a
