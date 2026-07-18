@@ -51,6 +51,65 @@ def _scaled_source_budget(max_sources: int, n_beats: int, video_type: str = "") 
     return max(base, scaled, longform_floor)
 
 
+# ---------------------------------------------------------------------------
+# STAGE CHECKPOINTS (resume). The whole point: a render that dies (or content-blocks) at stage 9
+# after 2+ hours must NOT redo analyze→discover→download→index→match→verify→recover from scratch.
+# All of that state is already persisted in project.json (selections carry beat_windows / verifier
+# verdicts / image_path; sources carry local_path; meta carries analysis+candidates), so a resume
+# only needs to (a) know which stages already finished and (b) confirm their inputs are unchanged.
+# Each stage records a *signature of its inputs*; a resume skips a stage iff that signature still
+# matches AND the stage's persisted artifact is present. Because every stage folds the upstream
+# signature into its own, changing anything (a new script, a bigger budget) re-runs that stage and
+# everything after it — never a stale mix.
+# ---------------------------------------------------------------------------
+import hashlib as _hashlib
+from datetime import datetime as _dt, timezone as _tz
+
+_PIPELINE_CKPT_VERSION = 2   # bump when a stage's semantics change so old checkpoints are ignored
+
+
+def _sig(*parts) -> str:
+    """Stable short signature of a stage's inputs (order-sensitive)."""
+    h = _hashlib.sha1()
+    for p in parts:
+        h.update(repr(p).encode("utf-8", "replace"))
+        h.update(b"\x1f")
+    return h.hexdigest()[:16]
+
+
+def _seg_sig(segs) -> str:
+    """Signature of the beats that actually drive footage selection — text + the classified visual
+    policy + the entity/scene/quote anchors. A change here must re-match."""
+    return _sig(tuple((s.index, s.text, s.visual_policy, s.required_entity, s.required_kind,
+                       s.scene_query, s.quote) for s in (segs or [])))
+
+
+def _ckpt(proj) -> dict:
+    pl = proj.meta.get("pipeline")
+    if not isinstance(pl, dict) or pl.get("version") != _PIPELINE_CKPT_VERSION:
+        pl = {"version": _PIPELINE_CKPT_VERSION, "stages": {}}
+        proj.meta["pipeline"] = pl
+    return pl
+
+
+def _stage_done(proj, name: str, sig: str) -> None:
+    """Mark a stage complete with the signature of its inputs, and flush the manifest so a crash in
+    the NEXT stage still finds this one done. This also closes the historical gap where match wrote
+    no save (a crash after match, before cut, lost every selection)."""
+    _ckpt(proj)["stages"][name] = {
+        "sig": sig, "at": _dt.now(_tz.utc).isoformat(timespec="seconds"), "status": "done"}
+    proj.save()
+
+
+def _stage_skip(proj, name: str, sig: str, resume: bool, artifact_ok: bool = True) -> bool:
+    """A stage is skippable iff we are resuming, its recorded input-signature still matches, and its
+    persisted output is actually present on disk / in the manifest."""
+    if not resume:
+        return False
+    rec = _ckpt(proj)["stages"].get(name)
+    return bool(rec and rec.get("status") == "done" and rec.get("sig") == sig and artifact_ok)
+
+
 def produce(project_dir, *, script_path: Optional[str] = None, script_text: Optional[str] = None,
             source_specs: Optional[list[SourceSpec]] = None, name: str = "",
             cfg: Optional[ClipConfig] = None, theme: str = "history", voice: str = "",
@@ -812,14 +871,41 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
     recovered: set = set()
 
     try:
-        from .discover import discover_sources
+        from .discover import discover_sources, _STOPQ as _R_STOP
         from .download import download_candidates
-        cfg_r = _dc.replace(cfg, discover_target=max(2, max_sources))
+        # discover_target must be WIDER than max_sources here. The global selection pass (per-channel
+        # caps, anchor/entity coverage) re-ranks everything, so with target==4 the four survivors are
+        # the same top anchor uploads the project already has — measured: rediscovery for five
+        # unresolved beats found 11 candidates and 0 new, twice in a row, while the per-beat queries'
+        # actual results (the scene uploads the beats need) were cut from the selection. Widen the
+        # target so per-beat results survive, then PREFER the new urls whose title matches an
+        # unresolved beat's scene tokens (>=2, same rule as anchor/key-scene coverage) — those are
+        # the uploads the recovery exists to fetch.
+        cfg_r = _dc.replace(cfg, discover_target=max(12, 3 * max_sources))
         have_urls = {(getattr(s, "url", "") or "").strip() for s in proj.sources if getattr(s, "url", "")}
         cands = discover_sources(analysis, cfg_r, segments=unresolved_segs, progress=None) or []
-        new_cands = [c for c in cands
-                     if (getattr(c, "url", "") or "").strip() and
-                     (getattr(c, "url", "") or "").strip() not in have_urls][:max_sources]
+        import re as _re_r
+        _r_mv = {w for w in _re_r.findall(r"\w+", (getattr(analysis, "movie_title", "") or "").lower())
+                 if len(w) > 2}
+
+        def _beat_hits(c) -> int:
+            tw = set(_re_r.findall(r"\w+", (getattr(c, "title", "") or "").lower()))
+            best = 0
+            for s in unresolved_segs:
+                toks = {w for w in _re_r.findall(
+                            r"\w+", (getattr(s, "scene_query", "") or "").lower())
+                        if len(w) > 2 and w not in _R_STOP and w not in _r_mv}
+                hits = sum(1 for w in toks
+                           if any(t == w or (t.startswith(w) and len(t) - len(w) <= 2)
+                                  for t in tw))
+                best = max(best, hits)
+            return best
+        _new_all = [c for c in cands
+                    if (getattr(c, "url", "") or "").strip() and
+                    (getattr(c, "url", "") or "").strip() not in have_urls]
+        _new_all.sort(key=_beat_hits, reverse=True)
+        new_cands = ([c for c in _new_all if _beat_hits(c) >= 2]
+                     or _new_all)[:max_sources]
         audit["attempts"].append({
             "queries": [getattr(s, "scene_query", "") or getattr(s, "required_entity", "")
                         for s in unresolved_segs],
@@ -896,11 +982,16 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
                  captions: Optional[bool] = None, caption_style: str = "",
                  voiceover: Optional[str] = None, voice_provider: str = "", voice_preset: str = "",
                  use_tts: bool = True, verify: bool = True, do_build: bool = True,
-                 force_index: bool = False, progress=None) -> dict:
+                 force_index: bool = False, resume: bool = False, progress=None) -> dict:
     """FULL AUTO: topic + script in → finished video out. Discovers + downloads its own sources.
     analyze → discover → download(policy) → Face-ID refs → deep index → match → cut → AI verify
-    → ledger + QC report → assemble."""
-    from .analyze import analyze_script
+    → ledger + QC report → assemble.
+
+    resume=True reuses an existing project dir and SKIPS every stage that already finished with the
+    same inputs (checkpoints in proj.meta['pipeline']), so a render that died — or content-blocked —
+    at assembly continues from where it stopped instead of redoing hours of index/match/verify. The
+    final assemble always re-runs (a killed render leaves no usable output)."""
+    from .analyze import analyze_script, ScriptAnalysis
     from .discover import discover_sources
     from .download import download_candidates
     from . import faceid as _faceid
@@ -944,6 +1035,9 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
         log(f"  [purge] blocked {_purged} cached unwanted source(s) before render")
         proj.save()
 
+    if resume:
+        log("resume: reusing project — completed stages will be skipped where inputs are unchanged")
+
     # 1 — analyze
     log("1/9 · analyze script")
     if script_text is None and script_path:
@@ -952,15 +1046,23 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
     if not (script_text or "").strip():
         raise PipelineError("no narration script provided.")
     from . import policy as _policy
-    analysis, segs = analyze_script(script_text, topic=topic, movie_hint=movie_hint,
-                                    eng_cfg=eng, cfg=cfg, progress=progress)
-    proj.segments = segs
-    # unified per-beat VISUAL POLICY — classify every beat once; all downstream stages obey it
-    _tally = _policy.finalize_beats(segs)
-    proj.meta["analysis"] = analysis.to_dict()
-    proj.save()
-    log(f"  movie={analysis.movie_title!r} · {len(analysis.actors)} actors · {len(segs)} beats")
-    log(f"  beat policy → " + " · ".join(f"{k}:{v}" for k, v in sorted(_tally.items())))
+    _sig_analyze = _sig(script_text, topic, movie_hint)
+    if _stage_skip(proj, "analyze", _sig_analyze, resume,
+                   artifact_ok=bool(proj.segments and proj.meta.get("analysis"))):
+        analysis = ScriptAnalysis.from_dict(proj.meta["analysis"])
+        segs = proj.segments
+        _tally = _policy.finalize_beats(segs)          # idempotent re-classify (cheap; for the tally)
+        log(f"  ↻ skipped (resume) — movie={analysis.movie_title!r} · {len(segs)} beats cached")
+    else:
+        analysis, segs = analyze_script(script_text, topic=topic, movie_hint=movie_hint,
+                                        eng_cfg=eng, cfg=cfg, progress=progress)
+        proj.segments = segs
+        # unified per-beat VISUAL POLICY — classify every beat once; all downstream stages obey it
+        _tally = _policy.finalize_beats(segs)
+        proj.meta["analysis"] = analysis.to_dict()
+        _stage_done(proj, "analyze", _sig_analyze)
+        log(f"  movie={analysis.movie_title!r} · {len(analysis.actors)} actors · {len(segs)} beats")
+        log(f"  beat policy → " + " · ".join(f"{k}:{v}" for k, v in sorted(_tally.items())))
 
     # 2 — discover. The ranked head of the returned list = the requested download budget;
     # entity-coverage + anchor force-includes are APPENDED past it by discover, so the
@@ -970,17 +1072,24 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
     # knob still governs direct discover_sources() callers.
     log("2/9 · discover sources")
     import dataclasses as _dc
+    from .discover import SourceCandidate as _SourceCandidate
     # scale the footage budget to the script: a long multi-scene essay needs far MORE distinct
     # sources than the user's default, or most beats re-use a few generic clips (wrong-scene).
     _budget = _scaled_source_budget(max_sources, len(segs), getattr(analysis, "video_type", ""))
     if _budget > max_sources:
         log(f"  long script ({len(segs)} beats) → scaling footage budget {max_sources} → {_budget} sources")
     cfg = _dc.replace(cfg, discover_target=max(4, _budget))
-    candidates = discover_sources(analysis, cfg, segments=segs, progress=progress)
-    proj.meta["candidates"] = [c.to_dict() for c in candidates]
-    proj.save()
-    if not candidates:
-        raise PipelineError("source discovery found nothing — check connectivity / movie name.")
+    _sig_discover = _sig(_sig_analyze, _budget)
+    if _stage_skip(proj, "discover", _sig_discover, resume,
+                   artifact_ok=bool(proj.meta.get("candidates"))):
+        candidates = [_SourceCandidate.from_dict(d) for d in proj.meta.get("candidates", [])]
+        log(f"  ↻ skipped (resume) — {len(candidates)} discovered source(s) cached")
+    else:
+        candidates = discover_sources(analysis, cfg, segments=segs, progress=progress)
+        proj.meta["candidates"] = [c.to_dict() for c in candidates]
+        if not candidates:
+            raise PipelineError("source discovery found nothing — check connectivity / movie name.")
+        _stage_done(proj, "discover", _sig_discover)
 
     # 3 — download (permission-policy gated). Download the FULL discovered set: discover's own
     # construction bounds it (head ≤ max_sources, coverage ≤ coverage_extra, anchors ≤ 4/scene),
@@ -988,67 +1097,141 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
     # anchor force-includes appended last.
     dl_limit = len(candidates)
     log(f"3/9 · download (policy={policy}, budget={_budget}+coverage)")
-    download_candidates(proj, candidates, cfg, policy=policy, limit=dl_limit, progress=progress)
-    usable = [s for s in proj.sources if s.status == "ok"]
-    if not usable:
-        raise PipelineError(f"no usable sources under policy={policy}. Use --policy approved_testing "
-                         "(your explicit testing approval) or open_only (public-domain).")
+    _sig_download = _sig(_sig_discover, policy)
+    _usable0 = [s for s in proj.sources if s.status == "ok"]
+    if _stage_skip(proj, "download", _sig_download, resume, artifact_ok=bool(_usable0)):
+        usable = _usable0
+        log(f"  ↻ skipped (resume) — {len(usable)} source(s) already downloaded")
+    else:
+        download_candidates(proj, candidates, cfg, policy=policy, limit=dl_limit, progress=progress)
+        usable = [s for s in proj.sources if s.status == "ok"]
+        if not usable:
+            raise PipelineError(f"no usable sources under policy={policy}. Use --policy approved_testing "
+                             "(your explicit testing approval) or open_only (public-domain).")
+        _stage_done(proj, "download", _sig_download)
     log(f"  {len(usable)} sources downloaded")
 
+    # Downstream signatures — computable now that the source set is known. Each folds in the upstream
+    # signature so any earlier change cascades a re-run. These also let us skip the whole
+    # index/Face-ID/match/verify block when everything after download is already cached (the common
+    # case for a content-blocked resume: jump straight to assemble).
+    _sig_index = _sig(_sig_download, tuple(sorted(s.id for s in usable)), bool(force_index))
+    _sig_match = _sig(_sig_index, _seg_sig(segs))
+    _sig_cut = _sig(_sig_match)
+    _sig_verify = _sig(_sig_cut, bool(verify))
+    _sig_recover = _sig(_sig_verify)
+    _sel_complete = (bool(proj.selections)
+                     and {s.segment_index for s in proj.selections} >= {s.index for s in segs})
+    _skip_match = _stage_skip(proj, "match", _sig_match, resume, artifact_ok=_sel_complete)
+    _skip_verify = _stage_skip(proj, "verify", _sig_verify, resume, artifact_ok=_sel_complete)
+    _skip_recover = _stage_skip(proj, "recover", _sig_recover, resume, artifact_ok=_sel_complete)
+    # Face-ID refs feed indexing (shot identities) + recovery re-indexing; match consumes persisted
+    # shot identities, not the refs object. So they're only worth building when a footage stage will
+    # actually run. A fully-cached resume (→ assemble only) skips this and the model load with it.
+    _need_footage_stages = not (_skip_match and _skip_verify and _skip_recover)
+
     # 4 — Face-ID references
-    log("4/9 · build Face-ID references")
     faceid_obj, refs = None, {}
-    if _faceid.available():
-        faceid_obj = _faceid.FaceID()
-        refs = _faceid.build_references(analysis.reference_identities(), proj.index_dir,
-                                        faceid_obj, progress=progress)
     roster = analysis.actors
+    if _need_footage_stages:
+        log("4/9 · build Face-ID references")
+        if _faceid.available():
+            faceid_obj = _faceid.FaceID()
+            refs = _faceid.build_references(analysis.reference_identities(), proj.index_dir,
+                                            faceid_obj, progress=progress)
+    else:
+        log("4/9 · Face-ID references — ↻ skipped (resume, all footage stages cached)")
 
     # 5 — deep index
-    log("5/9 · deep index (ASR + scenes + CLIP + Face-ID + OCR + quality + dedup)")
-    index_all(proj, cfg, references=refs, faceid=faceid_obj, roster=roster,
-              force=force_index, progress=progress)
+    if _need_footage_stages:
+        log("5/9 · deep index (ASR + scenes + CLIP + Face-ID + OCR + quality + dedup)")
+        index_all(proj, cfg, references=refs, faceid=faceid_obj, roster=roster,
+                  force=(force_index and not resume), progress=progress)
+    else:
+        log("5/9 · deep index — ↻ skipped (resume, all footage stages cached)")
 
     # 6 — match
-    log("6/9 · match")
-    match_segments(proj, segs, cfg, analysis=analysis, progress=progress)
+    if _skip_match:
+        log("6/9 · match — ↻ skipped (resume, selections cached)")
+    else:
+        log("6/9 · match")
+        match_segments(proj, segs, cfg, analysis=analysis, progress=progress)
+        _stage_done(proj, "match", _sig_match)         # closes the historic match→cut save gap
 
     # 7 — cut
-    log("7/9 · cut")
-    cut_all(proj, cfg, progress=progress)
+    if _skip_match and _stage_skip(proj, "cut", _sig_cut, resume, artifact_ok=_sel_complete):
+        log("7/9 · cut — ↻ skipped (resume, clips cached)")
+    else:
+        log("7/9 · cut")
+        cut_all(proj, cfg, resume=resume, progress=progress)
+        _stage_done(proj, "cut", _sig_cut)
 
     # 8 — AI verify + repair
-    if verify:
+    if verify and _skip_verify:
+        log("8/9 · AI verify + repair — ↻ skipped (resume, verdicts cached)")
+    elif verify:
         log("8/9 · AI verify + repair")
         _verify.verify_and_repair(proj, segs, cfg, eng, progress=progress)
+        _stage_done(proj, "verify", _sig_verify)
 
-    # 8a — BOUNDED AUTONOMOUS RECOVERY (R4-5): for exact beats the verifier could NOT satisfy, try
-    # ONE targeted rediscovery→download→index→rematch→re-cut→reverify round BEFORE falling back to a
-    # still/hold/block. Prefers an exact clip that verifies over an irrelevant HD one; preserves every
-    # already-resolved beat; fail-closed. The deterministic still (8b) and the build-stage editorial
-    # hold / honest release-block remain the downstream last resorts.
-    try:
-        _recover_unresolved_beats(proj, segs, analysis, cfg, eng, faceid_obj=faceid_obj, refs=refs,
-                                  roster=roster, policy=policy, log=log)
-    except Exception as _e:
-        log(f"recovery: skipped ({type(_e).__name__}: {_e})")
-
-    # 8b — EXACT-SCENE IMAGE FALLBACK: beats that still have no relevant footage (no source,
-    # low confidence, or a confirmed wrong-character pick) get a face/CLIP-verified still from
-    # the open web (Bing/DDG/Wikimedia). A wrong image is worse than generic footage, so the
-    # fetcher only accepts what it can verify; otherwise the beat keeps its clip.
+    # 8a/8b — BOUNDED RECOVERY + IMAGE FALLBACK. Grouped under ONE 'recover' checkpoint: on resume
+    # with unchanged inputs both are skipped (their outcomes — recovered footage, installed stills —
+    # are already persisted on the selections). This is the expensive tail (rediscovery + web-image
+    # verification) that a content-blocked render should never repeat just to re-block at assembly.
     import os as _os
-    if _os.environ.get("VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK", "1").strip() not in ("0", "false", "no"):
+    if _skip_recover:
+        log("8a/8b · recovery + image fallback — ↻ skipped (resume, outcomes cached)")
+    else:
+        # 8a — BOUNDED AUTONOMOUS RECOVERY (R4-5): for exact beats the verifier could NOT satisfy, try
+        # ONE targeted rediscovery→download→index→rematch→re-cut→reverify round BEFORE falling back to a
+        # still/hold/block. Prefers an exact clip that verifies over an irrelevant HD one; preserves
+        # every already-resolved beat; fail-closed. The deterministic still (8b) and the build-stage
+        # editorial hold / honest release-block remain the downstream last resorts.
         try:
-            _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, eng_cfg=eng)
+            _recover_unresolved_beats(proj, segs, analysis, cfg, eng, faceid_obj=faceid_obj, refs=refs,
+                                      roster=roster, policy=policy, log=log)
         except Exception as _e:
-            log(f"image-fallback: skipped ({type(_e).__name__}: {_e})")
+            log(f"recovery: skipped ({type(_e).__name__}: {_e})")
+
+        # 8b — EXACT-SCENE IMAGE FALLBACK: beats that still have no relevant footage (no source,
+        # low confidence, or a confirmed wrong-character pick) get a face/CLIP-verified still from
+        # the open web (Bing/DDG/Wikimedia). A wrong image is worse than generic footage, so the
+        # fetcher only accepts what it can verify; otherwise the beat keeps its clip.
+        if _os.environ.get("VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK", "1").strip() not in ("0", "false", "no"):
+            try:
+                _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, eng_cfg=eng)
+            except Exception as _e:
+                log(f"image-fallback: skipped ({type(_e).__name__}: {_e})")
+        _stage_done(proj, "recover", _sig_recover)
 
     # ledger + QC report
     summ = ledger.finalize(proj, segs, cfg)
     review_path = _review.write_review(proj, segs)
     proj.save()
     log(f"  QC · {summ['flagged_for_review']}/{summ['segments']} flagged · mean conf {summ['mean_confidence']}")
+
+    # PRE-ASSEMBLE FEASIBILITY GATE (fail-fast). The rejected-footage release gate lives at the END of
+    # assembly, so on a footage-gap render it fired only AFTER ~20 min of per-beat re-encoding — all of
+    # it thrown away. That verdict is deterministic from the (now frozen) selections, so surface it HERE
+    # and abort before assembly. Structural-only + fail-open: it re-raises the SAME NonRetryableBuildError
+    # the build gate would, but never blocks a render the build gate would let through (see build.py).
+    if do_build:
+        try:
+            from .build import preassemble_release_block_reason
+            _pre = preassemble_release_block_reason(proj, segs, analysis)
+        except Exception as _e:                          # never let the fast-path itself break a render
+            _pre = None
+            log(f"pre-assemble gate: skipped ({type(_e).__name__}: {_e})")
+        if _pre:
+            _mode = _os.environ.get("VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE", "block").strip().lower()
+            if _mode == "warn":
+                log(f"⚠ pre-assemble feasibility (mode=warn) — {_pre} Building a REVIEW draft anyway.")
+            else:
+                log(f"⛔ pre-assemble feasibility — {_pre} Aborting BEFORE assembly (fail-fast; the "
+                    f"final render would release-block after ~20 min of wasted encoding). Add footage "
+                    f"for these scenes or set RELEASE_BLOCK_MODE=warn for a review draft.")
+                from .verify import NonRetryableBuildError
+                raise NonRetryableBuildError(_pre)
 
     out = None
     if do_build:

@@ -91,9 +91,12 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         "NOTE — the required subject is an OBJECT/PROP that may be too small to resolve in a frame. "
         "Do NOT demand the object itself be identifiable. Verify the moment's CONTEXT instead: the "
         "frame must show the described scene — the right characters, setting and staging for THIS "
-        "moment (see the storyboard above). Set correct_subject_visible=true when the character(s) "
-        "who hold/handle the object are clearly present in the right scene, even if the object is "
-        "not resolvable. A wrong scene, wrong characters, or wrong era is still 'replace'.\n"
+        "moment (see the storyboard above). The storyboard's FRAMING is aspirational: never mark "
+        "'replace' because the frame is a wide/medium shot instead of the described close-up — "
+        "judge WHO, WHERE and WHEN, not the camera distance. Set correct_subject_visible=true when "
+        "the character(s) who hold/handle the object are clearly present in the right scene, even "
+        "if the object is not resolvable. A wrong scene, wrong characters, or wrong era is still "
+        "'replace'.\n"
         if "object" in (required_kind or "").lower() else "")
     txt = (
         f'Narration line: "{narration}"\n'
@@ -131,7 +134,7 @@ _SEASON_RX = re.compile(
 
 # Bump whenever the verifier PROMPT or its JSON contract changes: a verdict is only reusable if it
 # was produced by the same question. Part of the fingerprint below.
-PROMPT_VERSION = "v4-2026-07"          # v4: micro-OBJECT context clause (E2) — see verify_frame
+PROMPT_VERSION = "v5-2026-07"          # v5: micro-OBJECT clause + framing release (E2/E2b)
 # Bump when the contact-sheet SAMPLING changes (frame count/positions/layout). The sheet is the
 # image the verifier judges, so a different sampling is a different question even for the same shot.
 SHEET_VERSION = "sheet-v1-startmidend"

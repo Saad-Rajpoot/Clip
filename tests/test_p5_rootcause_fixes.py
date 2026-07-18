@@ -527,8 +527,11 @@ def test_e2_object_beats_get_the_context_clause():
         L.complete = orig
     assert "OBJECT/PROP" in seen[0], "object beats must get the micro-object context clause"
     assert "wrong scene, wrong characters, or wrong era is still" in seen[0]
+    assert "FRAMING is aspirational" in seen[0], \
+        "object beats must release the storyboard's framing demand (E2b)"
     assert "OBJECT/PROP" not in seen[1], "character beats must keep the strict subject question"
-    assert V.PROMPT_VERSION != "v3-2026-07", "prompt change must bump PROMPT_VERSION (cache identity)"
+    assert V.PROMPT_VERSION not in ("v3-2026-07", "v4-2026-07"), \
+        "prompt change must bump PROMPT_VERSION (cache identity)"
 
 
 TESTS = [
