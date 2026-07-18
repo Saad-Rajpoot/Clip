@@ -872,9 +872,19 @@ def _breakout_src_ok(src, shots) -> bool:
 
 
 def _breakout_window_luma(src_path, start: float, dur: float) -> float:
-    """Mean luma (YAVG, 0–255) across a breakout's air window — one signalstats pass over
-    [start, start+dur] on a 128×72 decode. Returns **-1.0 if unreadable** (a failed probe is
-    'unknown', never 'dark', so a transient ffmpeg error can never wrongly reject a shot)."""
+    """LEGIBILITY score (0–255-ish) across a breakout's air window, on a 128×72 decode.
+
+    Was plain mean luma (YAVG) — which measures BRIGHTNESS, not legibility, and rejected iconic
+    candle-lit scenes wholesale. Measured: the S07E03 Olenna–Jaime confession probes YAVG 28–45 and
+    Purple-Wedding interiors 48–59 — every one under the 62 floor, every one perfectly readable on
+    screen, seven candidates killed in one render. What actually separates "readable dim scene"
+    from "dead near-black frame" is CONTRAST: a lit face against shadow spreads the histogram even
+    when the mean is low, while true near-black has both a low mean and a collapsed spread.
+
+    Score = max(YAVG, spread) where spread = YHIGH − YLOW (signalstats' 10th→90th percentile
+    range). A bright flat frame passes on YAVG exactly as before; a dim-but-lit scene passes on
+    spread (confession: spread ≈ 90+); genuine near-black fails both (YAVG ~8, spread ~15).
+    Returns **-1.0 if unreadable** (a failed probe is 'unknown', never 'dark')."""
     try:
         import re as _rel9
         p = subprocess.run(
@@ -882,13 +892,23 @@ def _breakout_window_luma(src_path, start: float, dur: float) -> float:
              "-ss", f"{max(0.0, float(start)):.3f}", "-i", str(src_path),
              "-t", f"{max(0.5, float(dur)):.3f}", "-an",
              "-vf", "scale=128:72,signalstats,"
-                    "metadata=print:key=lavfi.signalstats.YAVG:file=-",
+                    "metadata=print:key=lavfi.signalstats.YAVG:file=-:direct=1,"
+                    "metadata=print:key=lavfi.signalstats.YLOW:file=-:direct=1,"
+                    "metadata=print:key=lavfi.signalstats.YHIGH:file=-:direct=1",
              "-f", "null", "-"],
             capture_output=True, timeout=120)
         blob = (p.stdout or b"").decode("utf-8", "ignore") \
             + (p.stderr or b"").decode("utf-8", "ignore")
-        vals = [float(m) for m in _rel9.findall(r"YAVG=([0-9.]+)", blob)]
-        return (sum(vals) / len(vals)) if vals else -1.0
+        yavg = [float(m) for m in _rel9.findall(r"YAVG=([0-9.]+)", blob)]
+        ylow = [float(m) for m in _rel9.findall(r"YLOW=([0-9.]+)", blob)]
+        yhigh = [float(m) for m in _rel9.findall(r"YHIGH=([0-9.]+)", blob)]
+        if not yavg:
+            return -1.0
+        mean = sum(yavg) / len(yavg)
+        spread = 0.0
+        if ylow and yhigh and len(ylow) == len(yhigh):
+            spread = sum(h - l for h, l in zip(yhigh, ylow)) / len(yhigh)
+        return max(mean, spread)
     except Exception:
         return -1.0
 
@@ -1038,7 +1058,9 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     # even when the throne-room shot is too dim for Face-ID. (User's cold-open / "let the scene speak".)
     _verbatim_strong = set()
     _verbatim_first = None        # (seg_idx, key) of the EARLIEST verbatim quote = cold-open hook
-    for seg, _q in quote_segs:
+    def _locate_quote9(_q):
+        """Locate a scripted quote in the downloaded footage. Returns (score, source, shot, run)
+        or None. Pure lookup — the caller does the candidate bookkeeping (_admit_quote9)."""
         qw = _rw(_q)[:8]
         best = None
         for s in srcs:
@@ -1080,16 +1102,74 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                                        else 0)
                     if best is None or score > best[0]:
                         best = (score, s, sh, run)
-        if best is not None:
-            cands.append((best[0], seg.index, best[1], best[2], _q))
-            _k = (seg.index, best[1].id, round(float(best[2].start), 1))
-            _cand_origin[_k] = "verbatim_quote"        # created from a scripted quote
-            # Face-ID BYPASS requires a STRONG verbatim match (>=4 words, >=70% coverage, a content
-            # word) — a bare 3-4-word generic prefix used to steal the gate and air a DIFFERENT line.
-            if _verbatim_bypass_ok(_rw(_q)[:8], best[3]):
-                _verbatim_strong.add(_k)
-            if _verbatim_first is None or seg.index < _verbatim_first[0]:
-                _verbatim_first = (seg.index, _k, _rw(_q)[:8], best[3])
+        return best
+
+    def _admit_quote9(seg, _q, best):
+        nonlocal _verbatim_first
+        cands.append((best[0], seg.index, best[1], best[2], _q))
+        _k = (seg.index, best[1].id, round(float(best[2].start), 1))
+        _cand_origin[_k] = "verbatim_quote"        # created from a scripted quote
+        # Face-ID BYPASS requires a STRONG verbatim match (>=4 words, >=70% coverage, a content
+        # word) — a bare 3-4-word generic prefix used to steal the gate and air a DIFFERENT line.
+        if _verbatim_bypass_ok(_rw(_q)[:8], best[3]):
+            _verbatim_strong.add(_k)
+        if _verbatim_first is None or seg.index < _verbatim_first[0]:
+            _verbatim_first = (seg.index, _k, _rw(_q)[:8], best[3])
+
+    _unlocated9 = []
+    for seg, _q in quote_segs:
+        best = _locate_quote9(_q)
+        if best is None:
+            _unlocated9.append((seg, _q))
+            continue
+        _admit_quote9(seg, _q, best)
+    # QUOTE-HALLUCINATION CORRECTION — one bounded LLM re-ask per render. The per-beat `quote` comes
+    # from the analysis LLM and is routinely a paraphrase or an outright invention (measured: a beat
+    # carrying quote='I killed Joffrey.' — words never spoken on screen; the real confession is
+    # phrased differently). An invented quote locates NOWHERE in any source's word stream, so the
+    # script's promised payoff silently produces zero candidates. Fix: batch every unlocatable quote
+    # into ONE fact-check call asking for the exact on-screen wording, then re-run the SAME locator
+    # on the corrections. A correction only counts if it now locates in the footage's own ASR — the
+    # ASR stays ground truth, so a second hallucination changes nothing and no gate is weakened.
+    # Env: VIDLORE_CLIPSTUDIO_QUOTE_CORRECT=0 disables.
+    if _unlocated9 and _os9b.environ.get("VIDLORE_CLIPSTUDIO_QUOTE_CORRECT", "1").strip() \
+            not in ("0", "false", "no", ""):
+        try:
+            from . import llm as _llm9
+            _lines9 = "\n".join(
+                f"{i}. narration: {((getattr(t, 'text', '') or '')[:160])!r}"
+                f" | claimed quote: {q[:120]!r}"
+                for i, (t, q) in enumerate(_unlocated9))
+            _qtxt9 = _llm9.complete(
+                system=("You are a dialogue fact-checker for "
+                        + (_bk_show9 or "the show/film named in the narration")
+                        + ". For each numbered item, the narration references a moment and claims a "
+                          "quoted line, but that wording was NOT found in the episode audio. Reply "
+                          "with one line per item: '<number>. <the exact dialogue as spoken on "
+                          "screen>' — or '<number>. NONE' if no such line exists. Only real "
+                          "on-screen wording; never invent."),
+                messages=[{"role": "user", "content": _lines9}], max_tokens=800)
+            import re as _re9q
+            _fixed9 = {}
+            for _m9 in _re9q.finditer(r"^\s*(\d+)[.)]\s*(.+?)\s*$", _qtxt9 or "", _re9q.M):
+                _c9 = _m9.group(2).strip().strip('"“”‘’\'')
+                if _c9 and _c9.upper() != "NONE" and len(_c9.split()) >= 3:
+                    _fixed9[int(_m9.group(1))] = _c9
+            _nfix9 = 0
+            for _i9, (seg, _q0) in enumerate(_unlocated9):
+                _qc9 = _fixed9.get(_i9)
+                if not _qc9 or _qc9.lower() == _q0.lower():
+                    continue
+                best = _locate_quote9(_qc9)
+                if best is not None:
+                    _admit_quote9(seg, _qc9, best)
+                    _nfix9 += 1
+                    log(f"build: quote corrected (beat {seg.index}): {_q0[:40]!r} → "
+                        f"{_qc9[:60]!r} — located in footage ASR")
+            log(f"build: quote check — {len(_unlocated9)} scripted quote(s) unlocatable; "
+                f"corrective re-ask recovered {_nfix9}")
+        except Exception as _e9q:                          # noqa: BLE001
+            log(f"build: quote correction skipped ({str(_e9q)[:80]})")
     # COLD-OPEN HOOK: the EARLIEST verbatim quote in the opening stretch is the hook — air the real
     # scene of the opening quoted line right at the start. It is still Face-ID-exempt ONLY when it is
     # itself a STRONG verbatim match (same bar as any other bypass) — a weak 3-word opening prefix no
@@ -1340,9 +1420,17 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
             "VIDLORE_CLIPSTUDIO_BREAKOUT_LUMA_FLOOR", "62") or 62)
         # A verbatim / cold-open match IS the exact scene we asked for, and many iconic scenes are
         # LEGITIMATELY dim (candle-lit throne room, night). Don't reject those on the legibility
-        # floor — only on TRUE near-black (subject genuinely invisible). Other breakouts keep the
-        # full floor. This is what lets a dim "Power is power" / "Cut his throat" cold-open air.
-        if _verbatim_ok:
+        # floor — only on TRUE near-black (subject genuinely invisible). The same holds for a
+        # candidate whose shot carries a CONFIRMED main-cast face: Face-ID recognizing someone IS
+        # proof the shot is legible — a luma floor overruling a confirmed face is self-
+        # contradictory. Measured: 7 candidates with confirmed faces (they had already passed the
+        # wrong-character guard) died at YAVG 45–59 under the flat 62 floor, including
+        # Purple-Wedding interiors. Full floor now applies only when the cast is UNKNOWN (no
+        # Face-ID evidence either way).
+        _face_confirmed9 = bool(_main_faces9
+                                and ({f.lower() for f in (getattr(c[3], "face_ids", None) or [])}
+                                     & _main_faces9))
+        if _verbatim_ok or _face_confirmed9:
             _lflo9 = min(_lflo9, 24.0)
         if _lflo9 > 0 and getattr(c[2], "local_path", None):
             _bwin9 = min(9.0, max(2.0, float(c[3].end) - float(c[3].start)))

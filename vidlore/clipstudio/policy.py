@@ -61,6 +61,36 @@ _DEICTIC_RX = re.compile(
     r"|\bthere it is\b|\bright there\b|\bwatch it again\b", re.I)
 
 
+# RHETORICAL CONNECTORS — transition/question lines whose only job is moving the argument along:
+# "And that raises the next obvious question." / "Where does it even come from?" / "the answer
+# stops being obvious fast". They have no scene, no era, no character — there is nothing exact TO
+# show. Measured failure this guards: the analyzer LLM labelled 11 such lines `exact_scene` in one
+# render; each demanded footage that cannot exist, failed the verifier, ground through the entire
+# still/web fallback ladder (~7 hours of vision calls) and still release-blocked the video. The
+# competitor covered the same lines with 2s of related filler and moved on.
+_RHETORIC_RX = re.compile(
+    r"\b(?:raises? the (?:next |obvious |same )*question|the answer (?:stops|is|isn'?t|starts)|"
+    r"where does (?:it|that|this|the \w+) (?:even )?come from|"
+    r"which brings us (?:back )?to|(?:but|and|so) (?:that|this|it) (?:changes|leaves|means)|"
+    r"(?:let'?s|we need to) (?:start|go back|look|talk about)|"
+    r"(?:that|this|it)'?s not a (?:gap|coincidence|accident|mystery)|"
+    r"(?:here|now) (?:is|'?s) (?:where|why|what|the)|start with)\b", re.I)
+
+
+def _is_rhetorical_connector(seg) -> bool:
+    """A connector has NO concrete hook: no quote, no required entity, and either a connector
+    phrase or a short pure question. Any concrete hook keeps the beat out of this bucket."""
+    if (getattr(seg, "quote", "") or "").strip():
+        return False
+    if (getattr(seg, "required_entity", "") or "").strip():
+        return False
+    t = (getattr(seg, "text", "") or "").strip()
+    if _RHETORIC_RX.search(t):
+        return True
+    # a short pure question with no entity is asking the AUDIENCE, not describing a scene
+    return t.endswith("?") and len(t.split()) <= 10
+
+
 def is_deictic(seg) -> bool:
     """True when the beat POINTS at the anchor scene instead of naming it. Such a beat inherits the
     exact_scene treatment: 'that table' can only ever be satisfied by THAT table."""
@@ -100,6 +130,14 @@ def policy_of(seg) -> str:
     if is_deictic(seg):
         return EXACT
     p = (getattr(seg, "visual_policy", "") or "").strip().lower()
+    # DEMOTION GUARD — the mirror of the deixis promotion. A SPECIFIC label (exact/character) is a
+    # demand for particular footage, so it must be earned by at least one concrete hook: a quote, a
+    # required entity, or scene-describing text. A rhetorical connector has none; keeping the LLM's
+    # exact_scene label on "And that raises the next obvious question." creates a beat that CANNOT
+    # be satisfied — measured: 11 such beats release-blocked a render after ~7h of doomed fallback
+    # work. Genuinely specific beats are untouched (any quote or entity keeps the label).
+    if p in (EXACT, CHARACTER) and _is_rhetorical_connector(seg):
+        return ABSTRACT
     return p if p in POLICIES else classify(seg)
 
 

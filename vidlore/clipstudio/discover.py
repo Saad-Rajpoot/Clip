@@ -41,6 +41,11 @@ _REJECT_TITLE = re.compile(
     r"when i (died|was killed)|gag(s| reel|ging)?|mesmeriz|kissing scene|"
     # parody / BTS / fan-made / fake-future-season / press — NONE are clean in-show scene footage:
     r"the musical|musical (teaser|parody|number)|parod(y|ies)|comedy sketch|sketch comedy|skits?|"
+    # 'Abridged' series are fan parodies with redubbed audio — one satisfied a TRIAL anchor slot
+    # ('Tyrion's Trial 2: Medieval Boogaloo | ... Abridged') because its title shares scene tokens.
+    # Foreign-language re-uploads carry burned subs + dubbed/subbed ASR that poisons quote mining
+    # (plural-safe per the trailing-\b note above):
+    r"abridged|legendado|legendada|subtitulado|sub ita|vostfr|deutsch|dublado|"
     r"set tour|tour the [a-z ]{0,20}set|studio tour|set visit|on the set of|set with the cast|"
     r"concept (trailer|art|teaser)|announcement trailer|teaser concept|fan[- ]?made|fan trailer|"
     r"fan film|fan edit|what if|re-?imagined|ai[- ]?(generated|trailer|concept)|deepfakes?|"
@@ -986,6 +991,51 @@ def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None
                 present.add(kk)
                 added += 1
                 log(f"discover: +anchor '{(sc.get('name') or sc.get('query'))[:34]}' → {c.title[:42]!r}")
+
+    # KEY-SCENE COVERAGE: the script often CITES scenes beyond the anchor(s) — a later confession,
+    # a trial, an origin flashback. Those live in analysis.key_scenes, and until now they had NO
+    # download guarantee: global ranking concentrates on the dominant scene, so the cited-scene
+    # candidates get queried, found… and dropped at the cut. Measured on the Olenna render:
+    # 'Olenna confesses to Jaime' was queried 3× with candidates found, yet 0/45 downloaded
+    # sources contained the confession, and the same starvation left Pycelle's trial testimony
+    # uncovered — the two scenes the script explicitly retells. One source per cited scene, best
+    # candidate first, same token matching as anchors, small bounded overflow.
+    if anchor_qset:
+        import os as _os_ks
+        _ks_extra = int(_os_ks.environ.get("VIDLORE_CLIPSTUDIO_KEYSCENE_COVERAGE", "4") or 4)
+        present = {(c.provider, c.id or c.url) for c in final}
+        _mtoks = [w for w in re.findall(r"\w+", analysis.movie_title.lower()) if len(w) > 2]
+        _anchor_blob = " ".join((sc.get("query", "") + " " + sc.get("name", "")).lower()
+                                for sc in (getattr(analysis, "anchor_scenes", None) or []))
+        added_ks = 0
+        for ks in (getattr(analysis, "key_scenes", None) or []):
+            if added_ks >= _ks_extra:
+                break
+            kst = [w for w in re.findall(r"\w+", str(ks).lower())
+                   if len(w) > 2 and w not in _STOPQ and w not in _mtoks]
+            if not kst:
+                continue
+            # already covered by an anchor scene? (the anchors got their own pass above)
+            if sum(1 for w in set(kst) if w in _anchor_blob) >= max(2, len(set(kst)) - 1):
+                continue
+            covered = any(
+                sum(1 for w in set(kst)
+                    if any(t == w or (t.startswith(w) and len(t) - len(w) <= 2)
+                           for t in re.findall(r"\w+", c.title.lower()))) >= 2
+                for c in final)
+            if covered:
+                continue
+            best = next((c for c in sorted(kept, key=lambda c: (c.anchor_verified, c.relevance),
+                                           reverse=True)
+                         if (c.provider, c.id or c.url) not in present
+                         and sum(1 for w in set(kst)
+                                 if any(t == w or (t.startswith(w) and len(t) - len(w) <= 2)
+                                        for t in re.findall(r"\w+", c.title.lower()))) >= 2), None)
+            if best is not None:
+                final.append(best)
+                present.add((best.provider, best.id or best.url))
+                added_ks += 1
+                log(f"discover: +key-scene '{str(ks)[:36]}' → {best.title[:42]!r}")
 
     log(f"discover: {len(uniq)} unique → {len(final)} selected "
         f"(rejected {sum(1 for c in uniq if c.reject_reason)})")
