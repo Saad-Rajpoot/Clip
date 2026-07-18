@@ -1048,7 +1048,7 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
         if _tbonus:
             sig["title_affinity"] = round(_tbonus, 3)
         if _era_conf:
-            sig["era_conflict"] = beat_era
+            sig["era_conflict"] = 1.0        # numeric: ledger rounds every signal via float()
         if wrongface:
             sig["wrongface"] = True
         scored.append((base, bonus, sig, ps))

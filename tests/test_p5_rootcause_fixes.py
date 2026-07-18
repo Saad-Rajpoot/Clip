@@ -594,7 +594,10 @@ def test_g1_match_penalizes_declared_conflicting_source():
     order = [x[3].sid for x in sc]
     assert order[0] == "clean", f"declared-conflict source must sink: {order}"
     bot = next(x for x in sc if x[3].sid == "s7pack")
-    assert bot[2].get("era_conflict") == "season 4", "conflict must be reported in signals"
+    assert bot[2].get("era_conflict") == 1.0, "conflict must be reported as a NUMERIC signal"
+    # the ledger rounds every signal via float() — a non-numeric signal killed a full render
+    assert all(isinstance(v, (int, float)) for x in sc for v in x[2].values()), \
+        "every signal value must be numeric (ledger contract)"
     # no beat era → no penalty
     sc2 = _score_pool(seg, pool, None, cfg, set(), title_toks=titles, mv_toks=set(),
                       beat_era="", src_titles=raw_titles)
