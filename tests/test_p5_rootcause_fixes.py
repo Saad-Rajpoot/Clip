@@ -441,6 +441,96 @@ def test_d1_already_tried_shots_are_excluded():
     assert ("trial_full", 0) not in {(c.source_id, c.shot_index) for c in pool}
 
 
+# ---------------------------------------------------------------------------
+# E1 — scene-title affinity in match candidate ranking (match.py _score_pool)
+# ---------------------------------------------------------------------------
+def _pool_shot(sid, idx=0, transcript=""):
+    from vidlore.clipstudio.match import _PoolShot
+    sh = NS(index=idx, start=10.0 * idx, end=10.0 * idx + 6.0, transcript=transcript,
+            face_ids=[], ocr_names=[], ocr_text="", tags=[], quality=0.9,
+            luma_avg=-1, luma_hi=-1, keyframe_path="")
+    return _PoolShot(sid=sid, shot=sh)
+
+
+def test_e1_literal_title_source_outranks_equal_signal_rival():
+    from vidlore.clipstudio.match import _score_pool
+    from vidlore.clipstudio.config import ClipConfig
+    cfg = ClipConfig()
+    seg = _seg("she plucks one of the stones straight off the necklace",
+               visual_policy=policy.EXACT, is_specific_claim=True,
+               scene_query="Example Kingdom queen plucks poison stone from lady's necklace",
+               keywords=[])
+    pool = [_pool_shot("generic_src"), _pool_shot("literal_src", idx=1)]
+    titles = {"generic_src": {"example", "kingdom", "best", "moments"},
+              "literal_src": {"queen", "removes", "poison", "vial", "from", "ladys", "necklace"}}
+    scored = _score_pool(seg, pool, None, cfg, set(), title_toks=titles, mv_toks={"example", "kingdom"})
+    assert scored, "pool must survive the gates"
+    order = [s[3].sid for s in scored]
+    assert order[0] == "literal_src", f"title-affine source must lead on zero other signal: {order}"
+    top = scored[0]
+    assert top[2].get("title_affinity"), "affinity must be reported in signals"
+    assert top[0] == scored[1][0], "affinity must be ranking-only — base (confidence) untouched"
+
+
+def test_e1_generic_beats_and_env_off_get_no_affinity():
+    import os
+    from vidlore.clipstudio.match import _score_pool
+    from vidlore.clipstudio.config import ClipConfig
+    cfg = ClipConfig()
+    titles = {"literal_src": {"queen", "poison", "necklace"}}
+    pool = [_pool_shot("literal_src")]
+    # generic beat → no affinity
+    seg_g = _seg("and everything changed that night", visual_policy="generic_filler",
+                 scene_query="Example Kingdom queen poison necklace", keywords=[])
+    sc = _score_pool(seg_g, pool, None, cfg, set(), title_toks=titles, mv_toks=set())
+    assert not sc[0][2].get("title_affinity"), "generic beats must get no title bonus"
+    # env off → no affinity even on exact beats
+    seg_e = _seg("she plucks the stone", visual_policy=policy.EXACT, is_specific_claim=True,
+                 scene_query="Example Kingdom queen poison necklace", keywords=[])
+    os.environ["VIDLORE_CLIPSTUDIO_TITLE_AFFINITY"] = "0"
+    try:
+        sc = _score_pool(seg_e, pool, None, cfg, set(), title_toks=titles, mv_toks=set())
+        assert not sc[0][2].get("title_affinity"), "env=0 must disable the bonus"
+    finally:
+        del os.environ["VIDLORE_CLIPSTUDIO_TITLE_AFFINITY"]
+
+
+# ---------------------------------------------------------------------------
+# E2 — micro-object context clause in the verifier question (verify.py)
+# ---------------------------------------------------------------------------
+def test_e2_object_beats_get_the_context_clause():
+    from vidlore.clipstudio import verify as V
+    from vidlore.clipstudio import llm as L
+    img = "/tmp/e2_frame.jpg"
+    # tiny valid jpeg
+    import base64
+    Path(img).write_bytes(base64.b64decode(
+        b"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0a"
+        b"HBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAA"
+        b"AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q=="))
+    seen = []
+
+    def fake(**kw):
+        seen.append(kw["messages"][0]["content"][1]["text"])
+        return '{"matches_narration": true, "correct_subject_visible": true, ' \
+               '"wrong_subject_visible": false, "specific_enough": true, "quality_ok": true, ' \
+               '"confidence": 0.9, "verdict": "keep", "reason": "ok"}'
+    orig = L.complete
+    L.complete = fake
+    try:
+        V.verify_frame(img, "she plucks the stone off the necklace", "the poison stone",
+                       "object", [], None, is_specific=True,
+                       expected_visual="close-up of fingers removing a stone")
+        V.verify_frame(img, "the queen watches the king", "Queen Regent",
+                       "character", [], None, is_specific=True)
+    finally:
+        L.complete = orig
+    assert "OBJECT/PROP" in seen[0], "object beats must get the micro-object context clause"
+    assert "wrong scene, wrong characters, or wrong era is still" in seen[0]
+    assert "OBJECT/PROP" not in seen[1], "character beats must keep the strict subject question"
+    assert V.PROMPT_VERSION != "v3-2026-07", "prompt change must bump PROMPT_VERSION (cache identity)"
+
+
 TESTS = [
     test_a1_connectors_demote_to_abstract,
     test_a1_specific_beats_keep_their_labels,
@@ -462,6 +552,9 @@ TESTS = [
     test_d1_venue_pool_from_anchor_affine_sources,
     test_d1_no_scene_query_or_no_anchor_overlap_is_empty,
     test_d1_already_tried_shots_are_excluded,
+    test_e1_literal_title_source_outranks_equal_signal_rival,
+    test_e1_generic_beats_and_env_off_get_no_affinity,
+    test_e2_object_beats_get_the_context_clause,
 ]
 
 

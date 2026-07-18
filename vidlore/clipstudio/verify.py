@@ -80,11 +80,26 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
            "right). Judge whether the described ACTION actually happens across them — a single frame "
            "cannot prove an action, so require visible progression consistent with the line.\n"
            if multiframe else "")
+    # MICRO-OBJECT beats: 'the poison stone' / 'a vial' / 'a coin' cannot be resolved in a frame,
+    # so demanding the object itself made the verifier reject the beat's OWN scene at every layer
+    # (measured: frames of the exact gem-plucking moment — right characters, right table, necklace
+    # in frame — rejected as "no poison is visible", and the beat release-blocked with the correct
+    # footage downloaded). Ask the answerable question instead: is this the described MOMENT — the
+    # characters who handle the object, the setting, the staging. Wrong scene/characters/era still
+    # fail; this narrows the question, it does not lower the bar.
+    _obj = (
+        "NOTE — the required subject is an OBJECT/PROP that may be too small to resolve in a frame. "
+        "Do NOT demand the object itself be identifiable. Verify the moment's CONTEXT instead: the "
+        "frame must show the described scene — the right characters, setting and staging for THIS "
+        "moment (see the storyboard above). Set correct_subject_visible=true when the character(s) "
+        "who hold/handle the object are clearly present in the right scene, even if the object is "
+        "not resolvable. A wrong scene, wrong characters, or wrong era is still 'replace'.\n"
+        if "object" in (required_kind or "").lower() else "")
     txt = (
         f'Narration line: "{narration}"\n'
         f"This clip should show: {required_entity or '(a general scene fitting the line)'} "
         f"(kind: {required_kind or 'any'}).\n"
-        + _story + _mf + _rule +
+        + _story + _mf + _rule + _obj +
         f"Automatic Face-ID on this frame detected: {', '.join(faceid_names) if faceid_names else 'none'}.\n\n"
         "For wrong_subject_visible: set true ONLY if a DIFFERENT specific character (clearly NOT the "
         "one this line is about) is the main subject of the frame; set false for a wide / crowd / "
@@ -116,7 +131,7 @@ _SEASON_RX = re.compile(
 
 # Bump whenever the verifier PROMPT or its JSON contract changes: a verdict is only reusable if it
 # was produced by the same question. Part of the fingerprint below.
-PROMPT_VERSION = "v3-2026-07"
+PROMPT_VERSION = "v4-2026-07"          # v4: micro-OBJECT context clause (E2) — see verify_frame
 # Bump when the contact-sheet SAMPLING changes (frame count/positions/layout). The sheet is the
 # image the verifier judges, so a different sampling is a different question even for the same shot.
 SHEET_VERSION = "sheet-v1-startmidend"

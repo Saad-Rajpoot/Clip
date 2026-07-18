@@ -898,9 +898,34 @@ def _ocr_text_heavy(shot) -> bool:
 def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipConfig,
                 face_targets: set, anchor_sids: set | None = None,
                 anchor_bonus: float = 0.0,
-                all_faces: set | None = None) -> list[tuple[float, float, dict, _PoolShot]]:
+                all_faces: set | None = None,
+                title_toks: dict | None = None,
+                mv_toks: set | None = None) -> list[tuple[float, float, dict, _PoolShot]]:
     import numpy as np
     import os
+    # SCENE-TITLE AFFINITY (ranking-only, the same decoupling as the anchor-continuity bonus).
+    # CLIP + transcript are blind to MICRO-moments: a beat about plucking a tiny stone off a
+    # necklace has no distinctive thumbnail (the action is 1-2s and the object centimetres wide)
+    # and the scene is near-silent, so neither signal fires — measured: a source whose TITLE
+    # literally named the beat's action (4 shared scene-query tokens) never entered the beat's
+    # alternates, and the beat release-blocked while the right footage sat downloaded in the pool.
+    # An uploader's title is human scene-labeling — use it: shots from a source whose title shares
+    # >=2 scene-specific query tokens get a small ranking bonus (kept OUT of `base`, so reported
+    # confidence is undistorted). Specific/exact beats only; env VIDLORE_CLIPSTUDIO_TITLE_AFFINITY=0
+    # disables.
+    _aff = _f_env("VIDLORE_CLIPSTUDIO_TITLE_AFFINITY", 0.12)
+    _sq_toks: set = set()
+    if _aff > 0 and title_toks and (
+            (getattr(seg, "visual_policy", "") or "") == "exact_scene"
+            or bool(getattr(seg, "is_specific_claim", False))):
+        import re as _re_ta
+        try:
+            from .discover import _STOPQ as _TA_STOP
+        except Exception:
+            _TA_STOP = set()
+        _sq_toks = {w for w in _re_ta.findall(
+                        r"[a-z']+", (getattr(seg, "scene_query", "") or "").lower())
+                    if len(w) > 2 and w not in (mv_toks or set()) and w not in _TA_STOP}
     gate_on = os.environ.get("VIDLORE_CLIPSTUDIO_OCR_GATE", "1").strip() not in ("0", "false", "no", "")
     tgate_on = os.environ.get("VIDLORE_CLIPSTUDIO_TEXT_GATE", "1").strip() not in ("0", "false", "no", "")
     subband_on = os.environ.get("VIDLORE_CLIPSTUDIO_SUBBAND_GATE", "1").strip() \
@@ -971,6 +996,15 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
         # out of `base` so a zero-signal anchor shot can't report 0.45 confidence and dodge the
         # low-confidence review flag.
         bonus = anchor_bonus if (anchor_bonus and anchor_sids and ps.sid in anchor_sids) else 0.0
+        _tbonus = 0.0
+        if _sq_toks:
+            _tw = (title_toks or {}).get(ps.sid) or set()
+            _thits = sum(1 for w in _sq_toks
+                         if any(t == w or (t.startswith(w) and len(t) - len(w) <= 2)
+                                for t in _tw))
+            if _thits >= 2:
+                _tbonus = _aff * min(_thits, 4) / 4.0
+                bonus += _tbonus
         # SOFT preference for clean frames: a burned-in source dialogue subtitle (readable on-frame
         # text that survived the junk-gate) clashes with our own narration caption. Small penalty so
         # a clean frame wins a near-tie, but a subtitled frame still wins if it's clearly more
@@ -988,6 +1022,8 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
                "quality": round(ps.shot.quality, 3)}
         if bonus:
             sig["anchor_bonus"] = round(bonus, 3)
+        if _tbonus:
+            sig["title_affinity"] = round(_tbonus, 3)
         if wrongface:
             sig["wrongface"] = True
         scored.append((base, bonus, sig, ps))
@@ -1372,8 +1408,13 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
             except Exception:
                 text_vec = None
         face_targets = _face_targets(seg, char2actor)
+        _ta_titles = {src.id: set(re.findall(r"[a-z']+", (src.title or "").lower()))
+                      for src in proj.sources}
+        _ta_mv = {w for w in re.findall(
+                      r"[a-z']+", (((getattr(proj, "meta", None) or {}).get("analysis", {}) or {})
+                                   .get("movie_title", "") or "").lower()) if len(w) > 2}
         scored = _score_pool(seg, pool, text_vec, cfg, face_targets, anchor_sids, anchor_bonus,
-                             all_faces=all_faces)
+                             all_faces=all_faces, title_toks=_ta_titles, mv_toks=_ta_mv)
 
         # `base` = match QUALITY (drives the reported confidence + flagging).
         # `adj`  = base + anchor bonus minus diversity penalties (drives only WHICH is picked).
