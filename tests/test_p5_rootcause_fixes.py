@@ -184,7 +184,8 @@ def test_b2_anchor_covered_key_scene_adds_nothing():
 # B1 + B3 — breakout fixes (build.py _select_breakouts)
 # ---------------------------------------------------------------------------
 def _breakout_fixture(*, quote, asr, seg0_text, llm_reply=None, face_ids=(),
-                      luma=80.0, characters=None, aired=None, env=None, seg_idx=0):
+                      luma=80.0, characters=None, aired=None, env=None, seg_idx=0,
+                      work_dir=None):
     from vidlore.clipstudio import build as B
     from vidlore.clipstudio import llm as L
     import vidlore.clipstudio.index as _idxmod
@@ -230,7 +231,7 @@ def _breakout_fixture(*, quote, asr, seg0_text, llm_reply=None, face_ids=(),
     saved = {k: os.environ.get(k) for k in envset}
     try:
         os.environ.update(envset)
-        out = B._select_breakouts(proj, segs, 200.0, Path("/tmp"),
+        out = B._select_breakouts(proj, segs, 200.0, work_dir or Path("/tmp"),
                                   lambda m: logs.append(str(m)))
     finally:
         _idxmod.load_shots = _orig_ls
@@ -651,28 +652,34 @@ def test_q1_qa_failures_persist_and_exclude():
         work, [{"breakout": "What gold is an empty cup? Fill it.",
                 "reason": "final-mix ordered coverage 0.25 < 0.30", "start": 331.0}],
         lambda m: logs.append(m))
-    d = json.loads((work / "breakout_qa_exclude.json").read_text())
+    # persisted OUTSIDE the work dir — the build wipes work/ at startup, which is exactly how
+    # the first version of this fix silently failed on a real render
+    xf = work.parent / "breakout_qa_exclude.json"
+    d = json.loads(xf.read_text())
+    assert not (work / "breakout_qa_exclude.json").exists(), \
+        "exclusions must NOT live inside the wiped work dir"
     assert d["exclude"] and _norm_bk_line(d["exclude"][0]["line"]) == \
         _norm_bk_line("What GOLD is an empty cup?  Fill it"), "identity must be normalization-stable"
     # append is idempotent
     _persist_breakout_qa_exclusions(
         work, [{"breakout": "What gold is an empty cup? Fill it.", "reason": "x", "start": 1}],
         lambda m: None)
-    assert len(json.loads((work / "breakout_qa_exclude.json").read_text())["exclude"]) == 1
+    assert len(json.loads(xf.read_text())["exclude"]) == 1
     # selection honors the exclusion: the same located line is dropped with its own counter
     import shutil
-    accept_work = Path("/tmp")
-    (accept_work / "breakout_qa_exclude.json").write_text(json.dumps(
+    qa_root = Path(tempfile.mkdtemp())
+    qa_work = qa_root / "work"
+    qa_work.mkdir()
+    (qa_root / "breakout_qa_exclude.json").write_text(json.dumps(
         {"exclude": [{"line": "Seize him. Cut his throat."}]}))
-    try:
-        out, logs2, _ = _breakout_fixture(
-            quote="Seize him. Cut his throat.", asr=_SC,
-            seg0_text="the narration describes the arrest",
-            env={"VIDLORE_CLIPSTUDIO_QUOTE_CORRECT": "0"})
-        assert not any(o["seg_index"] == 0 for o in out), "excluded line must not air"
-        assert "post-render QA (excluded)" in logs2
-    finally:
-        (accept_work / "breakout_qa_exclude.json").unlink(missing_ok=True)
+    out, logs2, _ = _breakout_fixture(
+        quote="Seize him. Cut his throat.", asr=_SC,
+        seg0_text="the narration describes the arrest",
+        env={"VIDLORE_CLIPSTUDIO_QUOTE_CORRECT": "0"}, work_dir=qa_work)
+    assert not any(o["seg_index"] == 0 for o in out), "excluded line must not air"
+    assert "post-render QA (excluded)" in logs2
+    assert "honors 1 post-render-QA exclusion" in logs2
+    shutil.rmtree(qa_root, ignore_errors=True)
     shutil.rmtree(work.parent, ignore_errors=True)
 
 

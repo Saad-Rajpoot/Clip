@@ -1032,7 +1032,7 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     _qa_excl: set = set()
     try:
         import json as _json_qx
-        _qxf = work / "breakout_qa_exclude.json"
+        _qxf = work.parent / "breakout_qa_exclude.json"   # output/, survives the work-dir wipe
         if _qxf.exists():
             _qa_excl = {_norm_bk_line(e.get("line", ""))
                         for e in (_json_qx.loads(_qxf.read_text(encoding="utf-8")) or {})
@@ -2715,7 +2715,11 @@ def _persist_breakout_qa_exclusions(work: Path, problems: list, log) -> None:
     re-run's own post-render QA still applies to whatever airs."""
     import json as _json_px
     try:
-        xf = work / "breakout_qa_exclude.json"
+        # work.parent (output/), NOT work/: the build WIPES the work dir at startup, so an
+        # exclusion stored there died before the very selection it was meant to steer — the same
+        # breakout re-aired and re-quarantined. breakout_qa_failures.json lives at output/ for the
+        # same reason.
+        xf = work.parent / "breakout_qa_exclude.json"
         prev = []
         if xf.exists():
             prev = (_json_px.loads(xf.read_text(encoding="utf-8")) or {}).get("exclude", [])
