@@ -1229,21 +1229,41 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
                              "then click Resume",
                      "down": "the vision backend is unreachable — check your connection, then "
                              "click Resume"}.get(_kind, "restore the vision backend, then Resume")
-            log(f"⛔ VISION BACKEND UNAVAILABLE ({_kind}) — {_err}/{_att} beats could not be "
-                f"verified. {_hint}. Verify was NOT checkpointed, so Resume re-verifies "
-                f"(no re-download / re-index / re-match).")
-            from .verify import VisionBackendError
-            raise VisionBackendError(
-                f"vision backend unavailable ({_kind}): {_err}/{_att} exact-scene beats could not "
-                f"be verified. {_hint}.", kind=_kind)
-        _stage_done(proj, "verify", _sig_verify)
+            # NEVER checkpoint an errored verify (so Resume re-verifies once the backend is back),
+            # and NEVER grind the image-fallback stage against a dead API (raising below / the
+            # _verify_down guard on stage 8a/8b both skip it — hours → seconds).
+            _review = _os_pf0.environ.get("VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE", "block") \
+                .strip().lower() == "warn"
+            if _review:
+                # explicit review-draft: the user asked for a watchable draft anyway. Proceed to
+                # assembly, which in warn mode airs the CLIP/Face-ID/transcript-matched footage
+                # LOUDLY flagged 'not vision-verified · not for publication'. Grind still skipped.
+                log(f"⚠ VISION BACKEND UNAVAILABLE ({_kind}) — {_err}/{_att} beats unverified; "
+                    f"REVIEW DRAFT mode airs matched footage flagged (not for publication). "
+                    f"{_hint} for a verified build.")
+            else:
+                log(f"⛔ VISION BACKEND UNAVAILABLE ({_kind}) — {_err}/{_att} beats could not be "
+                    f"verified. {_hint}. Verify was NOT checkpointed, so Resume re-verifies "
+                    f"(no re-download / re-index / re-match).")
+                from .verify import VisionBackendError
+                raise VisionBackendError(
+                    f"vision backend unavailable ({_kind}): {_err}/{_att} exact-scene beats could "
+                    f"not be verified. {_hint}.", kind=_kind)
+        else:
+            _stage_done(proj, "verify", _sig_verify)
 
     # 8a/8b — BOUNDED RECOVERY + IMAGE FALLBACK. Grouped under ONE 'recover' checkpoint: on resume
     # with unchanged inputs both are skipped (their outcomes — recovered footage, installed stills —
     # are already persisted on the selections). This is the expensive tail (rediscovery + web-image
     # verification) that a content-blocked render should never repeat just to re-block at assembly.
     import os as _os
-    if _skip_recover:
+    if _verify_down:
+        # the vision backend is dead — recovery re-verification and web-still verdicts would ALL
+        # come back 'unverified' (measured: ~6.8h of doomed stills). Skip the whole grind; the
+        # matched footage stands and the warn-mode assembly airs it flagged.
+        log("8a/8b · recovery + image fallback — ⏭ skipped (vision backend down; would only "
+            "produce unverified stills)")
+    elif _skip_recover:
         log("8a/8b · recovery + image fallback — ↻ skipped (resume, outcomes cached)")
     else:
         # 8a — BOUNDED AUTONOMOUS RECOVERY (R4-5): for exact beats the verifier could NOT satisfy, try
