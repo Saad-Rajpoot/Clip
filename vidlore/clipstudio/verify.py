@@ -818,6 +818,89 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 except Exception:
                     pass
 
+    # CONCURRENT VERDICT PREFETCH — the wall-clock fix for the verify stage. The decision loop
+    # below is inherently serial (reuse ledger, breaker, repair promotions share state), but the
+    # EXPENSIVE part — one vision call per beat — has no cross-beat dependency at all. Measured:
+    # ~148 serial calls ≈ 25-90 min of the render. This pass computes each pending selection's
+    # fingerprint (the SAME derivation as the loop below — keep them in sync) and warms the verdict
+    # cache with a small worker pool; the serial loop then hits cache. Failure semantics are
+    # UNCHANGED: a failed prefetch simply isn't cached, so the serial loop re-asks with its own
+    # retry/backoff and the circuit breaker still governs; a burst of prefetch failures aborts the
+    # prefetch early and leaves everything to the serial path. Sheet-prediction rule preserved
+    # (store only when used_sheet == want_sheet).
+    #
+    # OPT-IN (default 1 = off): the breaker/outage suites encode EXACT call-count contracts for
+    # the serial path ("stop after 8 consecutive errors"); a default-on pool would change those
+    # counts under failure. Concurrency here is a turbo switch, like MAX_CPU — the portal/runners
+    # enable it explicitly with VIDLORE_CLIPSTUDIO_VERIFY_WORKERS=4.
+    import os as _os_pf
+    try:
+        _pf_workers = int(_os_pf.environ.get("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", "1") or 1)
+    except (TypeError, ValueError):
+        _pf_workers = 1
+    if _pf_workers > 1 and not _breaker_open:
+        _pending = []
+        for sel in proj.selections:
+            if _subset is not None and sel.segment_index not in _subset:
+                continue
+            if not sel.source_id:
+                continue
+            seg = by_idx.get(sel.segment_index)
+            if seg is None:
+                continue
+            shot = get_shot(sel.source_id, sel.shot_index)
+            if shot is None:
+                continue
+            kf = shot.keyframe_path if shot else ""
+            faceid_names = (shot.face_ids if shot else []) or ([sel.identity] if sel.identity else [])
+            _exact = _policy.verify_strict(seg)
+            _src_obj = proj.source(sel.source_id)
+            _want_sheet = _will_sheet(shot, _exact)
+            _fp = verdict_fingerprint(
+                src_hash=_src_hash_of(_src_obj), source_id=sel.source_id or "",
+                shot_start=getattr(shot, "start", 0.0), shot_end=getattr(shot, "end", 0.0),
+                beat_text=getattr(seg, "text", ""),
+                required_entity=getattr(seg, "required_entity", ""),
+                required_kind=getattr(seg, "required_kind", ""),
+                expected_visual=getattr(seg, "expected_visual", "") or "",
+                scene_query=getattr(seg, "scene_query", "") or "",
+                era=_era_of(seg), visual_policy=_policy.policy_of(seg), is_specific=_exact,
+                faceid_names=faceid_names, multiframe=_want_sheet,
+                image_id=_image_id(kf, shot, _want_sheet), model=_vmodel)
+            _c0 = _vcache.get(_fp)
+            if _fp and (_c0 is None or not _verdict_schema_ok(_c0)):
+                _pending.append((_fp, seg, shot, kf, faceid_names, _exact, _want_sheet))
+        if _pending:
+            log(f"verify: prefetching {len(_pending)} fresh verdict(s) "
+                f"({_pf_workers} workers; serial decisions unchanged)")
+            import concurrent.futures as _cf
+            _pf_fail = _pf_ok = 0
+            with _cf.ThreadPoolExecutor(max_workers=_pf_workers) as _ex:
+                _futs = {_ex.submit(_verify_ctx, kf9, shot9, seg9, ex9, fids9):
+                         (fp9, ws9)
+                         for (fp9, seg9, shot9, kf9, fids9, ex9, ws9) in _pending}
+                for _fu in _cf.as_completed(_futs):
+                    _fp9, _ws9 = _futs[_fu]
+                    try:
+                        _v9, _us9 = _fu.result()
+                    except Exception:                     # noqa: BLE001
+                        _v9, _us9 = None, _ws9
+                    if _v9 is not None and _us9 == _ws9 \
+                            and _verdict_schema_ok({**_v9, "status": "ok"}):
+                        _vcache[_fp9] = {k: val for k, val in _v9.items() if k != "reused"}
+                        _pf_ok += 1
+                        _pf_fail = 0
+                    else:
+                        _pf_fail += 1
+                        if _pf_fail >= VERIFIER_BREAKER_TRIP:
+                            for _f2 in _futs:
+                                _f2.cancel()
+                            log("verify: prefetch aborted — repeated transport failures; the "
+                                "serial loop (and its circuit breaker) takes over")
+                            break
+            log(f"verify: prefetch warmed {_pf_ok}/{len(_pending)} verdict(s)")
+            _save_verdict_cache(proj, _vcache)
+
     for sel in proj.selections:
         if _subset is not None and sel.segment_index not in _subset:
             continue                           # recovery pass: verify only the re-matched beats
