@@ -146,20 +146,28 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
         # nothing left to reject and the render published. `retryable` is persisted so no driver
         # (or human watching the portal) has to infer that from a message string.
         try:
-            from .verify import NonRetryableBuildError as _NRB
+            from .verify import NonRetryableBuildError as _NRB, VisionBackendError as _VBE
             _content = isinstance(e, _NRB)
+            _vision = isinstance(e, _VBE)
         except Exception:
-            _content = False
+            _content = _vision = False
         with _LOCK:
             j = _JOBS[jid]
             j["done"] = True
             j["finished"] = time.time()
             j["ok"] = False
             j["error"] = str(e)[:600]
-            j["status"] = "content_failure" if _content else "error"
-            j["retryable"] = not _content
+            # VISION-OUTAGE is its own status: NOT a content failure (footage may be fine, nobody
+            # could check it) and IS retryable — once the API backend/billing is restored, Resume
+            # re-verifies and completes. It must never read as 'footage gap'.
+            j["status"] = ("vision_down" if _vision else
+                           "content_failure" if _content else "error")
+            j["retryable"] = _vision or (not _content)
             j["error_type"] = type(e).__name__
-            j["log"].append(("CONTENT FAILURE (not retryable): " if _content else "FATAL: ")
+            if _vision:
+                j["vision_kind"] = getattr(e, "kind", "down")
+            j["log"].append(("VISION BACKEND UNAVAILABLE (retryable once restored): " if _vision else
+                             "CONTENT FAILURE (not retryable): " if _content else "FATAL: ")
                             + str(e)[:300])
         # full traceback (absolute paths) only to the server console, not the browser
         traceback.print_exc()
@@ -339,14 +347,22 @@ def _job_page(jid: str) -> str:
          (j.summary&&j.summary.segments?(j.summary.segments+' scenes'):'')+'</div>';}
        else{
          var content=(j.status==='content_failure');
-         document.getElementById('ph').textContent=content?'footage gap ✗':'failed ✗';
+         var vision=(j.status==='vision_down');
+         document.getElementById('ph').textContent=vision?'vision API unavailable ✗':(content?'footage gap ✗':'failed ✗');
          var h='<div style="margin-top:10px">';
-         h+='<a class=dl href="#" onclick="return retryResume()">↻ Resume / retry from where it failed</a>';
-         if(content){
-           h+='<a class=dl style="background:#8b6f1a;color:#fff;margin-left:8px" href="#" onclick="return retryDraft()">▶ Build a review draft anyway</a>';
-           h+='<div class=brain>Some beats have no proven footage. “Resume” re-checks fast — finished stages (index/match/verify) are not redone. “Review draft” airs those beats flagged for manual review — not for publication.</div>';
+         if(vision){
+           var vk=j.vision_kind||'down';
+           var msg=(vk==='billing')?'The AI vision service is out of credits, so footage could not be verified. Top up billing (Gemini AI Studio or Anthropic), then click Resume — it re-verifies only (no re-download / re-index / re-match).':(vk==='auth')?'The vision API key is invalid or unauthorized. Fix it in .env, then click Resume.':'The vision backend was unreachable. Check your connection, then click Resume.';
+           h+='<a class=dl href="#" onclick="return retryResume()">↻ Resume (re-verify)</a>';
+           h+='<div class=brain>'+msg+'</div>';
          }else{
-           h+='<div class=brain>Resume continues from the failed stage — completed stages are skipped, not redone.</div>';
+           h+='<a class=dl href="#" onclick="return retryResume()">↻ Resume / retry from where it failed</a>';
+           if(content){
+             h+='<a class=dl style="background:#8b6f1a;color:#fff;margin-left:8px" href="#" onclick="return retryDraft()">▶ Build a review draft anyway</a>';
+             h+='<div class=brain>Some beats have no proven footage. “Resume” re-checks fast — finished stages (index/match/verify) are not redone. “Review draft” airs those beats flagged for manual review — not for publication.</div>';
+           }else{
+             h+='<div class=brain>Resume continues from the failed stage — completed stages are skipped, not redone.</div>';
+           }
          }
          h+='</div>';
          document.getElementById('dl').innerHTML=h;

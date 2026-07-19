@@ -249,6 +249,7 @@ def test_produce_auto_resume_skips_completed_stages_end_to_end():
     matching — not just the helper units."""
     from vidlore.clipstudio import analyze as AN, discover as DS, download as DL
     from vidlore.clipstudio import faceid as FI, verify as VF, review as RV, index as IX, ledger as LG
+    from vidlore.clipstudio import llm as LM
     from vidlore.clipstudio.analyze import ScriptAnalysis
 
     calls = {}
@@ -288,6 +289,7 @@ def test_produce_auto_resume_skips_completed_stages_end_to_end():
         (FI, "available", lambda: False),
         (IX, "clip_available", lambda: True),
         (VF, "verify_and_repair", lambda *a, **k: _count("verify")),
+        (LM, "vision_probe", lambda *a, **k: (True, "ok")),   # healthy backend → preflight passes
         (RV, "write_review", lambda *a, **k: "review.html"),
         (LG, "finalize", lambda proj, segs, cfg: {"flagged_for_review": 0, "segments": len(segs),
                                                   "mean_confidence": 1.0}),
@@ -328,7 +330,118 @@ def test_produce_auto_resume_skips_completed_stages_end_to_end():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_vision_error_classifier():
+    from vidlore.clipstudio import llm
+    assert llm.classify_vision_error("429 RESOURCE_EXHAUSTED prepayment credits are depleted") == "billing"
+    assert llm.classify_vision_error("Your credit balance is too low to access the API") == "billing"
+    assert llm.classify_vision_error("insufficient_quota") == "billing"
+    assert llm.classify_vision_error("401 invalid api key") == "auth"
+    assert llm.classify_vision_error("permission denied 403") == "auth"
+    assert llm.classify_vision_error("connection reset / timeout") == "transient"
+    assert llm.classify_vision_error("503 model overloaded") == "transient"
+
+
+def test_vision_backend_error_is_retryable_and_distinct():
+    from vidlore.clipstudio.verify import VisionBackendError, NonRetryableBuildError
+    e = VisionBackendError("out of credits", kind="billing")
+    assert e.kind == "billing"
+    # a vision outage is INFRA (retryable once restored), NOT a content verdict
+    assert not isinstance(e, NonRetryableBuildError)
+    assert isinstance(e, RuntimeError)
+
+
+def test_vision_outage_does_not_checkpoint_verify_and_skips_the_grind():
+    """When verify reports the backend down (breaker open), produce_auto must: raise
+    VisionBackendError, NOT checkpoint verify as done (so Resume re-runs it), and NEVER run the
+    image-fallback grind. This is the exact failure the user hit: hours of doomed stills + a
+    Resume that skipped the dead verify and re-hit the wall."""
+    from vidlore.clipstudio import analyze as AN, discover as DS, download as DL
+    from vidlore.clipstudio import faceid as FI, verify as VF, review as RV, index as IX, ledger as LG
+    from vidlore.clipstudio import llm as LM
+    from vidlore.clipstudio.analyze import ScriptAnalysis
+    from vidlore.clipstudio.verify import VisionBackendError
+
+    calls = {}
+    def _count(n): calls[n] = calls.get(n, 0) + 1
+
+    def fake_analyze(script_text, **k):
+        _count("analyze")
+        return ScriptAnalysis(topic="t", movie_title="Movie", video_type="multi_scene",
+                              actors=["Actor"], characters=[]), [_seg(0, "throne room", "tyrion")]
+
+    def fake_download(proj, candidates, cfg, **k):
+        proj.sources = [SourceVideo(id="srcA", url="https://y/1", local_path="/tmp/x.mp4",
+                                    title="Scene", duration=60.0, status="ok")]
+
+    def fake_match(proj, segs, cfg, **k):
+        proj.selections = [_sel(s.index, "srcA") for s in segs]
+
+    # verify reports the backend DOWN (breaker open) — the outage signature
+    def fake_verify(proj, segs, cfg, eng, **k):
+        _count("verify")
+        return {"verified": 0, "errored": 178, "attempted": 178, "verifier_down": True,
+                "available": True, "verified_frac": 0.0}
+
+    patches = [
+        (AN, "analyze_script", fake_analyze),
+        (DS, "discover_sources", lambda a, c, **k: [DS.SourceCandidate(url="https://y/1", id="srcA", title="Scene")]),
+        (DL, "download_candidates", fake_download),
+        (FI, "available", lambda: False),
+        (IX, "clip_available", lambda: True),
+        (VF, "verify_and_repair", fake_verify),
+        (LM, "vision_probe", lambda *a, **k: (False, "billing")),   # preflight + classify both see billing
+        (RV, "write_review", lambda *a, **k: "review.html"),
+        (LG, "finalize", lambda proj, segs, cfg: {"segments": len(segs), "mean_confidence": 1.0}),
+        (O, "index_all", lambda *a, **k: None),
+        (O, "match_segments", fake_match),
+        (O, "cut_all", lambda *a, **k: 0),
+        (O, "build_video", lambda *a, **k: _count("build")),
+        (O, "_recover_unresolved_beats", lambda *a, **k: _count("recover")),
+        (O, "_fill_image_fallbacks", lambda *a, **k: _count("fallback")),
+        (O, "_purge_unwanted_sources", lambda *a, **k: 0),
+    ]
+    saved = [(m, n, getattr(m, n, None)) for m, n, _ in patches]
+    tmp = tempfile.mkdtemp()
+    try:
+        for m, n, fn in patches:
+            setattr(m, n, fn)
+        kw = dict(topic="t", script_text="a real script line", movie_hint="Movie",
+                  policy="approved_testing", max_sources=4, do_build=True, verify=True)
+        raised = None
+        try:
+            O.produce_auto(tmp, **kw)
+        except VisionBackendError as e:
+            raised = e
+        assert raised is not None, "a vision outage must raise VisionBackendError"
+        assert raised.kind == "billing"
+        assert calls.get("build", 0) == 0, "assembly must NOT run after a vision outage"
+        assert calls.get("fallback", 0) == 0, "the image-fallback grind must be SKIPPED on outage"
+        assert calls.get("recover", 0) == 0, "recovery must be skipped on outage"
+        # verify was NOT checkpointed → a resume re-runs it (does not skip the dead verify)
+        p = ClipProject.load(tmp)
+        assert O._ckpt(p)["stages"].get("verify") is None, \
+            "an errored verify must NOT checkpoint as done, or Resume would skip it forever"
+    finally:
+        for m, n, orig in saved:
+            if orig is not None:
+                setattr(m, n, orig)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_preflight_and_outage_wiring_present():
+    src = open(os.path.join(ROOT, "vidlore", "clipstudio", "orchestrate.py"), encoding="utf-8").read()
+    assert "vision_probe" in src and "VISION PREFLIGHT" in src, "preflight probe must be wired"
+    assert "verifier_down" in src, "the post-verify outage path must be handled"
+    web = open(os.path.join(ROOT, "vidlore", "clipstudio", "web.py"), encoding="utf-8").read()
+    assert "vision_down" in web and "VisionBackendError" in web, "portal must map the outage status"
+    assert "vision_kind" in web
+
+
 TESTS = [
+    test_vision_error_classifier,
+    test_vision_backend_error_is_retryable_and_distinct,
+    test_vision_outage_does_not_checkpoint_verify_and_skips_the_grind,
+    test_preflight_and_outage_wiring_present,
     test_signature_is_stable_and_sensitive,
     test_stage_skip_only_when_resuming_matching_and_artifact_present,
     test_checkpoint_version_bump_invalidates_old_records,

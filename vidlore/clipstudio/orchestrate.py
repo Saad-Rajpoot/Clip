@@ -1006,6 +1006,7 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
     from . import faceid as _faceid
     from . import verify as _verify
     from . import review as _review
+    from . import llm as _llm
 
     cfg = cfg or load_clip_config()
     eng = engine_config()
@@ -1072,6 +1073,30 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
         _stage_done(proj, "analyze", _sig_analyze)
         log(f"  movie={analysis.movie_title!r} · {len(analysis.actors)} actors · {len(segs)} beats")
         log(f"  beat policy → " + " · ".join(f"{k}:{v}" for k, v in sorted(_tally.items())))
+
+    # PREFLIGHT VISION HEALTH — fail in SECONDS, not after ~1.5h of discover/download/index/match,
+    # when footage verification is impossible up front. Footage QC is a hard requirement (an exact
+    # beat that can't be verified release-blocks), so a dead vision backend dooms the render before
+    # it starts. Only a HARD outage (billing/auth) aborts here; a transient blip proceeds and the
+    # per-beat breaker handles it. Skipped when verify is off or when resuming past a good verify.
+    # Only on a FRESH render (not a resume — the resume path's own verify re-run + the post-verify
+    # outage detector cover that case; the skip signatures aren't computed until after download).
+    import os as _os_pf0
+    if verify and not resume and _os_pf0.environ.get(
+            "VIDLORE_CLIPSTUDIO_VISION_PREFLIGHT", "1").strip() not in ("0", "false", "no"):
+        try:
+            _pf_ok, _pf_kind = _llm.vision_probe(eng)
+        except Exception:
+            _pf_ok, _pf_kind = True, "ok"                 # never let the probe itself kill a render
+        if not _pf_ok and _pf_kind in ("billing", "auth"):
+            _pf_hint = ("the vision API is OUT OF CREDITS — top up billing (Gemini AI Studio or "
+                        "Anthropic), then run again" if _pf_kind == "billing" else
+                        "the vision API key is invalid/unauthorized — fix it in .env, then run again")
+            log(f"⛔ VISION PREFLIGHT FAILED ({_pf_kind}) — {_pf_hint}. Stopping now (before "
+                f"downloading/indexing) so no time is wasted on a render that cannot be verified.")
+            from .verify import VisionBackendError
+            raise VisionBackendError(
+                f"vision backend unavailable ({_pf_kind}): {_pf_hint}.", kind=_pf_kind)
 
     # 2 — discover. The ranked head of the returned list = the requested download budget;
     # entity-coverage + anchor force-includes are APPENDED past it by discover, so the
@@ -1176,11 +1201,41 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
         _stage_done(proj, "cut", _sig_cut)
 
     # 8 — AI verify + repair
+    _verify_down = False
     if verify and _skip_verify:
         log("8/9 · AI verify + repair — ↻ skipped (resume, verdicts cached)")
     elif verify:
         log("8/9 · AI verify + repair")
-        _verify.verify_and_repair(proj, segs, cfg, eng, progress=progress)
+        _vres = _verify.verify_and_repair(proj, segs, cfg, eng, progress=progress) or {}
+        # VISION-BACKEND OUTAGE (billing / bad key / persistent down): the whole stage errored, so
+        # every exact beat is unresolved. Do NOT checkpoint this stage 'done' — that made a later
+        # Resume SKIP verify and re-hit the block forever. Do NOT grind hours of image-fallback
+        # against a dead API (measured: ~6.8h of 'unverified' stills). Fail FAST + retryable with an
+        # actionable message; once the backend is restored, Resume re-runs verify and completes.
+        if _vres.get("verifier_down"):
+            _verify_down = True
+            _err = int(_vres.get("errored", 0))
+            _att = int(_vres.get("attempted", 0)) or 1
+            _kind = "down"
+            try:
+                _ok_probe, _kind = _llm.vision_probe(eng)   # classify billing vs auth vs blip
+                if _ok_probe:
+                    _kind = "down"
+            except Exception:
+                _kind = "down"
+            _hint = {"billing": "the vision API is OUT OF CREDITS — top up billing (Gemini AI "
+                                 "Studio or Anthropic), then click Resume",
+                     "auth": "the vision API key is invalid/unauthorized — fix the key in .env, "
+                             "then click Resume",
+                     "down": "the vision backend is unreachable — check your connection, then "
+                             "click Resume"}.get(_kind, "restore the vision backend, then Resume")
+            log(f"⛔ VISION BACKEND UNAVAILABLE ({_kind}) — {_err}/{_att} beats could not be "
+                f"verified. {_hint}. Verify was NOT checkpointed, so Resume re-verifies "
+                f"(no re-download / re-index / re-match).")
+            from .verify import VisionBackendError
+            raise VisionBackendError(
+                f"vision backend unavailable ({_kind}): {_err}/{_att} exact-scene beats could not "
+                f"be verified. {_hint}.", kind=_kind)
         _stage_done(proj, "verify", _sig_verify)
 
     # 8a/8b — BOUNDED RECOVERY + IMAGE FALLBACK. Grouped under ONE 'recover' checkpoint: on resume

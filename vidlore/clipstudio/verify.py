@@ -173,6 +173,22 @@ class NonRetryableBuildError(RuntimeError):
     Retry transient plumbing. Never retry a judgment."""
 
 
+class VisionBackendError(RuntimeError):
+    """The vision backend was UNAVAILABLE (billing/quota exhausted, bad key, or persistent outage),
+    so footage could not be verified. This is INFRASTRUCTURE, not content: unlike a
+    NonRetryableBuildError it IS retryable — once the backend is restored (e.g. API credits topped
+    up), a resume re-runs verification and the render completes. Carries `.kind` in
+    {'billing','auth','down'} so the caller can show an actionable message and mark the job retryable.
+
+    Distinguished so a render never (a) grinds hours of doomed image-fallback against a dead API,
+    (b) checkpoints the errored verify stage as 'done' (which made Resume skip verify and re-hit the
+    same wall), or (c) reports 'footage gap' when the real problem is an unpaid API bill."""
+
+    def __init__(self, message: str, kind: str = "down"):
+        super().__init__(message)
+        self.kind = kind
+
+
 def _file_fingerprint(path) -> str:
     """Content id for a file: a FULL sha256, memoized on disk against (size, mtime).
 

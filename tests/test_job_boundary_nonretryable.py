@@ -125,7 +125,10 @@ def test_portal_status_endpoint_exposes_retryable():
     assert '"status", "retryable", "error_type"' in src, \
         "the portal /status payload must carry the machine-readable outcome"
     assert "NonRetryableBuildError" in src, "the portal job boundary must classify content failures"
-    assert 'j["retryable"] = not _content' in src
+    assert 'j["retryable"] = _vision or (not _content)' in src, \
+        "retryability must cover content failures AND the (retryable) vision-outage case"
+    assert "VisionBackendError" in src and "vision_down" in src, \
+        "the job boundary must classify a vision-backend outage as its own retryable status"
 
 
 TESTS = [
