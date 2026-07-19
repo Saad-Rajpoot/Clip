@@ -57,6 +57,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-build", action="store_true", help="stop after ledger; do not render")
     ap.add_argument("--no-enrich", action="store_true", help="skip the Claude visual-director pass")
     ap.add_argument("--force-index", action="store_true", help="re-index sources even if cached")
+    ap.add_argument("--resume", action="store_true",
+                    help="reuse the project dir and skip stages that already finished with the same "
+                         "inputs (continue a render that died/blocked instead of restarting; auto mode)")
     # --- AUTO mode (topic + script only; no --sources/--add) ---
     ap.add_argument("--topic", default="", help="video topic — enables AUTOMATIC source discovery")
     ap.add_argument("--movie", default="", help="movie name hint (optional; inferred otherwise)")
@@ -80,6 +83,9 @@ def main(argv=None) -> int:
     try:
         if specs:
             # MANUAL mode: user supplied sources
+            if args.resume:
+                print("note: --resume applies to auto mode; manual mode already reuses the project "
+                      "dir (index/download self-skip cached work).", flush=True)
             res = produce(
                 args.project, script_path=args.script, source_specs=specs,
                 name=(args.name or None), theme=args.theme, voice=args.voice, title=args.title,
@@ -101,7 +107,7 @@ def main(argv=None) -> int:
                 voiceover=(args.voiceover or None),
                 voice_provider=args.voice_provider, voice_preset=args.voice_preset,
                 verify=not args.no_verify, do_build=not args.no_build,
-                force_index=args.force_index, progress=_progress,
+                force_index=args.force_index, resume=args.resume, progress=_progress,
             )
     except PipelineError as e:
         print(f"error: {e}", file=sys.stderr, flush=True)

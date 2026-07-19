@@ -67,7 +67,8 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
              script_text: str, voiceover: str | None, max_sources: int, policy: str,
              theme: str, verify: bool, voice_provider: str = "", voice_preset: str = "",
              provider: str = "", ds_model: str = "", turbo: bool = True,
-             captions_enabled: bool = True, caption_style: str = "professional"):
+             captions_enabled: bool = True, caption_style: str = "professional",
+             resume: bool = False, review_mode: bool = False):
     # FULL render log persisted to the project dir — the in-memory buffer keeps only the last 400
     # lines, so window-QC / breakout selection / composed index maps / caption merge / audit remap /
     # assembly-invariant / post-render QA lines scroll off and can never be audited after the fact.
@@ -114,13 +115,17 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
             # produce_auto reads this at construction, so it must be set before that call. Set it
             # explicitly each run (symmetric) so a prior job's choice never bleeds in.
             os.environ["VIDLORE_CLIPSTUDIO_MAX_CPU"] = "1" if turbo else "0"
+            # REVIEW mode = accept the render even if some beats have no proven footage, flagging them
+            # loudly instead of release-blocking. Set symmetrically every run so 'block' (production
+            # default) is restored and a prior review retry never bleeds into a fresh job.
+            os.environ["VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE"] = "warn" if review_mode else "block"
             res = produce_auto(
                 str(project_dir), topic=topic, script_text=script_text, movie_hint=movie_hint,
                 policy=policy, max_sources=max_sources, theme=theme, title=title,
                 captions=bool(captions_enabled), caption_style=caption_style,
                 voiceover=voiceover, use_tts=True, verify=verify, do_build=True,
                 voice_provider=voice_provider, voice_preset=voice_preset,
-                progress=log,
+                resume=resume, progress=log,
             )
         with _LOCK:
             j = _JOBS[jid]
@@ -332,11 +337,31 @@ def _job_page(jid: str) -> str:
          '<a class=dl href="/download/__JID__">⬇ Download MP4</a>'+
          '<div class=brain>'+(j.summary&&j.summary.sources_used?(j.summary.sources_used+' sources · '):'')+
          (j.summary&&j.summary.segments?(j.summary.segments+' scenes'):'')+'</div>';}
-       else{document.getElementById('ph').textContent='failed ✗';}
+       else{
+         var content=(j.status==='content_failure');
+         document.getElementById('ph').textContent=content?'footage gap ✗':'failed ✗';
+         var h='<div style="margin-top:10px">';
+         h+='<a class=dl href="#" onclick="return retryResume()">↻ Resume / retry from where it failed</a>';
+         if(content){
+           h+='<a class=dl style="background:#8b6f1a;color:#fff;margin-left:8px" href="#" onclick="return retryDraft()">▶ Build a review draft anyway</a>';
+           h+='<div class=brain>Some beats have no proven footage. “Resume” re-checks fast — finished stages (index/match/verify) are not redone. “Review draft” airs those beats flagged for manual review — not for publication.</div>';
+         }else{
+           h+='<div class=brain>Resume continues from the failed stage — completed stages are skipped, not redone.</div>';
+         }
+         h+='</div>';
+         document.getElementById('dl').innerHTML=h;
+       }
      }
    }catch(e){}
    setTimeout(poll, done?9999:2500);
  }
+ async function _retry(mode){
+   try{ await fetch('/retry/__JID__'+(mode?('?mode='+mode):''),{method:'POST'}); location.reload(); }
+   catch(e){}
+   return false;
+ }
+ function retryResume(){ return _retry(''); }
+ function retryDraft(){ return _retry('review'); }
  poll();
 </script>""".replace("__JID__", jid)
     return (_PAGE.replace("__BODY__", body).replace("__SCRIPT__", script)
@@ -491,14 +516,52 @@ def create():
                       # per-job caption settings (shown on the status page; no cross-job leakage)
                       "captions_enabled": captions_enabled, "caption_style": caption_style}
 
-    t = threading.Thread(target=_run_job, args=(jid, proj), kwargs=dict(
+    _kw = dict(
         topic=topic, title=topic, movie_hint=movie, script_text=script_text,
         voiceover=vo_path, max_sources=max_sources,
         policy=os.environ.get("VIDLORE_CLIPSTUDIO_PORTAL_POLICY", "approved_testing").strip(),
         theme=theme, verify=verify,
         voice_provider=voice_provider, voice_preset=voice_preset,
         provider=provider, ds_model=ds_model, turbo=turbo,
-        captions_enabled=captions_enabled, caption_style=caption_style), daemon=True)
+        captions_enabled=captions_enabled, caption_style=caption_style)
+    # remember the launch kwargs so "Resume / Retry" can replay this render on the SAME dir with
+    # resume=True (skipping every stage that already finished) instead of starting a fresh job.
+    with _LOCK:
+        _JOBS[jid]["params"] = dict(_kw)
+    t = threading.Thread(target=_run_job, args=(jid, proj), kwargs=_kw, daemon=True)
+    t.start()
+    return redirect(url_for("job", jid=jid))
+
+
+@app.route("/retry/<jid>", methods=["POST"])
+def retry(jid):
+    """Resume a finished-but-failed job on its OWN project dir with resume=True — every stage that
+    already completed (analyze/discover/download/index/match/verify/recover) is skipped, so a render
+    that died or content-blocked continues from where it stopped instead of restarting from zero.
+    ?mode=review re-runs in review mode (accept + flag weak beats) so a footage-gap render still
+    produces a watchable draft."""
+    with _LOCK:
+        j = _JOBS.get(jid)
+        params = (j or {}).get("params")
+        busy = bool(j and not j.get("done"))
+    if j is None or params is None:
+        # params live only in the in-memory registry; an evicted/old job can't be replayed
+        return ("This job is no longer resumable (it aged out of the queue). Start a new render.",
+                410)
+    if busy:
+        return ("This render is still running — let it finish before retrying.", 409)
+    proj = _ROOT / jid
+    if not (proj / "project.json").exists():
+        return ("Nothing to resume — the project state for this job is gone.", 410)
+    review_mode = (request.values.get("mode") or "").strip().lower() == "review"
+    with _LOCK:
+        j.update({"phase": "queued", "done": False, "ok": False, "output": None, "error": "",
+                  "status": "queued", "retryable": True, "error_type": "",
+                  "started": time.time(), "finished": None})
+        j["log"].append(f"↻ resume{' (review mode)' if review_mode else ''} — reusing project, "
+                        f"skipping already-completed stages")
+    t = threading.Thread(target=_run_job, args=(jid, proj),
+                         kwargs={**params, "resume": True, "review_mode": review_mode}, daemon=True)
     t.start()
     return redirect(url_for("job", jid=jid))
 
