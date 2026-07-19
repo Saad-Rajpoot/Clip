@@ -428,6 +428,54 @@ def test_vision_outage_does_not_checkpoint_verify_and_skips_the_grind():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_final_black_gate_honors_review_mode():
+    """The final-video black gate must block in production but WARN+DELIVER in review mode — the
+    same warn-mode contract the footage + unverified-exact gates follow. A 1s dark region must not
+    withhold a 13-min review draft a human is meant to inspect."""
+    import types, tempfile, shutil
+    from pathlib import Path
+    from vidlore.clipstudio import build as B
+    saved = {k: getattr(B, k, None) for k in
+             ("_probe_duration", "_scan_coverage_reason", "_final_timestamp_reachable",
+              "_frame_luma_hi", "ffmpeg_exe")}
+    saved_run = B.subprocess.run
+    tmp = Path(tempfile.mkdtemp()); (tmp / "output").mkdir(); work = tmp / "output" / "work"; work.mkdir()
+    B._probe_duration = lambda p: 600.0
+    B._scan_coverage_reason = lambda *a, **k: None
+    B._final_timestamp_reachable = lambda *a, **k: True
+    B._frame_luma_hi = lambda fp: 10.0                       # every frame dark → sustained-dark run
+    B.ffmpeg_exe = lambda: "/bin/true"
+    def _run(cmd, *a, **k):
+        dest = Path(cmd[-1]).parent; dest.mkdir(parents=True, exist_ok=True)
+        for i in range(20): (dest / f"b_{i:05d}.jpg").write_bytes(b"x")
+        return types.SimpleNamespace(returncode=0)
+    B.subprocess.run = _run
+    try:
+        # BLOCK (production) → raises + quarantines
+        res = tmp / "output" / "fb.mp4"; res.write_bytes(b"v")
+        os.environ["VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE"] = "block"
+        blocked = False
+        try:
+            B._final_video_black_gate(res, work, log=lambda m: None)
+        except RuntimeError:
+            blocked = True
+        assert blocked and not res.exists(), "production must hard-block + quarantine a dark region"
+        # WARN (review draft) → delivers, no raise, logs the warning
+        res2 = tmp / "output" / "fw.mp4"; res2.write_bytes(b"v")
+        os.environ["VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE"] = "warn"
+        logs = []
+        out = B._final_video_black_gate(res2, work, log=logs.append)
+        assert out == res2 and res2.exists(), "review mode must DELIVER the draft, not quarantine"
+        assert any("BLACK-QA (mode=warn" in l for l in logs), "review mode must warn loudly"
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                setattr(B, k, v)
+        B.subprocess.run = saved_run
+        os.environ.pop("VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE", None)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_preflight_and_outage_wiring_present():
     src = open(os.path.join(ROOT, "vidlore", "clipstudio", "orchestrate.py"), encoding="utf-8").read()
     assert "vision_probe" in src and "VISION PREFLIGHT" in src, "preflight probe must be wired"
@@ -441,6 +489,7 @@ TESTS = [
     test_vision_error_classifier,
     test_vision_backend_error_is_retryable_and_distinct,
     test_vision_outage_does_not_checkpoint_verify_and_skips_the_grind,
+    test_final_black_gate_honors_review_mode,
     test_preflight_and_outage_wiring_present,
     test_signature_is_stable_and_sensitive,
     test_stage_skip_only_when_resuming_matching_and_artifact_present,

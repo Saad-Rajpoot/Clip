@@ -4200,8 +4200,28 @@ def _final_video_black_gate(result: Path, work: Path, *, log) -> Path:
     max_fail_frac = _cfg_fb("VIDLORE_CLIPSTUDIO_FINAL_BLACK_MAXFAIL", 0.03)   # strict probe-failure cap
     stride = 0.5
     ff = ffmpeg_exe()
+    # REVIEW-DRAFT consistency: the footage + unverified-exact gates both WARN (not block) under
+    # RELEASE_BLOCK_MODE=warn — the whole point of a review draft is to deliver the imperfect video
+    # so a human can SEE and judge it. A short unusable-dark region is exactly such a "see and fix
+    # that one beat" defect; withholding a 13-min draft over a 1s dark spot is inconsistent and
+    # unhelpful. So in warn mode this gate logs a LOUD warning + records the regions but DELIVERS
+    # the video (no quarantine). Production ('block', the default) is unchanged: hard fail-closed —
+    # a black region never ships to publication.
+    _review_mode = _os5.environ.get("VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE", "block") \
+        .strip().lower() == "warn"
 
     def _blk(reason):
+        try:
+            (work.parent / "final_black_failures.json").write_text(
+                _json_b.dumps({"reason": reason, "floor_luma_hi": floor, "min_dur_s": min_dur},
+                              indent=1), encoding="utf-8")
+        except Exception:
+            pass
+        if _review_mode:
+            log(f"build: ⚠ BLACK-QA (mode=warn, REVIEW BUILD — not for publication) — {reason}. "
+                f"Delivered anyway for review; fix the dark beat before publishing. "
+                f"See final_black_failures.json.")
+            return result
         _q = result.with_name(result.stem + ".FAILED_BLACK_QA" + result.suffix)
         try:
             if _q.exists():
@@ -4210,17 +4230,11 @@ def _final_video_black_gate(result: Path, work: Path, *, log) -> Path:
         except Exception:
             _q = result
         log(f"build: ⛔ RELEASE-BLOCKED — {reason}; quarantined → {_q.name}. See final_black_failures.json.")
-        try:
-            (work.parent / "final_black_failures.json").write_text(
-                _json_b.dumps({"reason": reason, "floor_luma_hi": floor, "min_dur_s": min_dur},
-                              indent=1), encoding="utf-8")
-        except Exception:
-            pass
         raise RuntimeError(f"final-video black gate: {reason} (quarantined at {_q.name})")
 
     dur = _probe_duration(result)
     if dur <= 0:
-        _blk("could not probe the final video duration (fail-closed — cannot verify legibility)")
+        return _blk("could not probe the final video duration (fail-closed — cannot verify legibility)")
     scan = work / "_blackscan"
     try:
         scan.mkdir(exist_ok=True)
@@ -4240,7 +4254,7 @@ def _final_video_black_gate(result: Path, work: Path, *, log) -> Path:
     if _cov is None and not _final_timestamp_reachable(result, dur, ff, scan):
         _cov = f"final timestamp (~{dur:.1f}s) does not decode — tail not covered"
     if _cov is not None:
-        _blk(f"{_cov} — cannot verify legibility to the final timestamp")
+        return _blk(f"{_cov} — cannot verify legibility to the final timestamp")
     lows, fails = [], 0
     for i, fp in enumerate(frames):
         v = _frame_luma_hi(fp)
@@ -4254,7 +4268,7 @@ def _final_video_black_gate(result: Path, work: Path, *, log) -> Path:
     except Exception:
         pass
     if fails > max(1, int(len(frames) * max_fail_frac)):
-        _blk(f"too many unreadable scan probes ({fails}/{len(frames)} > {max_fail_frac:.0%}) — "
+        return _blk(f"too many unreadable scan probes ({fails}/{len(frames)} > {max_fail_frac:.0%}) — "
              f"UNVERIFIED (fail-closed)")
     # group consecutive low frames into runs; a run longer than min_dur is an unusable-dark region
     runs, cur = [], []
@@ -4279,7 +4293,7 @@ def _final_video_black_gate(result: Path, work: Path, *, log) -> Path:
                            "floor_luma_hi": floor, "min_dur_s": min_dur}, indent=1), encoding="utf-8")
     except Exception:
         pass
-    _blk(f"{len(bad)} sustained unusable-dark region(s) (first {bad[0][0]:.1f}-{bad[0][1]:.1f}s, "
+    return _blk(f"{len(bad)} sustained unusable-dark region(s) (first {bad[0][0]:.1f}-{bad[0][1]:.1f}s, "
          f"picture-area luma_hi < {floor:.0f})")
 
 
