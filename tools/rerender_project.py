@@ -85,21 +85,32 @@ try:
     log("2/5 cut")
     cut_all(proj, cfg, progress=log)
     log("3/5 AI verify + repair")
-    _verify.verify_and_repair(proj, segs, cfg, eng, progress=log)
-    # bounded recovery (R4-5) — same stage order as the full pipeline (verify → recovery →
-    # stills). Without it a verifier-rejected beat with no valid hold FATALs the build at the
-    # very end ("rediscovery needed") with no rediscovery ever attempted.
-    log("3b/5 bounded recovery")
-    try:
-        _recover_unresolved_beats(proj, segs, analysis, cfg, eng, faceid_obj=faceid_obj,
-                                  refs=refs, roster=analysis.actors,
-                                  policy=str(proj.meta.get("policy", "") or "block"), log=log)
-    except Exception as e:  # noqa: BLE001
-        log(f"recovery: skipped ({type(e).__name__}: {e})")
-    log("4/5 image fallbacks")
-    # eng_cfg enables the vision-verified still path (same as the portal pipeline) — without it
-    # the stage silently fell to deterministic-only checks ("no vision model")
-    _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, eng_cfg=eng)
+    _vres = _verify.verify_and_repair(proj, segs, cfg, eng, progress=log) or {}
+    # VISION-BACKEND DOWN: recovery re-verification + web-still verdicts would ALL come back
+    # 'unverified' against the dead API (measured: ~6.8h of doomed stills). Skip that whole grind —
+    # exactly as produce_auto now does. The matched footage stands; warn-mode assembly airs it
+    # flagged. (Env VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK=0 forces the skip regardless.)
+    _vdown = bool(_vres.get("verifier_down"))
+    _fb_off = os.environ.get("VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK", "1").strip() in ("0", "false", "no")
+    if _vdown or _fb_off:
+        log("3b/4 recovery + image fallbacks — ⏭ skipped "
+            + ("(vision backend down — would only produce unverified stills)" if _vdown
+               else "(image fallback disabled)"))
+    else:
+        # bounded recovery (R4-5) — same stage order as the full pipeline (verify → recovery →
+        # stills). Without it a verifier-rejected beat with no valid hold FATALs the build at the
+        # very end ("rediscovery needed") with no rediscovery ever attempted.
+        log("3b/5 bounded recovery")
+        try:
+            _recover_unresolved_beats(proj, segs, analysis, cfg, eng, faceid_obj=faceid_obj,
+                                      refs=refs, roster=analysis.actors,
+                                      policy=str(proj.meta.get("policy", "") or "block"), log=log)
+        except Exception as e:  # noqa: BLE001
+            log(f"recovery: skipped ({type(e).__name__}: {e})")
+        log("4/5 image fallbacks")
+        # eng_cfg enables the vision-verified still path (same as the portal pipeline) — without it
+        # the stage silently fell to deterministic-only checks ("no vision model")
+        _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, eng_cfg=eng)
     summ = ledger.finalize(proj, segs, cfg)
     proj.save()
     log(f"QC: {summ['flagged_for_review']}/{summ['segments']} flagged · "
