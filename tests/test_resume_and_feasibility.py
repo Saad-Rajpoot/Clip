@@ -334,11 +334,18 @@ def test_vision_error_classifier():
     from vidlore.clipstudio import llm
     assert llm.classify_vision_error("429 RESOURCE_EXHAUSTED prepayment credits are depleted") == "billing"
     assert llm.classify_vision_error("Your credit balance is too low to access the API") == "billing"
-    assert llm.classify_vision_error("insufficient_quota") == "billing"
+    assert llm.classify_vision_error("past due invoice, account is not active") == "billing"
     assert llm.classify_vision_error("401 invalid api key") == "auth"
     assert llm.classify_vision_error("permission denied 403") == "auth"
     assert llm.classify_vision_error("connection reset / timeout") == "transient"
     assert llm.classify_vision_error("503 model overloaded") == "transient"
+    # CRITICAL: a RATE-LIMIT 429 (quota per minute / RESOURCE_EXHAUSTED without money words) must be
+    # TRANSIENT, not billing — misclassifying it hard-failed a funded render with 'out of credits'.
+    assert llm.classify_vision_error(
+        "429 Quota exceeded for quota metric 'GenerateContent requests per minute'") == "transient"
+    assert llm.classify_vision_error(
+        "429 RESOURCE_EXHAUSTED. Resource has been exhausted (check quota).") == "transient"
+    assert llm.classify_vision_error("429 Too Many Requests") == "transient"
 
 
 def test_vision_backend_error_is_retryable_and_distinct():

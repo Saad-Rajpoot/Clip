@@ -422,37 +422,52 @@ _PROBE_JPEG_B64 = (
 
 
 def classify_vision_error(exc_or_text) -> str:
-    """Bucket a vision-call failure: 'billing' (out of credits / quota exhausted / payment),
-    'auth' (bad/expired key / unauthorized / permission), or 'transient' (rate-limit blip /
-    overload / timeout / network — worth continuing, the per-beat breaker + retries handle it).
+    """Bucket a vision-call failure: 'billing' (out of credits / payment), 'auth' (bad/expired key /
+    unauthorized / permission), or 'transient' (rate-limit / quota-per-minute / overload / timeout /
+    network — worth continuing, the per-beat breaker + retries handle it).
 
-    Billing and auth are HARD-DOWN: no amount of retrying inside one render fixes them, and a
-    multi-hour render that will only end in an unverified-footage block should abort in seconds
-    with an actionable message instead. Measured cause of a doubly-failed render: Gemini 429
-    'prepayment credits are depleted' AND Claude 400 'credit balance is too low'."""
+    Billing and auth are HARD-DOWN (retrying inside one render can't fix them → abort fast with an
+    actionable message). 'transient' must NOT abort — it recovers.
+
+    CRITICAL distinction (a real bug this fixes): a 429 RESOURCE_EXHAUSTED is EITHER credit
+    depletion ('prepayment credits are depleted' → billing, hard) OR a RATE limit ('Quota exceeded
+    for quota metric ... requests per minute' → transient, retry). Keying 'billing' on the words
+    'quota'/'exhaust'/'resource_exhausted' misclassified an ordinary rate-limit blip as
+    out-of-credits and hard-failed a render whose API was perfectly funded. So billing is keyed ONLY
+    on MONEY words; anything about rate/quota-per-time is transient."""
     s = (str(exc_or_text) or "").lower()
-    if any(k in s for k in ("credit", "billing", "quota", "exhaust", "insufficient", "balance",
-                            "payment", "depleted", "plan", "purchase", "resource_exhausted")):
+    # MONEY words only — a real credit/payment problem. NOT 'quota'/'exhaust' (those are rate limits).
+    _billing = ("credit", "billing", "prepayment", "insufficient fund", "balance is too low",
+                "balance too low", "payment", "purchase", "top up", "top-up", "past due",
+                "account is not active", "free tier")
+    if any(k in s for k in _billing):
         return "billing"
     if any(k in s for k in ("unauthorized", "invalid api key", "invalid_api_key", "permission",
-                            "forbidden", "authentication", "401", "403", "api key not valid")):
+                            "forbidden", "authentication", "401", "403", "api key not valid",
+                            "api_key_invalid", "api key expired")):
         return "auth"
+    # everything else — rate limits ('requests per minute', 'quota exceeded', RESOURCE_EXHAUSTED
+    # without money words), overload, timeout, network — is TRANSIENT and must not hard-fail.
     return "transient"
 
 
-def vision_probe(eng_cfg=None, *, timeout_sec: float = 20.0) -> tuple[bool, str]:
-    """Cheap one-shot health check of the ACTUAL vision chain (the same fallback order verify uses).
+def vision_probe(eng_cfg=None, *, timeout_sec: float = 20.0, attempts: int = 3) -> tuple[bool, str]:
+    """Health check of the ACTUAL vision chain (the same fallback order verify uses).
     Returns (ok, reason): ok=True → a provider answered; ok=False with reason in
-    {'billing','auth','down'} → no vision provider is usable RIGHT NOW. 'down' means every provider
-    failed transiently (network/overload) — the caller decides whether to proceed and lean on the
-    per-beat breaker, or abort. Never raises."""
+    {'billing','auth','down'} → no vision provider is usable RIGHT NOW.
+
+    RETRIES transient failures (rate-limit / overload / network) up to `attempts` times with
+    backoff before concluding — a preflight that hard-fails a render must never trip on a single
+    rate-limit blip on a perfectly funded API. A CONFIRMED billing/auth error returns immediately
+    (no point retrying a money/key problem). 'down' = every provider only failed transiently.
+    Never raises."""
+    import time as _t
     cfg_id = vision_config(eng_cfg)
     if cfg_id == "none":
         return False, "auth"                       # no vision provider configured at all
     img = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
                                        "data": _PROBE_JPEG_B64}}
     msg = [{"role": "user", "content": [img, {"type": "text", "text": "Reply with the word OK."}]}]
-    worst = "down"
     # probe each vision-capable provider the SAME order complete() would try them
     order = []
     if gemini_available() and _provider() not in ("anthropic", "claude"):
@@ -463,18 +478,21 @@ def vision_probe(eng_cfg=None, *, timeout_sec: float = 20.0) -> tuple[bool, str]
         order.append(("gemini", lambda: _gemini_complete("Reply OK.", msg, 8, _gemini_model())))
     if not order:
         return False, "auth"
-    for _name, call in order:
-        try:
-            out = call()
-            if out and out.strip():
-                return True, "ok"
-            # empty non-error reply — treat as a transient blip, try the next provider
-        except Exception as e:                            # noqa: BLE001
-            kind = classify_vision_error(e)
-            if kind == "transient":
-                worst = "down"
-            elif worst != "billing":                      # billing outranks auth outranks down
-                worst = kind
+    worst = "down"
+    for _attempt in range(max(1, attempts)):
+        for _name, call in order:
+            try:
+                out = call()
+                if out and out.strip():
+                    return True, "ok"
+                # empty non-error reply — transient blip, try the next provider
+            except Exception as e:                        # noqa: BLE001
+                kind = classify_vision_error(e)
+                if kind in ("billing", "auth"):
+                    return False, kind                    # confirmed money/key problem — retrying won't help
+                worst = "down"                            # transient — may recover on retry
+        if _attempt < attempts - 1:
+            _t.sleep(min(8.0, 1.5 * (2 ** _attempt)))     # backoff before re-probing
     return False, worst
 
 
