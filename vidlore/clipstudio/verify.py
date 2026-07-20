@@ -777,6 +777,11 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             _roster_toks |= {w for w in re.findall(r"[a-z0-9]+", (_nm or "").lower()) if len(w) > 2}
         for _a in (_an.get("actors") or []):
             _roster_toks |= {w for w in re.findall(r"[a-z0-9]+", (str(_a) or "").lower()) if len(w) > 2}
+    # roster tokens allowed as "co-mentioned" context in a single-scene deep-dive — LOOP-INVARIANT,
+    # so compute ONCE here. (Was assigned only inside the character-beat branch, so an object/scene
+    # beat that skipped that branch hit an UnboundLocalError in the generic-filler rung below —
+    # crashing verify on beat 11 of a single-scene render and trapping it in a resume→re-crash loop.)
+    _ok_toks = _roster_toks if _single else frozenset()
     _mf_on = _os_ms.environ.get("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "1").strip() \
         not in ("0", "false", "no")
 
@@ -1194,7 +1199,6 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     and (getattr(seg, "required_kind", "") or "").lower() in ("character", "actor"):
                 _src_r = proj.source(sel.source_id)
                 _src_title = ((getattr(_src_r, "title", "") or "") + " " + (sel.source_id or ""))
-                _ok_toks = _roster_toks if _single else frozenset()
                 if _present_unconfirmed_ok(v, seg, _src_title, faceid_names,
                                            _era_of(seg), _ok_toks, char2actor=_char2actor):
                     # right scene/era, subject present-but-unconfirmed → CONTEXTUAL
@@ -1231,7 +1235,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     _fresh, _ = _verify_ctx(kf, shot, seg, False, faceid_names)   # LENIENT re-ask
                 _ok_f, _why_f = _generic_filler_ok(
                     _fresh, seg, _src_title_of(sel), faceid_names, _era_of(seg),
-                    _ok_toks if _single else frozenset(), _char2actor)
+                    _ok_toks, _char2actor)
                 if _ok_f:
                     v = dict(_fresh)
                     v["status"] = "ok"

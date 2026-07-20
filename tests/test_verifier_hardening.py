@@ -171,6 +171,37 @@ def _run_verify(tmp, *, always_fail=True, n_beats=30, sheet=False):
     return summ, calls["n"], proj
 
 
+def test_object_beat_in_single_scene_does_not_crash_the_filler_rung():
+    """REGRESSION: an exact OBJECT/scene beat (required_kind not character/actor) in a single_scene
+    render skipped the character-only downgrade branch, so `_ok_toks` was never bound before the
+    generic-filler rung referenced it → UnboundLocalError crashed verify on beat 11 and trapped the
+    job in a resume→re-crash loop. Drive verify with object beats + a 'replace' verdict (forces the
+    downgrade ladder all the way to the filler rung) and assert it completes without raising."""
+    from vidlore.clipstudio.config import ClipConfig
+    tmp = tempfile.mkdtemp()
+    try:
+        proj, segs, shots = _mini_project(tmp, 12)
+        for s in segs:                                  # the crashing shape: exact OBJECT beats
+            s.required_kind = "object"
+            s.required_entity = "the poison necklace"
+        by = {(s.source_id, s.index): s for s in shots}
+        # a 'replace' verdict with subject NOT visible → exhausts strict/contextual → reaches filler
+        def fake_vf(*a, **k):
+            return {"verdict": "replace", "correct_subject_visible": False,
+                    "matches_narration": False, "confidence": 0.5}
+        orig_vf, orig_lookup = V.verify_frame, V._shot_lookup
+        V.verify_frame = fake_vf
+        V._shot_lookup = lambda p: (lambda sid, ix: by.get((sid, ix)))
+        try:
+            summ = V.verify_and_repair(proj, segs, ClipConfig(),
+                                       NS(anthropic_model="m", anthropic_key="k"), progress=None)
+        finally:
+            V.verify_frame, V._shot_lookup = orig_vf, orig_lookup
+        assert summ["verified"] == 12, "every object beat must be processed without crashing"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_a_verdict_is_not_cached_when_the_sheet_prediction_did_not_hold():
     """A contact-sheet build can fail and silently fall back to one frame. That answer is to a
     DIFFERENT question than the key claims, so it must not be stored — otherwise a later run gets a
@@ -307,6 +338,7 @@ TESTS = [
     test_healthy_backend_verifies_every_beat_and_caches,
     test_a_poisoned_cache_entry_is_dropped_not_served,
     test_a_verdict_is_not_cached_when_the_sheet_prediction_did_not_hold,
+    test_object_beat_in_single_scene_does_not_crash_the_filler_rung,
     test_generic_filler_needs_a_fresh_positive_lenient_verdict,
     test_generic_filler_refuses_without_proof,
     test_generic_filler_refuses_a_confirmed_wrong_person_and_wrong_era,
