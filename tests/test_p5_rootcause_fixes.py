@@ -683,7 +683,37 @@ def test_q1_qa_failures_persist_and_exclude():
     shutil.rmtree(work.parent, ignore_errors=True)
 
 
+def test_breakout_essay_source_and_narration_echo_gates():
+    """Measured: an essay source titled 'The Scene Tyrion Exposed The Spy Using Three Lies' (no
+    'explained/breakdown' keyword) aired 3 narration 'breakouts' whose captions duplicated the
+    video's own script. Two gates now stop it: the essay-title gate excludes the source from
+    breakout mining, and the narration-echo backstop rejects any aired window that shares a long
+    verbatim run with our own narration (catches essay leaks from ANY source)."""
+    from vidlore.clipstudio.build import _breakout_src_ok, _echoes_own_narration, _ESSAYISH_RX
+    # essay-title gate: the leaking source rejected; real-footage titles kept
+    assert not _breakout_src_ok(NS(title="The Scene Tyrion Exposed The Spy Using Three Lies"), [])
+    assert not _breakout_src_ok(NS(title="How Tyrion Outsmarted The Small Council"), [])
+    assert not _breakout_src_ok(NS(title="Cersei's plan using three lies"), [])
+    assert _breakout_src_ok(NS(title="Tyrion Lannister and Theon Greyjoy at Winterfell - GoT"), [])
+    assert _breakout_src_ok(NS(title="Varys and Tyrion small council scene | Game of Thrones S2"), [])
+    assert _breakout_src_ok(NS(title="Tyrion & Bronn HD Season 2"), [])
+    # narration-echo backstop: our own script as a word stream
+    script = ("and somewhere in kings landing cersei is about to hear one of them "
+              "then pycelle takes the bait")
+    import re
+    stream = " " + " ".join(re.findall(r"[a-z']+", script.lower())) + " "
+    # an essay-narration line that echoes our script (>=6-word run) → flagged
+    assert _echoes_own_narration("somewhere in kings landing cersei is about to hear one of them",
+                                 stream, 6) >= 6
+    # a real in-character line shares ~nothing with our analysis prose → not flagged
+    assert _echoes_own_narration("i still remember seeing my fathers fleet burn in lannisport",
+                                 stream, 6) < 6
+    # short lines can't false-trip the run gate
+    assert _echoes_own_narration("take him", stream, 6) == 0
+
+
 TESTS = [
+    test_breakout_essay_source_and_narration_echo_gates,
     test_q1_qa_failures_persist_and_exclude,
     test_a1_connectors_demote_to_abstract,
     test_a1_specific_beats_keep_their_labels,

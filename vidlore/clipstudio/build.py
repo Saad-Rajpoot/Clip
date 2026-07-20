@@ -353,6 +353,32 @@ def _is_narration(text: str) -> bool:
     return bool(_NARRATION_RX.search(text or ""))
 
 
+def _echoes_own_narration(aired_text: str, script_stream: str, min_run: int = 6) -> int:
+    """Longest run of consecutive words the AIRED breakout audio shares with THIS video's OWN
+    narration script. A real in-character movie line ('I still remember seeing my father's fleet
+    burn in Lannisport') shares ~nothing with our analysis prose; but a same-topic ESSAY source's
+    NARRATION echoes our script almost verbatim (measured: an aired 'breakout' window read
+    '…somewhere in King's Landing, Cersei is about to hear one of them' — a 9-word run straight
+    out of our own script). A long shared run is proof the 'dialogue' is the narrator, not a
+    character — a keyword-free, general backstop to _NARRATION_RX. `script_stream` is a pre-built
+    space-delimited lowercase word stream of the whole narration (built once by the caller)."""
+    import re as _re_en
+    aw = _re_en.findall(r"[a-z']+", (aired_text or "").lower())
+    if len(aw) < min_run or not script_stream:
+        return 0
+    best = 0
+    n = len(aw)
+    for i in range(n):
+        # longest run starting at i that appears verbatim in the script stream
+        for j in range(n, i + best, -1):     # only try to BEAT the current best
+            if j - i < min_run:
+                break
+            if (" " + " ".join(aw[i:j]) + " ") in script_stream:
+                best = j - i
+                break
+    return best
+
+
 # A breakout airs a scene's OWN dialogue. A RETROSPECTIVE recap line — a character in a LATER scene
 # referring back to the event ("Last time I was here, I killed my father with a crossbow" = S7 Tyrion
 # recapping the S4 act) — is the wrong era/scene even though it's in-character. Bar such lines from
@@ -822,6 +848,15 @@ _ESSAYISH_RX = re.compile(
     r"featurette|behind the|on playing|interview|reacts?|reaction|"
     # edit/essay/reaction TITLES that slipped onto a Tywin S01E07 video and aired commentary:
     r"the scene where|the scene that|fatal mistake|biggest mistake|costly mistake|"
+    # ESSAY/clickbait STRUCTURE (measured leak: 'The Scene Tyrion Exposed The Spy Using Three
+    # Lies' aired 3 narration 'breakouts' — its title has no 'explained/breakdown' keyword but is
+    # unmistakably an essay): 'the scene <name> exposed/reveals/…', 'exposed/outsmarted the
+    # spy/traitor/plan/council', 'using N lies/tricks/words'. Structural, so raw-clip titles
+    # ('Tyrion & Bronn HD S2', 'Varys small council scene') never match.
+    r"the scene \w+ (?:exposed|reveals?|proves?|explains?|shows?|breaks?)|"
+    r"(?:exposed?|outsmart(?:ed|s)?|outplay(?:ed|s)?|outwit(?:ted|s)?|tricked|fooled|caught) "
+    r"(?:the |a )?(?:spy|traitor|mole|leak|liar|plan|scheme|trap|council|small council)|"
+    r"using (?:\d+|one|two|three|four|five|six|seven) (?:lies|tricks|words|moves|rules|secrets|clues|steps|questions)|"
     r"lost because|lost (?:her|his|the) [a-z]+ because|almost cries|motivational|tribute|edit\b|amv|"
     r"educat(?:es|ing|ion)|watching|watch ?along|first time|the sack of|the story of|"
     r"vs fan|plot hole|q ?& ?a|explains?|commentary)\b", re.I)
@@ -1561,6 +1596,12 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
 
     out = []
     _seg_by_idx = {s.index: s for s in segments}
+    # our OWN narration script as a word stream — the backstop that catches an essay source's
+    # narration re-aired as a 'breakout' (its words echo our script; a real character line does not)
+    import re as _re_ns
+    _script_stream = " " + " ".join(
+        _re_ns.findall(r"[a-z']+", " ".join((getattr(s, "text", "") or "") for s in segments).lower())
+    ) + " "
     for score, idx, src, sh, _q in sorted(picked, key=lambda p: p[1]):
         # pass the 10s MAX cap — _extract_breakout finds the real length that ends on a
         # complete spoken line (3-10s), so an iconic quote is never chopped mid-word
@@ -1618,6 +1659,18 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                 f"commentary/narration, not in-character dialogue "
                 f"(src={(src.title or src.id)[:40]!r})")
             continue                                   # try the next candidate; none clean → no breakout
+        # NARRATION-ECHO backstop: a same-topic essay source's NARRATION duplicates our own script
+        # (keyword-free, so _NARRATION_RX misses it). If the aired window shares a long verbatim run
+        # with our narration, it's the narrator, not a character — reject. (Measured: 3 aired
+        # 'breakouts' from an essay source echoed our script by 5-9 words; a real character line
+        # shares ~0.) env VIDLORE_CLIPSTUDIO_BREAKOUT_ECHO_RUN (default 6; 0 disables).
+        _echo_run = int(_os9b.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_ECHO_RUN", "6") or 6)
+        if _echo_run > 0 and _wtxt and _echoes_own_narration(_wtxt, _script_stream, _echo_run) >= _echo_run:
+            _rej["window_commentary"] += 1
+            log(f"build: breakout REJECTED post-extract before scene {idx} — aired audio DUPLICATES "
+                f"our own narration script ({_echo_run}+ word run) — it is the narrator, not "
+                f"in-character dialogue (src={(src.title or src.id)[:40]!r})")
+            continue
         # CUT-WINDOW FLAG VALIDATION on the aired breakout window — _extract_breakout extends
         # the cut to a full spoken line, which can cross into an adjacent shot carrying burned
         # subs or unreadable murk (the full-source corner bug is already punch-in-cropped via
