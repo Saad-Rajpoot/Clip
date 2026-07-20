@@ -95,6 +95,15 @@ def test_post_concat_conform_retimes_video_to_audio():
             ad = _probe_duration(os.path.join(d, "a.wav"))
             assert abs(vd - ad) <= 1 / FPS, f"{tag}: video {vd} not conformed to audio {ad}"
 
+        # MULTI-BREAKOUT accumulation: 5 breakouts drifted +13 frames (0.443s, video LONG) on a
+        # real render — over the OLD 12-frame cap, so it hard-failed the invariant. The cap now
+        # covers it (24 frames / 0.8s): a 164-frame video (13 over the 151-frame audio) must conform.
+        run("-f", "lavfi", "-i", "color=c=red:s=320x180:r=30", "-frames:v", "164",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", os.path.join(d, "acc.mp4"))
+        _conform_video_to_audio(os.path.join(d, "acc.mp4"), NS(audio=os.path.join(d, "a.wav")), d)
+        assert abs(_probe_duration(os.path.join(d, "acc.mp4")) - 5.0333) <= 1 / FPS, \
+            "a 13-frame multi-breakout accumulation must now conform, not fail the invariant"
+
         # a GROSS gap must NOT be papered over — it must reach the invariant
         run("-f", "lavfi", "-i", "color=c=green:s=320x180:r=30", "-frames:v", "300",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", os.path.join(d, "gross.mp4"))

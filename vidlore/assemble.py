@@ -273,7 +273,7 @@ def _stream_times(p) -> dict:
     return out
 
 
-def _conform_video_to_audio(video_only, narration, workdir, *, max_fix_frames: int = 12) -> None:
+def _conform_video_to_audio(video_only, narration, workdir, *, max_fix_frames: int = 24) -> None:
     """Trim/pad the CONCATENATED video to the composed-audio length, at the file level.
 
     The video timeline is assembled from many per-scene frame counts plus fixed-length breakout
@@ -285,7 +285,14 @@ def _conform_video_to_audio(video_only, narration, workdir, *, max_fix_frames: i
     it is a few frames off the composed audio, retime it to match with a single tpad/trim.
 
     Bounded by max_fix_frames: this corrects sub-perceptible accumulation, never a gross error (a
-    large gap means something is genuinely wrong and must reach the invariant, not be papered over)."""
+    large gap means something is genuinely wrong and must reach the invariant, not be papered over).
+    The bound scales with breakout count — each breakout insertion contributes a couple of frames of
+    per-boundary rounding (video mp4 frame-count vs the composed-audio splice grid), so a video with
+    5 breakouts accumulates ~13 frames (measured on a canary-trap render: +0.443s, video LONG). 24
+    frames (0.8s at 30fps) covers realistic multi-breakout accumulation while still failing a truly
+    gross error (>0.8s = seconds-scale = a genuinely misplaced beat/breakout, which must reach the
+    invariant). The conform trims/pads to the COMPOSED AUDIO (the authority captions key to), so it
+    never desyncs captions; the trimmed frames are the outro tail."""
     aud = getattr(narration, "audio", None)
     if not aud:
         return                                         # the invariant will fail closed on this
