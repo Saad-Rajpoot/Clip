@@ -131,11 +131,28 @@ def test_portal_status_endpoint_exposes_retryable():
         "the job boundary must classify a vision-backend outage as its own retryable status"
 
 
+def test_portal_auto_review_draft_on_footage_gap():
+    """A FOOTAGE GAP must not show a bare 'fail': the portal auto-builds a review draft (warn mode,
+    resumed from cache) so the user always gets a video. A VISION outage stays a retryable failure
+    (it needs billing/backend restore, not a draft)."""
+    src = open(os.path.join(ROOT, "vidlore", "clipstudio", "web.py"), encoding="utf-8").read()
+    assert "VIDLORE_CLIPSTUDIO_PORTAL_AUTO_REVIEW" in src, "auto-review must be env-toggleable"
+    assert "_do_render(resume=True)" in src, "the auto-review retry must RESUME (assembly only)"
+    assert 'os.environ["VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE"] = "warn"' in src, \
+        "the auto-review retry must flip to warn mode"
+    # eligibility: content gap yes, vision outage NO
+    assert "isinstance(_ce, _NRB2)" in src and "not isinstance(_ce, _VBE2)" in src, \
+        "auto-review must fire on a content gap but NOT on a vision outage"
+    assert 'j["status"] = ("review_draft"' in src, "a delivered review draft gets its own status"
+    assert "review_draft" in src and "REVIEW DRAFT" in src, "the UI must label the review draft"
+
+
 TESTS = [
     test_content_failure_is_marked_non_retryable,
     test_transient_failure_stays_retryable,
     test_an_unchanged_content_failure_is_not_auto_restarted,
     test_portal_status_endpoint_exposes_retryable,
+    test_portal_auto_review_draft_on_footage_gap,
 ]
 
 if __name__ == "__main__":

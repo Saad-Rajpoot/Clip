@@ -119,14 +119,41 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
             # loudly instead of release-blocking. Set symmetrically every run so 'block' (production
             # default) is restored and a prior review retry never bleeds into a fresh job.
             os.environ["VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE"] = "warn" if review_mode else "block"
-            res = produce_auto(
-                str(project_dir), topic=topic, script_text=script_text, movie_hint=movie_hint,
-                policy=policy, max_sources=max_sources, theme=theme, title=title,
-                captions=bool(captions_enabled), caption_style=caption_style,
-                voiceover=voiceover, use_tts=True, verify=verify, do_build=True,
-                voice_provider=voice_provider, voice_preset=voice_preset,
-                resume=resume, progress=log,
-            )
+
+            def _do_render(**over):
+                return produce_auto(
+                    str(project_dir), topic=topic, script_text=script_text, movie_hint=movie_hint,
+                    policy=policy, max_sources=max_sources, theme=theme, title=title,
+                    captions=bool(captions_enabled), caption_style=caption_style,
+                    voiceover=voiceover, use_tts=True, verify=verify, do_build=True,
+                    voice_provider=voice_provider, voice_preset=voice_preset,
+                    resume=over.get("resume", resume), progress=log,
+                )
+
+            _auto_review = os.environ.get("VIDLORE_CLIPSTUDIO_PORTAL_AUTO_REVIEW", "1").strip() \
+                not in ("0", "false", "no")
+            _became_review = False
+            try:
+                res = _do_render()
+            except Exception as _ce:                       # noqa: BLE001
+                # AUTO REVIEW DRAFT on a FOOTAGE GAP: a content failure (some beats have no proven
+                # footage) is NOT a crash and NOT the user's fault — the pipeline just refuses to
+                # SILENTLY air unverified footage. Instead of showing a bare "fail", deliver a
+                # review draft automatically: flip to warn mode and RESUME (every finished stage —
+                # index/match/verify/recover — is cached, so this only re-does assembly, ~20 min),
+                # airing the gap beats loudly flagged. A vision-backend outage is NOT eligible (that
+                # needs billing/backend restore, so it stays a retryable failure). Env
+                # VIDLORE_CLIPSTUDIO_PORTAL_AUTO_REVIEW=0 disables.
+                from .verify import NonRetryableBuildError as _NRB2, VisionBackendError as _VBE2
+                if _auto_review and not review_mode and isinstance(_ce, _NRB2) \
+                        and not isinstance(_ce, _VBE2):
+                    log("↻ FOOTAGE GAP → auto-building a REVIEW DRAFT (the missing-footage beats "
+                        "air flagged, not for publication). Resuming from cached stages…")
+                    os.environ["VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE"] = "warn"
+                    res = _do_render(resume=True)
+                    _became_review = True
+                else:
+                    raise
         with _LOCK:
             j = _JOBS[jid]
             j["done"] = True
@@ -134,7 +161,9 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
             j["ok"] = bool(res.get("output"))
             j["output"] = res.get("output")
             j["summary"] = res.get("summary", {})
-            j["status"] = "ok" if j["ok"] else "error"
+            j["review_draft"] = _became_review
+            j["status"] = ("review_draft" if (j["ok"] and _became_review)
+                           else "ok" if j["ok"] else "error")
             j["retryable"] = not j["ok"]
     except BaseException as e:                            # noqa: BLE001
         # BaseException: a stray SystemExit from a dependency dies silently in a thread —
@@ -334,7 +363,7 @@ def _job_page(jid: str) -> str:
    if(done)return;
    try{
      const r=await fetch('/status/__JID__');const j=await r.json();
-     document.getElementById('ph').textContent=j.phase||(j.done?(j.ok?'done ✓':'failed ✗'):'running…');
+     document.getElementById('ph').textContent=j.phase||(j.done?(j.ok?(j.review_draft?'review draft ✓':'done ✓'):'failed ✗'):'running…');
      document.getElementById('log').textContent=(j.log||[]).join('\\n');
      document.getElementById('log').scrollTop=1e9;
      // crude progress from the "N/9" phase
@@ -344,7 +373,9 @@ def _job_page(jid: str) -> str:
        if(j.ok){document.getElementById('dl').innerHTML=
          '<a class=dl href="/download/__JID__">⬇ Download MP4</a>'+
          '<div class=brain>'+(j.summary&&j.summary.sources_used?(j.summary.sources_used+' sources · '):'')+
-         (j.summary&&j.summary.segments?(j.summary.segments+' scenes'):'')+'</div>';}
+         (j.summary&&j.summary.segments?(j.summary.segments+' scenes'):'')+
+         (j.review_draft?' · ⚠ REVIEW DRAFT — some beats had no exact footage and air flagged (not for publication); improve those scenes or publish as-is':'')+
+         '</div>';}
        else{
          var content=(j.status==='content_failure');
          var vision=(j.status==='vision_down');
