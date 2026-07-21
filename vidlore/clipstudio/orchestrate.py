@@ -248,11 +248,35 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
 
     from . import index as _index_sv
 
+    # PER-RENDER MEMOS (perf only — same data, loaded once instead of per candidate):
+    #   _shots_cache    source_id -> list[Shot]  (shots.json parsed once per source)
+    #   _embeds_cache   source_id -> persisted embeds matrix (or None when absent)
+    #   _rel_memo       (source_id, shot_index, text) -> CLIP relevance score
+    _shots_cache: dict = {}
+    _embeds_cache: dict = {}
+    _rel_memo: dict = {}
+
+    def _shots_of(sid):
+        if sid not in _shots_cache:
+            try:
+                _shots_cache[sid] = _index_sv.load_shots(proj, sid)
+            except Exception:
+                _shots_cache[sid] = []
+        return _shots_cache[sid]
+
+    def _embeds_of(sid):
+        if sid not in _embeds_cache:
+            try:
+                _embeds_cache[sid] = _index_sv.load_embeds(proj, sid)
+            except Exception:
+                _embeds_cache[sid] = None
+        return _embeds_cache[sid]
+
     def _shot_face_ids(sid, sidx):
         """The candidate SHOT's actual persisted face detections (NOT the beat's requested entities —
         those are script asks, not faces found in this frame). Empty list when unavailable."""
         try:
-            for _sh in _index_sv.load_shots(proj, sid):
+            for _sh in _shots_of(sid):
                 if getattr(_sh, "index", None) == sidx:
                     return list(getattr(_sh, "face_ids", None) or [])
         except Exception:
@@ -297,10 +321,66 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
         except Exception:
             return False
 
+    # STILL-VERDICT CACHE — the same verdict_cache.json and the same full-fingerprint doctrine as
+    # verify.py's rungs: a still verdict is reusable ONLY when the complete question (source content
+    # hash, shot bounds, judged frame identity, every prompt field, the venue_fallback question
+    # variant, real vision model, prompt/sheet versions) is byte-identical. Reuse is NEVER keyed on
+    # the image path alone — the same frame judged for a different beat is a different question.
+    # Only successful schema-valid verdicts are stored ('unverified' transport outcomes never are),
+    # so the 2-attempt retry and the vision-outage backoff behavior are unchanged.
+    _still_vcache = _verify_mod._load_verdict_cache(proj)
+    try:
+        _vmodel_sv = _llm_mod.vision_config(eng_cfg)
+    except Exception:
+        _vmodel_sv = str(getattr(eng_cfg, "anthropic_model", "") or "")
+    _srch_cache: dict = {}
+
+    def _src_hash_sv(sid):
+        if sid not in _srch_cache:
+            _src_o = proj.source(sid)
+            _srch_cache[sid] = _verify_mod._file_fingerprint(
+                getattr(_src_o, "local_path", "") or "")
+        return _srch_cache[sid]
+
+    def _shot_obj_sv(sid, sidx):
+        for _sh in _shots_of(sid):
+            if getattr(_sh, "index", None) == sidx:
+                return _sh
+        return None
+
+    def _still_fp(kf_path, seg, sid, sidx, faces):
+        try:
+            _sh = _shot_obj_sv(sid, sidx)
+            if _sh is None:
+                return ""
+            return _verify_mod.verdict_fingerprint(
+                src_hash=_src_hash_sv(sid), source_id=sid or "",
+                shot_start=getattr(_sh, "start", 0.0), shot_end=getattr(_sh, "end", 0.0),
+                beat_text=getattr(seg, "text", ""),
+                required_entity=getattr(seg, "required_entity", ""),
+                required_kind=getattr(seg, "required_kind", ""),
+                expected_visual=getattr(seg, "expected_visual", "") or "",
+                scene_query=getattr(seg, "scene_query", "") or "",
+                era=_verify_mod._beat_era(seg, _global_era_sv, _vtype_sv == "single_scene",
+                                          anchor_eras=_anchor_eras_sv),
+                visual_policy=_policy.policy_of(seg), is_specific=False,
+                faceid_names=list(faces or []), multiframe=False,
+                image_id=f"kf:{_verify_mod._file_fingerprint(kf_path)}",
+                model=_vmodel_sv, venue_fallback=True)
+        except Exception:
+            return ""                                    # no key → baseline uncached call
+
     def _still_verdict_call(kf_path, seg, sid, sidx):
+        from . import perf_metrics as _pm_sv
         faces = _shot_face_ids(sid, sidx)
+        _fp = _still_fp(kf_path, seg, sid, sidx, faces)
+        _hit = _still_vcache.get(_fp) if _fp else None
+        if _hit is not None and _verify_mod._verdict_schema_ok(_hit):
+            _pm_sv.incr("still.verdict.cache_hit")
+            return "reject" if _hit.get("verdict") == "replace" else "ok"
         for _attempt in (1, 2):
             try:
+                _pm_sv.incr("still.verdict.call")
                 v = _verify_mod.verify_frame(
                     str(kf_path), seg.text, getattr(seg, "required_entity", ""),
                     getattr(seg, "required_kind", ""), faces, eng_cfg,
@@ -314,6 +394,9 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                     venue_fallback=True)
                 if v is None:
                     continue                              # transport error → retry, then unverified
+                if _fp and _verify_mod._verdict_schema_ok({**v, "status": "ok"}):
+                    _still_vcache[_fp] = dict(v)
+                    _verify_mod._save_verdict_cache(proj, _still_vcache)   # atomic tmp+replace
                 return "reject" if v.get("verdict") == "replace" else "ok"
             except Exception:
                 continue
@@ -351,10 +434,14 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
         if _discover.is_unwanted_source_title(getattr(s, "title", "") or ""):
             _skipped_src += 1
             continue
-        try:
-            _shots = _index.load_shots(proj, s.id)
-        except Exception:
-            continue
+        if s.id in _shots_cache:                       # perf memo only — flow identical to baseline
+            _shots = _shots_cache[s.id]
+        else:
+            try:
+                _shots = _index.load_shots(proj, s.id)
+            except Exception:
+                continue                               # exactly the baseline skip (no counters touched)
+            _shots_cache[s.id] = _shots
         if _src_wm(_shots) or (_corner_on and _src_logo(_shots)):
             _skipped_wm += 1
             continue
@@ -444,7 +531,8 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
             _cand_n = max(3, int(os.environ.get("VIDLORE_CLIPSTUDIO_STILL_CANDIDATES", "6") or 6))
             for _ in range(_cand_n):                   # ranked pool candidates
                 _sp = _imgfb.pick_pool_still(seg, shots_by_key, _seen_keys, used_phash,
-                                             distinct_from=aired_phash, want_faces=_wf)
+                                             distinct_from=aired_phash, want_faces=_wf,
+                                             embeds_of=_embeds_of, rel_memo=_rel_memo)
                 if not _sp:
                     break
                 _cands.append(_sp); _seen_keys = _seen_keys | {(_sp[1], _sp[2])}
@@ -489,7 +577,8 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                     for _ in range(_cand_n):
                         _lp = _imgfb.pick_pool_still(seg, shots_lowres_by_key, _lr_seen,
                                                      used_phash, distinct_from=aired_phash,
-                                                     want_faces=_wf)
+                                                     want_faces=_wf, embeds_of=_embeds_of,
+                                                     rel_memo=_rel_memo)
                         if not _lp:
                             break
                         _lr_cands.append(_lp); _lr_seen = _lr_seen | {(_lp[1], _lp[2])}
@@ -1012,7 +1101,16 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
     eng = engine_config()
     project_dir = Path(project_dir)
 
+    from . import perf_metrics as _pm_stage
+
     def log(m):
+        # decision-neutral stage-duration marks, driven by the existing "N/9 ·" progress lines
+        try:
+            _s = str(m)
+            if "·" in _s and _s.split("/")[0].strip().rstrip("ab").isdigit():
+                _pm_stage.stage(_s.split("·", 1)[1].strip()[:48])
+        except Exception:
+            pass
         if progress:
             progress(m)
 
@@ -1325,6 +1423,9 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
                           title=title or analysis.movie_title or proj.name,
                           theme_name=theme, voiceover=voiceover, voice_provider=voice_provider,
                           voice_preset=voice_preset, use_tts=use_tts, progress=progress)
+
+    if _pm_stage.enabled():
+        _pm_stage.write_report(proj.output_dir / "perf_report.json")
 
     return {
         "project": str(proj.root),

@@ -633,10 +633,32 @@ def _wrong_installment(target_title: str, candidate_title: str) -> bool:
 # the dialogue can't. Costs one metadata call + one tiny caption download per candidate.
 # ---------------------------------------------------------------------------
 
+# Per-URL result caches (process-lifetime). A render calls _fetch_subs_text / the HD probe for
+# overlapping URL sets on every anchor-verify AND every bounded-recovery round — the measured
+# recovery rounds re-paid ~330-510s each mostly re-fetching the same URLs. A video's caption
+# track and real resolution ladder are effectively immutable for the lifetime of one render
+# process, so a POSITIVE result is safe to reuse. Failures ('' / h<=0) are NEVER cached — a
+# transient fetch failure must stay retryable on the next round, exactly as before.
+_SUBS_TEXT_CACHE: dict = {}
+_PROBE_H_CACHE: dict = {}
+
+
 def _fetch_subs_text(url: str, timeout: int = 45) -> str:
     """Best-effort English subtitle/auto-caption text for a video ('' on any failure).
     HD runtime FIRST: plain clients no longer receive caption tracks (PO-token gated), so the
     in-process path below almost always finds none."""
+    from . import perf_metrics as _pm_s
+    if url in _SUBS_TEXT_CACHE:
+        _pm_s.incr("discover.subs.cache_hit")
+        return _SUBS_TEXT_CACHE[url]
+    _pm_s.incr("discover.subs.fetch")
+    _got = _fetch_subs_text_uncached(url, timeout)
+    if _got:
+        _SUBS_TEXT_CACHE[url] = _got                     # positive results only — '' stays retryable
+    return _got
+
+
+def _fetch_subs_text_uncached(url: str, timeout: int = 45) -> str:
     import json as _json
     import urllib.request
     try:
@@ -793,7 +815,15 @@ def resolve_quality(cands: list[SourceCandidate], cfg: ClipConfig, progress=None
     todo = [c for c in cands if c.provider == "youtube"][:cfg.discover_resolve_limit]
     with yt_dlp.YoutubeDL(opts) as y:
         for c in todo:
-            h = _hd.probe_max_height(c.url, max_height=cfg.max_height) if use_hd else 0
+            _pk = (c.url, int(getattr(cfg, "max_height", 0) or 0))   # cap changes the answer
+            if use_hd and _pk in _PROBE_H_CACHE:
+                h = _PROBE_H_CACHE[_pk]
+            elif use_hd:
+                h = _hd.probe_max_height(c.url, max_height=cfg.max_height)
+                if h > 0:
+                    _PROBE_H_CACHE[_pk] = h              # positive probes only — failures retry
+            else:
+                h = 0
             if h <= 0:                                    # HD probe off/failed → legacy estimate
                 try:
                     info = y.extract_info(c.url, download=False)
@@ -822,12 +852,55 @@ def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None
     # the exact raw scene clip can't be missed under the noise of essays/compilations.
     anchor_qset = {q.lower() for q in anchor_queries(analysis, segments)}
     log(f"discover: {len(queries)} queries ({len(anchor_qset)} anchor) · type={getattr(analysis,'video_type','')}")
-    raw: list[SourceCandidate] = []
-    for q in queries:
+    from . import perf_metrics as _pm
+
+    def _one_query(q: str) -> list:
+        """One query's full bucket, in the serial loop's exact internal order (yt then
+        archive). Both providers swallow their own errors and return partial/empty lists,
+        so a bucket is deterministic-in-shape for a frozen result set."""
         depth = cfg.discover_per_query * 2 if q.lower() in anchor_qset else cfg.discover_per_query
-        raw += _ytsearch(q, depth)
-        raw += _archive_search(q, max(2, cfg.discover_per_query // 2))
-        log(f"discover: '{q[:40]}' → {len(raw)} cumulative")
+        with _pm.timed("discover.query"):
+            _pm.incr("discover.query")
+            out = list(_ytsearch(q, depth))
+            out += _archive_search(q, max(2, cfg.discover_per_query // 2))
+        return out
+
+    # BOUNDED PARALLEL FAN-OUT, ORDER-PRESERVING AGGREGATION. The queries are independent
+    # network waits (measured: 200 queries × ~3s strictly serial = ~13 min of the render).
+    # Each query's results are collected in their OWN bucket and the buckets are concatenated
+    # in the ORIGINAL query order, so the raw sequence — and therefore the first-occurrence
+    # id/title dedupe below, every stable sort after it, the per-channel caps, and the chosen
+    # sources — is identical to the serial loop over the same result sets. A bucket that
+    # errored (neither provider swallowed it) is retried SERIALLY in query order after the
+    # pool drains. VIDLORE_CLIPSTUDIO_DISCOVER_WORKERS=1 restores the pure serial loop.
+    import os as _os_dw
+    try:
+        _dw = int(_os_dw.environ.get("VIDLORE_CLIPSTUDIO_DISCOVER_WORKERS", "4") or 4)
+    except (TypeError, ValueError):
+        _dw = 4
+    raw: list[SourceCandidate] = []
+    if _dw > 1 and len(queries) > 1:
+        import concurrent.futures as _cf
+        _buckets: dict[int, list] = {}
+        _failed: list[int] = []
+        with _cf.ThreadPoolExecutor(max_workers=_dw) as _ex:
+            _futs = {_ex.submit(_one_query, q): i for i, q in enumerate(queries)}
+            for _fu in _cf.as_completed(_futs):
+                _qi = _futs[_fu]
+                try:
+                    _buckets[_qi] = _fu.result()
+                except Exception:                        # noqa: BLE001 — retried serially below
+                    _pm.incr("discover.query.error")
+                    _failed.append(_qi)
+        for _qi in sorted(_failed):
+            _buckets[_qi] = _one_query(queries[_qi])
+        for _qi, q in enumerate(queries):
+            raw += _buckets.get(_qi, [])
+            log(f"discover: '{q[:40]}' → {len(raw)} cumulative")
+    else:
+        for q in queries:
+            raw += _one_query(q)
+            log(f"discover: '{q[:40]}' → {len(raw)} cumulative")
 
     # dedupe by id and by normalized title
     seen_id, seen_title, uniq = set(), set(), []

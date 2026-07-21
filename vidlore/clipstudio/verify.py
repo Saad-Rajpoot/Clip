@@ -130,12 +130,17 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         '"confidence": 0.0-1.0, "verdict": "keep" or "replace", "reason": "one short sentence"}'
     )
     import time
+    from . import perf_metrics as _pm
     content = [_img_block(Path(keyframe_path)), {"type": "text", "text": txt}]
+    _pm.incr("verify.vision_call")
+    if venue_fallback:
+        _pm.incr("verify.vision_call.venue")
     for attempt in range(1, 5):                       # retry transient overload / rate limits
         try:
-            out = _llm.complete(system=_VSYS, max_tokens=400,
-                                messages=[{"role": "user", "content": content}],
-                                eng_cfg=eng_cfg, model=model)
+            with _pm.timed("verify.vision_call"):
+                out = _llm.complete(system=_VSYS, max_tokens=400,
+                                    messages=[{"role": "user", "content": content}],
+                                    eng_cfg=eng_cfg, model=model)
             m = re.search(r"\{.*\}", out, re.S)
             return json.loads(m.group(0)) if m else None
         except Exception:                             # transient overload / rate limit → back off
@@ -247,7 +252,7 @@ def verdict_fingerprint(*, src_hash: str, source_id: str, shot_start: float, sho
                         expected_visual: str = "", scene_query: str = "", era: str = "",
                         visual_policy: str = "", is_specific: bool = True,
                         faceid_names=(), multiframe: bool = False, image_id: str = "",
-                        model: str = "") -> str:
+                        model: str = "", venue_fallback: bool = False) -> str:
     """Identity of a verdict: EVERY input that can change the answer.
 
     A verdict is reusable only when the QUESTION is byte-identical. The first cut of this keyed on
@@ -265,17 +270,24 @@ def verdict_fingerprint(*, src_hash: str, source_id: str, shot_start: float, sho
                           a re-index can rewrite a keyframe while start/end stay put
       model            -> the REAL vision provider+model (see llm.vision_config), not the configured
                           text brain: with the deepseek default, vision is really Gemini, so keying
-                          on eng_cfg.anthropic_model made Gemini and Claude verdicts collide."""
+                          on eng_cfg.anthropic_model made Gemini and Claude verdicts collide.
+      venue_fallback   -> selects the still layer's HOLDING-IMAGE question (the _venue prompt
+                          block): the same frame under the venue question can legitimately get the
+                          opposite verdict, so the two must never share a key. Appended to the hash
+                          ONLY when True so every pre-existing (venue-less) cache key stays valid."""
     import hashlib
     h = hashlib.sha256()
-    for part in (src_hash, source_id, f"{float(shot_start):.3f}", f"{float(shot_end):.3f}",
-                 (beat_text or "").strip(), (required_entity or "").strip().lower(),
-                 (required_kind or "").strip().lower(), (expected_visual or "").strip(),
-                 (scene_query or "").strip(), (era or "").strip().lower(),
-                 (visual_policy or "").strip().lower(), "1" if is_specific else "0",
-                 _norm_faces(faceid_names), "mf" if multiframe else "sf",
-                 (image_id or ""), (model or "").strip(),
-                 PROMPT_VERSION, SHEET_VERSION):
+    parts = [src_hash, source_id, f"{float(shot_start):.3f}", f"{float(shot_end):.3f}",
+             (beat_text or "").strip(), (required_entity or "").strip().lower(),
+             (required_kind or "").strip().lower(), (expected_visual or "").strip(),
+             (scene_query or "").strip(), (era or "").strip().lower(),
+             (visual_policy or "").strip().lower(), "1" if is_specific else "0",
+             _norm_faces(faceid_names), "mf" if multiframe else "sf",
+             (image_id or ""), (model or "").strip(),
+             PROMPT_VERSION, SHEET_VERSION]
+    if venue_fallback:
+        parts.append("venue")
+    for part in parts:
         h.update(str(part).encode("utf-8", "replace"))
         h.update(b"\x1f")
     return h.hexdigest()[:32]
@@ -839,6 +851,58 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 except Exception:
                     pass
 
+    _vcache_dirty = 0
+
+    def _rung_fingerprint(ashot, _seg, strict_flag: bool, faceids):
+        """Fingerprint of a FALLBACK-RUNG question — the exact same derivation as the primary
+        path (keep the two in sync), parameterized on the candidate shot and the rung's
+        strictness. `faceids` must be the SAME list the prompt will carry (the caller may
+        substitute sel.identity when the shot has no face detections — the fingerprint hashes
+        what is actually asked, never a proxy). venue_fallback stays False here because
+        _verify_ctx never asks the venue question (the still layer does)."""
+        if ashot is None:
+            return "", False
+        _src_a = proj.source(getattr(ashot, "source_id", "") or "")
+        _ws = _will_sheet(ashot, strict_flag)
+        _kf_a = getattr(ashot, "keyframe_path", "") or ""
+        return verdict_fingerprint(
+            src_hash=_src_hash_of(_src_a), source_id=getattr(ashot, "source_id", "") or "",
+            shot_start=getattr(ashot, "start", 0.0), shot_end=getattr(ashot, "end", 0.0),
+            beat_text=getattr(_seg, "text", ""),
+            required_entity=getattr(_seg, "required_entity", ""),
+            required_kind=getattr(_seg, "required_kind", ""),
+            expected_visual=getattr(_seg, "expected_visual", "") or "",
+            scene_query=getattr(_seg, "scene_query", "") or "",
+            era=_era_of(_seg), visual_policy=_policy.policy_of(_seg),
+            is_specific=strict_flag, faceid_names=list(faceids or []),
+            multiframe=_ws, image_id=_image_id(_kf_a, ashot, _ws), model=_vmodel), _ws
+
+    def _cached_verify_ctx(kf_path, ashot, _seg, strict_flag: bool, faceids, rung: str):
+        """One cache layer for every fallback-rung verdict (strict promotion, contextual
+        downgrade, venue-contextual promotion, lenient generic-filler re-ask). A rung verdict
+        is reusable ONLY when its complete fingerprint — content hash, shot bounds, judged
+        image identity, every prompt field, strictness, model, prompt/sheet version — is
+        byte-identical (the same doctrine, and the same key derivation, as the primary path).
+        Only successful schema-valid verdicts are stored; a transport error / breaker miss /
+        malformed reply is never cached, so retry and circuit-breaker behavior is untouched.
+        Returns (verdict|None, used_sheet) exactly like _verify_ctx."""
+        nonlocal _vcache_dirty
+        from . import perf_metrics as _pm_r
+        _fp_r, _ws_r = _rung_fingerprint(ashot, _seg, strict_flag, faceids)
+        _hit = _vcache.get(_fp_r) if _fp_r else None
+        if _hit is not None and _verdict_schema_ok(_hit):
+            _pm_r.incr(f"verify.rung.{rung}.cache_hit")
+            return dict(_hit), _ws_r                     # copy: callers mutate their verdict
+        _pm_r.incr(f"verify.rung.{rung}.call")
+        v_r, used_r = _verify_ctx(kf_path, ashot, _seg, strict_flag, faceids)
+        if _fp_r and v_r is not None and used_r == _ws_r \
+                and _verdict_schema_ok({**v_r, "status": "ok"}):
+            _vcache[_fp_r] = {k: val for k, val in v_r.items() if k != "reused"}
+            _vcache_dirty += 1
+        elif _fp_r and v_r is not None and used_r != _ws_r:
+            _pm_r.incr("verify.rung.sheet_mismatch")     # not cached (answer ≠ keyed question)
+        return v_r, used_r
+
     # CONCURRENT VERDICT PREFETCH — the wall-clock fix for the verify stage. The decision loop
     # below is inherently serial (reuse ledger, breaker, repair promotions share state), but the
     # EXPENSIVE part — one vision call per beat — has no cross-beat dependency at all. Measured:
@@ -957,6 +1021,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         _cached = _vcache.get(_fp) if _fp else None
         _used_sheet = _want_sheet
         if _cached is not None and _verdict_schema_ok(_cached):
+            from . import perf_metrics as _pm_v
+            _pm_v.incr("verify.primary.cache_hit")
             v = dict(_cached)
             v["reused"] = True
             _reused += 1
@@ -1003,6 +1069,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         if _fp and not v.get("reused") and _verdict_schema_ok({**v, "status": "ok"}):
             if _used_sheet == _want_sheet:
                 _vcache[_fp] = {k: val for k, val in v.items() if k != "reused"}
+                _vcache_dirty += 1
             else:
                 _fp_mismatch += 1
         v["status"] = "ok"
@@ -1052,8 +1119,10 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     anames = ashot.face_ids or []
                     if _breaker_open:
                         break                           # backend is down — promotion cannot verify
-                    av, _ = _verify_ctx(ashot.keyframe_path, ashot, seg,
-                                        (False if downgrade else _exact), anames)
+                    av, _ = _cached_verify_ctx(
+                        ashot.keyframe_path, ashot, seg, (False if downgrade else _exact), anames,
+                        rung=("venue" if pool is not None else
+                              ("contextual" if downgrade else "strict_promote")))
                     if av is None:
                         continue                        # transport error, NOT a judgment
                     if downgrade:
@@ -1232,7 +1301,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             if not swapped and _exact and _downgrade_on and _filler_on:
                 _fresh = None
                 if not _breaker_open:
-                    _fresh, _ = _verify_ctx(kf, shot, seg, False, faceid_names)   # LENIENT re-ask
+                    _fresh, _ = _cached_verify_ctx(kf, shot, seg, False, faceid_names,
+                                                   rung="lenient_filler")         # LENIENT re-ask
                 _ok_f, _why_f = _generic_filler_ok(
                     _fresh, seg, _src_title_of(sel), faceid_names, _era_of(seg),
                     _ok_toks, _char2actor)
@@ -1266,6 +1336,11 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         f"(no exact footage AND no relevant contextual clip — only contradictory)")
                 sel.flagged = True
                 log(f"verify: seg{sel.segment_index} FAILED, no passing alternate")
+        if _vcache_dirty:
+            # INCREMENTAL atomic save — a kill mid-verify must not lose the rung verdicts already
+            # paid for (they are exactly what makes a retry/resume cheap). Same writer, same file.
+            _save_verdict_cache(proj, _vcache)
+            _vcache_dirty = 0
         if progress and sel.segment_index % 10 == 0:
             log(f"verify: {verified} checked, {replaced} replaced, {failed} unresolved")
 

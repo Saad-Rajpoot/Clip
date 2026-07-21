@@ -74,6 +74,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
 
+    # PRODUCTION DEFAULT: warm the verify verdict cache with the proven 4-worker prefetch pool
+    # (measured in production: 221 verdicts warmed in 108s; the serial decision loop, breaker and
+    # provider-fallback behavior are unchanged — see verify.py). setdefault: an explicit user env
+    # (including =1 to force the fully-serial path, as the breaker suites do) always wins.
+    import os as _os_vw
+    _os_vw.environ.setdefault("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", "4")
+
     specs: list[SourceSpec] = []
     if args.sources:
         specs += load_specs(Path(args.sources))

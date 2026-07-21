@@ -793,8 +793,18 @@ def available() -> bool:
 
 
 # ── embeddings ───────────────────────────────────────────────────────────────
+def _perf_incr(name: str) -> None:
+    """Decision-neutral call counter (never raises, never affects behavior)."""
+    try:
+        from vidlore.clipstudio import perf_metrics as _pm
+        _pm.incr(name)
+    except Exception:
+        pass
+
+
 def _img_embed(pil_img):
     import numpy as np
+    _perf_incr("clip.img_embed")
     im = pil_img.convert("RGB")
     w, h = im.size
     s = 224 / min(w, h)
@@ -813,7 +823,9 @@ def _img_embed(pil_img):
 def _txt_embed(prompt: str):
     import numpy as np
     if prompt in _text_emb_cache:
+        _perf_incr("clip.txt_embed.cache_hit")
         return _text_emb_cache[prompt]
+    _perf_incr("clip.txt_embed")
     enc = _tok.encode(prompt)
     ids = np.array([enc.ids[:_CTX] + [0] * max(0, _CTX - len(enc.ids))],
                    dtype="int64")

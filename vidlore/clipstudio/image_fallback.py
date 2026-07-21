@@ -156,6 +156,54 @@ def _clip_relevance(img_path: Path, scene_text: str) -> float:
         return -1.0
 
 
+def _shot_relevance(shot, kf, scene_text: str, embeds_of=None, rel_memo: dict | None = None) -> float:
+    """CLIP relevance of a pool SHOT's keyframe vs the beat text — numerically identical to
+    _clip_relevance(kf, text), but served from the index's PERSISTED embedding when available.
+
+    The persisted row IS the vector _clip_relevance would recompute: index_source stores
+    float32(_img_embed(keyframe)) at index time from the very same keyframe file, and both
+    paths apply the same float32 dot + (cos-0.15)/(0.34-0.15) clamp — so a valid row swaps a
+    full CLIP image forward pass (~tens of ms × up to scan_cap × candidates × beats) for one
+    dot product with zero score change. Falls back to the LIVE _clip_relevance path whenever
+    the persisted data is missing, stale, out of bounds, or the model is unavailable — and
+    the text-embedding still comes from the live (already process-cached) model, so
+    availability semantics are identical: no model → -1.0 exactly as before.
+
+    `rel_memo` (per-render dict) memoizes results by (source_id, shot_index, text): the
+    still pass re-scans the same pool head for every candidate round, recomputing identical
+    scores. Only REAL scores are memoized — a -1.0 "unavailable" is never cached, so the
+    baseline's per-call retry behavior on transient failure is preserved."""
+    from . import perf_metrics as _pm
+    sid = getattr(shot, "source_id", "") or ""
+    key = (sid, getattr(shot, "index", -1), scene_text)
+    if rel_memo is not None and key in rel_memo:
+        _pm.incr("imgfb.rel.memo_hit")
+        return rel_memo[key]
+    rel = None
+    if embeds_of is not None:
+        try:
+            row = getattr(shot, "embed_row", -1)
+            row = -1 if row is None else int(row)
+            if row >= 0 and scene_text.strip():
+                vr = _vr()
+                if vr is not None:
+                    mat = embeds_of(sid)
+                    if mat is not None and row < int(mat.shape[0]):
+                        import numpy as np
+                        te = np.asarray(vr._txt_embed(scene_text), dtype="float32")
+                        cos = float(np.dot(np.asarray(mat[row], dtype="float32"), te))
+                        rel = max(0.0, min(1.0, (cos - 0.15) / (0.34 - 0.15)))
+                        _pm.incr("imgfb.rel.persisted")
+        except Exception:
+            rel = None                                 # any persisted-path failure → live path
+    if rel is None:
+        rel = _clip_relevance(Path(kf), scene_text)
+        _pm.incr("imgfb.rel.live")
+    if rel_memo is not None and rel >= 0.0:
+        rel_memo[key] = rel
+    return rel
+
+
 def _face_verdict(img_path: Path, target_actors: set, all_actors: set,
                   faceid_obj, refs: dict) -> str:
     """'match' (target actor present), 'wrong' (a DIFFERENT main character dominates),
@@ -381,7 +429,8 @@ def pick_source_still(sel, shots_by_key: dict, used_keys: set, used_phash: set,
 
 def pick_pool_still(seg, shots_by_key: dict, used_keys: set, used_phash: set,
                     *, distinct_from=None, min_rel: float = 0.30, min_quality: float = 0.42,
-                    scan_cap: int = 220, want_faces=None):
+                    scan_cap: int = 220, want_faces=None, embeds_of=None,
+                    rel_memo: dict | None = None):
     """Best RELEVANT downloaded source-video keyframe for a beat that has NO usable selection /
     alternates — CLIP-ranked over the indexed pool (real footage frames ONLY, never web/AI). Bounded
     by `scan_cap` so a no-clip beat can't scan an unbounded pool. `want_faces` (a list of accepted
@@ -433,7 +482,7 @@ def pick_pool_still(seg, shots_by_key: dict, used_keys: set, used_phash: set,
             continue
         scanned += 1
         hit = 1 if (variants and _face_hit(shot)) else 0
-        rel = _clip_relevance(Path(kf), text)
+        rel = _shot_relevance(shot, kf, text, embeds_of, rel_memo)
         if rel >= min_rel and (best is None or (hit, rel) > (best[0], best[1])):
             best = (hit, rel, kf, key[0], key[1], ph)
     return (best[2], best[3], best[4], best[1], best[5]) if best else None
