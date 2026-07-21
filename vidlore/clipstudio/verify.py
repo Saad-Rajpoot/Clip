@@ -114,11 +114,21 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         "'replace' only for a DIFFERENT scene/location, a different era/season, unrelated or wrong "
         "characters, or footage that would contradict the narration.\n"
         if venue_fallback else "")
+    # NON-SHOW HARD RULE — applies to EVERY rung (strict, generic, object, venue-fallback). The
+    # verifier once rationalized a sports-news CGI intro as "suitable for a general transition"
+    # on an abstract-effect beat, and painterly fan art as "shows the correct character": a
+    # designed image can be thematically perfect and still must never air as footage.
+    _nonshow = (
+        "HARD RULE — the frame must be LIVE-ACTION footage from the show itself. If it is any "
+        "designed or non-show image — a drawing, painting, fan art, comic/anime frame, poster, "
+        "video-game graphics or UI, news/broadcast motion graphics, a logo/title card, or an "
+        "AI-generated image — mark 'replace' no matter how thematically fitting it is. Real props, "
+        "maps and documents FILMED WITHIN a live-action scene are fine.\n")
     txt = (
         f'Narration line: "{narration}"\n'
         f"This clip should show: {required_entity or '(a general scene fitting the line)'} "
         f"(kind: {required_kind or 'any'}).\n"
-        + _story + _mf + _rule + _obj + _venue +
+        + _story + _mf + _rule + _nonshow + _obj + _venue +
         f"Automatic Face-ID on this frame detected: {', '.join(faceid_names) if faceid_names else 'none'}.\n\n"
         "For wrong_subject_visible: set true ONLY if a DIFFERENT specific character (clearly NOT the "
         "one this line is about) is the main subject of the frame; set false for a wide / crowd / "
@@ -162,7 +172,7 @@ _SEASON_RX = re.compile(
 
 # Bump whenever the verifier PROMPT or its JSON contract changes: a verdict is only reusable if it
 # was produced by the same question. Part of the fingerprint below.
-PROMPT_VERSION = "v6-2026-07"          # v6: + venue-fallback still question (S1); v5: E2/E2b
+PROMPT_VERSION = "v7-2026-07"          # v7: + non-show/illustration hard rule; v6: venue-fallback
 # Bump when the contact-sheet SAMPLING changes (frame count/positions/layout). The sheet is the
 # image the verifier judges, so a different sampling is a different question even for the same shot.
 SHEET_VERSION = "sheet-v1-startmidend"
@@ -1196,10 +1206,10 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     anames = ashot.face_ids or []
                     if _breaker_open:
                         break                           # backend is down — promotion cannot verify
-                    av, _ = _cached_verify_ctx(
-                        ashot.keyframe_path, ashot, seg, (False if downgrade else _exact), anames,
-                        rung=("venue" if pool is not None else
-                              ("contextual" if downgrade else "strict_promote")))
+                    av, _ = _cached_verify_ctx(ashot.keyframe_path, ashot, seg,
+                                               (False if downgrade else _exact), anames,
+                                               rung=("venue" if pool is not None else
+                                                     ("contextual" if downgrade else "strict_promote")))
                     if av is None:
                         continue                        # transport error, NOT a judgment
                     if downgrade:

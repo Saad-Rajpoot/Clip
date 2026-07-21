@@ -525,7 +525,14 @@ def test_round2_review_fixes():
                         ["srcC", 30.0, 34.0], ["srcD", 40.0, 44.0]]
     proj.selections = [sel]
     seg = M.ScriptSegment(index=0, text="x")
-    fake_shot = types.SimpleNamespace(index=0, keyframe_path="kf.jpg", face_ids=[], identities=[])
+    # Distinct shot per (source_id, shot_index) — the verdict-rung cache keys on the shot's
+    # identity (source_id / bounds / keyframe), which every REAL pair of alternates has. A single
+    # shared mock shot would make altA and altB the byte-identical cached question, so altB would
+    # (correctly, per the cache doctrine) reuse altA's verdict and never reach the mock.
+    def fake_shot_of(sid, idx):
+        return types.SimpleNamespace(index=idx, source_id=sid, start=10.0 * idx,
+                                     end=10.0 * idx + 4.0, keyframe_path=f"kf_{sid}_{idx}.jpg",
+                                     face_ids=[], identities=[])
     calls = {"n": 0}
 
     def fake_vf(kf, narration, ent, kind, names, eng_cfg, model="", is_specific=True, **kwargs):
@@ -537,7 +544,7 @@ def test_round2_review_fixes():
     orig = (V.verify_frame, V._shot_lookup, V._cut.cut_selection, L.has_llm)
     try:
         V.verify_frame = fake_vf
-        V._shot_lookup = lambda p: (lambda sid, idx: fake_shot)
+        V._shot_lookup = lambda p: fake_shot_of
         V._cut.cut_selection = lambda p, s, c: None
         L.has_llm = lambda eng_cfg=None: True
         V.verify_and_repair(proj, [seg], ClipConfig(),
@@ -5365,7 +5372,16 @@ def test_fps_and_ad_protection():
     _, n1_sub, act_s, _ = clean_cut_window([A, Bsub], 0.0, 2.4, 1.2, anchor=(0.0, 2.0))
     check("subs neighbour → exact boundary kept (no margin, unchanged behavior)",
           act_s == "shortened" and abs(n1_sub - 2.0) <= 1e-6)
-    check("edge-margin applies to ocr-text reason only", "r == \"ocr-text\"" in msrc)
+    # avatar badges fade in/out like text cards, so overlay-badge shares the ocr-text margin;
+    # subs/unreadable/logo keep exact bounds (the over-trim protection this test exists for)
+    check("edge-margin applies to ocr-text + overlay-badge reasons only",
+          'r in ("ocr-text", "overlay-badge")' in msrc and 'r == "subs"' not in msrc)
+    Bbadge = _shot(1, 2.0, 5.0, ocr_text="Jacquelyn Sutphen",
+                   corner_masks={"bl": "300c0381801ff00c000000600000037fffff9bfffffcdeffbfe6"
+                                       "0000003ffffff9ffffffc0000000"})
+    _, n1_bdg, act_b, _ = clean_cut_window([A, Bbadge], 0.0, 2.4, 1.2, anchor=(0.0, 2.0))
+    check("overlay-badge neighbour → clean window ends with the same safety margin",
+          act_b == "shortened" and n1_bdg <= 2.0 - 0.3 + 1e-6)
 
     # (6) the final-video ad gate is WIRED into build_video as a release gate
     check("final-video ad gate wired into build_video",
