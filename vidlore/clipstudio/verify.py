@@ -130,12 +130,17 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         '"confidence": 0.0-1.0, "verdict": "keep" or "replace", "reason": "one short sentence"}'
     )
     import time
+    from . import perf_metrics as _pm
     content = [_img_block(Path(keyframe_path)), {"type": "text", "text": txt}]
+    _pm.incr("verify.vision_call")
+    if venue_fallback:
+        _pm.incr("verify.vision_call.venue")
     for attempt in range(1, 5):                       # retry transient overload / rate limits
         try:
-            out = _llm.complete(system=_VSYS, max_tokens=400,
-                                messages=[{"role": "user", "content": content}],
-                                eng_cfg=eng_cfg, model=model)
+            with _pm.timed("verify.vision_call"):
+                out = _llm.complete(system=_VSYS, max_tokens=400,
+                                    messages=[{"role": "user", "content": content}],
+                                    eng_cfg=eng_cfg, model=model)
             m = re.search(r"\{.*\}", out, re.S)
             return json.loads(m.group(0)) if m else None
         except Exception:                             # transient overload / rate limit → back off
@@ -957,6 +962,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         _cached = _vcache.get(_fp) if _fp else None
         _used_sheet = _want_sheet
         if _cached is not None and _verdict_schema_ok(_cached):
+            from . import perf_metrics as _pm_v
+            _pm_v.incr("verify.primary.cache_hit")
             v = dict(_cached)
             v["reused"] = True
             _reused += 1

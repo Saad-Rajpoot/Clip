@@ -676,6 +676,8 @@ def index_all(proj: ClipProject, cfg: ClipConfig, *, references=None, faceid=Non
 
 
 def load_shots(proj: ClipProject, source_id: str) -> list[Shot]:
+    from . import perf_metrics as _pm
+    _pm.incr("index.load_shots")
     f = proj.shots_path(source_id)
     if not f.exists():
         return []
@@ -684,5 +686,7 @@ def load_shots(proj: ClipProject, source_id: str) -> list[Shot]:
 
 def load_embeds(proj: ClipProject, source_id: str):
     import numpy as np
+    from . import perf_metrics as _pm
+    _pm.incr("index.load_embeds")
     f = proj.embeds_path(source_id)
     return np.load(f) if f.exists() else None

@@ -1012,7 +1012,16 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
     eng = engine_config()
     project_dir = Path(project_dir)
 
+    from . import perf_metrics as _pm_stage
+
     def log(m):
+        # decision-neutral stage-duration marks, driven by the existing "N/9 ·" progress lines
+        try:
+            _s = str(m)
+            if "·" in _s and _s.split("/")[0].strip().rstrip("ab").isdigit():
+                _pm_stage.stage(_s.split("·", 1)[1].strip()[:48])
+        except Exception:
+            pass
         if progress:
             progress(m)
 
@@ -1325,6 +1334,9 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
                           title=title or analysis.movie_title or proj.name,
                           theme_name=theme, voiceover=voiceover, voice_provider=voice_provider,
                           voice_preset=voice_preset, use_tts=use_tts, progress=progress)
+
+    if _pm_stage.enabled():
+        _pm_stage.write_report(proj.output_dir / "perf_report.json")
 
     return {
         "project": str(proj.root),

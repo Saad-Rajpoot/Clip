@@ -822,11 +822,14 @@ def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None
     # the exact raw scene clip can't be missed under the noise of essays/compilations.
     anchor_qset = {q.lower() for q in anchor_queries(analysis, segments)}
     log(f"discover: {len(queries)} queries ({len(anchor_qset)} anchor) · type={getattr(analysis,'video_type','')}")
+    from . import perf_metrics as _pm
     raw: list[SourceCandidate] = []
     for q in queries:
         depth = cfg.discover_per_query * 2 if q.lower() in anchor_qset else cfg.discover_per_query
-        raw += _ytsearch(q, depth)
-        raw += _archive_search(q, max(2, cfg.discover_per_query // 2))
+        with _pm.timed("discover.query"):
+            _pm.incr("discover.query")
+            raw += _ytsearch(q, depth)
+            raw += _archive_search(q, max(2, cfg.discover_per_query // 2))
         log(f"discover: '{q[:40]}' → {len(raw)} cumulative")
 
     # dedupe by id and by normalized title
