@@ -35,6 +35,10 @@ app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024     # 200 MB voiceover cap
 # in-memory job registry  id -> {phase, log[], done, ok, output, error, started}
 _JOBS: dict = {}
 _LOCK = threading.Lock()
+# Operator override for the verify-prefetch pool, captured ONCE at process start: _run_job resets
+# the env symmetrically per job, so a live value could not distinguish "operator set this" from
+# "the previous job set this".
+_VERIFY_WORKERS_START = (os.environ.get("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", "") or "").strip()
 # Renders are SERIALIZED through this lock. The LLM layer reads the chosen provider/model from the
 # process-global env at call-time, so two concurrent jobs with different brains would clobber each
 # other mid-run. One render at a time keeps each job on its own brain (and avoids CPU/network
@@ -115,6 +119,11 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
             # produce_auto reads this at construction, so it must be set before that call. Set it
             # explicitly each run (symmetric) so a prior job's choice never bleeds in.
             os.environ["VIDLORE_CLIPSTUDIO_MAX_CPU"] = "1" if turbo else "0"
+            # Verify-verdict PREFETCH pool (proven 4-worker warm; serial decisions/breaker
+            # unchanged — verify.py). Symmetric per job like the knobs above; an operator's
+            # process-start value (captured once at import) always wins, including =1 for the
+            # fully-serial path.
+            os.environ["VIDLORE_CLIPSTUDIO_VERIFY_WORKERS"] = _VERIFY_WORKERS_START or "4"
             # REVIEW mode = accept the render even if some beats have no proven footage, flagging them
             # loudly instead of release-blocking. Set symmetrically every run so 'block' (production
             # default) is restored and a prior review retry never bleeds into a fresh job.
