@@ -3834,6 +3834,85 @@ def _clip_has_burned_text(clip_path: Path, ocr_engine) -> bool:
     return False
 
 
+def _clip_text_corner(clip_path: Path, ocr_engine) -> str:
+    """WHERE the burned text of a cut clip sits: 'tl'|'tr'|'bl'|'br' when it is CORNER-LOCALIZED
+    (a channel bug / commenter-avatar badge — croppable), '' when it is centered or frame-wide
+    (dialogue subtitles / title cards — not croppable, the caller must fall back to caption
+    suppression). Same frame offsets as _clip_has_burned_text; corner votes need the text box
+    off-center on BOTH axes (the _detect_logo_corner rule), and any full-width strip vetoes."""
+    if ocr_engine is None or not Path(clip_path).exists():
+        return ""
+    import os as _os2
+    import re as _re2
+    from collections import Counter
+    try:
+        from PIL import Image
+    except Exception:
+        return ""
+    ff = ffmpeg_exe()
+    votes: Counter = Counter()
+    strip_seen = False
+    for off in (0.3, 1.0, 1.8, 2.6):
+        tmp = f"{clip_path}.tcorner_{int(off * 10)}.jpg"
+        try:
+            subprocess.run([ff, "-y", "-loglevel", "error", "-ss", f"{off:.2f}",
+                            "-i", str(clip_path), "-frames:v", "1", "-vf", "scale=854:-1", tmp],
+                           capture_output=True, timeout=20)
+            if not Path(tmp).exists():
+                continue
+            W, H = Image.open(tmp).size
+            res, _el = ocr_engine(tmp)
+            for box, txt, conf in (res or []):
+                if float(conf) < 0.5 or len(_re2.findall(r"[A-Za-z]", str(txt))) < 4:
+                    continue
+                xs = [p[0] for p in box]; ys = [p[1] for p in box]
+                bw = (max(xs) - min(xs)) / max(1, W)
+                cx = (min(xs) + max(xs)) / 2 / max(1, W)
+                cy = (min(ys) + max(ys)) / 2 / max(1, H)
+                if bw > 0.45:
+                    strip_seen = True                  # frame-wide strip = subs, never croppable
+                elif (cx < 0.3 or cx > 0.7) and (cy < 0.3 or cy > 0.7):
+                    votes[("b" if cy > 0.5 else "t") + ("r" if cx > 0.5 else "l")] += 1
+        except Exception:
+            pass
+        finally:
+            try:
+                _os2.remove(tmp)
+            except Exception:
+                pass
+    if strip_seen or not votes:
+        return ""
+    return votes.most_common(1)[0][0]
+
+
+def _crop_clip_corner(clip_path: Path, corner: str, log=None) -> bool:
+    """REPAIR a corner-badged cut clip in place: the same punch-in crop the watermark path uses
+    (_watermark_crop_filter — keeps 16:9, drops the badge corner), re-encoded at the recut CRF.
+    Duration-neutral (crop only). False (original untouched) on any failure."""
+    src = Path(clip_path)
+    if not src.exists() or corner not in ("tl", "tr", "bl", "br"):
+        return False
+    out = src.with_name(src.stem + ".dodgecrop" + src.suffix)
+    # crop ONLY — the clip already got the _CAS detail chain at cut time; a second sharpen
+    # pass would halo. Assemble's per-clip normalize handles the rescale to 1920x1080.
+    cmd = [ffmpeg_exe(), "-y", "-loglevel", "error", "-i", str(src),
+           "-vf", _watermark_crop_filter(corner),
+           "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+           "-c:a", "copy", str(out)]
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=300)
+    except Exception:
+        out.unlink(missing_ok=True)
+        return False
+    if p.returncode == 0 and out.exists() and out.stat().st_size > 0:
+        out.replace(src)
+        return True
+    if log:
+        log(f"build: caption-dodge crop failed on {src.name} ({(p.stderr or b'')[-120:]!r})")
+    out.unlink(missing_ok=True)
+    return False
+
+
 # A channel intro/outro slate / social-links / CTA card — NOT scene footage. Unlike a source
 # DIALOGUE subtitle (which we keep, just suppressing our own caption over it), a branding card
 # must be REMOVED from the video entirely. Matches the cards the user flagged (ExploreWesteros
@@ -4061,8 +4140,153 @@ def _ocr_layout_metrics(res, W: int, H: int):
     return n, tot / area, mx / area
 
 
+# ── OWN-CAPTION whitelist for the final-video ad scan ────────────────────────────────────────
+# The gate scans the FINISHED video, which legitimately carries OUR OWN burned captions — and a
+# narration script may itself end on a CTA ("…subscribe because that's the story coming next").
+# That word is the USER'S OWN SCRIPT, not third-party promo material, yet it matches _PROMO_RX
+# and a large caption style trips the layout-heavy geometry (observed: a finished 4.3h render
+# quarantined on its own outro caption, deterministically on every retry). The precise defence is
+# the caption SCHEDULE: a text box is ignored only when its words match what WE burned at that
+# very timestamp. A real promo card's text is not in the schedule, so detection is unweakened.
+
+_CAPWORD_RX = re.compile(r"[a-z0-9']+")
+
+
+def _norm_caption_words(text: str) -> list:
+    """Normalized word list for caption-vs-OCR comparison: lowercase, curly quotes/dashes folded,
+    everything but [a-z0-9'] dropped (OCR reads '—' as '-', smart quotes as ASCII, etc.)."""
+    t = str(text or "").lower()
+    t = (t.replace("’", "'").replace("‘", "'")
+          .replace("“", '"').replace("”", '"'))
+    return _CAPWORD_RX.findall(t)
+
+
+def _parse_srt_events(path) -> list:
+    """[(t0, t1, text)] from an SRT file. Tolerant: returns [] on any read/parse failure —
+    the caller then simply has no whitelist (fail-safe: the gate stays as strict as before)."""
+    try:
+        txt = Path(path).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    ts_rx = re.compile(r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)")
+    evs, cur, buf = [], None, []
+    for line in txt.splitlines() + [""]:
+        m = ts_rx.search(line)
+        if m:
+            if cur is not None and buf:
+                evs.append((cur[0], cur[1], " ".join(buf)))
+            g = [int(x) for x in m.groups()]
+            cur = (g[0] * 3600 + g[1] * 60 + g[2] + g[3] / 1000.0,
+                   g[4] * 3600 + g[5] * 60 + g[6] + g[7] / 1000.0)
+            buf = []
+        elif not line.strip():
+            if cur is not None and buf:
+                evs.append((cur[0], cur[1], " ".join(buf)))
+            cur, buf = None, []
+        elif cur is not None:
+            # every non-blank line after a timestamp is cue TEXT — including digit-only lines
+            # (a caption that is just a year, '1942', must stay in the whitelist schedule; SRT
+            # index lines only ever appear before a timestamp, where cur is None).
+            buf.append(line.strip())
+    return evs
+
+
+def _parse_ass_events(path) -> list:
+    """[(t0, t1, text)] from an ASS subtitle file (the breakout word-by-word caption overlay).
+    Strips {\\kf..}/{\\fad..} override tags; \\N becomes a space. [] on any failure."""
+    try:
+        txt = Path(path).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    tag_rx = re.compile(r"\{[^}]*\}")
+
+    def _ts(s):
+        try:
+            hh, mm, rest = s.strip().split(":")
+            return int(hh) * 3600 + int(mm) * 60 + float(rest)
+        except Exception:
+            return None
+    evs = []
+    for line in txt.splitlines():
+        if not line.startswith("Dialogue:"):
+            continue
+        parts = line.split(",", 9)
+        if len(parts) < 10:
+            continue
+        t0, t1 = _ts(parts[1]), _ts(parts[2])
+        if t0 is None or t1 is None:
+            continue
+        text = tag_rx.sub("", parts[9]).replace(r"\N", " ").replace(r"\n", " ").strip()
+        if text:
+            evs.append((t0, t1, text))
+    return evs
+
+
+def _own_caption_schedule(result: Path, work: Path) -> list:
+    """[(t0, t1, [words], raw_text)] for every caption WE burned onto the final video:
+    the narration captions (final.srt — written by the engine from the same word timings the
+    caption burner renders) plus the breakout word-by-word lines (work/breakout_caps.ass — the
+    exact burned text). Empty list when neither exists (→ no whitelisting)."""
+    evs = []
+    try:
+        srt = Path(result).with_suffix(".srt")
+        if srt.exists():
+            evs.extend(_parse_srt_events(srt))
+        ass = Path(work) / "breakout_caps.ass"
+        if ass.exists():
+            evs.extend(_parse_ass_events(ass))
+    except Exception:
+        return []
+    out = []
+    for t0, t1, text in evs:
+        ws = _norm_caption_words(text)
+        if ws:
+            out.append((float(t0), float(t1), ws, text))
+    return out
+
+
+def _caption_explained(box_text: str, active_events: list) -> bool:
+    """True when an OCR box's text is (fuzzily) covered by ONE caption event we burned in the
+    surrounding seconds — and covers enough OF that event to actually BE the caption render (or
+    one full row of it), not a promo element that merely SHARES words with it.
+
+    TWO-WAY coverage against each active event's word list (never a flattened union):
+      forward — >= 80% (ceil) of the box's words appear in the event (exact, or difflib>=0.8 for
+                words of 4+ chars: OCR noise like 'subscrlbe' / 'thats');
+      reverse — the box matches at least min(3, len(event_words)) DISTINCT event words.
+    The reverse requirement is what stops the subset bypass: a full-screen 'SUBSCRIBE' end-card
+    button while our caption reads 'subscribe because that's the story' shares 100% of ITS one
+    word but covers only 1 of the event's 7 — never explained. A two-row caption render still
+    passes (each row carries >= 3 of its event's words). Residual: a promo element that
+    reproduces >= 3 consecutive words of our exact caption line at the exact moment it airs is
+    indistinguishable from the caption by text alone — accepted (the flat-card path and the
+    upstream clip-stage branding scans still apply to it)."""
+    words = _norm_caption_words(box_text)
+    if not words:
+        return False
+    import difflib
+    import math
+    need_fwd = max(1, math.ceil(0.8 * len(words)))
+    for ev_words in (active_events or []):
+        if not ev_words:
+            continue
+        fwd, matched = 0, set()
+        for w in words:
+            if w in ev_words:
+                fwd += 1
+                matched.add(w)
+            elif len(w) >= 4:
+                close = difflib.get_close_matches(w, ev_words, n=1, cutoff=0.8)
+                if close:
+                    fwd += 1
+                    matched.add(close[0])
+        if fwd >= need_fwd and len(matched) >= min(3, len(set(ev_words))):
+            return True
+    return False
+
+
 def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
-                         stride: float = 0.5) -> dict:
+                         stride: float = 0.5, own_captions: list = None) -> dict:
     """Scan the FINISHED video every `stride` seconds (0.5s — a 1-2s card cannot fit between probes)
     for full-screen promotional / outro / CTA / streamer-brand slates that must never ship.
 
@@ -4076,9 +4300,11 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
          even over a photographic background (pricing/URL/subscribe overlays on a movie still).
     A candidate is CONFIRMED as a hit when it persists across >=2 consecutive samples (a real card
     holds >= ~1s) OR a single frame is an unambiguous flat card (card >= strong). In-scene signs,
-    burned subtitles, corner bugs, and our own bottom captions are protected: the OCR crop drops the
-    bottom caption band, a lone small box never trips path B, and a transient single frame never
-    confirms unless it is a strong flat card."""
+    burned subtitles and corner bugs are protected by the two-factor geometry; our OWN burned
+    captions are protected by `own_captions` — a text box is dropped only when it two-way-matches
+    a caption event WE scheduled at that very timestamp (see _caption_explained), never by
+    discarding the bottom band. A transient single frame never confirms unless it is a strong
+    flat card."""
     import os as _os2
     scan_dir = work / "_adscan"
     if ocr_engine is None:
@@ -4089,16 +4315,42 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
     card_floor = _cfg_f3("VIDLORE_CLIPSTUDIO_AD_CARD_FLOOR", 0.40)
     card_strong = _cfg_f3("VIDLORE_CLIPSTUDIO_AD_CARD_STRONG", 0.55)
     from PIL import Image
+    _caps_sched = list(own_captions or [])
+    _cap_excluded = [0]                                    # boxes whitelisted as our own captions
 
-    def _probe_frame(fp):
+    def _active_caption_events(t):
+        """Per-EVENT word lists of the captions WE burned that are active at frame-time t
+        (±1.0s slack — the fps-filter frame time is only stride-accurate, and caption fades
+        straddle event edges). Kept per-event, never flattened: _caption_explained requires the
+        box to cover a real fraction of ONE event, which a promo element sharing stray words
+        with several events cannot fake."""
+        return [ev[2] for ev in _caps_sched if ev[0] - 1.0 <= t <= ev[1] + 1.0]
+
+    def _probe_frame(fp, t=None):
         """OCR ONE frame → a promo-candidate dict or None. OCRs the FULL frame (promo URLs/prices
-        live at the very bottom too) — our own captions are protected by the two-factor gate below,
-        never by discarding the bottom band. Card-uniformity is measured on the picture area."""
+        live at the very bottom too) — our own captions are protected by matching each text box
+        against the caption SCHEDULE (what we burned at this very timestamp), never by discarding
+        the bottom band. Card-uniformity is measured on the picture area."""
         card = _frame_card_uniformity(fp)
         im = Image.open(fp).convert("RGB")
         W, H = im.size
         res, _el = ocr_engine(str(fp))
-        joined = " ".join(str(txt) for _b, txt, conf in (res or []) if float(conf) >= 0.30)
+        res = list(res or [])
+        if _caps_sched and t is not None:
+            act = _active_caption_events(t)
+            if act:
+                kept = []
+                for item in res:
+                    try:
+                        if (float(item[2]) >= 0.30
+                                and _caption_explained(str(item[1]), act)):
+                            _cap_excluded[0] += 1
+                            continue
+                    except Exception:
+                        pass
+                    kept.append(item)
+                res = kept
+        joined = " ".join(str(txt) for _b, txt, conf in res if float(conf) >= 0.30)
         m = _PROMO_RX.search(joined)
         if not m:
             return None
@@ -4137,7 +4389,7 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
     for i, fp in enumerate(frames):
         t = round(i * stride, 2)
         try:
-            c = _probe_frame(fp)
+            c = _probe_frame(fp, t)
             if c is not None:
                 c["t"] = t
                 cand[t] = c
@@ -4173,9 +4425,10 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
                 _o.unlink(missing_ok=True)
             return "unverified"
         hit = derr = 0
-        for dp in dframes:
+        _d0 = max(0.0, t0 - 0.5)
+        for _di, dp in enumerate(dframes):
             try:
-                if _probe_frame(dp) is not None:
+                if _probe_frame(dp, round(_d0 + _di * 0.1, 2)) is not None:
                     hit += 1
             except Exception:
                 derr += 1
@@ -4202,6 +4455,10 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
                 c["confirmed_by"] = "dense_rescan"
                 hits.append(c)
     if log:
+        if _cap_excluded[0]:
+            log(f"build: final-video ad scan — {_cap_excluded[0]} text box(es) matched OUR OWN "
+                f"burned caption schedule (narration/breakout lines) and were whitelisted; "
+                f"promo detection ran on the remaining screen text")
         if hits:
             for h in hits[:12]:
                 log(f"build: final-video AD SCAN HIT @{h['t']}s token={h['token']!r} "
@@ -4214,18 +4471,32 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
             "frames": len(frames), "ocr_errors": ocr_errors, "reason": ""}
 
 
-def _final_video_ad_gate(result: Path, work: Path, ocr_engine, *, log) -> Path:
+def _final_video_ad_gate(result: Path, work: Path, ocr_engine, *, log,
+                         captions_burned: bool = False) -> Path:
     """HARD, FAIL-CLOSED publication gate against full-screen promo/outro/CTA/streamer-brand cards.
     Auto-repair happens UPSTREAM at the clip stage (_clip_branding_text full-window probe →
     _freeze_replace / clean re-window + Ken-Burns time-neutrality). A survivor here — OR an inability
     to VERIFY the render is clean — quarantines the render (*.FAILED_AD_QA.*) and RAISES. A
     verification failure (no OCR / zero frames / excessive OCR errors) can only be waved through with
-    an explicit emergency override (VIDLORE_CLIPSTUDIO_AD_GATE_OVERRIDE=1) that logs a LOUD warning."""
+    an explicit emergency override (VIDLORE_CLIPSTUDIO_AD_GATE_OVERRIDE=1) that logs a LOUD warning.
+
+    `captions_burned=True` (the caller burned word-synced captions onto this video) enables the
+    OWN-CAPTION whitelist: OCR text matching the burned caption schedule (final.srt + breakout ASS)
+    at that timestamp is the user's own script, not third-party promo. With captions off, no
+    whitelist — screen text then can only come from the footage itself."""
     import json as _json_ad
     import os as _os3
     if _os3.environ.get("VIDLORE_CLIPSTUDIO_FINAL_AD_GATE", "1").strip() in ("0", "false", "no"):
         return result
-    r = _final_video_ad_scan(result, work, ocr_engine, log=log)
+    own = _own_caption_schedule(result, work) if captions_burned else None
+    if own:
+        _cta = sorted({m.group(0).strip().lower() for _a, _b, _w, _raw in own
+                       for m in [_PROMO_RX.search(_raw)] if m})[:6]
+        if _cta:
+            log(f"build: ad-gate note — the narration/breakout captions themselves contain "
+                f"CTA-like language {_cta} (the user's own script); these caption lines are "
+                f"whitelisted by text+time match, NOT by loosening promo detection")
+    r = _final_video_ad_scan(result, work, ocr_engine, log=log, own_captions=own)
     status = r.get("status")
     if status == "clean":
         return result
@@ -4647,12 +4918,16 @@ def _burn_breakout_captions(video: Path, caps: list, work: Path, log=None, *, pr
     try:
         p = subprocess.run(cmd, capture_output=True, timeout=1200)
     except Exception:
-        return False
+        ass.unlink(missing_ok=True)                    # nothing burned → keep it OUT of the
+        return False                                   # ad-gate's own-caption whitelist
     if p.returncode == 0 and out.exists() and out.stat().st_size > 0:
         Path(out).replace(video)                       # same dir — atomic, no `os` needed
         return True
     if log:
         log(f"build: breakout-caption burn failed ({(p.stderr or b'')[-180:]!r})")
+    # the burn FAILED: these lines were never rendered onto the video, so the ASS file must not
+    # feed _own_caption_schedule (it would whitelist screen text that can only be the footage's).
+    ass.unlink(missing_ok=True)
     return False
 
 
@@ -5581,24 +5856,34 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 continue
             clips = beat_clips.get(seg.index) or []
             _ls = _dlens.get(seg.index) or []
+            # SAME-SCENE donor first: freezing from the PREVIOUS scene's clip propagates that
+            # scene's content across the cut (observed: a news-CGI frame from the neighbouring
+            # beat froze into a legit S05E08 beat, airing broadcast graphics over the wrong
+            # narration). A cross-scene donor stays the last resort and is logged as such.
+            _dark_flags = [_clip_too_dark(Path(cp), floor=_dfloor) for cp in clips]
+            _own_clean = [cp for cp, _dk in zip(clips, _dark_flags) if not _dk]
             for m, cp in enumerate(list(clips)):
-                if _clip_too_dark(Path(cp), floor=_dfloor):
-                    _d = (_ls[m] if m < len(_ls) and _ls[m] > 0 else 3.0) + 0.5
-                    if _last_clean_d is not None:
-                        _fr = proj.clips_dir / f"beat_{seg.index:03d}_{m}_nodark.mp4"
-                        _got = _freeze_replace(Path(_last_clean_d), _fr, _d)
-                        if _got:
-                            clips[m] = Path(_got)
-                            _drep += 1
-                            log(f"build: unreadable-clip removal — scene {seg.index} clip {m} "
-                                f"near-black, freeze-replaced with previous clean frame")
-                            continue
-                    # no clean predecessor to freeze — leave it for the final black gate to BLOCK
-                    # (never silently air dark; never substitute a black placeholder either)
-                    log(f"build: ⚠ scene {seg.index} clip {m} near-black with no clean predecessor "
-                        f"— final black gate will block this render (footage gap needs rediscovery)")
-                else:
+                if not _dark_flags[m]:
                     _last_clean_d = cp
+                    continue
+                _d = (_ls[m] if m < len(_ls) and _ls[m] > 0 else 3.0) + 0.5
+                _donor = _own_clean[0] if _own_clean else _last_clean_d
+                if _donor is not None:
+                    _fr = proj.clips_dir / f"beat_{seg.index:03d}_{m}_nodark.mp4"
+                    _got = _freeze_replace(Path(_donor), _fr, _d)
+                    if _got:
+                        clips[m] = Path(_got)
+                        _drep += 1
+                        log(f"build: unreadable-clip removal — scene {seg.index} clip {m} "
+                            f"near-black, freeze-replaced with a "
+                            f"{'same-scene' if _own_clean else 'PREVIOUS-scene'} clean frame"
+                            + ("" if _own_clean else
+                               " (cross-scene donor — content is the neighbour beat's)"))
+                        continue
+                # no clean donor to freeze — leave it for the final black gate to BLOCK
+                # (never silently air dark; never substitute a black placeholder either)
+                log(f"build: ⚠ scene {seg.index} clip {m} near-black with no clean predecessor "
+                    f"— final black gate will block this render (footage gap needs rediscovery)")
             beat_clips[seg.index] = clips
             if clips:
                 for _fi in footage:
@@ -5858,7 +6143,23 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             for m, cp in enumerate(clips):
                 t2 = t + lens[m]
                 if _clip_has_burned_text(Path(cp), _ocr_eng):
-                    suppress_wins.append((round(max(a, t - 0.3), 2), round(min(b, t2 + 0.3), 2)))
+                    # REPAIR-FIRST: corner-localized text (channel bug / commenter-avatar badge)
+                    # is CROPPED out of the clip — the viewer keeps both clean footage AND the
+                    # caption. Suppression is the last resort for non-croppable text (dialogue
+                    # subs / frame-wide cards) and is now logged per-beat: a silently vanishing
+                    # caption reads as a render bug (observed: 3.3s caption dropout over an
+                    # avatar badge the earlier gates missed).
+                    _corner = _clip_text_corner(Path(cp), _ocr_eng)
+                    if _corner and _crop_clip_corner(Path(cp), _corner, log=log) \
+                            and not _clip_has_burned_text(Path(cp), _ocr_eng):
+                        log(f"build: caption-dodge REPAIR — beat {seg.index} clip {m} "
+                            f"corner-cropped ({_corner}); caption kept")
+                    else:
+                        suppress_wins.append((round(max(a, t - 0.3), 2),
+                                              round(min(b, t2 + 0.3), 2)))
+                        log(f"build: caption-dodge SUPPRESS — beat {seg.index} "
+                            f"[{max(a, t - 0.3):.1f}-{min(b, t2 + 0.3):.1f}s] caption hidden "
+                            f"over source text (not corner-croppable)")
                 t = t2
         if suppress_wins:
             suppress_wins.sort()
@@ -6005,7 +6306,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # promo / outro / CTA / streamer-brand slates (the Max/WarnerMedia end-slate class). Clip-stage
     # removal + Ken-Burns time-neutrality are the primary fix; this is the last-line block so a
     # promo frame can never SILENTLY ship (quarantine + raise on any survivor).
-    result = _final_video_ad_gate(result, work, _ocr_eng, log=log)
+    result = _final_video_ad_gate(result, work, _ocr_eng, log=log, captions_burned=_cap_on)
     # FINAL-VIDEO SUSTAINED-BLACK / LEGIBILITY GATE — no near-black/unusable-dark footage may ship
     # (distinct from the assemble true-black repair). Short fades are allowed; sustained illegible
     # regions block publication.

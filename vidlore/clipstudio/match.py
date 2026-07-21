@@ -402,7 +402,31 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
                 progress(f"match: dropping non-live-action source {src.id} "
                          f"(toy/claymation/AI-render — not real footage)")
             continue
+        # NON-SHOW GRAPHICS — per-shot AND source-level. _source_is_nonphotographic above samples
+        # only ~6 keyframes at a 55% bar, so a 40%-illustrated book-essay source passes it and,
+        # with no per-shot gate at all, contributes every fan-art/CGI shot to the pool (observed:
+        # a news-CGI intro aired on a connector beat; fan art aired via a secondary beat window).
+        _gfx_on = nonshow_on and os.environ.get("VIDLORE_CLIPSTUDIO_GRAPHICS_GATE", "1").strip() \
+            not in ("0", "false", "no")
+        _gfx_idx: set = set()
+        if _gfx_on:
+            for sh in shots:
+                _v = (embeds[sh.embed_row] if embeds is not None
+                      and 0 <= sh.embed_row < len(embeds) else None)
+                if _shot_is_graphics(sh, _v):
+                    _gfx_idx.add(sh.index)
+            if _graphics_source_verdict(len(_gfx_idx), len(shots)):
+                if progress:
+                    progress(f"match: dropping illustrated/graphics source {src.id} "
+                             f"({len(_gfx_idx)}/{len(shots)} shots are designed graphics — "
+                             f"parody/fan-art/news content, not footage)")
+                continue
+            if _gfx_idx and progress:
+                progress(f"match: {src.id} — {len(_gfx_idx)} designed-graphics shot(s) gated "
+                         f"(news CGI / game UI / illustration never airs)")
         for sh in shots:                              # `embeds` loaded once above (reused here)
+            if sh.index in _gfx_idx:
+                continue
             vec = None
             if embeds is not None and 0 <= sh.embed_row < len(embeds):
                 vec = embeds[sh.embed_row]
@@ -504,6 +528,66 @@ _OCR_JUNK = re.compile(
 def _ocr_is_junk(shot) -> bool:
     txt = (getattr(shot, "ocr_text", "") or "").strip()
     return bool(txt) and bool(_OCR_JUNK.search(txt))
+
+
+# A commenter/channel AVATAR BADGE — "reads a comment" overlay: profile pic + a personal name
+# in a bordered box, parked in one corner for a stretch of the video. It defeats every other
+# text rule at once: the name matches no _OCR_JUNK keyword, two mixed-case words stay under
+# _ocr_text_heavy's 3-word/ALL-CAPS floors, and the source-level pixel corner detector needs the
+# bug on ≥25% of shots (an intermittent overlay never qualifies — and cropping the WHOLE source
+# for a part-time overlay would be wrong anyway). Observed: a 'Jacquelyn Sutphen' fox-avatar
+# badge aired on 2 beats and forced a caption-dodge dropout.
+_NAME_BADGE_RX = re.compile(r"\b[A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}\b")
+
+
+def _shot_overlay_badge(sh) -> bool:
+    """Persisted-first per-SHOT detector for the avatar-badge class: 1-2-word NAME-LIKE OCR text
+    (3+ words is _ocr_text_heavy's call) coinciding with a DENSE edge mask in some corner (the
+    badge's border/avatar/text edges — mean ≥0.25 of the corner grid). Calibrated on the 50-source
+    Qyburn project index: flags exactly the 4 real badge shots of 1957, zero false positives.
+    Old indexes without corner_masks return False (fail-open, same doctrine as the other flags)."""
+    txt = (getattr(sh, "ocr_text", "") or "").strip()
+    if not txt or not _NAME_BADGE_RX.search(txt):
+        return False
+    if len(re.findall(r"[A-Za-z']{3,}", txt)) >= 3:
+        return False                                   # text-heavy overlay — already gated
+    masks = getattr(sh, "corner_masks", None) or {}
+    if not masks:
+        return False
+    from .index import _mask_from_hex
+    for h in masks.values():
+        m = _mask_from_hex(h)
+        if m is not None and float(m.mean()) >= 0.25:
+            return True
+    return False
+
+
+def _shot_is_graphics(sh, vec=None) -> bool:
+    """Designed-graphics verdict for a pool shot — persisted-first (graphics_flag from a new
+    index), else computed from the shot's CLIP embedding (`vec`) via index.graphics_flag_of.
+    False when neither is available (old index + no embed): fail-open, same doctrine as the
+    other persisted flags. See index.py for the calibrated rule (news CGI / game-UI parody /
+    cartoon segments / painterly fan art; 0 live-action FPs on 1957 real shots)."""
+    pf = getattr(sh, "graphics_flag", -1)
+    try:
+        pf = -1 if pf is None else int(pf)
+    except (TypeError, ValueError):
+        pf = -1
+    if pf >= 0:
+        return pf == 1
+    if vec is None:
+        return False
+    from .index import graphics_flag_of
+    return graphics_flag_of(vec, float(getattr(sh, "luma_avg", -1.0) or -1.0)) == 1
+
+
+def _graphics_source_verdict(n_gfx: int, n_shots: int) -> bool:
+    """True when a WHOLE source is an illustrated/parody upload (drop it entirely): >=20% of its
+    shots are designed graphics with at least 3 such shots. Calibrated on a real 50-source render:
+    the four parody/illustrated sources score 28.6-94.6%; every real-footage source <=6.1%. A
+    source above the bar can't be trusted between keyframes either (a 15s shot of an illustrated
+    essay aired fan art that its single keyframe never showed)."""
+    return n_gfx >= 3 and n_gfx / max(1, n_shots) >= 0.20
 
 
 _SUBBAND_CACHE: dict = {}
@@ -659,6 +743,11 @@ def _shot_dirty_reason(sh, partial_corner: dict | None = None) -> str:
         return "unreadable"
     if _ocr_is_junk(sh) or _ocr_text_heavy(sh):
         return "ocr-text"
+    if _shot_overlay_badge(sh):
+        return "overlay-badge"
+    if getattr(sh, "graphics_flag", -1) == 1:
+        return "graphics"                              # persisted-only here (no embeds in scope);
+                                                       # the pool gate computes live for old indexes
     if partial_corner:
         c = partial_corner.get(getattr(sh, "index", -1))
         if c:
@@ -716,7 +805,8 @@ def clean_cut_window(shots, t0: float, t1: float, min_len: float,
         r = _shot_dirty_reason(sh, partial_corner)
         if r:
             ds, de = float(sh.start), float(sh.end)
-            if r == "ocr-text" and _edge > 0:
+            # avatar badges fade in/out around their shot bounds exactly like text cards do
+            if r in ("ocr-text", "overlay-badge") and _edge > 0:
                 ds -= _edge
                 de += _edge
             ds, de = max(t0, ds), min(t1, de)
@@ -966,6 +1056,10 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
             continue                                      # drop ad/news/CTA/watermark frames
         if tgate_on and _ocr_text_heavy(ps.shot):
             continue                                      # readable overlay text NEVER airs
+        if tgate_on and _shot_overlay_badge(ps.shot):
+            continue                                      # commenter-avatar badge NEVER airs
+        if tgate_on and _shot_is_graphics(ps.shot, getattr(ps, "embed", None)):
+            continue                                      # designed graphics/illustration NEVER airs
         if subband_on and _shot_subtitle_band(ps.shot):
             continue                                      # burned subs (any script) NEVER air
         if _black_floor > 0 and float(getattr(ps.shot, "quality", 1.0) or 1.0) < _black_floor:

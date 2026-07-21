@@ -330,14 +330,105 @@ def _flags_from_frames(frames: list) -> dict:
     return out
 
 
+# ── NON-SHOW GRAPHICS flag (per-shot, embed-space) ───────────────────────────────────────────
+# Designed graphics that must NEVER air as footage: broadcast-news CGI, video-game-UI parody
+# frames, cartoon/comic segments, posters, and painterly fan art. Observed leaks: a teal
+# sports-news intro aired on a connector beat (the verifier rationalized it as "a transition"),
+# and Jaime/Cersei fan art aired via an unverified secondary beat window from an illustrated
+# book-essay source. Computed from the SAME persisted CLIP embedding the index already stores,
+# so the gate costs dot products, not decodes.
+#
+# Rule (calibrated on a real 50-source render, 1957 shots — the parody/illustrated sources score
+# 28.6-94.6% of shots vs <=6.1% for every real-footage source; 0 live-action false positives):
+#   graphic_dom = max(sim to graphic anchors) - max(sim to real-photo anchors)
+#   HARD  : graphic_dom > VIDLORE_CLIPSTUDIO_GRAPHIC_MAX  (default 0.036 — same bar as the
+#           RC5 web-image gate this reuses)
+#   BAND  : 0.010 < graphic_dom <= MAX additionally requires the photo-vs-art test to say "art"
+#           (painterly fan art sits in this band; a normal film still does not)
+#   GUARD : near-black frames (luma < 22) are never judged — their embeds are degenerate and
+#           the unreadable gates own them.
+_GFX_EXTRA_ANCHORS = (
+    "a digital painting of fictional characters",
+    "fan art illustration of a man and a woman",
+    "a stylized digital painting portrait",
+    "an anime or manga style illustration",
+    "3D rendered broadcast television graphics with colorful icons",
+)
+_GFX_MATS: list = [None]        # [(G, P, PH, AR)] — lazily built text-anchor matrices
+
+
+def _graphics_mats():
+    """(graphic, realphoto, photo, art) anchor matrices, or None when CLIP is unavailable."""
+    if _GFX_MATS[0] is not None:
+        return _GFX_MATS[0]
+    try:
+        import numpy as np
+        import vidlore.visual_relevance as _vrm
+        if not _vrm.available():
+            return None
+        from .image_fallback import _PHOTO_PROMPTS, _ART_PROMPTS
+
+        def _m(prompts):
+            return np.stack([np.asarray(_vrm._txt_embed(t), dtype="float32") for t in prompts])
+        _GFX_MATS[0] = (_m(tuple(_vrm._GRAPHIC_NEG) + _GFX_EXTRA_ANCHORS),
+                        _m(_vrm._REALPHOTO_POS), _m(_PHOTO_PROMPTS), _m(_ART_PROMPTS))
+        return _GFX_MATS[0]
+    except Exception:
+        return None
+
+
+def graphics_flag_of(vec, luma_avg: float = -1.0) -> int:
+    """Tiered designed-graphics verdict for one shot embedding:
+      2 = HARD graphics (graphic_dom above the calibrated gate — always excluded)
+      1 = BAND-art (weakly graphic AND the photo-vs-art test says art) — excluded only in a
+          source that ALSO has hard evidence: a lone stylized live-action composition (observed:
+          a high-angle drawbridge aerial) can land here, so band alone never gates a clean source
+      0 = photographic · -1 = cannot judge."""
+    if vec is None:
+        return -1
+    if 0.0 <= float(luma_avg) < 22.0:
+        return 0                                       # near-black: the unreadable gates' business
+    mats = _graphics_mats()
+    if mats is None:
+        return -1
+    try:
+        import os as _os
+        G, P, PH, AR = mats
+        d = float((G @ vec).max() - (P @ vec).max())
+        try:
+            gmax = float(_os.environ.get("VIDLORE_CLIPSTUDIO_GRAPHIC_MAX", "0.036") or 0.036)
+        except (TypeError, ValueError):
+            gmax = 0.036
+        try:
+            gsoft = float(_os.environ.get("VIDLORE_CLIPSTUDIO_GRAPHIC_SOFT", "0.010") or 0.010)
+        except (TypeError, ValueError):
+            gsoft = 0.010
+        if d > gmax:
+            return 2
+        if d > gsoft:
+            # photo-vs-art tiebreak on the SAME embedding (no extra image pass) — the identical
+            # comparison image_fallback._photographic_ok runs, minus its file IO
+            return 1 if float((PH @ vec).max()) < float((AR @ vec).max()) - 0.01 else 0
+        return 0
+    except Exception:
+        return -1
+
+
 def _sample_times(start: float, end: float) -> list:
     """Sample timestamps for one shot's flag pass. SHORT shots (<2s) get FIVE spread samples —
     they are exactly where a brief burned sub / bug flash slips between 3 samples (observed: a
     rare Turkish sub inside a 1.4s shot missed by 3 samples), and where the render pads the cut
-    past the shot boundary, so their verdict must be the most reliable. Longer shots keep 3.
+    past the shot boundary, so their verdict must be the most reliable. LONG shots scale up to
+    one sample per ~6s (cap 9): a 51s essay shot sampled at 3 points has ~17s blind stretches —
+    observed: a commenter-avatar badge lived entirely between them and aired with empty ocr_text.
     Never returns a single mid-frame-only sample."""
     d = max(0.0, end - start)
-    fr = (0.1, 0.3, 0.5, 0.7, 0.9) if d < 2.0 else (0.15, 0.5, 0.85)
+    if d < 2.0:
+        fr = (0.1, 0.3, 0.5, 0.7, 0.9)
+    else:
+        import math
+        n = max(3, min(9, int(math.ceil(d / 6.0))))
+        fr = tuple((i + 0.5) / n for i in range(n))
     return [start + f * d for f in fr]
 
 
@@ -593,6 +684,12 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
                     v = vr._img_embed(im)
                     sh.embed_row = len(embeds)
                     embeds.append(np.asarray(v, dtype="float32"))
+                    try:
+                        _kl = float(np.asarray(im.convert("L"), dtype="float32").mean())
+                        sh.graphics_flag = graphics_flag_of(
+                            np.asarray(v, dtype="float32"), _kl)
+                    except Exception:
+                        sh.graphics_flag = -1
                 if cfg.detect_faces and use_clip:
                     frac = float(vr._face_frac(im))
                     sh.scores["face_frac"] = round(frac, 4)
