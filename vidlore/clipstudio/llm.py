@@ -326,10 +326,21 @@ def _is_transient(e: Exception) -> bool:
 
 def complete(*, system: str = "", messages, max_tokens: int = 1024,
              eng_cfg=None, model: str = "") -> str:
-    """Run an LLM completion. PRIMARY provider (default Claude) → the OTHER provider as automatic
-    fallback. Each provider is RETRIED with exponential backoff on transient errors (rate-limit /
-    overload / timeout) so a single hiccup never silently degrades the caller (e.g. analyze collapsing
-    to its heuristic path and wrecking relevance). Returns the response text ('' on total failure)."""
+    """Back-compat wrapper over complete_ex(): text only ('' on total failure)."""
+    return complete_ex(system=system, messages=messages, max_tokens=max_tokens,
+                       eng_cfg=eng_cfg, model=model)[0]
+
+
+def complete_ex(*, system: str = "", messages, max_tokens: int = 1024,
+                eng_cfg=None, model: str = "") -> tuple:
+    """Run an LLM completion and report WHO ACTUALLY SERVED it.
+
+    Returns (text, meta) where meta = {"provider", "model", "transport", "served"} describes
+    the provider branch that produced the text — not the configured/predicted one. "served" is
+    the canonical identity string in exactly vision_config()'s format, so cache keys derived
+    from a prediction and keys derived from the actual server are directly comparable. On
+    total failure -> ("", {"served": "none", ...}). The provider ladder, retries, backoff and
+    fallback order are byte-identical to the historical complete()."""
     import time as _time
 
     def _with_retry(call):
@@ -366,25 +377,42 @@ def complete(*, system: str = "", messages, max_tokens: int = 1024,
         # explicit model_id (e.g. the flash fallback) wins; else the caller's model (pro by default)
         return _with_retry(lambda: _deepseek_complete(system, messages, max_tokens, model_id or model))
 
+    def _gemini_id():
+        return {"provider": "gemini", "model": _gemini_model(),
+                "transport": "apikey" if _gemini_api_key() else "vertex",
+                "served": f"gemini:{_gemini_model()}:{'apikey' if _gemini_api_key() else 'vertex'}"}
+
+    def _claude_id():
+        return {"provider": "anthropic", "model": _claude_model(), "transport": "sdk",
+                "served": f"anthropic:{_claude_model()}"}
+
+    def _deepseek_id(model_id: str = ""):
+        _m = model_id or model or _deepseek_model()
+        return {"provider": "deepseek", "model": _m, "transport": "http",
+                "served": f"deepseek:{_m}"}
+
     # provider ORDER: the selected primary first, then automatic fallbacks. DeepSeek is text-only,
     # so when it's primary, vision calls (image messages) skip BOTH its models and Gemini/Claude
     # serve them. Claude is the LAST resort everywhere except when explicitly chosen as primary.
     prov = _provider()
     if prov in ("deepseek", "ds"):
         # deepseek-v4-pro → deepseek-v4-flash → Gemini → Claude (last)
-        seq = (_try_deepseek,
-               lambda: _try_deepseek(fast_deepseek_model()),
-               _try_gemini,
-               _try_claude)
+        seq = ((_try_deepseek, _deepseek_id),
+               (lambda: _try_deepseek(fast_deepseek_model()),
+                lambda: _deepseek_id(fast_deepseek_model())),
+               (_try_gemini, _gemini_id),
+               (_try_claude, _claude_id))
     elif prov in ("gemini", "google", "vertex"):
-        seq = (_try_gemini, _try_deepseek, _try_claude)
+        seq = ((_try_gemini, _gemini_id), (_try_deepseek, _deepseek_id),
+               (_try_claude, _claude_id))
     else:                                              # anthropic (Claude) primary — explicit choice
-        seq = (_try_claude, _try_deepseek, _try_gemini)
-    for fn in seq:
+        seq = ((_try_claude, _claude_id), (_try_deepseek, _deepseek_id),
+               (_try_gemini, _gemini_id))
+    for fn, ident in seq:
         out = fn()
         if out:
-            return out
-    return ""
+            return out, ident()
+    return "", {"provider": "", "model": "", "transport": "", "served": "none"}
 
 
 def has_llm(eng_cfg=None) -> bool:

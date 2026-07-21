@@ -138,11 +138,18 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
     for attempt in range(1, 5):                       # retry transient overload / rate limits
         try:
             with _pm.timed("verify.vision_call"):
-                out = _llm.complete(system=_VSYS, max_tokens=400,
-                                    messages=[{"role": "user", "content": content}],
-                                    eng_cfg=eng_cfg, model=model)
+                out, _meta = _llm.complete_ex(system=_VSYS, max_tokens=400,
+                                              messages=[{"role": "user", "content": content}],
+                                              eng_cfg=eng_cfg, model=model)
             m = re.search(r"\{.*\}", out, re.S)
-            return json.loads(m.group(0)) if m else None
+            if not m:
+                return None
+            v = json.loads(m.group(0))
+            if isinstance(v, dict):
+                # provenance: the provider that ACTUALLY served this judgment (vision_config's
+                # canonical format). Cache writers key the verdict by this, never by a prediction.
+                v["vision_served_by"] = str(_meta.get("served") or "")
+            return v
         except Exception:                             # transient overload / rate limit → back off
             if attempt == 4:
                 return None
@@ -291,6 +298,18 @@ def verdict_fingerprint(*, src_hash: str, source_id: str, shot_start: float, sho
         h.update(str(part).encode("utf-8", "replace"))
         h.update(b"\x1f")
     return h.hexdigest()[:32]
+
+
+def _hit_provider_ok(entry, expected_model: str) -> bool:
+    """A cached verdict may serve a lookup ONLY when the provider that actually produced it
+    matches the model identity in the key it was found under. Verdicts now record
+    `vision_served_by` (the ACTUAL server); a Claude-fallback answer is stored under a
+    Claude-keyed fingerprint, so a Gemini-keyed lookup can never return it — this check is
+    the belt-and-suspenders that also drops any mislabeled legacy-style entry. Entries
+    without provenance (pre-upgrade caches) are accepted as-is: they were stored under the
+    predicted key when prediction and server agreed."""
+    sb = str((entry or {}).get("vision_served_by") or "")
+    return (not sb) or sb == (expected_model or "")
 
 
 def _verdict_schema_ok(v) -> bool:
@@ -853,7 +872,13 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
 
     _vcache_dirty = 0
 
-    def _rung_fingerprint(ashot, _seg, strict_flag: bool, faceids):
+    def _served_model_of(v) -> str:
+        """The provider that ACTUALLY served this fresh verdict (canonical id), falling back
+        to the prediction for stubbed/legacy verdicts that carry no provenance."""
+        _sb = str((v or {}).get("vision_served_by") or "")
+        return _sb if _sb and _sb != "none" else _vmodel
+
+    def _rung_fingerprint(ashot, _seg, strict_flag: bool, faceids, model_id: str = ""):
         """Fingerprint of a FALLBACK-RUNG question — the exact same derivation as the primary
         path (keep the two in sync), parameterized on the candidate shot and the rung's
         strictness. `faceids` must be the SAME list the prompt will carry (the caller may
@@ -875,7 +900,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             scene_query=getattr(_seg, "scene_query", "") or "",
             era=_era_of(_seg), visual_policy=_policy.policy_of(_seg),
             is_specific=strict_flag, faceid_names=list(faceids or []),
-            multiframe=_ws, image_id=_image_id(_kf_a, ashot, _ws), model=_vmodel), _ws
+            multiframe=_ws, image_id=_image_id(_kf_a, ashot, _ws),
+            model=(model_id or _vmodel)), _ws
 
     def _cached_verify_ctx(kf_path, ashot, _seg, strict_flag: bool, faceids, rung: str):
         """One cache layer for every fallback-rung verdict (strict promotion, contextual
@@ -890,15 +916,21 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         from . import perf_metrics as _pm_r
         _fp_r, _ws_r = _rung_fingerprint(ashot, _seg, strict_flag, faceids)
         _hit = _vcache.get(_fp_r) if _fp_r else None
-        if _hit is not None and _verdict_schema_ok(_hit):
+        if _hit is not None and _verdict_schema_ok(_hit) and _hit_provider_ok(_hit, _vmodel):
             _pm_r.incr(f"verify.rung.{rung}.cache_hit")
             return dict(_hit), _ws_r                     # copy: callers mutate their verdict
         _pm_r.incr(f"verify.rung.{rung}.call")
         v_r, used_r = _verify_ctx(kf_path, ashot, _seg, strict_flag, faceids)
         if _fp_r and v_r is not None and used_r == _ws_r \
                 and _verdict_schema_ok({**v_r, "status": "ok"}):
-            _vcache[_fp_r] = {k: val for k, val in v_r.items() if k != "reused"}
-            _vcache_dirty += 1
+            # store under the ACTUAL server's key — a Claude fallback answer must never sit
+            # under a Gemini-predicted fingerprint (and vice versa)
+            _served_r = _served_model_of(v_r)
+            _fp_store = _fp_r if _served_r == _vmodel else \
+                _rung_fingerprint(ashot, _seg, strict_flag, faceids, model_id=_served_r)[0]
+            if _fp_store:
+                _vcache[_fp_store] = {k: val for k, val in v_r.items() if k != "reused"}
+                _vcache_dirty += 1
         elif _fp_r and v_r is not None and used_r != _ws_r:
             _pm_r.incr("verify.rung.sheet_mismatch")     # not cached (answer ≠ keyed question)
         return v_r, used_r
@@ -953,7 +985,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 faceid_names=faceid_names, multiframe=_want_sheet,
                 image_id=_image_id(kf, shot, _want_sheet), model=_vmodel)
             _c0 = _vcache.get(_fp)
-            if _fp and (_c0 is None or not _verdict_schema_ok(_c0)):
+            if _fp and (_c0 is None or not _verdict_schema_ok(_c0)
+                        or not _hit_provider_ok(_c0, _vmodel)):
                 _pending.append((_fp, seg, shot, kf, faceid_names, _exact, _want_sheet))
         if _pending:
             log(f"verify: prefetching {len(_pending)} fresh verdict(s) "
@@ -972,7 +1005,29 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         _v9, _us9 = None, _ws9
                     if _v9 is not None and _us9 == _ws9 \
                             and _verdict_schema_ok({**_v9, "status": "ok"}):
-                        _vcache[_fp9] = {k: val for k, val in _v9.items() if k != "reused"}
+                        _served9 = _served_model_of(_v9)
+                        _fp_store9 = _fp9
+                        if _served9 != _vmodel:
+                            # a fallback provider answered — key by the ACTUAL server
+                            (_, _seg9, _shot9, _kf9, _fids9, _ex9b, _ws9b) = \
+                                next(p for p in _pending if p[0] == _fp9)
+                            _src9 = proj.source(getattr(_shot9, "source_id", "") or "")
+                            _fp_store9 = verdict_fingerprint(
+                                src_hash=_src_hash_of(_src9),
+                                source_id=getattr(_shot9, "source_id", "") or "",
+                                shot_start=getattr(_shot9, "start", 0.0),
+                                shot_end=getattr(_shot9, "end", 0.0),
+                                beat_text=getattr(_seg9, "text", ""),
+                                required_entity=getattr(_seg9, "required_entity", ""),
+                                required_kind=getattr(_seg9, "required_kind", ""),
+                                expected_visual=getattr(_seg9, "expected_visual", "") or "",
+                                scene_query=getattr(_seg9, "scene_query", "") or "",
+                                era=_era_of(_seg9), visual_policy=_policy.policy_of(_seg9),
+                                is_specific=_ex9b, faceid_names=_fids9,
+                                multiframe=_ws9b, image_id=_image_id(_kf9, _shot9, _ws9b),
+                                model=_served9)
+                        _vcache[_fp_store9] = {k: val for k, val in _v9.items()
+                                               if k != "reused"}
                         _pf_ok += 1
                         _pf_fail = 0
                     else:
@@ -1020,7 +1075,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         # reply whose missing "verdict" key would read as falsy and quietly pass
         _cached = _vcache.get(_fp) if _fp else None
         _used_sheet = _want_sheet
-        if _cached is not None and _verdict_schema_ok(_cached):
+        if _cached is not None and _verdict_schema_ok(_cached) \
+                and _hit_provider_ok(_cached, _vmodel):
             from . import perf_metrics as _pm_v
             _pm_v.incr("verify.primary.cache_hit")
             v = dict(_cached)
@@ -1068,7 +1124,26 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         # that single-frame answer under a multiframe key would hand back the wrong judgment later.
         if _fp and not v.get("reused") and _verdict_schema_ok({**v, "status": "ok"}):
             if _used_sheet == _want_sheet:
-                _vcache[_fp] = {k: val for k, val in v.items() if k != "reused"}
+                # key by the ACTUAL server (a fallback provider's answer must never sit under
+                # the predicted provider's fingerprint)
+                _served_p = _served_model_of(v)
+                _fp_store_p = _fp
+                if _served_p != _vmodel and shot is not None:
+                    _src_obj = proj.source(sel.source_id)
+                    _fp_store_p = verdict_fingerprint(
+                        src_hash=_src_hash_of(_src_obj), source_id=sel.source_id or "",
+                        shot_start=getattr(shot, "start", 0.0),
+                        shot_end=getattr(shot, "end", 0.0),
+                        beat_text=getattr(seg, "text", ""),
+                        required_entity=getattr(seg, "required_entity", ""),
+                        required_kind=getattr(seg, "required_kind", ""),
+                        expected_visual=getattr(seg, "expected_visual", "") or "",
+                        scene_query=getattr(seg, "scene_query", "") or "",
+                        era=_era_of(seg), visual_policy=_policy.policy_of(seg),
+                        is_specific=_exact, faceid_names=faceid_names,
+                        multiframe=_want_sheet, image_id=_image_id(kf, shot, _want_sheet),
+                        model=_served_p)
+                _vcache[_fp_store_p] = {k: val for k, val in v.items() if k != "reused"}
                 _vcache_dirty += 1
             else:
                 _fp_mismatch += 1
