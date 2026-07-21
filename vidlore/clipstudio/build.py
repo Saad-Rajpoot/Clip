@@ -1151,10 +1151,20 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     _cngate9 = _os9b.environ.get("VIDLORE_CLIPSTUDIO_CORNER_LOGO_GATE", "1").strip() \
         not in ("0", "false", "no", "")
 
+    _ggate9 = _os9b.environ.get("VIDLORE_CLIPSTUDIO_GRAPHICS_GATE", "1").strip() \
+        not in ("0", "false", "no")
+
     def _texty9(sh):
         """Burned overlay text on a breakout shot — OCR-readable OR a script-agnostic subtitle
-        band (Arabic/Turkish burned subs OCR to nothing readable but must never open a breakout)."""
-        return (_tgate9 and _txt9(sh)) or (_sbgate9 and _sub9(sh))
+        band (Arabic/Turkish burned subs OCR to nothing readable but must never open a breakout)
+        — OR a hard-tier designed-graphics shot (news CGI / game-UI parody / illustration; the
+        pool gate repeats here per the repeat-every-pool-drop doctrine, persisted-flag only)."""
+        if (_tgate9 and _txt9(sh)) or (_sbgate9 and _sub9(sh)):
+            return True
+        try:
+            return _ggate9 and int(getattr(sh, "graphics_flag", -1) or -1) >= 2
+        except (TypeError, ValueError):
+            return False
     cands = []
     # EXPLICIT candidate ORIGIN, keyed by (seg_idx, src_id, round(start,1)) and set WHERE the
     # candidate is created — 'verbatim_quote' (a scripted quote located in the footage's own ASR) or
@@ -5427,6 +5437,11 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                     continue                           # burned-in text never airs
                 if _dark_b(sh):
                     continue                           # near-black/unreadable never airs (Gap 3)
+                try:
+                    if int(getattr(sh, "graphics_flag", -1) or -1) >= 2:
+                        continue                       # designed graphics/illustration never airs
+                except (TypeError, ValueError):
+                    pass
                 if sp and _looks_recent(_frame_hash(sp, min(sh.start + 1.2, sh.end - 0.2))):
                     continue
                 if _TGATE and sp and (
@@ -5865,17 +5880,23 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 continue
             clips = beat_clips.get(seg.index) or []
             _ls = _blens.get(seg.index) or []
+            # SAME-SCENE donor first (mirrors the near-black pass): freezing from _last_clean
+            # propagates the PREVIOUS scene's content across the cut. Probe the scene's own
+            # clips for a clean donor before reaching backwards.
+            _brand_flags = [_clip_branding_text(Path(cp), _ocr_eng) for cp in clips]
+            _own_ok = [cp for cp, _bf in zip(clips, _brand_flags) if not _bf]
             for m, cp in enumerate(list(clips)):
-                if _clip_branding_text(Path(cp), _ocr_eng):
+                if _brand_flags[m]:
                     _d = (_ls[m] if m < len(_ls) and _ls[m] > 0 else 3.0) + 0.5
-                    if _last_clean is not None:
+                    _donor = _own_ok[0] if _own_ok else _last_clean
+                    if _donor is not None:
                         _fr = proj.clips_dir / f"beat_{seg.index:03d}_{m}_nobrand.mp4"
-                        _got = _freeze_replace(Path(_last_clean), _fr, _d)
+                        _got = _freeze_replace(Path(_donor), _fr, _d)
                         if _got:
                             clips[m] = Path(_got)
                             _replaced += 1
                             continue
-                    # no clean predecessor → drop to a black placeholder rather than air the card
+                    # no clean donor → drop to a black placeholder rather than air the card
                     clips[m] = _placeholder_clip(proj, seg.index)
                     _replaced += 1
                 else:
@@ -5914,15 +5935,24 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             # scene's content across the cut (observed: a news-CGI frame from the neighbouring
             # beat froze into a legit S05E08 beat, airing broadcast graphics over the wrong
             # narration). A cross-scene donor stays the last resort and is logged as such.
+            # SYNTHESIZED clips (branding-pass _nobrand freezes, earlier _nodark freezes, black
+            # placeholders) are never donors AND never become _last_clean_d: a _nobrand freeze IS
+            # the previous scene's frame, so donating from it would silently re-create the exact
+            # cross-scene propagation this pass exists to stop — while logging "same-scene".
+            def _is_synth(_p):
+                _s = Path(_p).stem
+                return "_nobrand" in _s or "_nodark" in _s or "placeholder" in _s
             # (probe served from the staged-replay parallel precompute when available — the
             # verdict is a pure function of the clip file + fixed floor, so this changes
-            # nothing about the same-scene-donor selection below)
+            # nothing about the donor selection below)
             _dark_flags = [(_dark_verdicts[str(cp)] if str(cp) in _dark_verdicts
                             else _clip_too_dark(Path(cp), floor=_dfloor)) for cp in clips]
-            _own_clean = [cp for cp, _dk in zip(clips, _dark_flags) if not _dk]
+            _own_clean = [cp for cp, _dk in zip(clips, _dark_flags)
+                          if not _dk and not _is_synth(cp)]
             for m, cp in enumerate(list(clips)):
                 if not _dark_flags[m]:
-                    _last_clean_d = cp
+                    if not _is_synth(cp):
+                        _last_clean_d = cp
                     continue
                 _d = (_ls[m] if m < len(_ls) and _ls[m] > 0 else 3.0) + 0.5
                 _donor = _own_clean[0] if _own_clean else _last_clean_d

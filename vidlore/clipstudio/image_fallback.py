@@ -401,6 +401,14 @@ def _shot_has_overlay_text(shot) -> bool:
     t = (getattr(shot, "ocr_text", "") or "").strip()
     if len(t) >= 6:                                             # any real readable overlay text
         return True
+    # HARD-tier designed graphics (news CGI / game-UI parody / cartoon / fan-art illustration) —
+    # a still of one would sit on screen for seconds; both source-frame still pickers route
+    # through this guard, so the pool gate's verdict repeats here (persisted flag, no image IO)
+    try:
+        if int(getattr(shot, "graphics_flag", -1) or -1) >= 2:
+            return True
+    except (TypeError, ValueError):
+        pass
     # script-agnostic visual band check — Arabic/Turkish burned subs OCR to nothing readable but
     # must never air as a FROZEN still (they'd sit on screen for seconds)
     from .match import _shot_subtitle_band
