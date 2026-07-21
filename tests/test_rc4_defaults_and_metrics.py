@@ -69,19 +69,22 @@ def test_form_template_defaults_on():
 
 
 def test_fresh_dashboard_renders_checked():
-    """An empty form dict (what GET /new passes) must render BOTH toggles
-    checked — proves the production default is genuinely ON end-to-end."""
+    """An empty form dict (what GET /new passes) must render each toggle at its
+    DESIGNED default: sfx CHECKED (on), captions UNCHECKED (deliberately off by default in
+    the vidlore app — its own UI copy says 'off by default — toggle on here'; the
+    ClipStudio portal's captions-ON default is asserted separately above)."""
     # _form_page renders a Jinja template via Flask's render_template_string,
     # which needs an app/request context.
     with W.app.test_request_context("/new"):
         html = W._form_page({})
-    # Locate the two checkbox <input> tags and assert each carries `checked`.
-    for field in ("sfx", "captions"):
+    expected = {"sfx": True, "captions": False}
+    for field, want_checked in expected.items():
         i = html.find("name=" + field + " ")
         check(field + " checkbox present in rendered form", i != -1)
         tag = html[i: html.find(">", i)]
-        check("fresh dashboard renders " + field + " CHECKED",
-              "checked" in tag)
+        check("fresh dashboard renders %s %s" % (field,
+                                                 "CHECKED" if want_checked else "unchecked"),
+              ("checked" in tag) is want_checked)
 
 
 def test_explicit_optout_round_trips_off():
