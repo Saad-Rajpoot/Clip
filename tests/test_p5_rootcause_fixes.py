@@ -141,15 +141,15 @@ def _discover_fixture(key_scenes, env=None):
     envset = {"VIDLORE_CLIPSTUDIO_SUB_VERIFY": "0"}
     envset.update(env or {})
     saved = {k: os.environ.get(k) for k in envset}
-    _yt, _ar = D._ytsearch, D._archive_search
-    D._ytsearch = lambda q, n: list(pool)
-    D._archive_search = lambda q, n: []
+    _yt, _ar = D._ytsearch_ex, D._archive_search_ex
+    D._ytsearch_ex = lambda q, n: (list(pool), D.STATUS_OK)
+    D._archive_search_ex = lambda q, n: ([], D.STATUS_EMPTY)
     try:
         os.environ.update(envset)
         final = D.discover_sources(ana, cfg, segments=None,
                                    progress=lambda m: logs.append(str(m)))
     finally:
-        D._ytsearch, D._archive_search = _yt, _ar
+        D._ytsearch_ex, D._archive_search_ex = _yt, _ar
         for k, v in saved.items():
             (os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v))
     return final, "\n".join(logs)
