@@ -262,12 +262,14 @@ def test_workers4_backend_failure_aborts_pool_and_keeps_breaker_contract():
 # ---------------------------------------------------------------------------
 def _fake_pool(tmp, n=10):
     """Real (tiny) JPEGs: the LIVE path PIL-opens the keyframe before embedding, so the
-    equality test must exercise a genuine decode, not an unreadable stub file."""
+    equality test must exercise a genuine decode, not an unreadable stub file. Returns the
+    matrix, the shot map, and a certified manifest row_map (P1.3 contract)."""
     import numpy as np
     from PIL import Image
     rng = __import__("random").Random(7)
     mat = np.zeros((n, 8), dtype="float32")
     shots = {}
+    row_map = {}
     for j in range(n):
         v = np.array([rng.random() for _ in range(8)], dtype="float32")
         mat[j] = v / (float(np.linalg.norm(v)) + 1e-8)
@@ -276,14 +278,16 @@ def _fake_pool(tmp, n=10):
         shots[("s1", j)] = NS(source_id="s1", index=j, keyframe_path=kf, quality=1.0,
                               phash="", face_ids=[], ocr_names=[], ocr_text="",
                               embed_row=j, luma_avg=-1.0, luma_hi=-1.0, subs_frac=-1.0)
-    return mat, shots
+        row_map[str(j)] = {"shot": j, "kf": os.path.basename(kf),
+                           "kf_md5": hashlib.md5(open(kf, "rb").read()).hexdigest()}
+    return mat, shots, row_map
 
 
 def test_persisted_embeddings_reproduce_live_picks_and_scores():
     import numpy as np
     tmp = tempfile.mkdtemp()
     try:
-        mat, shots = _fake_pool(tmp)
+        mat, shots, row_map = _fake_pool(tmp)
         te = np.ones(8, dtype="float32") / np.sqrt(np.float32(8.0))
         by_path = {shots[("s1", j)].keyframe_path: mat[j] for j in range(len(mat))}
 
@@ -313,7 +317,7 @@ def test_persisted_embeddings_reproduce_live_picks_and_scores():
                 return picks
 
             live = run(None)
-            fast = run(lambda sid: mat)
+            fast = run(lambda sid: (mat, row_map))
             assert live and len(live) == len(fast), "same number of candidate picks"
             for a, b in zip(live, fast):
                 assert a[:3] == b[:3] and a[4] == b[4], f"pick differs: {a} vs {b}"
@@ -328,7 +332,7 @@ def test_persisted_path_falls_back_to_live_on_missing_or_stale_rows():
     import numpy as np
     tmp = tempfile.mkdtemp()
     try:
-        mat, shots = _fake_pool(tmp, n=6)
+        mat, shots, row_map = _fake_pool(tmp, n=6)
         shots[("s1", 2)].embed_row = -1                   # never embedded
         shots[("s1", 3)].embed_row = 99                   # stale: past the matrix bounds
         te = np.ones(8, dtype="float32") / np.sqrt(np.float32(8.0))
@@ -349,7 +353,8 @@ def test_persisted_path_falls_back_to_live_on_missing_or_stale_rows():
         IF._vr = lambda: FakeVR
         try:
             seg = NS(index=0, scene_query="tywin at the council", expected_visual="", text="")
-            p = IF.pick_pool_still(seg, shots, set(), set(), embeds_of=lambda sid: mat)
+            p = IF.pick_pool_still(seg, shots, set(), set(),
+                                   embeds_of=lambda sid: (mat, row_map))
             assert p is not None
             assert live_calls["n"] == 2, \
                 f"exactly the missing/stale rows fall back to live embeds, got {live_calls['n']}"

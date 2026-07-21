@@ -49,16 +49,21 @@ def _run_discover(workers, *, jitter=False):
     """Drive ONLY the fan-out + dedupe head of discover_sources via its real code path."""
     yt, ar = _frozen_searches()
     queries = [f"q#{i}" for i in range(24)]
-    orig_yt, orig_ar = D._ytsearch, D._archive_search
+    orig_yt, orig_ar = D._ytsearch_ex, D._archive_search_ex
     orig_bq, orig_aq = D.build_queries, D.anchor_queries
     orig_env = os.environ.get("VIDLORE_CLIPSTUDIO_DISCOVER_WORKERS")
 
     def yt_j(q, n):
         if jitter:                                       # adversarial completion order
             time.sleep(0.002 * (hash(q) % 7))
-        return yt(q, n)
+        res = yt(q, n)
+        return res, (D.STATUS_OK if res else D.STATUS_EMPTY)
 
-    D._ytsearch, D._archive_search = yt_j, ar
+    def ar_ex(q, n):
+        res = ar(q, n)
+        return res, (D.STATUS_OK if res else D.STATUS_EMPTY)
+
+    D._ytsearch_ex, D._archive_search_ex = yt_j, ar_ex
     D.build_queries = lambda analysis, segments=None: list(queries)
     D.anchor_queries = lambda analysis, segments=None: [queries[0], queries[3]]
     os.environ["VIDLORE_CLIPSTUDIO_DISCOVER_WORKERS"] = str(workers)
@@ -74,7 +79,7 @@ def _run_discover(workers, *, jitter=False):
         cands = D.discover_sources(analysis, cfg)
         return cands
     finally:
-        D._ytsearch, D._archive_search = orig_yt, orig_ar
+        D._ytsearch_ex, D._archive_search_ex = orig_yt, orig_ar
         D.build_queries, D.anchor_queries = orig_bq, orig_aq
         if orig_env is None:
             os.environ.pop("VIDLORE_CLIPSTUDIO_DISCOVER_WORKERS", None)

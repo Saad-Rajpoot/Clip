@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .cache import scene_key
-from .ffmpeg_tool import run
+from .ffmpeg_tool import run, seeded_noise as _seeded
 
 # Per-theme drone: (root Hz, fifth-ish Hz, tremolo Hz, lowpass cutoff Hz).
 # Lower/darker for crime, warmer for history, brighter for modern.
@@ -144,7 +144,7 @@ def _render_section(f1, f2, trem, cutoff, seclen, out):
         "-f", "lavfi", "-i", f"sine=frequency={f1}:sample_rate=44100",
         "-f", "lavfi", "-i", f"sine=frequency={f2}:sample_rate=44100",
         "-f", "lavfi",
-        "-i", "anoisesrc=color=brown:sample_rate=44100:amplitude=0.06",
+        "-i", _seeded("anoisesrc=color=brown:sample_rate=44100:amplitude=0.06"),
         "-f", "lavfi", "-i", f"sine=frequency={p1}:sample_rate=44100",
         "-f", "lavfi", "-i", f"sine=frequency={p2}:sample_rate=44100",
         "-f", "lavfi", "-i", f"sine=frequency={p3}:sample_rate=44100",
@@ -378,9 +378,9 @@ def build_sfx_bed(
         nb, nr, nw = len(booms), len(risers), len(whooshes)
         # inputs: 0=boom sine · 1=riser noise · 2=whoosh noise · 3=base
         boom_src = "sine=frequency=52:sample_rate=44100:duration=2.2"
-        riser_src = (
+        riser_src = _seeded(
             "anoisesrc=color=brown:sample_rate=44100:amplitude=0.6:d=2.0")
-        whoosh_src = (
+        whoosh_src = _seeded(
             "anoisesrc=color=brown:sample_rate=44100:amplitude=0.7:d=1.0")
 
         parts = [f"[3:a]atrim=0:{dur:.2f},asetpts=PTS-STARTPTS[base]"]
@@ -512,7 +512,7 @@ def build_typewriter_sfx(
              "-t", f"{dur:.2f}", str(dest)])
         return dest
     nC, nE = len(clicks), len(enters)
-    click_src = "anoisesrc=color=white:sample_rate=44100:amplitude=0.55:d=0.12"
+    click_src = _seeded("anoisesrc=color=white:sample_rate=44100:amplitude=0.55:d=0.12")
     enter_src = "sine=frequency=190:sample_rate=44100:duration=0.20"
     parts = [f"[2:a]atrim=0:{dur:.2f},asetpts=PTS-STARTPTS[base]"]
     parts.append("[0:a]asetpts=PTS-STARTPTS"
@@ -719,7 +719,7 @@ def build_archival_bed(
             "channel_layouts=stereo[out]")
         run([
             "-f", "lavfi", "-i",
-            "anoisesrc=color=pink:sample_rate=44100:amplitude=0.5",
+            _seeded("anoisesrc=color=pink:sample_rate=44100:amplitude=0.5"),
             "-f", "lavfi", "-i",
             "sine=frequency=58:sample_rate=44100",
             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
@@ -838,7 +838,7 @@ def build_atmosphere_bed(
         fo = max(0.3, ln - 1.0)
         inputs: list[str] = []
         for src in srcs:
-            inputs += ["-f", "lavfi", "-i", src]
+            inputs += ["-f", "lavfi", "-i", _seeded(src)]
         if wt > 0.0:
             # R1 — sustained cinematic LOW-END weight UNDER the texture: a
             # detuned sub sine pair (42/63 Hz) lowpassed to stay SUB (no mud,

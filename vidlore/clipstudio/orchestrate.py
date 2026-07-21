@@ -265,11 +265,14 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
         return _shots_cache[sid]
 
     def _embeds_of(sid):
+        # (matrix, manifest row_map), certified for the current schema/model/dim/rows —
+        # (None, None) for every legacy/mismatched index, which _shot_relevance treats as
+        # "use the live embedding path" (see index.load_embeds_verified)
         if sid not in _embeds_cache:
             try:
-                _embeds_cache[sid] = _index_sv.load_embeds(proj, sid)
+                _embeds_cache[sid] = _index_sv.load_embeds_verified(proj, sid)
             except Exception:
-                _embeds_cache[sid] = None
+                _embeds_cache[sid] = (None, None)
         return _embeds_cache[sid]
 
     def _shot_face_ids(sid, sidx):
@@ -348,7 +351,7 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                 return _sh
         return None
 
-    def _still_fp(kf_path, seg, sid, sidx, faces):
+    def _still_fp(kf_path, seg, sid, sidx, faces, model_id: str = ""):
         try:
             _sh = _shot_obj_sv(sid, sidx)
             if _sh is None:
@@ -366,7 +369,7 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                 visual_policy=_policy.policy_of(seg), is_specific=False,
                 faceid_names=list(faces or []), multiframe=False,
                 image_id=f"kf:{_verify_mod._file_fingerprint(kf_path)}",
-                model=_vmodel_sv, venue_fallback=True)
+                model=(model_id or _vmodel_sv), venue_fallback=True)
         except Exception:
             return ""                                    # no key → baseline uncached call
 
@@ -375,7 +378,8 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
         faces = _shot_face_ids(sid, sidx)
         _fp = _still_fp(kf_path, seg, sid, sidx, faces)
         _hit = _still_vcache.get(_fp) if _fp else None
-        if _hit is not None and _verify_mod._verdict_schema_ok(_hit):
+        if _hit is not None and _verify_mod._verdict_schema_ok(_hit) \
+                and _verify_mod._hit_provider_ok(_hit, _vmodel_sv):
             _pm_sv.incr("still.verdict.cache_hit")
             return "reject" if _hit.get("verdict") == "replace" else "ok"
         for _attempt in (1, 2):
@@ -395,8 +399,12 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                 if v is None:
                     continue                              # transport error → retry, then unverified
                 if _fp and _verify_mod._verdict_schema_ok({**v, "status": "ok"}):
-                    _still_vcache[_fp] = dict(v)
-                    _verify_mod._save_verdict_cache(proj, _still_vcache)   # atomic tmp+replace
+                    _sb = str(v.get("vision_served_by") or "")
+                    _fp_store = _fp if (not _sb or _sb == _vmodel_sv) else \
+                        _still_fp(kf_path, seg, sid, sidx, faces, model_id=_sb)
+                    if _fp_store:
+                        _still_vcache[_fp_store] = dict(v)
+                        _verify_mod._save_verdict_cache(proj, _still_vcache)   # atomic
                 return "reject" if v.get("verdict") == "replace" else "ok"
             except Exception:
                 continue

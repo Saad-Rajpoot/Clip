@@ -792,6 +792,30 @@ def available() -> bool:
     return _enabled() and _try_load()
 
 
+_IDENT_DIM = 0
+
+
+def model_identity() -> str:
+    """Stable identity of the ACTIVE image-embedding model, for embedding-manifest
+    validation: vision-onnx file name + size + mtime + output dimension. Any model swap,
+    re-export, or re-download changes it; a persisted embedding row may only be trusted
+    when the manifest's identity equals this string. '' when the model is unavailable."""
+    global _IDENT_DIM
+    try:
+        if not available():
+            return ""
+        p = _CLIP_DIR / "clip_vision.onnx"
+        st = p.stat()
+        if not _IDENT_DIM:
+            import numpy as _np_mi
+            from PIL import Image as _Im_mi
+            _IDENT_DIM = int(_np_mi.asarray(
+                _img_embed(_Im_mi.new("RGB", (8, 8)))).shape[-1])
+        return f"{p.name}:{st.st_size}:{int(st.st_mtime)}:{_IDENT_DIM}"
+    except Exception:
+        return ""
+
+
 # ── embeddings ───────────────────────────────────────────────────────────────
 def _perf_incr(name: str) -> None:
     """Decision-neutral call counter (never raises, never affects behavior)."""

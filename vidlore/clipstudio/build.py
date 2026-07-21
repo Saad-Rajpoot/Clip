@@ -3066,9 +3066,10 @@ def _click_wav(work: Path) -> Optional[Path]:
     # mechanical camera-shutter "ka-chak": crisp tick + delayed lower thunk, QUIET
     # (calibrated to ~-22 dB peak — v1 white-noise at -1.9 dB was far too loud, the first
     # bandpass rework at -70 dB was inaudible; gains are measured, not guessed)
+    from vidlore.ffmpeg_tool import seeded_noise as _seeded_n
     cmd = [ffmpeg_exe(), "-y",
-           "-f", "lavfi", "-i", "anoisesrc=d=0.030:c=pink:a=0.9",
-           "-f", "lavfi", "-i", "anoisesrc=d=0.040:c=brown:a=0.9",
+           "-f", "lavfi", "-i", _seeded_n("anoisesrc=d=0.030:c=pink:a=0.9"),
+           "-f", "lavfi", "-i", _seeded_n("anoisesrc=d=0.040:c=brown:a=0.9"),
            "-filter_complex",
            "[0:a]bandpass=f=2400:w=1800,volume=70,afade=t=out:st=0.008:d=0.022[t1];"
            "[1:a]bandpass=f=900:w=700,volume=95,afade=t=out:st=0.012:d=0.028,adelay=60|60[t2];"
@@ -5815,6 +5816,57 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     #     scene footage and must NEVER air. We OCR the ACTUAL cut clips (reliable even when the
     #     source was indexed without OCR — the recurring leak) and replace any branding clip with
     #     a still freeze of the previous CLEAN clip (timing preserved). env BRANDING_GATE.
+    # STAGED-REPLAY PARALLEL QA SWEEPS. The branding and dark sweeps below each pay one
+    # expensive per-clip probe (_clip_branding_text: up to ~10 frame decodes + OCR;
+    # _clip_too_dark: a full-clip decode — measured 418s serial over 231 clips). The tested
+    # set is FROZEN before each loop runs (each loop iterates a snapshot; its replacements
+    # are never re-tested), so the verdicts are precomputed in a bounded thread pool and the
+    # UNCHANGED serial loops replay them — _last_clean ordering, freeze-replace decisions and
+    # log lines are byte-identical to the serial pass. Verdicts are pure functions of the
+    # clip file (+ fixed floor), so precomputation cannot change any outcome. A missing
+    # verdict falls back to the direct call. VIDLORE_CLIPSTUDIO_QA_SWEEP_WORKERS=1 restores
+    # the fully-serial path.
+    def _precompute_clip_verdicts(probe, paths, label):
+        try:
+            _w = int(_os.environ.get("VIDLORE_CLIPSTUDIO_QA_SWEEP_WORKERS",
+                                     str(max(2, ((_os.cpu_count() or 8) // 2)))) or 1)
+        except (TypeError, ValueError):
+            _w = 1
+        out: dict = {}
+        uniq = []
+        seen = set()
+        for p in paths:
+            sp = str(p)
+            if sp not in seen:
+                seen.add(sp)
+                uniq.append(sp)
+        if _w <= 1 or len(uniq) <= 1:
+            return out                                   # serial loops probe directly
+        import concurrent.futures as _cfq
+        from . import perf_metrics as _pmq
+        with _pmq.timed(f"build.qa_sweep.{label}"):
+            with _cfq.ThreadPoolExecutor(max_workers=_w) as _exq:
+                futs = {_exq.submit(probe, sp): sp for sp in uniq}
+                for fu in _cfq.as_completed(futs):
+                    try:
+                        out[futs[fu]] = bool(fu.result())
+                    except Exception:                    # noqa: BLE001 — replay probes directly
+                        pass
+        _pmq.incr(f"build.qa_sweep.{label}.precomputed", len(out))
+        return out
+
+    def _sweep_paths():
+        _ps = []
+        for _sg in segments:
+            if _sg.index in _breakout_clip:
+                continue
+            _ps.extend(beat_clips.get(_sg.index) or [])
+        return _ps
+
+    # (the BRANDING sweep stays serial: its probe shares the single _ocr_eng instance, whose
+    # thread-safety under concurrent Run is unproven — a wrong OCR verdict is an editorial
+    # change, so no parallelism without a per-thread-engine proof. The DARK sweep's probe is
+    # a self-contained ffmpeg subprocess and is precomputed in parallel below.)
     if _ocr_eng is not None and _os.environ.get("VIDLORE_CLIPSTUDIO_BRANDING_GATE", "1").strip() \
             not in ("0", "false", "no", ""):
         _blens = {segments[_p].index: list(_ls) for _p, _ls in _lens_by_pos.items()}
@@ -5867,6 +5919,8 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     if _os.environ.get("VIDLORE_CLIPSTUDIO_DARK_CLIP_GATE", "1").strip() not in ("0", "false", "no"):
         _dfloor = _cfg_f("VIDLORE_CLIPSTUDIO_FINAL_BLACK_FLOOR", 50.0)
         _dlens = {segments[_p].index: list(_ls) for _p, _ls in _lens_by_pos.items()}
+        _dark_verdicts = _precompute_clip_verdicts(
+            lambda sp: _clip_too_dark(Path(sp), floor=_dfloor), _sweep_paths(), "dark")
         _last_clean_d = None
         _drep = 0
         for seg in segments:
@@ -5888,7 +5942,11 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             def _is_synth(_p):
                 _s = Path(_p).stem
                 return "_nobrand" in _s or "_nodark" in _s or "placeholder" in _s
-            _dark_flags = [_clip_too_dark(Path(cp), floor=_dfloor) for cp in clips]
+            # (probe served from the staged-replay parallel precompute when available — the
+            # verdict is a pure function of the clip file + fixed floor, so this changes
+            # nothing about the donor selection below)
+            _dark_flags = [(_dark_verdicts[str(cp)] if str(cp) in _dark_verdicts
+                            else _clip_too_dark(Path(cp), floor=_dfloor)) for cp in clips]
             _own_clean = [cp for cp, _dk in zip(clips, _dark_flags)
                           if not _dk and not _is_synth(cp)]
             for m, cp in enumerate(list(clips)):

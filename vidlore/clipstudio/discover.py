@@ -420,7 +420,44 @@ def build_queries(a: ScriptAnalysis, segments=None) -> list[str]:
     return out[:_qcap]
 
 
-def _ytsearch(query: str, n: int) -> list[SourceCandidate]:
+# Provider call statuses — callers can now tell these APART (they were all a silent []):
+#   ok         >=1 result
+#   empty      the call succeeded and there genuinely were no results (never retried)
+#   throttled  HTTP 429 / rate-limit language (retried with a longer backoff)
+#   timeout    socket/read timeout (retried)
+#   transport  any other network/extract failure (retried)
+STATUS_OK, STATUS_EMPTY = "ok", "empty"
+STATUS_THROTTLED, STATUS_TIMEOUT, STATUS_TRANSPORT = "throttled", "timeout", "transport"
+_RETRYABLE = (STATUS_THROTTLED, STATUS_TIMEOUT, STATUS_TRANSPORT)
+
+
+def _classify_net_error(exc) -> str:
+    """Map a provider exception to a status. Message-based for yt-dlp (it wraps HTTP errors
+    into DownloadError strings); type-based where real types exist."""
+    import socket
+    try:
+        import requests as _rq
+        if isinstance(exc, _rq.Timeout):
+            return STATUS_TIMEOUT
+        if isinstance(exc, _rq.RequestException):
+            _resp = getattr(exc, "response", None)
+            if _resp is not None and getattr(_resp, "status_code", 0) == 429:
+                return STATUS_THROTTLED
+            return STATUS_TRANSPORT
+    except Exception:
+        pass
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return STATUS_TIMEOUT
+    msg = str(exc).lower()
+    if "429" in msg or "too many requests" in msg or "rate limit" in msg or "rate-limit" in msg:
+        return STATUS_THROTTLED
+    if "timed out" in msg or "timeout" in msg:
+        return STATUS_TIMEOUT
+    return STATUS_TRANSPORT
+
+
+def _ytsearch_ex(query: str, n: int) -> tuple[list[SourceCandidate], str]:
+    """YouTube search -> (candidates, status). Never raises."""
     import yt_dlp
     opts = {"quiet": True, "no_warnings": True, "skip_download": True,
             "extract_flat": True, "noplaylist": True, "socket_timeout": 20}
@@ -437,12 +474,18 @@ def _ytsearch(query: str, n: int) -> list[SourceCandidate]:
                 id=vid, title=e.get("title", "") or "", provider="youtube",
                 duration=float(e.get("duration") or 0), channel=e.get("channel") or e.get("uploader") or "",
                 view_count=int(e.get("view_count") or 0), query=query))
-    except Exception:
-        pass
-    return [c for c in out if c.url]
+    except Exception as exc:                              # noqa: BLE001 — classified, never raised
+        return [c for c in out if c.url], _classify_net_error(exc)
+    out = [c for c in out if c.url]
+    return out, (STATUS_OK if out else STATUS_EMPTY)
 
 
-def _archive_search(query: str, n: int) -> list[SourceCandidate]:
+def _ytsearch(query: str, n: int) -> list[SourceCandidate]:
+    return _ytsearch_ex(query, n)[0]
+
+
+def _archive_search_ex(query: str, n: int) -> tuple[list[SourceCandidate], str]:
+    """archive.org search -> (candidates, status). Never raises."""
     import requests
     out = []
     try:
@@ -450,6 +493,8 @@ def _archive_search(query: str, n: int) -> list[SourceCandidate]:
                          params={"q": f"({query}) AND mediatype:(movies)",
                                  "fl[]": ["identifier", "title"], "rows": n, "output": "json"},
                          timeout=20, headers={"User-Agent": "ClipStudio/0.1 (testing)"})
+        if getattr(r, "status_code", 200) == 429:
+            return out, STATUS_THROTTLED
         for d in r.json().get("response", {}).get("docs", []):
             ident = d.get("identifier", "")
             if not ident:
@@ -458,9 +503,13 @@ def _archive_search(query: str, n: int) -> list[SourceCandidate]:
                 url=f"https://archive.org/details/{ident}", id=ident,
                 title=str(d.get("title", "") or ident), provider="archive",
                 permission_hint="public_domain", query=query))
-    except Exception:
-        pass
-    return out
+    except Exception as exc:                              # noqa: BLE001 — classified, never raised
+        return out, _classify_net_error(exc)
+    return out, (STATUS_OK if out else STATUS_EMPTY)
+
+
+def _archive_search(query: str, n: int) -> list[SourceCandidate]:
+    return _archive_search_ex(query, n)[0]
 
 
 def _anchor_token_sets(a: ScriptAnalysis) -> list[set]:
@@ -854,52 +903,85 @@ def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None
     log(f"discover: {len(queries)} queries ({len(anchor_qset)} anchor) · type={getattr(analysis,'video_type','')}")
     from . import perf_metrics as _pm
 
-    def _one_query(q: str) -> list:
-        """One query's full bucket, in the serial loop's exact internal order (yt then
-        archive). Both providers swallow their own errors and return partial/empty lists,
-        so a bucket is deterministic-in-shape for a frozen result set."""
-        depth = cfg.discover_per_query * 2 if q.lower() in anchor_qset else cfg.discover_per_query
+    def _depths(q: str) -> tuple[int, int]:
+        yt_n = cfg.discover_per_query * 2 if q.lower() in anchor_qset else cfg.discover_per_query
+        return yt_n, max(2, cfg.discover_per_query // 2)
+
+    def _one_query_ex(q: str) -> dict:
+        """One query's per-provider results + status, in the serial loop's exact internal
+        order (yt then archive). Statuses let the caller distinguish real results, a
+        legitimate empty answer, throttling, a timeout, and a transport failure — the
+        old code collapsed all five into a silent []."""
+        yt_n, ar_n = _depths(q)
         with _pm.timed("discover.query"):
             _pm.incr("discover.query")
-            out = list(_ytsearch(q, depth))
-            out += _archive_search(q, max(2, cfg.discover_per_query // 2))
-        return out
+            yt_res, yt_st = _ytsearch_ex(q, yt_n)
+            ar_res, ar_st = _archive_search_ex(q, ar_n)
+        for _st in (yt_st, ar_st):
+            if _st in _RETRYABLE:
+                _pm.incr(f"discover.provider.{_st}")
+        return {"yt": (yt_res, yt_st), "ar": (ar_res, ar_st)}
+
+    def _retry_failed_providers(q: str, bucket: dict) -> dict:
+        """SERIAL bounded-backoff retry of ONLY the failed/throttled providers of one query.
+        A provider's successful partial results are preserved untouched; a legitimately
+        EMPTY answer is never retried (it is an answer). Throttling backs off longer."""
+        import time as _t
+        yt_n, ar_n = _depths(q)
+        for prov, fn, n in (("yt", _ytsearch_ex, yt_n), ("ar", _archive_search_ex, ar_n)):
+            res, st = bucket[prov]
+            attempt = 0
+            while st in _RETRYABLE and attempt < 2:
+                attempt += 1
+                _pm.incr("discover.retry.serial")
+                _t.sleep(min(8.0, (4.0 if st == STATUS_THROTTLED else 1.5) * attempt))
+                res, st = fn(q, n)
+            bucket[prov] = (res, st)
+        return bucket
+
+    def _bucket_list(bucket: dict) -> list:
+        return list(bucket["yt"][0]) + list(bucket["ar"][0])
 
     # BOUNDED PARALLEL FAN-OUT, ORDER-PRESERVING AGGREGATION. The queries are independent
     # network waits (measured: 200 queries × ~3s strictly serial = ~13 min of the render).
     # Each query's results are collected in their OWN bucket and the buckets are concatenated
     # in the ORIGINAL query order, so the raw sequence — and therefore the first-occurrence
     # id/title dedupe below, every stable sort after it, the per-channel caps, and the chosen
-    # sources — is identical to the serial loop over the same result sets. A bucket that
-    # errored (neither provider swallowed it) is retried SERIALLY in query order after the
-    # pool drains. VIDLORE_CLIPSTUDIO_DISCOVER_WORKERS=1 restores the pure serial loop.
+    # sources — is identical to the serial loop over the same result sets. Failed/throttled
+    # provider buckets are retried SERIALLY in query order (bounded backoff) after the pool
+    # drains, keeping each query's successful partial results.
+    # VIDLORE_CLIPSTUDIO_DISCOVER_WORKERS=1 restores the pure serial loop.
     import os as _os_dw
     try:
         _dw = int(_os_dw.environ.get("VIDLORE_CLIPSTUDIO_DISCOVER_WORKERS", "4") or 4)
     except (TypeError, ValueError):
         _dw = 4
     raw: list[SourceCandidate] = []
+    _EMPTY_BUCKET = {"yt": ([], STATUS_TRANSPORT), "ar": ([], STATUS_TRANSPORT)}
     if _dw > 1 and len(queries) > 1:
         import concurrent.futures as _cf
-        _buckets: dict[int, list] = {}
-        _failed: list[int] = []
+        _buckets: dict[int, dict] = {}
         with _cf.ThreadPoolExecutor(max_workers=_dw) as _ex:
-            _futs = {_ex.submit(_one_query, q): i for i, q in enumerate(queries)}
+            _futs = {_ex.submit(_one_query_ex, q): i for i, q in enumerate(queries)}
             for _fu in _cf.as_completed(_futs):
                 _qi = _futs[_fu]
                 try:
                     _buckets[_qi] = _fu.result()
                 except Exception:                        # noqa: BLE001 — retried serially below
                     _pm.incr("discover.query.error")
-                    _failed.append(_qi)
-        for _qi in sorted(_failed):
-            _buckets[_qi] = _one_query(queries[_qi])
+                    _buckets[_qi] = {k: (list(v[0]), v[1]) for k, v in _EMPTY_BUCKET.items()}
+        for _qi, q in enumerate(queries):                # serial in-order retry of failures
+            if any(_buckets[_qi][p][1] in _RETRYABLE for p in ("yt", "ar")):
+                _buckets[_qi] = _retry_failed_providers(q, _buckets[_qi])
         for _qi, q in enumerate(queries):
-            raw += _buckets.get(_qi, [])
+            raw += _bucket_list(_buckets[_qi])
             log(f"discover: '{q[:40]}' → {len(raw)} cumulative")
     else:
         for q in queries:
-            raw += _one_query(q)
+            _b = _one_query_ex(q)
+            if any(_b[p][1] in _RETRYABLE for p in ("yt", "ar")):
+                _b = _retry_failed_providers(q, _b)
+            raw += _bucket_list(_b)
             log(f"discover: '{q[:40]}' → {len(raw)} cumulative")
 
     # dedupe by id and by normalized title
