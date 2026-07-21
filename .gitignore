@@ -65,3 +65,6 @@ vidlore/audio_library/ytal_cache/
 *.otf
 *.woff
 *.woff2
+
+# portal runtime log (long-lived local process output)
+.portal.log
