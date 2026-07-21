@@ -1248,7 +1248,11 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
     # index/Face-ID/match/verify block when everything after download is already cached (the common
     # case for a content-blocked resume: jump straight to assemble).
     _sig_index = _sig(_sig_download, tuple(sorted(s.id for s in usable)), bool(force_index))
-    _sig_match = _sig(_sig_index, _seg_sig(segs))
+    # MATCH_GATE_VERSION folds pool-gate semantics into the match signature: a resume must NOT
+    # replay selections chosen before a new footage gate existed (observed: cached selections
+    # kept airing news-CGI/fan-art shots the new graphics gate would refuse — the gate was
+    # silently inert on every resumed project). Bump on any pool-gate semantics change.
+    _sig_match = _sig(_sig_index, _seg_sig(segs), "gatev2-graphics")
     _sig_cut = _sig(_sig_match)
     _sig_verify = _sig(_sig_cut, bool(verify))
     _sig_recover = _sig(_sig_verify)

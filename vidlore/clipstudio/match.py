@@ -410,26 +410,45 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
             not in ("0", "false", "no")
         _gfx_idx: set = set()
         if _gfx_on:
-            for sh in shots:
-                _v = (embeds[sh.embed_row] if embeds is not None
-                      and 0 <= sh.embed_row < len(embeds) else None)
-                if _shot_is_graphics(sh, _v):
-                    _gfx_idx.add(sh.index)
-            if _graphics_source_verdict(len(_gfx_idx), len(shots)):
+            _tiers = {}
+            for _pos, sh in enumerate(shots):
+                _row = getattr(sh, "embed_row", -1)
+                _v = (embeds[_row] if embeds is not None and 0 <= _row < len(embeds) else None)
+                _tiers[getattr(sh, "index", _pos)] = _shot_graphics_tier(sh, _v)
+                # WRITE-THROUGH backfill: stamp the computed tier on the in-memory shot so every
+                # later consumer of THIS shots list (window-QC dirty reasons, breakout gating)
+                # sees it persisted-first; _persist_graphics_flags below writes it to shots.json
+                # so old projects converge to the new-index behaviour on their next load.
+                if getattr(sh, "graphics_flag", -1) in (-1, None) and _tiers[
+                        getattr(sh, "index", _pos)] >= 0:
+                    try:
+                        sh.graphics_flag = _tiers[getattr(sh, "index", _pos)]
+                    except Exception:
+                        pass
+            _n_hard = sum(1 for t in _tiers.values() if t >= 2)
+            # hard tier always gates; band tier gates only when the SAME source shows SOLID hard
+            # evidence (>=3 hard shots — a lone intro/outro title card must not arm the band and
+            # cost real dark/stylized footage; the illustrated/parody sources all carry 4+)
+            _band_armed = _n_hard >= 3
+            _gfx_idx = {i for i, t in _tiers.items() if t >= 2 or (t == 1 and _band_armed)}
+            if _graphics_source_verdict(_n_hard, len(shots)):
                 if progress:
                     progress(f"match: dropping illustrated/graphics source {src.id} "
-                             f"({len(_gfx_idx)}/{len(shots)} shots are designed graphics — "
+                             f"({_n_hard}/{len(shots)} shots are designed graphics — "
                              f"parody/fan-art/news content, not footage)")
+                _persist_graphics_flags(proj, src.id, shots)
                 continue
             if _gfx_idx and progress:
                 progress(f"match: {src.id} — {len(_gfx_idx)} designed-graphics shot(s) gated "
                          f"(news CGI / game UI / illustration never airs)")
-        for sh in shots:                              # `embeds` loaded once above (reused here)
-            if sh.index in _gfx_idx:
+            _persist_graphics_flags(proj, src.id, shots)
+        for _pos, sh in enumerate(shots):             # `embeds` loaded once above (reused here)
+            if getattr(sh, "index", _pos) in _gfx_idx:
                 continue
             vec = None
-            if embeds is not None and 0 <= sh.embed_row < len(embeds):
-                vec = embeds[sh.embed_row]
+            _row = getattr(sh, "embed_row", -1)
+            if embeds is not None and 0 <= _row < len(embeds):
+                vec = embeds[_row]
             pool.append(_PoolShot(src.id, sh, vec))
     return pool
 
@@ -562,31 +581,75 @@ def _shot_overlay_badge(sh) -> bool:
     return False
 
 
-def _shot_is_graphics(sh, vec=None) -> bool:
-    """Designed-graphics verdict for a pool shot — persisted-first (graphics_flag from a new
-    index), else computed from the shot's CLIP embedding (`vec`) via index.graphics_flag_of.
-    False when neither is available (old index + no embed): fail-open, same doctrine as the
-    other persisted flags. See index.py for the calibrated rule (news CGI / game-UI parody /
-    cartoon segments / painterly fan art; 0 live-action FPs on 1957 real shots)."""
+def _shot_graphics_tier(sh, vec=None) -> int:
+    """Tiered designed-graphics verdict for a pool shot — persisted-first (graphics_flag from a
+    new index), else computed from the shot's CLIP embedding (`vec`) via index.graphics_flag_of.
+    -1 when neither is available (old index + no embed): fail-open, same doctrine as the other
+    persisted flags. Tiers: 2 hard (always excluded) · 1 band-art (excluded only alongside hard
+    evidence in the same source) · 0 photographic. Calibrated on 1957 real shots — the hard tier
+    has 0 live-action FPs; the band tier's one observed live FP (a stylized drawbridge aerial)
+    is why band alone never gates."""
     pf = getattr(sh, "graphics_flag", -1)
     try:
         pf = -1 if pf is None else int(pf)
     except (TypeError, ValueError):
         pf = -1
     if pf >= 0:
-        return pf == 1
+        return pf
     if vec is None:
-        return False
+        return -1
     from .index import graphics_flag_of
-    return graphics_flag_of(vec, float(getattr(sh, "luma_avg", -1.0) or -1.0)) == 1
+    # multi-frame luma_avg is only a PROXY for the keyframe's own luma (which the embed was
+    # computed from and which old indexes never stored) — good enough for the near-black guard.
+    # NOTE: no `or -1.0` — that would collapse a legitimate 0.0 (pure black) to "unknown" and
+    # judge a degenerate embed instead of guarding it.
+    _la = getattr(sh, "luma_avg", -1.0)
+    _la = -1.0 if _la is None else float(_la)
+    return graphics_flag_of(vec, _la)
+
+
+def _shot_is_graphics(sh, vec=None) -> bool:
+    """HARD-tier check only — safe without source context (see _shot_graphics_tier)."""
+    return _shot_graphics_tier(sh, vec) >= 2
+
+
+def _persist_graphics_flags(proj, source_id: str, shots) -> None:
+    """Write freshly-computed graphics tiers back to shots.json (old-index BACKFILL) so the
+    persisted-flag consumers — window-QC dirty reasons, breakout gating, build mirrors — see
+    them on every later load, not just in this process. Atomic tmp+replace; best-effort (a
+    failure leaves the old file intact and the live-compute path still governs)."""
+    try:
+        import json
+        f = proj.shots_path(source_id)
+        if not f.exists():
+            return
+        recs = json.loads(f.read_text(encoding="utf-8"))
+        if not isinstance(recs, list) or len(recs) != len(shots):
+            return
+        changed = False
+        for r, sh in zip(recs, shots):
+            _t = getattr(sh, "graphics_flag", -1)
+            _t = -1 if _t is None else int(_t)
+            if _t >= 0 and r.get("graphics_flag", -1) != _t:
+                r["graphics_flag"] = _t
+                changed = True
+        if not changed:
+            return
+        tmp = f.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(recs), encoding="utf-8")
+        tmp.replace(f)
+    except Exception:
+        pass
 
 
 def _graphics_source_verdict(n_gfx: int, n_shots: int) -> bool:
     """True when a WHOLE source is an illustrated/parody upload (drop it entirely): >=20% of its
-    shots are designed graphics with at least 3 such shots. Calibrated on a real 50-source render:
-    the four parody/illustrated sources score 28.6-94.6%; every real-footage source <=6.1%. A
-    source above the bar can't be trusted between keyframes either (a 15s shot of an illustrated
-    essay aired fan art that its single keyframe never showed)."""
+    shots are HARD-tier designed graphics with at least 3 such shots. Calibrated on a real
+    50-source render: the four parody/illustrated sources score 28.6-94.6% hard; every
+    real-footage source <=6.1%. A source above the bar can't be trusted between keyframes either
+    (a 15s shot of an illustrated essay aired fan art that its single keyframe never showed).
+    Counts HARD shots only — band-tier shots may include stylized live-action, and letting them
+    tip the fraction could kill a short real source over one title card + two moody frames."""
     return n_gfx >= 3 and n_gfx / max(1, n_shots) >= 0.20
 
 
@@ -733,10 +796,12 @@ def _partial_corner_shots(shots) -> dict:
     return out
 
 
-def _shot_dirty_reason(sh, partial_corner: dict | None = None) -> str:
+def _shot_dirty_reason(sh, partial_corner: dict | None = None,
+                       band_graphics: bool = False) -> str:
     """'' when the shot may air, else the reason it must not — persisted-first, no image IO on
     a flagged index. Mirrors the _score_pool hard gates so window validation and candidate
-    gating can never disagree."""
+    gating can never disagree. `band_graphics=True` = the caller established this source has
+    solid hard-graphics evidence (>=3 persisted hard shots), arming the band tier here too."""
     if _shot_subtitle_band(sh):
         return "subs"
     if _shot_unreadable(sh):
@@ -745,9 +810,18 @@ def _shot_dirty_reason(sh, partial_corner: dict | None = None) -> str:
         return "ocr-text"
     if _shot_overlay_badge(sh):
         return "overlay-badge"
-    if getattr(sh, "graphics_flag", -1) == 1:
-        return "graphics"                              # persisted-only here (no embeds in scope);
-                                                       # the pool gate computes live for old indexes
+    try:
+        import os as _os_g
+        if int(getattr(sh, "graphics_flag", -1) or -1) >= 2 \
+                and _os_g.environ.get("VIDLORE_CLIPSTUDIO_GRAPHICS_GATE", "1").strip() \
+                not in ("0", "false", "no"):
+            return "graphics"                          # persisted HARD tier only (no embeds in
+    except (TypeError, ValueError):                    # scope); the pool gate computes live tiers
+        pass
+    if band_graphics and int(getattr(sh, "graphics_flag", -1) or -1) == 1:
+        # band tier dirties ONLY with source context (the caller saw >=3 persisted hard shots in
+        # this source) — mirrors the pool rule so a window shift can't re-admit what the pool gated
+        return "graphics-band"
     if partial_corner:
         c = partial_corner.get(getattr(sh, "index", -1))
         if c:
@@ -800,9 +874,13 @@ def clean_cut_window(shots, t0: float, t1: float, min_len: float,
     # is behaviour-neutral except for the ocr-text margin it enables.
     _edge = _f_env("VIDLORE_CLIPSTUDIO_WQC_EDGE_MARGIN", 0.35)
     over = [sh for sh in shots if sh.end > t0 - _edge and sh.start < t1 + _edge]
+    # band-graphics context: mirror the pool rule (>=3 persisted hard shots arm the band tier)
+    # so a shifted/padded window can't re-admit a band-art span the pool already refused
+    _band_gfx = sum(1 for sh in shots
+                    if int(getattr(sh, "graphics_flag", -1) or -1) >= 2) >= 3
     dirty = []
     for sh in over:
-        r = _shot_dirty_reason(sh, partial_corner)
+        r = _shot_dirty_reason(sh, partial_corner, band_graphics=_band_gfx)
         if r:
             ds, de = float(sh.start), float(sh.end)
             # avatar badges fade in/out around their shot bounds exactly like text cards do
@@ -1038,6 +1116,13 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
                     if len(w) > 2 and w not in (mv_toks or set()) and w not in _TA_STOP}
     gate_on = os.environ.get("VIDLORE_CLIPSTUDIO_OCR_GATE", "1").strip() not in ("0", "false", "no", "")
     tgate_on = os.environ.get("VIDLORE_CLIPSTUDIO_TEXT_GATE", "1").strip() not in ("0", "false", "no", "")
+    # the graphics mirror keys on ITS OWN switch (same as the pool builder) — keying it on
+    # TEXT_GATE made VIDLORE_CLIPSTUDIO_GRAPHICS_GATE=0 a dead switch (the pool re-admitted
+    # shots that this mirror immediately dropped again)
+    ggate_on = os.environ.get("VIDLORE_CLIPSTUDIO_GRAPHICS_GATE", "1").strip() \
+        not in ("0", "false", "no") \
+        and os.environ.get("VIDLORE_CLIPSTUDIO_NONSHOW_GATE", "1").strip() \
+        not in ("0", "false", "no")
     subband_on = os.environ.get("VIDLORE_CLIPSTUDIO_SUBBAND_GATE", "1").strip() \
         not in ("0", "false", "no", "")
     wrongface_on = os.environ.get("VIDLORE_CLIPSTUDIO_WRONGFACE_GATE", "1").strip() \
@@ -1058,7 +1143,7 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
             continue                                      # readable overlay text NEVER airs
         if tgate_on and _shot_overlay_badge(ps.shot):
             continue                                      # commenter-avatar badge NEVER airs
-        if tgate_on and _shot_is_graphics(ps.shot, getattr(ps, "embed", None)):
+        if ggate_on and _shot_is_graphics(ps.shot, getattr(ps, "embed", None)):
             continue                                      # designed graphics/illustration NEVER airs
         if subband_on and _shot_subtitle_band(ps.shot):
             continue                                      # burned subs (any script) NEVER air
