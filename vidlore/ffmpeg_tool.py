@@ -248,3 +248,18 @@ def run(args: list[str], *, quiet: bool = True, cwd: str | None = None,
             "ffmpeg failed:\n  cmd: %s\n  stderr: %s"
             % (" ".join(cmd[:6]) + " ...", proc.stderr[-2000:])
         )
+
+
+def seeded_noise(spec: str) -> str:
+    """An `anoisesrc` lavfi spec with a STABLE derived seed appended, so synthesized
+    noise (atmos beds, risers, whooshes, UI clicks, camera-shutter ticks) is
+    bit-reproducible run to run. ffmpeg's anoisesrc draws a fresh random seed per
+    invocation by default, which made two otherwise identical renders differ in decoded
+    PCM. The seed is derived from the spec itself (crc32), so: same color/amplitude/
+    duration -> same realization; loudness, duration and mix are untouched — the seed
+    only pins WHICH random samples the generator draws. Specs that already carry a seed,
+    and non-noise specs, pass through unchanged."""
+    if "anoisesrc" not in (spec or "") or "seed=" in spec:
+        return spec
+    import zlib
+    return f"{spec}:seed={zlib.crc32(spec.encode('utf-8')) & 0x7FFFFFFF}"

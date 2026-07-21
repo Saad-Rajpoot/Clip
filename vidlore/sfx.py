@@ -51,8 +51,9 @@ def _voice(cat: str, *, freq: float | None = None, color: str | None = None,
     if freq is not None:
         src = f"sine=frequency={freq}:sample_rate={SR}:duration={dur:.2f}"
     else:
-        src = (f"anoisesrc=color={color or 'white'}:sample_rate={SR}:"
-               f"amplitude=0.8:d={dur:.2f}")
+        from .ffmpeg_tool import seeded_noise as _seeded
+        src = _seeded(f"anoisesrc=color={color or 'white'}:sample_rate={SR}:"
+                      f"amplitude=0.8:d={dur:.2f}")
     ch: list[str] = []
     if hp:
         ch.append(f"highpass=f={hp}")
