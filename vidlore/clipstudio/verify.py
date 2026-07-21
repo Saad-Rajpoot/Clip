@@ -1083,6 +1083,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             v["reused"] = True
             _reused += 1
         else:
+            from . import perf_metrics as _pm_m
+            _pm_m.incr("verify.primary.cache_miss")
             if _cached is not None:
                 _vcache.pop(_fp, None)                 # poisoned entry — drop it
             if _breaker_open:

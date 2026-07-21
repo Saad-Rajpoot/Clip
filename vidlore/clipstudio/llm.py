@@ -408,10 +408,13 @@ def complete_ex(*, system: str = "", messages, max_tokens: int = 1024,
     else:                                              # anthropic (Claude) primary — explicit choice
         seq = ((_try_claude, _claude_id), (_try_deepseek, _deepseek_id),
                (_try_gemini, _gemini_id))
+    from . import perf_metrics as _pm_llm
     for fn, ident in seq:
         out = fn()
         if out:
             return out, ident()
+        _pm_llm.incr("llm.branch_fail")                # eligible-or-skipped branch, no answer
+    _pm_llm.incr("llm.total_failure")
     return "", {"provider": "", "model": "", "transport": "", "served": "none"}
 
 

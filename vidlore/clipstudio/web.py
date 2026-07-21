@@ -113,6 +113,12 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
         # bleeds in: a non-DeepSeek job still resets the DeepSeek model to the pro default for any
         # fallback. DeepSeek-v4-pro is the default; Claude stays the last-resort fallback only.
         with _RENDER_LOCK:
+            # per-render metrics scope — a job must never inherit the previous job's counts
+            try:
+                from . import perf_metrics as _pm_job
+                _pm_job.start_run(jid, str(project_dir))
+            except Exception:
+                pass
             os.environ["VIDLORE_CLIPSTUDIO_LLM_PROVIDER"] = provider or "deepseek"
             os.environ["VIDLORE_CLIPSTUDIO_DEEPSEEK_MODEL"] = ds_model or "deepseek-v4-pro"
             # Turbo = saturate all CPU cores (cut/ASR/download fan-out). load_clip_config() inside
@@ -163,6 +169,11 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
                     _became_review = True
                 else:
                     raise
+        try:
+            from . import perf_metrics as _pm_job2
+            _pm_job2.end_run()
+        except Exception:
+            pass
         with _LOCK:
             j = _JOBS[jid]
             j["done"] = True

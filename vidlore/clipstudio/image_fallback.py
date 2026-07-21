@@ -463,6 +463,8 @@ def pick_pool_still(seg, shots_by_key: dict, used_keys: set, used_phash: set,
     face-less/other shot — without it the picker fed 3 no-face candidates to the still checks and
     every one was (correctly) rejected, leaving the beat for the release gate. Returns
     (kf, sid, shot, rel, phash) or None when nothing in the pool is relevant enough."""
+    from . import perf_metrics as _pm_ps
+    _pm_ps.incr("imgfb.pool_scan")
     text = _clean(getattr(seg, "scene_query", "") or getattr(seg, "expected_visual", "")
                   or getattr(seg, "text", ""))
     if not text:
