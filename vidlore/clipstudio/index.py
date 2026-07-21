@@ -646,6 +646,16 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
         _etmp = proj.embeds_path(source.id).with_suffix(".tmp.npy")
         np.save(_etmp, np.vstack(embeds))
         _etmp.replace(proj.embeds_path(source.id))
+        # EMBEDDING MANIFEST — certifies what each persisted row IS: index schema, the exact
+        # embedding model, the dimension, and per-row (shot index, keyframe name, keyframe
+        # content hash). A consumer may trust a stored vector ONLY when every one of these
+        # matches its current world; anything else (model swap, re-extracted keyframe,
+        # reordered rows, truncated matrix) must fall back to a live embed.
+        try:
+            write_embed_manifest(proj, source.id, shots, len(embeds),
+                                 int(embeds[0].shape[-1]) if embeds else 0)
+        except Exception as _me:
+            log(f"index: {source.id} embed manifest skipped ({type(_me).__name__})")
     # words BEFORE shots: shots.json presence gates the cache, so writing words first means a kill
     # between the two re-indexes (safe) rather than serving shots with no word stream (silent
     # degradation back to per-shot quote search).
@@ -690,3 +700,67 @@ def load_embeds(proj: ClipProject, source_id: str):
     _pm.incr("index.load_embeds")
     f = proj.embeds_path(source_id)
     return np.load(f) if f.exists() else None
+
+
+def _manifest_path(proj: ClipProject, source_id: str):
+    p = proj.embeds_path(source_id)
+    return p.with_name(p.name.replace(".npy", "") + ".manifest.json")
+
+
+def _kf_md5(path: str) -> str:
+    import hashlib
+    try:
+        return hashlib.md5(Path(path).read_bytes()).hexdigest()
+    except Exception:
+        return ""
+
+
+def write_embed_manifest(proj: ClipProject, source_id: str, shots, n_rows: int,
+                         dim: int) -> None:
+    """Atomic manifest write beside the embeds matrix (see index_source)."""
+    from vidlore import visual_relevance as _vr_m
+    rows = {}
+    for sh in shots:
+        r = getattr(sh, "embed_row", -1)
+        r = -1 if r is None else int(r)
+        if 0 <= r < n_rows and getattr(sh, "keyframe_path", ""):
+            rows[str(r)] = {"shot": int(sh.index),
+                            "kf": Path(sh.keyframe_path).name,
+                            "kf_md5": _kf_md5(sh.keyframe_path)}
+    mp = _manifest_path(proj, source_id)
+    tmp = mp.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"schema": INDEX_SCHEMA, "model": _vr_m.model_identity(),
+                               "dim": int(dim), "rows": int(n_rows), "row_map": rows}),
+                   encoding="utf-8")
+    tmp.replace(mp)
+
+
+def load_embeds_verified(proj: ClipProject, source_id: str):
+    """(matrix, row_map) — served ONLY when the manifest certifies the matrix for the
+    CURRENT world: index schema, active embedding-model identity, dimension, and row count
+    all match. Missing/corrupt/mismatched manifest (incl. every legacy pre-manifest index)
+    -> (None, None): callers use the live embedding path, never an uncertified vector.
+    Per-row keyframe identity is validated by the CONSUMER against row_map."""
+    import numpy as np
+    from . import perf_metrics as _pm
+    from vidlore import visual_relevance as _vr_m
+    mp = _manifest_path(proj, source_id)
+    f = proj.embeds_path(source_id)
+    if not (mp.exists() and f.exists()):
+        _pm.incr("index.embeds.unverified_legacy")
+        return None, None
+    try:
+        man = json.loads(mp.read_text(encoding="utf-8"))
+        mat = np.load(f)
+        ident = _vr_m.model_identity()
+        if (int(man.get("schema", -1)) == INDEX_SCHEMA
+                and ident and str(man.get("model", "")) == ident
+                and int(man.get("dim", -1)) == int(mat.shape[1])
+                and int(man.get("rows", -1)) == int(mat.shape[0])
+                and isinstance(man.get("row_map"), dict)):
+            _pm.incr("index.embeds.verified")
+            return mat, man["row_map"]
+    except Exception:
+        pass
+    _pm.incr("index.embeds.manifest_rejected")
+    return None, None

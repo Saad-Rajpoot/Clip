@@ -265,11 +265,14 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
         return _shots_cache[sid]
 
     def _embeds_of(sid):
+        # (matrix, manifest row_map), certified for the current schema/model/dim/rows —
+        # (None, None) for every legacy/mismatched index, which _shot_relevance treats as
+        # "use the live embedding path" (see index.load_embeds_verified)
         if sid not in _embeds_cache:
             try:
-                _embeds_cache[sid] = _index_sv.load_embeds(proj, sid)
+                _embeds_cache[sid] = _index_sv.load_embeds_verified(proj, sid)
             except Exception:
-                _embeds_cache[sid] = None
+                _embeds_cache[sid] = (None, None)
         return _embeds_cache[sid]
 
     def _shot_face_ids(sid, sidx):

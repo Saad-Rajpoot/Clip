@@ -187,13 +187,20 @@ def _shot_relevance(shot, kf, scene_text: str, embeds_of=None, rel_memo: dict | 
             if row >= 0 and scene_text.strip():
                 vr = _vr()
                 if vr is not None:
-                    mat = embeds_of(sid)
-                    if mat is not None and row < int(mat.shape[0]):
+                    bundle = embeds_of(sid)              # (matrix, manifest row_map) — verified
+                    mat, row_map = bundle if isinstance(bundle, tuple) else (None, None)
+                    info = (row_map or {}).get(str(row))
+                    if (mat is not None and info is not None and row < int(mat.shape[0])
+                            and int(info.get("shot", -1)) == int(getattr(shot, "index", -2))
+                            and str(info.get("kf", "")) == Path(kf).name
+                            and _kf_md5_memo(kf, rel_memo) == str(info.get("kf_md5", ""))):
                         import numpy as np
                         te = np.asarray(vr._txt_embed(scene_text), dtype="float32")
                         cos = float(np.dot(np.asarray(mat[row], dtype="float32"), te))
                         rel = max(0.0, min(1.0, (cos - 0.15) / (0.34 - 0.15)))
                         _pm.incr("imgfb.rel.persisted")
+                    elif mat is not None:
+                        _pm.incr("imgfb.rel.stale_row")  # certified matrix, uncertified row
         except Exception:
             rel = None                                 # any persisted-path failure → live path
     if rel is None:
@@ -202,6 +209,23 @@ def _shot_relevance(shot, kf, scene_text: str, embeds_of=None, rel_memo: dict | 
     if rel_memo is not None and rel >= 0.0:
         rel_memo[key] = rel
     return rel
+
+
+def _kf_md5_memo(kf, rel_memo: dict | None) -> str:
+    """md5 of the CURRENT keyframe bytes — the per-row content identity the manifest is
+    checked against. Memoized in the caller's per-render dict (a keyframe file does not
+    change mid-still-pass), so the hash is paid once per frame, not once per scan."""
+    mkey = ("_kfmd5", str(kf))
+    if rel_memo is not None and mkey in rel_memo:
+        return rel_memo[mkey]
+    import hashlib
+    try:
+        h = hashlib.md5(Path(kf).read_bytes()).hexdigest()
+    except Exception:
+        h = ""
+    if rel_memo is not None:
+        rel_memo[mkey] = h
+    return h
 
 
 def _face_verdict(img_path: Path, target_actors: set, all_actors: set,
