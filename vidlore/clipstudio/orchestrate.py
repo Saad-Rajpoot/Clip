@@ -248,11 +248,35 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
 
     from . import index as _index_sv
 
+    # PER-RENDER MEMOS (perf only — same data, loaded once instead of per candidate):
+    #   _shots_cache    source_id -> list[Shot]  (shots.json parsed once per source)
+    #   _embeds_cache   source_id -> persisted embeds matrix (or None when absent)
+    #   _rel_memo       (source_id, shot_index, text) -> CLIP relevance score
+    _shots_cache: dict = {}
+    _embeds_cache: dict = {}
+    _rel_memo: dict = {}
+
+    def _shots_of(sid):
+        if sid not in _shots_cache:
+            try:
+                _shots_cache[sid] = _index_sv.load_shots(proj, sid)
+            except Exception:
+                _shots_cache[sid] = []
+        return _shots_cache[sid]
+
+    def _embeds_of(sid):
+        if sid not in _embeds_cache:
+            try:
+                _embeds_cache[sid] = _index_sv.load_embeds(proj, sid)
+            except Exception:
+                _embeds_cache[sid] = None
+        return _embeds_cache[sid]
+
     def _shot_face_ids(sid, sidx):
         """The candidate SHOT's actual persisted face detections (NOT the beat's requested entities —
         those are script asks, not faces found in this frame). Empty list when unavailable."""
         try:
-            for _sh in _index_sv.load_shots(proj, sid):
+            for _sh in _shots_of(sid):
                 if getattr(_sh, "index", None) == sidx:
                     return list(getattr(_sh, "face_ids", None) or [])
         except Exception:
@@ -351,10 +375,14 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
         if _discover.is_unwanted_source_title(getattr(s, "title", "") or ""):
             _skipped_src += 1
             continue
-        try:
-            _shots = _index.load_shots(proj, s.id)
-        except Exception:
-            continue
+        if s.id in _shots_cache:                       # perf memo only — flow identical to baseline
+            _shots = _shots_cache[s.id]
+        else:
+            try:
+                _shots = _index.load_shots(proj, s.id)
+            except Exception:
+                continue                               # exactly the baseline skip (no counters touched)
+            _shots_cache[s.id] = _shots
         if _src_wm(_shots) or (_corner_on and _src_logo(_shots)):
             _skipped_wm += 1
             continue
@@ -444,7 +472,8 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
             _cand_n = max(3, int(os.environ.get("VIDLORE_CLIPSTUDIO_STILL_CANDIDATES", "6") or 6))
             for _ in range(_cand_n):                   # ranked pool candidates
                 _sp = _imgfb.pick_pool_still(seg, shots_by_key, _seen_keys, used_phash,
-                                             distinct_from=aired_phash, want_faces=_wf)
+                                             distinct_from=aired_phash, want_faces=_wf,
+                                             embeds_of=_embeds_of, rel_memo=_rel_memo)
                 if not _sp:
                     break
                 _cands.append(_sp); _seen_keys = _seen_keys | {(_sp[1], _sp[2])}
@@ -489,7 +518,8 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                     for _ in range(_cand_n):
                         _lp = _imgfb.pick_pool_still(seg, shots_lowres_by_key, _lr_seen,
                                                      used_phash, distinct_from=aired_phash,
-                                                     want_faces=_wf)
+                                                     want_faces=_wf, embeds_of=_embeds_of,
+                                                     rel_memo=_rel_memo)
                         if not _lp:
                             break
                         _lr_cands.append(_lp); _lr_seen = _lr_seen | {(_lp[1], _lp[2])}
