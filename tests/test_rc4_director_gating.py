@@ -133,8 +133,20 @@ def test_no_number_means_no_wealth_value():
 # ── 6) REGISTRY length (RC5.1: 70 after process_flow_steps was removed) ───────
 def test_registry_length_unchanged():
     # RC4 itself removes nothing; RC5.1 cut `process_flow_steps` from production
-    # (cheap four-box template), so the production REGISTRY is 70.
-    assert len(registry.REGISTRY) == 70
+    # (cheap four-box template). Pinning an exact count made every legitimate template
+    # addition a false failure — validate the registry's INVARIANTS instead:
+    assert len(registry.REGISTRY) >= 60, "registry unexpectedly gutted"
+    assert "process_flow_steps" not in registry.REGISTRY, \
+        "the RC5.1 removal must stay removed"
+    for key, ent in registry.REGISTRY.items():
+        assert isinstance(ent, dict), key
+        assert ent.get("id") == key, f"{key}: id must equal its registry key"
+        for req in ("family", "roles", "intensity_range", "duration_range",
+                    "per_video_cap", "cost"):
+            assert req in ent, f"{key}: missing required field {req!r}"
+        lo, hi = ent["duration_range"]
+        assert 0 < lo <= hi, f"{key}: nonsensical duration_range"
+        assert int(ent["per_video_cap"]) >= 0, f"{key}: negative per_video_cap"
 
 
 if __name__ == "__main__":

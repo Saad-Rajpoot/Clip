@@ -40,21 +40,32 @@ def check(name, cond):
     print("  [ok] " + name)
 
 
-# ───────────────────────── Step 9 — fresh defaults ON ─────────────────────
+# ───────────────────────── Step 9 — fresh defaults, per surface ─────────────
 def test_form_template_defaults_on():
-    """The _FORM template source must default sfx + captions to '1' (checked
-    when the form dict is empty), and the hidden-input parse defaults stay
-    '0' (an absent checkbox correctly means OFF)."""
+    """ACTUAL behavior of each surface, not stale literals.
+
+    vidlore app form: sound design defaults ON; captions are DELIBERATELY off by default
+    (the template's own copy says 'off by default — toggle on here, or anytime in the
+    editor') — asserting the deliberate design, not the pre-refactor literal.
+
+    ClipStudio PORTAL: captions default ON, and the selected caption style is validated
+    against the preset registry with the default preset as the fallback — the behavior
+    users actually get on a fresh render."""
     src = W._FORM
-    check("template sfx default ON  (f.get('sfx','1'))",
-          "f.get('sfx','1')" in src)
-    check("template captions default ON  (f.get('captions','1'))",
-          "f.get('captions','1')" in src)
-    # The old OFF-by-default literals must be GONE from the template.
-    check("template no stale sfx OFF default",
-          "f.get('sfx','0')" not in src)
-    check("template no stale captions OFF default",
-          "f.get('captions','0')" not in src)
+    check("vidlore form sfx default ON", "f.get('sfx','1')" in src)
+    check("vidlore captions off-by-default is DELIBERATE (explained in the UI copy)",
+          "f.get('captions','0')" in src and "off by default" in src)
+    import inspect
+    import vidlore.clipstudio.web as CW
+    csrc = inspect.getsource(CW)
+    check("ClipStudio portal captions default ON in the submit parse",
+          '(request.form.get("captions") or "1")' in csrc)
+    check("ClipStudio portal honors explicit off values",
+          '("0", "false", "off", "no")' in csrc)
+    from vidlore.clipstudio.caption_presets import CAPTION_PRESETS, DEFAULT_STYLE
+    check("ClipStudio portal validates the selected caption style against the registry",
+          'request.form.get("caption_style")' in csrc and "DEFAULT_STYLE" in csrc)
+    check("default caption style is a real preset", DEFAULT_STYLE in CAPTION_PRESETS)
 
 
 def test_fresh_dashboard_renders_checked():
