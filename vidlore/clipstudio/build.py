@@ -353,6 +353,69 @@ def _is_narration(text: str) -> bool:
     return bool(_NARRATION_RX.search(text or ""))
 
 
+def _breakout_line_is_dialogue(aired_text: str, movie_title: str, eng_cfg=None) -> tuple:
+    """SEMANTIC authority on 'is this the movie speaking, or a YouTuber speaking ABOUT the movie?'
+
+    Every previous defence here ENUMERATED: essay-ish words in the source TITLE (_ESSAYISH_RX) and
+    essay-ish phrases in the transcript (_NARRATION_RX). Enumeration cannot win — there are
+    unlimited ways to title a clickbait essay and unlimited ways to narrate one. Measured leaks, each
+    of which needed a NEW keyword after the fact: 'The Scene Tyrion Exposed The Spy Using Three
+    Lies', then "Varys's Absolute Humiliation of Tyrion Lannister" whose aired 'breakout' was the
+    narrator saying '...of authority in Westeros, but as he opens the door to the small council'.
+    Neither title nor line contained any listed keyword, so both gates passed them.
+
+    So ASK instead of MATCH. A breakout airs a scene's own voice; whether a transcript is a
+    character speaking IN the story or an essayist speaking ABOUT it is a semantic judgment, and one
+    cheap text call answers it reliably. Only breakout CANDIDATES reach here (a handful per render),
+    so the cost is negligible.
+
+    FAILS CLOSED: returns (False, reason) on a narration verdict, low confidence, an unparseable
+    reply, no LLM, or any exception. A breakout is optional polish — refusing one costs nothing,
+    while airing a rival's voice-over is the single most damaging thing this feature can do.
+    Returns (is_dialogue, reason)."""
+    txt = (aired_text or "").strip()
+    if len(txt.split()) < 3:
+        return False, "too short to classify"
+    try:
+        from . import llm as _llm_d
+        if eng_cfg is None:                                # self-serve: build_video carries no cfg
+            try:
+                from .config import engine_config as _ec_d
+                eng_cfg = _ec_d()
+            except Exception:
+                eng_cfg = None
+        if not _llm_d.has_llm(eng_cfg):
+            return False, "no LLM available to classify dialogue vs narration (fail-closed)"
+        _sys = (
+            "You classify a transcript snippet taken from a YouTube video about "
+            + (movie_title or "a film/TV show") + ".\n"
+            "Decide if the snippet is:\n"
+            "  'dialogue'  = words spoken BY A CHARACTER INSIDE the story, to another character "
+            "(first/second person, in-world, e.g. 'Tell no one what?', 'I never asked for this').\n"
+            "  'narration' = a video-essay narrator/commentator talking ABOUT the story from "
+            "outside it (third-person description, analysis, recap, mid-sentence explanatory prose, "
+            "e.g. '...of authority in Westeros, but as he opens the door', 'this scene shows us').\n"
+            "If it reads like an essayist explaining, summarizing or analysing — even partially, "
+            "even mid-sentence — answer 'narration'. When genuinely unsure, answer 'narration'.\n"
+            'Reply ONLY: {"kind":"dialogue"|"narration","confidence":0.0-1.0}')
+        out = _llm_d.complete(system=_sys, max_tokens=60,
+                              messages=[{"role": "user", "content": f"Snippet: {txt[:600]}"}],
+                              eng_cfg=eng_cfg)
+        import json as _json_d
+        import re as _re_d
+        m = _re_d.search(r"\{.*\}", out or "", _re_d.S)
+        if not m:
+            return False, "classifier gave no parseable verdict (fail-closed)"
+        v = _json_d.loads(m.group(0))
+        kind = str(v.get("kind", "")).strip().lower()
+        conf = float(v.get("confidence", 0) or 0)
+        if kind == "dialogue" and conf >= 0.6:
+            return True, f"in-character dialogue (conf {conf:.2f})"
+        return False, f"classified '{kind or 'unknown'}' (conf {conf:.2f}) — not in-character dialogue"
+    except Exception as e:                                 # noqa: BLE001
+        return False, f"classifier error ({type(e).__name__}) — fail-closed"
+
+
 def _echoes_own_narration(aired_text: str, script_stream: str, min_run: int = 6) -> int:
     """Longest run of consecutive words the AIRED breakout audio shares with THIS video's OWN
     narration script. A real in-character movie line ('I still remember seeing my father's fleet
@@ -1671,6 +1734,23 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                 f"our own narration script ({_echo_run}+ word run) — it is the narrator, not "
                 f"in-character dialogue (src={(src.title or src.id)[:40]!r})")
             continue
+        # SEMANTIC AUTHORITY (the gate that ends the whack-a-mole): the two checks above ENUMERATE
+        # essay keywords — in the source title and in the transcript — and enumeration keeps losing
+        # to phrasings nobody listed ("Varys's Absolute Humiliation of Tyrion Lannister" airing
+        # "...of authority in Westeros, but as he opens the door"). ASK instead of MATCH: is this
+        # aired line a character speaking INSIDE the story, or an essayist speaking ABOUT it? One
+        # cheap text call, only on candidates that already survived every other gate. FAILS CLOSED
+        # (narration / low confidence / no LLM / error → reject): a breakout is optional polish, so
+        # refusing one costs nothing while airing a rival's voice-over is the worst possible outcome.
+        # env VIDLORE_CLIPSTUDIO_BREAKOUT_DIALOGUE_CHECK=0 disables (back to keyword-only).
+        if _os9b.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_DIALOGUE_CHECK", "1").strip() \
+                not in ("0", "false", "no", "") and _wtxt:
+            _dlg_ok, _dlg_why = _breakout_line_is_dialogue(_wtxt, _bk_show9)
+            if not _dlg_ok:
+                _rej["window_commentary"] += 1
+                log(f"build: breakout REJECTED post-extract before scene {idx} — dialogue check: "
+                    f"{_dlg_why} (src={(src.title or src.id)[:40]!r})")
+                continue
         # CUT-WINDOW FLAG VALIDATION on the aired breakout window — _extract_breakout extends
         # the cut to a full spoken line, which can cross into an adjacent shot carrying burned
         # subs or unreadable murk (the full-source corner bug is already punch-in-cropped via

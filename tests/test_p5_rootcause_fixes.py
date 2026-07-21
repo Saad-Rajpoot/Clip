@@ -227,7 +227,12 @@ def _breakout_fixture(*, quote, asr, seg0_text, llm_reply=None, face_ids=(),
     B._asr_wav_words = lambda p: (_airtx.split(), _airtx, 5.0)
     L.complete = _fake_complete
     logs = []
-    envset = dict(env or {})
+    # These fixtures isolate ONE gate each (luma / era / quote-correction). The semantic
+    # dialogue-vs-narration check is a separate LLM gate with its own dedicated test
+    # (test_breakout_dialogue_classifier_is_the_semantic_authority) — leaving it on here would make
+    # every fixture's mocked LLM double as a dialogue verdict and mask the gate under test.
+    envset = {"VIDLORE_CLIPSTUDIO_BREAKOUT_DIALOGUE_CHECK": "0"}
+    envset.update(env or {})
     saved = {k: os.environ.get(k) for k in envset}
     try:
         os.environ.update(envset)
@@ -712,7 +717,50 @@ def test_breakout_essay_source_and_narration_echo_gates():
     assert _echoes_own_narration("take him", stream, 6) == 0
 
 
+def test_breakout_dialogue_classifier_is_the_semantic_authority():
+    """THE end of the whack-a-mole. Keyword gates (essay TITLE regex + narration TRANSCRIPT regex)
+    kept losing to phrasings nobody listed — measured leaks: 'The Scene Tyrion Exposed The Spy Using
+    Three Lies', then "Varys's Absolute Humiliation of Tyrion Lannister" airing '...of authority in
+    Westeros, but as he opens the door'. Neither title nor line matched any keyword. The classifier
+    ASKS instead of MATCHES, and FAILS CLOSED on every uncertain path."""
+    from vidlore.clipstudio import build as B
+    from vidlore.clipstudio import llm as L
+
+    def _with_llm(reply, has=True):
+        _o = (L.has_llm, L.complete)
+        L.has_llm = lambda *a, **k: has
+        L.complete = lambda **k: reply
+        try:
+            return B._breakout_line_is_dialogue("a real spoken line of some length", "Example Show")
+        finally:
+            L.has_llm, L.complete = _o
+
+    # a confident dialogue verdict airs
+    ok, why = _with_llm('{"kind":"dialogue","confidence":0.95}')
+    assert ok is True, why
+    # narration verdict → blocked
+    ok, why = _with_llm('{"kind":"narration","confidence":0.99}')
+    assert ok is False and "narration" in why
+    # LOW-confidence dialogue → blocked (fail-closed on uncertainty)
+    ok, _ = _with_llm('{"kind":"dialogue","confidence":0.3}')
+    assert ok is False, "low confidence must fail closed"
+    # unparseable reply → blocked
+    ok, why = _with_llm("I think it's probably dialogue?")
+    assert ok is False and "parseable" in why
+    # NO LLM → blocked (never air unclassifiable audio)
+    ok, why = _with_llm('{"kind":"dialogue","confidence":1.0}', has=False)
+    assert ok is False and "no LLM" in why
+    # too-short snippet → blocked without even calling
+    assert B._breakout_line_is_dialogue("ok", "Example Show")[0] is False
+    # the gate is wired as the final post-extract authority, env-toggleable
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "vidlore", "clipstudio", "build.py"), encoding="utf-8").read()
+    assert "VIDLORE_CLIPSTUDIO_BREAKOUT_DIALOGUE_CHECK" in src
+    assert "_breakout_line_is_dialogue(_wtxt, _bk_show9)" in src, "must judge the AIRED window"
+
+
 TESTS = [
+    test_breakout_dialogue_classifier_is_the_semantic_authority,
     test_breakout_essay_source_and_narration_echo_gates,
     test_q1_qa_failures_persist_and_exclude,
     test_a1_connectors_demote_to_abstract,
