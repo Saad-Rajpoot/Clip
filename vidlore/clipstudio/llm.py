@@ -331,6 +331,9 @@ def complete(*, system: str = "", messages, max_tokens: int = 1024,
                        eng_cfg=eng_cfg, model=model)[0]
 
 
+_COMPLETE_ORIG = complete
+
+
 def complete_ex(*, system: str = "", messages, max_tokens: int = 1024,
                 eng_cfg=None, model: str = "") -> tuple:
     """Run an LLM completion and report WHO ACTUALLY SERVED it.
@@ -340,7 +343,16 @@ def complete_ex(*, system: str = "", messages, max_tokens: int = 1024,
     the canonical identity string in exactly vision_config()'s format, so cache keys derived
     from a prediction and keys derived from the actual server are directly comparable. On
     total failure -> ("", {"served": "none", ...}). The provider ladder, retries, backoff and
-    fallback order are byte-identical to the historical complete()."""
+    fallback order are byte-identical to the historical complete().
+
+    LEGACY-SEAM COMPAT: tests and tools have always stubbed `llm.complete` directly. When
+    that name is monkeypatched, honor the stub — route through it and report no provider
+    identity ('' -> consumers fall back to the predicted identity, exactly the pre-upgrade
+    behavior). The real ladder runs only through the unpatched module function."""
+    if _COMPLETE_ORIG is not None and globals().get("complete") is not _COMPLETE_ORIG:
+        _out = globals()["complete"](system=system, messages=messages,
+                                     max_tokens=max_tokens, eng_cfg=eng_cfg, model=model)
+        return _out, {"provider": "", "model": "", "transport": "", "served": ""}
     import time as _time
 
     def _with_retry(call):
