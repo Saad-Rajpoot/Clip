@@ -321,10 +321,66 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
         except Exception:
             return False
 
+    # STILL-VERDICT CACHE — the same verdict_cache.json and the same full-fingerprint doctrine as
+    # verify.py's rungs: a still verdict is reusable ONLY when the complete question (source content
+    # hash, shot bounds, judged frame identity, every prompt field, the venue_fallback question
+    # variant, real vision model, prompt/sheet versions) is byte-identical. Reuse is NEVER keyed on
+    # the image path alone — the same frame judged for a different beat is a different question.
+    # Only successful schema-valid verdicts are stored ('unverified' transport outcomes never are),
+    # so the 2-attempt retry and the vision-outage backoff behavior are unchanged.
+    _still_vcache = _verify_mod._load_verdict_cache(proj)
+    try:
+        _vmodel_sv = _llm_mod.vision_config(eng_cfg)
+    except Exception:
+        _vmodel_sv = str(getattr(eng_cfg, "anthropic_model", "") or "")
+    _srch_cache: dict = {}
+
+    def _src_hash_sv(sid):
+        if sid not in _srch_cache:
+            _src_o = proj.source(sid)
+            _srch_cache[sid] = _verify_mod._file_fingerprint(
+                getattr(_src_o, "local_path", "") or "")
+        return _srch_cache[sid]
+
+    def _shot_obj_sv(sid, sidx):
+        for _sh in _shots_of(sid):
+            if getattr(_sh, "index", None) == sidx:
+                return _sh
+        return None
+
+    def _still_fp(kf_path, seg, sid, sidx, faces):
+        try:
+            _sh = _shot_obj_sv(sid, sidx)
+            if _sh is None:
+                return ""
+            return _verify_mod.verdict_fingerprint(
+                src_hash=_src_hash_sv(sid), source_id=sid or "",
+                shot_start=getattr(_sh, "start", 0.0), shot_end=getattr(_sh, "end", 0.0),
+                beat_text=getattr(seg, "text", ""),
+                required_entity=getattr(seg, "required_entity", ""),
+                required_kind=getattr(seg, "required_kind", ""),
+                expected_visual=getattr(seg, "expected_visual", "") or "",
+                scene_query=getattr(seg, "scene_query", "") or "",
+                era=_verify_mod._beat_era(seg, _global_era_sv, _vtype_sv == "single_scene",
+                                          anchor_eras=_anchor_eras_sv),
+                visual_policy=_policy.policy_of(seg), is_specific=False,
+                faceid_names=list(faces or []), multiframe=False,
+                image_id=f"kf:{_verify_mod._file_fingerprint(kf_path)}",
+                model=_vmodel_sv, venue_fallback=True)
+        except Exception:
+            return ""                                    # no key → baseline uncached call
+
     def _still_verdict_call(kf_path, seg, sid, sidx):
+        from . import perf_metrics as _pm_sv
         faces = _shot_face_ids(sid, sidx)
+        _fp = _still_fp(kf_path, seg, sid, sidx, faces)
+        _hit = _still_vcache.get(_fp) if _fp else None
+        if _hit is not None and _verify_mod._verdict_schema_ok(_hit):
+            _pm_sv.incr("still.verdict.cache_hit")
+            return "reject" if _hit.get("verdict") == "replace" else "ok"
         for _attempt in (1, 2):
             try:
+                _pm_sv.incr("still.verdict.call")
                 v = _verify_mod.verify_frame(
                     str(kf_path), seg.text, getattr(seg, "required_entity", ""),
                     getattr(seg, "required_kind", ""), faces, eng_cfg,
@@ -338,6 +394,9 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                     venue_fallback=True)
                 if v is None:
                     continue                              # transport error → retry, then unverified
+                if _fp and _verify_mod._verdict_schema_ok({**v, "status": "ok"}):
+                    _still_vcache[_fp] = dict(v)
+                    _verify_mod._save_verdict_cache(proj, _still_vcache)   # atomic tmp+replace
                 return "reject" if v.get("verdict") == "replace" else "ok"
             except Exception:
                 continue
