@@ -1542,6 +1542,17 @@ def test_image_fallback():
     check("face verdict distinguishes unknown (AI/wrong) from none (no face)",
           '"unknown" if big else "none"' in ifsrc
           and 'target_actors and face == "unknown"' in ifsrc)
+    # VERIFIER non-show HARD RULE covers BOTH new leak classes seen on the Arthur-Dayne render:
+    # photorealistic AI/deepfake VIDEO and different-production FAN-FILM live-action, while still
+    # sparing genuine-but-degraded show footage (authenticity, not resolution).
+    _vsrc = (Path(__file__).resolve().parent.parent / "vidlore" / "clipstudio" /
+             "verify.py").read_text(encoding="utf-8")
+    check("verifier rejects AI/deepfake VIDEO (not just still images)",
+          "deepfake image OR VIDEO" in _vsrc and "morph" in _vsrc)
+    check("verifier rejects a DIFFERENT PRODUCTION (fan film / re-enactment)",
+          "DIFFERENT PRODUCTION" in _vsrc and "fan film" in _vsrc)
+    check("verifier non-show rule spares genuine low-res/dark footage (authenticity not resolution)",
+          "AUTHENTICITY, not resolution" in _vsrc)
     check("AI/unknown-face image penalized + rejected on character beat",
           '"unknown": -0.30' in ifsrc)
     check("image fallback dedups across beats (no reuse)",
@@ -2643,6 +2654,16 @@ def test_nonscene_footage_gate():
         "Game of Thrones White Walker Makeup Transformation",
         "Game of Thrones Night King Theme - Live Concert (Ramin Djawadi)",
         "Game of Thrones Podcast: the Night King vlog",
+        # FABRICATED-OUTCOME / AI recreations — a '🔥 Oberyn Martell Kills The Mountain | ...
+        # Alternate Ending ⚔️' AI source fed a breakout + 3 beats of photorealistic AI footage
+        # (the graphics gate caught only 1/48 of its shots). In the real duel the Mountain kills
+        # Oberyn, so any 'Oberyn kills the Mountain / alternate ending' is a rewrite, not footage.
+        "🔥 Oberyn Martell Kills The Mountain | Game of Thrones Alternate Ending ⚔️",
+        "What If Oberyn Killed The Mountain - Alternate Ending",
+        "Game of Thrones Alternate Timeline: If Oberyn Won",
+        "If Ned Stark Lived | Game of Thrones",
+        "Oberyn Survived - Alternate Universe (GoT)",
+        "GoT AI Recreation: The Red Viper's Revenge",
     ]
     missed = [t for t in leak_titles if not D.is_unwanted_source_title(t)]
     check(f"title gate BLOCKS all leaked non-scene titles (missed={missed})", not missed)
@@ -2656,6 +2677,10 @@ def test_nonscene_footage_gate():
         "The Night King raises the dead at Hardhome | Game of Thrones",
         "Game of Thrones: The Night King [1080p HD]",
         "Game of Thrones - A Song of Ice and Fire (opening scene)",
+        # real duel/scene uploads that share tokens with the fabricated ones must still pass
+        "Oberyn Martell Fights The Mountain | Game of Thrones | HBO Max",
+        "Game Of Thrones - S04E07 - Oberyn as a Tyrion's Champion",
+        "The Scene Oberyn Martell Exposed Tywin Lannister's Weakness",
     ]
     wrongly = [t for t in keep_titles if D.is_unwanted_source_title(t)]
     check(f"title gate KEEPS clean raw scene clips (wrongly blocked={wrongly})", not wrongly)

@@ -49,6 +49,15 @@ _REJECT_TITLE = re.compile(
     r"set tour|tour the [a-z ]{0,20}set|studio tour|set visit|on the set of|set with the cast|"
     r"concept (trailer|art|teaser)|announcement trailer|teaser concept|fan[- ]?made|fan trailer|"
     r"fan film|fan edit|what if|re-?imagined|ai[- ]?(generated|trailer|concept)|deepfakes?|"
+    # FABRICATED-OUTCOME recreations — 'alternate ending/timeline/universe/version/reality',
+    # 'if <char> lived/survived/won', and outcome-inverting titles that state something the show
+    # NEVER shows (a '🔥 Oberyn Martell Kills The Mountain | ... Alternate Ending ⚔️' AI recreation
+    # aired as a breakout — in the real duel the Mountain kills Oberyn). These are AI/fan
+    # rewrites, not scene footage, and the graphics gate can't catch photorealistic AI video.
+    r"alternate (ending|endings|timeline|universe|reality|version|scene|take)|"
+    r"alternative (ending|timeline|universe|version)|if [a-z][a-z' ]{0,24}"
+    r"(lived|survived|didn'?t die|had won|had killed|never died)|"
+    r"ai[- ]?(recreation|reimagining|animation|edit|remake)|"
     # making-of / breakdown featurettes (show the film crew + equipment, NOT the scene) and
     # joke/meme re-edits (fart/crack/YTP edits, bad lip reading) — both aired junk on the
     # Tyrion render (an 'Anatomy of a Scene' BTS clip showed lights+reflectors mid-conclusion):

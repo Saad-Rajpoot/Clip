@@ -119,11 +119,20 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
     # on an abstract-effect beat, and painterly fan art as "shows the correct character": a
     # designed image can be thematically perfect and still must never air as footage.
     _nonshow = (
-        "HARD RULE — the frame must be LIVE-ACTION footage from the show itself. If it is any "
-        "designed or non-show image — a drawing, painting, fan art, comic/anime frame, poster, "
-        "video-game graphics or UI, news/broadcast motion graphics, a logo/title card, or an "
-        "AI-generated image — mark 'replace' no matter how thematically fitting it is. Real props, "
-        "maps and documents FILMED WITHIN a live-action scene are fine.\n")
+        "HARD RULE — the frame must be REAL footage from the actual show itself, with the show's "
+        "real actors. Mark 'replace' no matter how thematically fitting it is if it is any of:\n"
+        "• a designed / non-show image — drawing, painting, fan art, comic/anime frame, poster, "
+        "video-game graphics or UI, news/broadcast motion graphics, a logo/title card;\n"
+        "• an AI-GENERATED or deepfake image OR VIDEO — tells: waxy/over-smooth or plastic skin, "
+        "faces that morph or don't match the show's real actors, garbled hands/armor/props, an "
+        "unnaturally 'cinematic' sepia AI grade, impossible costumes/weapons;\n"
+        "• footage from a DIFFERENT PRODUCTION — a fan film, a fan-made recreation, another "
+        "movie/series, or a re-enactment — i.e. the location, costumes, or actors are clearly NOT "
+        "the real show's (amateur or mismatched production values, unfamiliar faces in the role).\n"
+        "This is about AUTHENTICITY, not resolution: genuine show footage that is merely low-res, "
+        "dark, blurry, or heavily colour-graded is FINE. Real props, maps and documents FILMED "
+        "WITHIN a live-action scene are fine. When the frame looks AI-generated OR like a different "
+        "production, set correct_subject_visible=false and verdict='replace'.\n")
     txt = (
         f'Narration line: "{narration}"\n'
         f"This clip should show: {required_entity or '(a general scene fitting the line)'} "
