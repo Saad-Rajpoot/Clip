@@ -330,8 +330,23 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
     # keyword gates. Deliberately NOT based on Face-ID cast-matching, which under-matches real cast.
     face_gate_on = os.environ.get("VIDLORE_CLIPSTUDIO_FACE_FOOTAGE_GATE", "1").strip() \
         not in ("0", "false", "no", "")
+    # OPERATOR / AUTO source BAN-LIST: explicit source-ids kept out of the pool wholesale.
+    # Used for fan-film / AI-recreation productions the per-frame verifier under-detects (a
+    # high-production Tower-of-Joy fan film reads as HBO to a fast vision model, so it is banned
+    # at the SOURCE — never entering match — and its beats fall to real footage / stills / holds).
+    # Persisted on the project (proj.meta['banned_sources']) or via env (comma-separated ids), so
+    # a re-render reproduces the ban deterministically.
+    _banned = set(str(x) for x in (proj.meta.get("banned_sources") or []))
+    import os as _os_bl
+    _banned |= {x.strip() for x in
+                _os_bl.environ.get("VIDLORE_CLIPSTUDIO_BANNED_SOURCES", "").split(",") if x.strip()}
     for src in proj.sources:
         if src.status != SOURCE_OK:
+            continue
+        if src.id in _banned:
+            if progress:
+                progress(f"match: dropping BANNED source {src.id} "
+                         f"(fan-film / non-authentic, operator/auto ban: {(src.title or '')[:44]!r})")
             continue
         # belt-and-suspenders for sources downloaded BEFORE the discovery wrong-show rule existed:
         # a franchise sibling/prequel (House of the Dragon in a Game of Thrones video) is the wrong

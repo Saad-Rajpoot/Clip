@@ -670,8 +670,6 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
     seen_hashes: set = set()
     if web_fallback_on:
         for seg in segs:
-            if (src_filled + web_filled) >= cap:
-                break
             sel = sel_by_idx.get(seg.index)
             _isrc = (getattr(sel, "image_meta", {}) or {}).get("source", "") if sel else ""
             _has_img = bool(sel and getattr(sel, "image_path", ""))
@@ -682,6 +680,16 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
             if _has_img and _isrc != "source-frame-recovery":
                 continue                               # already has a confirmed still
             if not _policy.allows_web_image(seg):      # filler/abstract → no random web decoration
+                continue
+            # A web-exact-scene still for an EXACT beat with NO real footage and NO confirmed still is
+            # ESSENTIAL COVERAGE, not decorative variety — it must bypass the still cap. Without this
+            # the cap (already exceeded by essential source-frame stills) breaks the whole web pass on
+            # its first iteration, so footage-gap beats (barely-filmed backstory characters) get NO
+            # real still and the render re-airs verifier-REJECTED footage on them instead. Only the
+            # OPTIONAL web fills (a beat that already has some coverage) stay capped.
+            _essential_web = _policy.is_exact(seg) and not _has_img and not (
+                sel is not None and getattr(sel, "source_id", ""))
+            if not _essential_web and (src_filled + web_filled) >= cap:
                 continue
             try:
                 res = _imgfb.fetch_scene_image(seg, analysis, img_dir, faceid_obj=faceid_obj,
@@ -1163,6 +1171,26 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
         raise PipelineError("no narration script provided.")
     from . import policy as _policy
     _sig_analyze = _sig(script_text, topic, movie_hint)
+    # TRUSTED RESUME (portal-restart recovery): the raw script text lives ONLY in the portal's
+    # in-memory job registry — a restarted portal (or a CLI resume of a portal job) can never
+    # reproduce the analyze signature even though the complete analyze ARTIFACT (analysis +
+    # segments) is cached on disk. With the env set, a resume adopts the RECORDED signature when
+    # that artifact is complete, so analyze skips exactly as the in-process retry would and every
+    # downstream signature reproduces identically. The script is NOT re-validated against the
+    # cached beats — only use on a project whose cached analysis is known-good; the log is loud.
+    import os as _os_tr
+    if resume and _os_tr.environ.get("VIDLORE_CLIPSTUDIO_RESUME_TRUST_CACHED", "0").strip() \
+            in ("1", "true", "yes"):
+        try:
+            _rec_sig = str((((proj.meta.get("pipeline") or {}).get("stages") or {})
+                            .get("analyze") or {}).get("sig") or "")
+        except Exception:
+            _rec_sig = ""
+        if _rec_sig and _rec_sig != _sig_analyze \
+                and proj.segments and proj.meta.get("analysis"):
+            log(f"resume: TRUSTED-CACHE — adopting the recorded analyze signature ({_rec_sig}); "
+                f"the provided script text was NOT re-validated against the cached beats")
+            _sig_analyze = _rec_sig
     if _stage_skip(proj, "analyze", _sig_analyze, resume,
                    artifact_ok=bool(proj.segments and proj.meta.get("analysis"))):
         analysis = ScriptAnalysis.from_dict(proj.meta["analysis"])

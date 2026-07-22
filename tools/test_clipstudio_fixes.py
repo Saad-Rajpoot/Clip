@@ -5221,6 +5221,13 @@ def test_release_gate_recovery_alignment():
           "essential = no_clip or weak" in osrc2)
     check("recovery ranks CHARACTER beats first and skips query-less beats",
           "_policy.CHARACTER: 0" in osrc2 and "can't be rediscovered" in osrc2)
+    # (8b) a web-exact-scene still for an EXACT footage-gap beat is ESSENTIAL coverage and must
+    # BYPASS the still cap — else 37 essential source-frame stills exhaust the cap-24 and the whole
+    # web pass breaks on iteration 1, so barely-filmed backstory beats (Lyanna/Rhaegar/Aerys) get
+    # no real still and the render re-airs verifier-REJECTED fan-film/AI on them (Arthur-Dayne render).
+    check("essential web-exact-scene coverage bypasses the still cap (optional web still stays capped)",
+          "_essential_web" in osrc2
+          and "if not _essential_web and (src_filled + web_filled) >= cap:" in osrc2)
 
     # (9) a validated same-scene hold blocked ONLY by the frozen-frame duration caps becomes a
     # Ken-Burns MOTION hold (the caps exist against long FROZEN frames; a push-in is the tool's
