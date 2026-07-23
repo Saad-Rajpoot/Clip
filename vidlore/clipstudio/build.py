@@ -1094,6 +1094,19 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     # even on a 16-min essay with rich dialogue footage — the Drogon render.)
     srcs = [s for s in proj.sources
             if s.status == "ok" and s.local_path and Path(s.local_path).exists()]
+    # BANNED sources (fan-film / AI-recreation) never open a breakout. This is the MOST damaging
+    # place a banned upload can land: a breakout hands it the narration's own pause and airs its
+    # audio as if it were the show's. The breakout miner reads proj.sources directly, so match's
+    # ban does not reach here — apply it explicitly (measured: an "ALTERNATE ENDING" AI recreation
+    # aired 9.9s of synthetic Oberyn/Mountain footage under the real "You raped her" line).
+    from .match import banned_source_ids as _banned_bk
+    _bk_banned = _banned_bk(proj)
+    if _bk_banned:
+        _n_bk = len(srcs)
+        srcs = [s for s in srcs if s.id not in _bk_banned]
+        if len(srcs) != _n_bk:
+            log(f"build: breakout — {_n_bk - len(srcs)} BANNED source(s) excluded "
+                f"(fan-film / AI-recreation never airs its own audio)")
     # CROSS-SHOW purity for breakouts: a breakout airs a FULL scene with its own audio in the most
     # prominent slots (the cold-open included), so a franchise sibling (House of the Dragon in a
     # Game of Thrones video) is the single most jarring possible miss. match.py already drops wrong-

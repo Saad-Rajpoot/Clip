@@ -431,8 +431,17 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
     except (TypeError, ValueError):
         _still_min_h = 480
     from .match import _source_is_watermarked as _src_wm, _source_corner_logo as _src_logo
+    from .match import banned_source_ids as _banned_ids
+    # BANNED sources (fan-film / AI-recreation) are excluded from the STILL pool too — a ban that
+    # only covered match would still let the same non-authentic upload air as a frozen Ken-Burns
+    # still, which is worse (it sits on screen for seconds).
+    _banned_sv = _banned_ids(proj)
+    _skipped_banned = 0
     for s in proj.sources:
         if s.status != SOURCE_OK:
+            continue
+        if s.id in _banned_sv:
+            _skipped_banned += 1
             continue
         # A reaction / review / interview / essay / non-show upload may have been downloaded+indexed
         # (e.g. as a dialogue-verify backup) yet gated out of CLIP selection. Its keyframes are
@@ -465,6 +474,9 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
             continue
         for sh in _shots:
             shots_by_key[(sh.source_id, sh.index)] = sh
+    if _skipped_banned and log:
+        log(f"  [image-pool] excluded {_skipped_banned} BANNED source(s) "
+            f"(fan-film / AI-recreation) from the still pool")
     if _skipped_src and log:
         log(f"  [image-pool] excluded {_skipped_src} reaction/essay/non-show source(s) "
             f"from the still-recovery pool")

@@ -20,6 +20,25 @@ from . import index as _index
 from . import policy as _policy
 
 
+def banned_source_ids(proj) -> set:
+    """Source-ids banned from EVERY pool for this render.
+
+    A ban means "this upload is not authentic show footage" (fan film, AI recreation,
+    alternate-ending re-cut) — so it must be excluded everywhere a frame or a line can reach
+    the timeline, not just from match's moving-clip pool. Three consumers share this list:
+    match (moving clips), the still/image-fallback pool, and breakout selection (real-audio
+    dialogue). Honouring it in only one of them is how an AI-recreation still keeps airing —
+    or worse, keeps its real-audio BREAKOUT — after the operator has already banned it.
+
+    Sources: proj.meta['banned_sources'] (persisted, so a re-render reproduces the ban
+    deterministically) plus VIDLORE_CLIPSTUDIO_BANNED_SOURCES (comma-separated, ad hoc)."""
+    import os as _os_bl
+    out = {str(x) for x in ((getattr(proj, "meta", None) or {}).get("banned_sources") or [])}
+    out |= {x.strip() for x in
+            _os_bl.environ.get("VIDLORE_CLIPSTUDIO_BANNED_SOURCES", "").split(",") if x.strip()}
+    return out
+
+
 def _f_env(name: str, default: float) -> float:
     import os
     try:
@@ -336,10 +355,7 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
     # at the SOURCE — never entering match — and its beats fall to real footage / stills / holds).
     # Persisted on the project (proj.meta['banned_sources']) or via env (comma-separated ids), so
     # a re-render reproduces the ban deterministically.
-    _banned = set(str(x) for x in (proj.meta.get("banned_sources") or []))
-    import os as _os_bl
-    _banned |= {x.strip() for x in
-                _os_bl.environ.get("VIDLORE_CLIPSTUDIO_BANNED_SOURCES", "").split(",") if x.strip()}
+    _banned = banned_source_ids(proj)
     for src in proj.sources:
         if src.status != SOURCE_OK:
             continue
