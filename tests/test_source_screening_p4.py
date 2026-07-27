@@ -128,6 +128,19 @@ def test_static_collage_gate_calibrated():
     check("old index never qualifies", not _slideshow_source_verdict(old))
 
 
+def test_cursor_source_gate_wired_into_pool_load():
+    m = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "vidlore", "clipstudio", "match.py")).read()
+    check("pool-load probes whole sources for a burned cursor",
+          '_reject(src.id, "screen_recording")' in m
+          and "VIDLORE_CLIPSTUDIO_CURSOR_SRC_GATE" in m)
+    check("verdict is cached per source on the project",
+          '"cursor_scan"' in m)
+    o = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "vidlore", "clipstudio", "orchestrate.py")).read()
+    check("backfill treats screen_recording as replaceable", '"screen_recording"' in o)
+
+
 def test_cursor_probe_wired_into_breakout_qc():
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "vidlore", "clipstudio", "build.py")).read()

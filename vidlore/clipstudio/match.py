@@ -600,6 +600,32 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
                          f"(most shots are near-static art cards, not scene footage)")
             _reject(src.id, "slideshow_source")
             continue
+        # SCREEN-RECORDING source — a burned mouse cursor sat mid-frame for a whole 12.6s
+        # breakout AND aired again on a regular beat (job 5462677f95 / the shorttest). One
+        # whole-source probe: 4 frames at 30/50/70/90% of the file — a solid-white frozen
+        # blob at the SAME pixels across four DIFFERENT scenes is necessarily an overlay
+        # (the within-clip probe's calibrated core/ring/edge rules apply unchanged). Verdict
+        # persisted in proj.meta so each source is decoded once. Quality reject: the same
+        # scenes exist in clean uploads, so backfill may chase a replacement.
+        if nonshow_on and os.environ.get("VIDLORE_CLIPSTUDIO_CURSOR_SRC_GATE", "1").strip() \
+                not in ("0", "false", "no") and getattr(src, "local_path", None):
+            _cur_cache = proj.meta.setdefault("cursor_scan", {}) if hasattr(proj, "meta") \
+                and isinstance(getattr(proj, "meta", None), dict) else {}
+            _cv = _cur_cache.get(src.id)
+            if _cv is None:
+                try:
+                    from .build import _breakout_cursor_probe as _cprobe
+                    _cv = bool(_cprobe(Path(src.local_path),
+                                       float(getattr(src, "duration", 0.0) or 0.0)))
+                except Exception:                        # noqa: BLE001
+                    _cv = False
+                _cur_cache[src.id] = _cv
+            if _cv:
+                if progress:
+                    progress(f"match: dropping screen-recording source {src.id} "
+                             f"(burned mouse cursor detected across the file)")
+                _reject(src.id, "screen_recording")
+                continue
         for _pos, sh in enumerate(shots):             # `embeds` loaded once above (reused here)
             if getattr(sh, "index", _pos) in _gfx_idx:
                 continue
