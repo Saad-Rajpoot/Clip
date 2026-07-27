@@ -1061,7 +1061,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 scene_query=getattr(seg, "scene_query", "") or "",
                 era=_era_of(seg), visual_policy=_policy.policy_of(seg), is_specific=_exact,
                 faceid_names=faceid_names, multiframe=_want_sheet,
-                image_id=_image_id(kf, shot, _want_sheet), model=_vmodel)
+                image_id=_image_id(kf, shot, _want_sheet), model=_vmodel,
+                must_see=_must_see(seg))
             _c0 = _vcache.get(_fp)
             if _fp and (_c0 is None or not _verdict_schema_ok(_c0)
                         or not _hit_provider_ok(_c0, _vmodel)):
@@ -1148,7 +1149,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 scene_query=getattr(seg, "scene_query", "") or "",
                 era=_era_of(seg), visual_policy=_policy.policy_of(seg), is_specific=_exact,
                 faceid_names=faceid_names, multiframe=_want_sheet,
-                image_id=_image_id(kf, shot, _want_sheet), model=_vmodel)
+                image_id=_image_id(kf, shot, _want_sheet), model=_vmodel,
+                must_see=_must_see(seg))
         # only a SUCCESSFUL, schema-valid verdict is reusable — never an error stub or a malformed
         # reply whose missing "verdict" key would read as falsy and quietly pass
         _cached = _vcache.get(_fp) if _fp else None
@@ -1236,6 +1238,18 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             v["verdict"] = "keep"
             v["relaxed"] = "non-exact beat: relevant right-subject filler accepted"
         sel.verifier = v
+
+        # FLAG-ON-ANY-VERDICT: a keep (or leniency-flipped) verdict with the named look-target
+        # absent previously left the beat unflagged — the gate lived only inside the replace
+        # branch, so "watch the chalice" over a kept chalice-less clip got no still coverage.
+        # The FOOTAGE decision is untouched (measured: swapping usable picks regressed −4.00);
+        # the flag only routes the beat to the still pass, which shows a frame OF the moment.
+        if _must_see(seg) and v.get("target_visible") is False:
+            try:
+                if "look_target_missing" not in (sel.flag_reasons or []):
+                    sel.flag_reasons = list(sel.flag_reasons or []) + ["look_target_missing"]
+            except Exception:                                # noqa: BLE001
+                pass
 
         if v.get("verdict") == "replace":
             swapped = False
@@ -1401,6 +1415,12 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         in ("0", "false", "no"):
                     return False
                 _bench = list(getattr(sel, "deep_alternates", None) or [])
+                # LOOK-MISS ordering: when the narration's named target is absent from the pick,
+                # surface bench candidates whose match-time CLIP probe saw the target (the
+                # target_vis signal) first — the strict bar still decides, this is order only.
+                if _bench and _must_see(seg) and v.get("target_visible") is False:
+                    _bench.sort(key=lambda c: float(
+                        (getattr(c, "signals", None) or {}).get("target_vis", 0.0)), reverse=True)
                 if _bench and _try_promote(downgrade=False, pool=_bench):
                     log(f"verify: seg{sel.segment_index} rescued from the deep bench "
                         f"({len(_bench)} extra candidate(s)) — exact scene found, no downgrade")

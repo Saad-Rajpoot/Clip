@@ -1438,6 +1438,54 @@ def _ocr_text_heavy(shot) -> bool:
     return False
 
 
+# ── DEICTIC-TARGET visibility probe (no vision LLM) ──────────────────────────────────────────
+# "Watch the chalice" must outrank "right people, no chalice". A bare CLIP cosine cannot carry
+# this (measured ~0.02 discriminative range across 4301 shots — see the note above _clip01), so
+# the probe copies the CONTRASTIVE-anchor pattern the graphics gate proved out: positive prompts
+# about the named target vs generic-scene negatives, margin rank-normalized WITHIN the beat's
+# own pool (adaptive — no absolute calibration to drift).
+_TGT_VEC_CACHE: dict = {}
+_TGT_NEG_PROMPTS = ("a wide shot of a medieval hall with many people",
+                    "two people in conversation, faces visible",
+                    "a dark castle corridor",
+                    "soldiers standing in a courtyard")
+
+
+def _target_pool_scores(target: str, pool: list, vr) -> dict | None:
+    """{(sid, shot_index): 0..1 rank-normalized contrastive margin} for 'is TARGET visible in
+    this shot', or None when undecidable (no embeds / degenerate spread). Milliseconds: two
+    text-tower passes per unique target (cached) + one matrix product over persisted embeds."""
+    try:
+        import numpy as np
+        key = (target or "").strip().lower()
+        if not key:
+            return None
+        if key not in _TGT_VEC_CACHE:
+            pos = (f"a close-up photograph of {target}",
+                   f"{target}, clearly visible in the frame")
+            P = np.asarray([vr._txt_embed(p) for p in pos], dtype="float32")
+            N = np.asarray([vr._txt_embed(p) for p in _TGT_NEG_PROMPTS], dtype="float32")
+            _TGT_VEC_CACHE[key] = (P, N)
+        P, N = _TGT_VEC_CACHE[key]
+        margins, vals = {}, []
+        for ps in pool:
+            if ps.embed is None:
+                continue
+            m = float((P @ ps.embed).max() - (N @ ps.embed).max())
+            margins[(ps.sid, ps.shot.index)] = m
+            vals.append(m)
+        if len(vals) < 8:
+            return None
+        vals.sort()
+        lo = vals[int(0.50 * (len(vals) - 1))]
+        hi = vals[int(0.95 * (len(vals) - 1))]
+        if hi - lo < 1e-6:
+            return None
+        return {k: max(0.0, min(1.0, (v - lo) / (hi - lo))) for k, v in margins.items()}
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
 def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipConfig,
                 face_targets: set, anchor_sids: set | None = None,
                 anchor_bonus: float = 0.0,
@@ -1447,7 +1495,8 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
                 beat_era: str = "",
                 src_titles: dict | None = None,
                 proj=None,
-                anchor_lines: list | None = None) -> list[tuple[float, float, dict, _PoolShot]]:
+                anchor_lines: list | None = None,
+                tgt01: dict | None = None) -> list[tuple[float, float, dict, _PoolShot]]:
     import numpy as np
     import os
     # DETERMINISTIC ERA PENALTY. The vision verifier cannot read a season off a torch-lit hall —
@@ -1621,6 +1670,19 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
             if _thits >= 2:
                 _tbonus = _aff * min(_thits, 4) / 4.0
                 bonus += _tbonus
+        # DEICTIC-TARGET bonus — "watch the chalice": shots where the CLIP probe ranks the named
+        # target visible get a ranking-only nudge (rides on `bonus`, flows into deep-alternates
+        # ordering via the anchor_bonus signal). Never touches confidence.
+        _tgvis = 0.0
+        if tgt01 is not None:
+            _tgvis = float(tgt01.get((ps.sid, ps.shot.index), 0.0))
+            if _tgvis > 0.0:
+                try:
+                    _tgw = float(os.environ.get("VIDLORE_CLIPSTUDIO_LOOK_MATCH_W",
+                                                "0.12") or 0.12)
+                except (TypeError, ValueError):
+                    _tgw = 0.12
+                bonus += _tgw * _tgvis
         # SOFT preference for clean frames: a burned-in source dialogue subtitle (readable on-frame
         # text that survived the junk-gate) clashes with our own narration caption. Small penalty so
         # a clean frame wins a near-tie, but a subtitled frame still wins if it's clearly more
@@ -1648,6 +1710,8 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
             sig["anchor_bonus"] = round(bonus, 3)
         if _tbonus:
             sig["title_affinity"] = round(_tbonus, 3)
+        if _tgvis > 0.0:
+            sig["target_vis"] = round(_tgvis, 3)
         if _era_conf:
             sig["era_conflict"] = 1.0        # numeric: ledger rounds every signal via float()
         if wrongface:
@@ -2106,6 +2170,16 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
                 text_vec = np.asarray(vr._txt_embed(_q), dtype="float32")
             except Exception:
                 text_vec = None
+        # DEICTIC-TARGET probe — when the narration instructs the viewer ("watch the chalice"),
+        # rank candidate shots by whether the named target is actually visible. Uses the
+        # persisted embeds + a cached text probe; no vision calls, adaptive per-beat scaling.
+        _tgt01 = None
+        import os as _os_tgt
+        if vr is not None and _os_tgt.environ.get(
+                "VIDLORE_CLIPSTUDIO_LOOK_MATCH_BONUS", "1").strip() not in ("0", "false", "no"):
+            _tgt_phrase = _policy.deictic_target(seg)
+            if _tgt_phrase:
+                _tgt01 = _target_pool_scores(_tgt_phrase, pool, vr)
         face_targets = _face_targets(seg, char2actor)
         _ta_titles = {src.id: set(re.findall(r"[a-z']+", (src.title or "").lower()))
                       for src in proj.sources}
@@ -2130,7 +2204,7 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         scored = _score_pool(seg, pool, text_vec, cfg, face_targets, anchor_sids, anchor_bonus,
                              all_faces=all_faces, title_toks=_ta_titles, mv_toks=_ta_mv,
                              beat_era=_beat_era_m, src_titles=_src_titles_m,
-                             proj=proj, anchor_lines=_anchor_lines)
+                             proj=proj, anchor_lines=_anchor_lines, tgt01=_tgt01)
 
         # `base` = match QUALITY (drives the reported confidence + flagging).
         # `adj`  = base + anchor bonus minus diversity penalties (drives only WHICH is picked).

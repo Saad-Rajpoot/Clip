@@ -475,6 +475,16 @@ def pick_pool_still(seg, shots_by_key: dict, used_keys: set, used_phash: set,
     _pm_ps.incr("imgfb.pool_scan")
     text = _clean(getattr(seg, "scene_query", "") or getattr(seg, "expected_visual", "")
                   or getattr(seg, "text", ""))
+    # DEICTIC TARGET leads the still query: for a "watch the chalice" beat the still exists to
+    # show the NAMED thing, so the CLIP ranking should ask for it first, not for the scene at
+    # large (the look-missed → still routing was wired but its query never mentioned the target).
+    try:
+        from . import policy as _pol_ps
+        _tgt_ps = _pol_ps.deictic_target(seg)
+        if _tgt_ps:
+            text = _clean(f"{_tgt_ps}. {text}")
+    except Exception:                                    # noqa: BLE001
+        pass
     if not text:
         return None
     distinct_from = distinct_from or set()

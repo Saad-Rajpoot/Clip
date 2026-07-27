@@ -1168,6 +1168,29 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
                       or (getattr(seg_by_idx.get(i), "required_entity", "") or "").strip())]
     unresolved.sort(key=_rec_rank)
     unresolved = unresolved[:max_beats]
+    # LOOK-MISS ACQUISITION — "watch the chalice" beats whose target nothing on disk shows are
+    # KEPT (usable footage, never gambled) but flagged; when the recovery round has spare slots,
+    # spend up to 3 on fetching footage that actually shows the named thing ("the footage exists
+    # on the internet" is the owner's standing complaint). Snapshot semantics protect the kept
+    # pick: a look-miss beat only changes if rediscovery positively resolves it at the strict
+    # bar; otherwise the snapshot is restored. Env: VIDLORE_CLIPSTUDIO_LOOK_RECOVERY=0 disables.
+    _look_aug: dict[int, str] = {}
+    if os.environ.get("VIDLORE_CLIPSTUDIO_LOOK_RECOVERY", "1").strip() \
+            not in ("0", "false", "no"):
+        _lm = [s.segment_index for s in proj.selections
+               if "look_target_missing" in (getattr(s, "flag_reasons", None) or [])
+               and s.segment_index not in unresolved
+               and s.segment_index in seg_by_idx]
+        _room = max(0, min(max_beats - len(unresolved), 3))
+        for i in _lm[:_room]:
+            _tgt_r = _policy.deictic_target(seg_by_idx[i])
+            if _tgt_r:
+                unresolved.append(i)
+                _look_aug[i] = _tgt_r
+        if _look_aug:
+            log(f"recovery: +{len(_look_aug)} look-miss beat(s) added for targeted "
+                f"acquisition {sorted(_look_aug)} (targets: "
+                f"{', '.join(repr(t) for t in _look_aug.values())})")
     if not unresolved:
         _write_recovery_audit(proj, audit)
         return 0
@@ -1176,6 +1199,19 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
     # Snapshot EVERY current selection; the final selection list is snapshot ∪ (recovered new picks).
     snapshot = {s.segment_index: _copy.deepcopy(s) for s in proj.selections}
     unresolved_segs = [seg_by_idx[i] for i in unresolved if i in seg_by_idx]
+    # look-miss beats search WITH their named target ("... Joffrey drinks chalice close-up") —
+    # a shallow shim copy so the project's own segment list is never mutated
+    if _look_aug:
+        _aug_segs = []
+        for s in unresolved_segs:
+            if s.index in _look_aug:
+                s2 = _copy.copy(s)
+                s2.scene_query = f"{(getattr(s, 'scene_query', '') or '').strip()} " \
+                                 f"{_look_aug[s.index]} close-up".strip()
+                _aug_segs.append(s2)
+            else:
+                _aug_segs.append(s)
+        unresolved_segs = _aug_segs
     recovered: set = set()
 
     try:

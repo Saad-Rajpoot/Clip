@@ -110,6 +110,20 @@ _LOOK_RX = re.compile(
     r"\b(?:watch|look at|keep (?:your )?eyes? on|notice|count|study|listen to)\s+"
     r"((?:the|his|her|their|its|that|this|those|these|\w+'s)\b.*)", re.I)
 
+# the same verbs aimed at a BARE PROPER NOUN — "watch Bran", "watch Olenna, not the cup". The
+# determiner-led pattern above cannot see these (audited misses: 'watch Bran's face' matched but
+# 'watch Bran' yielded no target at all). Case-sensitive capture: a capitalized token after the
+# verb is a name; 'watch the' is the other pattern's business.
+_LOOK_PROPER_RX = re.compile(
+    r"\b(?:[Ww]atch|[Ll]ook at|[Kk]eep (?:your )?eyes? on|[Nn]otice|[Ss]tudy)\s+"
+    r"([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})?(?:'s\s+\w+)?)")
+
+# the verbs aimed at a PRONOUN — "notice what nobody asks him", "watch her while she reads".
+# The pronoun's referent is the beat's required entity; the entity IS the visual target.
+_LOOK_PRONOUN_RX = re.compile(
+    r"\b(?:watch|look at|keep (?:your )?eyes? on|notice|study)\b[^.!?]{0,40}"
+    r"\b(?:him|her|them)\b", re.I)
+
 # a target must be something you can SEE — drop the abstract nouns the same phrasing produces
 # ("notice the division of labour", "watch the way it changes")
 _TARGET_STOP = frozenset("""way ways point points fact facts idea ideas reason reasons question
@@ -131,25 +145,60 @@ def deictic_target(seg) -> str:
     on screen instead of settling for a clip that merely has the right people in it. The phrase is
     cut at the first preposition or conjunction: greedy capture turned "watch the trial the way Bran
     watched it" into "the trial the way", whose head noun then read as abstract and lost the beat."""
-    m = _LOOK_RX.search(getattr(seg, "text", "") or "")
+    txt = getattr(seg, "text", "") or ""
+    got = _det_target(txt)
+    if got:
+        return got
+    # bare proper noun: "watch Bran", "watch Olenna Tyrell", "notice Sansa's necklace"
+    mp = _LOOK_PROPER_RX.search(txt)
+    if mp:
+        cand = mp.group(1).strip(".,;:!?\"'")
+        head = cand.split()[-1].lower().rstrip("'s")
+        if (head not in _TARGET_STOP and len(head) >= 3
+                and cand.split()[0] not in _CAP_PRONOUNS):
+            return cand
+    # pronoun referent: "notice what nobody asks him" — the required entity is the target
+    if _LOOK_PRONOUN_RX.search(txt):
+        ent = (getattr(seg, "required_entity", "") or "").strip()
+        if ent and (getattr(seg, "required_kind", "") or "") == "character":
+            return ent
+    return ""
+
+
+# a mid-sentence capitalized pronoun must never read as a proper name ("They watch Him ascend")
+_CAP_PRONOUNS = frozenset("""Him Her Them He She They It His Hers Their Its You Your Yours
+Me My Mine Us Our Ours Who Whom""".split())
+
+
+def _det_target(txt: str) -> str:
+    """The original determiner-led extraction ('watch the chalice'), hardened: the capture stops
+    at a sentence boundary (greedy split crossed 'itself. Joffrey' into the target), and ANY
+    abstract token — not only the head — rejects the phrase ('his strategy unfold' dodged the
+    head test because the trailing verb became the head)."""
+    m = _LOOK_RX.search(txt)
     if not m:
         return ""
     words, out = m.group(1).split(), []
     for i, w in enumerate(words):
         bare = w.lower().strip(".,;:!?\"")
+        ends_sentence = w.rstrip("\"'").endswith((".", "!", "?"))
         if bare.endswith("'s") and i == 0:
             out.append(w.strip(".,;:!?\""))
+            if ends_sentence:
+                break
             continue
         bare = bare.strip("'")
         if i and (bare in _TARGET_CUT or not bare):
             break
         out.append(w.strip(".,;:!?\"'"))
-        if len(out) >= 4:
+        if ends_sentence or len(out) >= 4:
             break
     if len(out) < 2:
         return ""
     head = out[-1].lower().rstrip("'s")
     if head in _TARGET_STOP or len(head) < 3:
+        return ""
+    if any(t.lower().rstrip("'s") in _TARGET_STOP for t in out):
         return ""
     return " ".join(out)
 
