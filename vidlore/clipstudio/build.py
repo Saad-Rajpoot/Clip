@@ -557,6 +557,23 @@ _BK_TAIL_S = 0.45
 _BK_CAP_ALIGN_MIN = 0.80
 _BK_CAP_ALIGN_FUZZY = 0.60
 
+# Typographic apostrophes/backticks → ASCII before any breakout-line tokenizing. Official HBO
+# uploads write "don’t" (U+2019) where fan uploads write "don't"; the tokenizer's [a-z'] class
+# split "don’t" into "don"+"t", which broke the cross-source dedup Jaccard for the SAME Olenna
+# line from two uploads (job 5462677f95: the confession aired twice, 3.4 min apart).
+_BK_APOS_TR = str.maketrans({"’": "'", "‘": "'", "ʼ": "'", "`": "'", "´": "'"})
+
+
+def _bk_dedup_same_line(cq: str, pq: str) -> bool:
+    """Cross-source same-line check for breakout dedup: normalized full-line similarity.
+    Substring/Jaccard on the first 10 tokens miss ASR/transcription variants of the SAME spoken
+    line ('do you? Well,' vs 'to you? What?'); SequenceMatcher on the full normalized quotes is
+    robust to a one-word divergence while genuinely different dialogue stays far below 0.8."""
+    if not cq or not pq:
+        return False
+    from difflib import SequenceMatcher as _SM_bk
+    return _SM_bk(None, cq, pq).ratio() >= 0.8
+
 
 def _extract_breakout(src_path: str, start: float, dur: float, vdest: Path,
                       adest: Path, src_w: int = 0, crop_corner: str = "",
@@ -1050,7 +1067,7 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         _orig_log(m)
 
     def _rw(t):
-        return _re9.findall(r"[a-z']+", (t or "").lower())
+        return _re9.findall(r"[a-z']+", (t or "").translate(_BK_APOS_TR).lower())
 
     # quote pool: per-beat quotes PLUS the analysis' verbatim anchor DIALOGUE lines (per-beat
     # quotes are often paraphrases; anchor dialogue is demanded verbatim) — each anchor line is
@@ -1510,7 +1527,9 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         # below, so a superset-replacement can never swap in a candidate that the wrong-character /
         # recap / era / commentary / luma gates would have rejected).
         _cw = {w for w in _rw(c[4])[:10] if len(w) > 2}
-        _cq = " ".join((c[4] or "").lower().split())
+        # punctuation-free normalized quote — 'beast,' vs 'beast' must not defeat the
+        # substring/similarity dedup keys
+        _cq = " ".join(_rw(c[4]))
         _cw0, _cw1 = _bk_win(c)
         # COMMENTARY-AUDIO gate: a breakout plays the SHOT's OWN audio. If that audio is a
         # YouTuber/essayist ANALYZING the scene (third-person commentary) rather than the movie's
@@ -1637,7 +1656,10 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
             _substr = bool(_cq and _pq and (_cq in _pq or _pq in _cq))
             _tok = (len(_cw & _picked_word_sets[_i])
                     / max(1, len(_cw | _picked_word_sets[_i])) >= 0.5) if _cw else False
-            if _same_src_win or _substr or _tok:
+            # (d) cross-SOURCE same line: full-line similarity — catches transcription variants
+            # of one spoken line from two different uploads (the 192/234 double confession)
+            _line_sim = _bk_dedup_same_line(_cq, _pq)
+            if _same_src_win or _substr or _tok or _line_sim:
                 _dup_i = _i
                 break
         if _dup_i is not None:
