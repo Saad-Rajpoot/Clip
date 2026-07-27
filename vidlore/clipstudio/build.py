@@ -4918,6 +4918,46 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None, *, preset=None) -
         _kept = []
         _rescued = 0
         _src_strong = bool(cap.get("line")) and _bk_align >= _BK_CAP_ALIGN_MIN
+        # WORD-LEVEL REPAIR (fringe trim + aired corroboration). The all-or-nothing rescue above
+        # deleted the essay's own cited quote TWICE on job 5462677f95: the caption line
+        # "marry that beast, do you? Well," is 100% source-backed except the trailing "Well,"
+        # (the next speaker's reply, past the quote) — one unbacked fringe word must cost the
+        # fringe, not the payload. Secondary evidence: the selection-time transcript
+        # (aired_transcript in work/breakout_audit.json). It is the same whisper model, so it is
+        # corroboration, not proof — an aired-backed word also needs non-hopeless acoustics
+        # (conf >= _aconf), which keeps genuinely-garbled lines (min conf 0.01) dropped.
+        _repair_on = _os_bkc.environ.get(
+            "VIDLORE_CLIPSTUDIO_BK_CAP_REPAIR", "1").lower() not in ("0", "false", "no")
+        try:
+            _aconf = float(_os_bkc.environ.get("VIDLORE_CLIPSTUDIO_BK_CAP_AIRED_CONF",
+                                               "0.30") or 0.30)
+        except (TypeError, ValueError):
+            _aconf = 0.30
+        _aired_toks: set = set()
+        if _repair_on:
+            try:
+                import json as _json_bkc
+                _aud = _json_bkc.loads((out_ass.parent / "breakout_audit.json").read_text())
+                for _e in (_aud.get("accepted") or []):
+                    if int(_e.get("seg_index", -1)) == int(cap.get("seg_index", -2)):
+                        _aired_toks = {re.sub(r"[^a-z0-9']", "", t.lower())
+                                       for t in re.findall(r"[\w']+",
+                                                           _e.get("aired_transcript") or "")}
+                        break
+            except Exception:                                # noqa: BLE001
+                _aired_toks = set()
+        _FUNC = {"a", "an", "the", "and", "or", "but", "of", "to", "in", "on", "at",
+                 "is", "it", "he", "she", "i", "you", "we", "so", "now"}
+
+        def _word_ok(gi_ids, li, w):
+            """Is this word vouched for by evidence stronger than its own ASR confidence?"""
+            i = gi_ids[li] if li < len(gi_ids) else -1
+            if 0 <= i < len(_bk_srcok) and _bk_srcok[i]:
+                return True                       # the verified source line says this word
+            _n = re.sub(r"[^a-z0-9']", "", w[0].lower())
+            if _n in _aired_toks and w[3] >= _aconf:
+                return True                       # heard the same both passes + not hopeless
+            return _n in _FUNC and len(_n) <= 3   # semantically inert connective
         for _gi, line in enumerate(grp):
             _minp = min(w[3] for w in line)
             if _minp >= _pfloor:
@@ -4934,9 +4974,46 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None, *, preset=None) -
                     log(f"build: breakout caption line kept — every word matches the verified "
                         f"source line (align {_bk_align:.2f}, min ASR conf {_minp:.2f}): "
                         f"{' '.join(w[0] for w in line)!r}")
-            elif log:
+                continue
+            if _repair_on and _ids:
+                # trim the unbacked FRINGE (words past the quote / before it), then keep the
+                # line iff every REMAINING word is source/aired/function-backed
+                _oks = [_word_ok(_ids, li, w) for li, w in enumerate(line)]
+                lo, hi = 0, len(line)
+                while lo < hi and not _oks[lo]:
+                    lo += 1
+                while hi > lo and not _oks[hi - 1]:
+                    hi -= 1
+                _rem = line[lo:hi]
+                _rcontent = sum(1 for w in _rem if len(re.sub(r"[^\w']", "", w[0])) > 1)
+                if (_rem and all(_oks[lo:hi]) and _rcontent >= 2):
+                    _kept.append(_rem)
+                    _rescued += 1
+                    if log:
+                        _cut = len(line) - len(_rem)
+                        log(f"build: breakout caption line repaired — kept {len(_rem)} "
+                            f"backed word(s), trimmed {_cut} unbacked (min ASR conf "
+                            f"{_minp:.2f}): {' '.join(w[0] for w in _rem)!r}")
+                    continue
+            if log:
                 log(f"build: breakout caption line dropped (ASR word confidence "
                     f"{_minp:.2f} < {_pfloor}): {' '.join(w[0] for w in line)!r}")
+        # ORPHAN CLEANUP: if the survivors caption almost none of what is spoken, a lone fragment
+        # ("my son.") floats context-free over a long breakout and reads as a non-sequitur —
+        # captioning NOTHING is the cleaner cut (documentaries do not caption screams).
+        try:
+            _mincov = float(_os_bkc.environ.get("VIDLORE_CLIPSTUDIO_BK_CAP_MIN_COVERAGE",
+                                                "0.35") or 0.35)
+        except (TypeError, ValueError):
+            _mincov = 0.35
+        if _repair_on and _kept and words:
+            _covw = sum(len(l) for l in _kept) / float(len(words))
+            if _covw < _mincov:
+                if log:
+                    log(f"build: breakout captions suppressed — only {_covw:.0%} of spoken words "
+                        f"survived the confidence gate (< {_mincov:.0%}); an orphan fragment "
+                        f"reads as a non-sequitur")
+                _kept = []
         grp = _kept
         for line in grp:
             ws = base + line[0][1]
