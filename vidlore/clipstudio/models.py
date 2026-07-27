@@ -126,12 +126,15 @@ class Shot:
     graphics_flag: int = -1       # 2 = HARD designed graphics (news CGI/game UI/cartoon/fan art —
                                   # never airs), 1 = band-art (gated only in a source with hard
                                   # evidence), 0 = photographic, -1 = not computed
-    static_frac: float = -1.0     # fraction of consecutive multi-frame sample pairs that are
-                                  # near-identical (mean|Δ| below the index-time threshold).
-                                  # 1.0 = a FROZEN image airing as footage (thumbnail collage /
-                                  # AI-art still / promo composite — the non_show leak class);
-                                  # real footage, even locked-off candlelit dialogue, carries
-                                  # codec grain + micro-motion. -1 = old index, gates fail open
+    static_frac: float = -1.0     # FREEZE tier: fraction of consecutive sample pairs with
+                                  # mean|Δ| < 0.9 (calibrated on job 5462677f95: live-action
+                                  # floor 0.97 — a frozen collage/promo still airing as footage
+                                  # scores ~1.0, real footage ~0.0). -1 = old index, fail open
+    pair_diff_max: float = -1.0   # max consecutive-pair mean|Δ| — STILL tier consumer
+                                  # (max < 2.3 + graphics/OCR/faces corroboration = static art)
+    pair_diff_mean: float = -1.0  # mean consecutive-pair mean|Δ| — source-level slideshow
+                                  # profile (fraction of shots with mean < 6: AI-art essays
+                                  # 0.69-0.89 vs real-footage sources <= 0.51)
 
     @property
     def duration(self) -> float:

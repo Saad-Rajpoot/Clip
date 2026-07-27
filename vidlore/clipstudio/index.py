@@ -281,20 +281,23 @@ def _flags_from_frames(frames: list) -> dict:
     import numpy as np
     out = {"subs_flag": 0, "text_conf": 0.0, "luma_avg": -1.0, "luma_hi": -1.0,
            "luma_min": -1.0, "luma_min_black_frac": -1.0, "corner_masks": {},
-           "static_frac": -1.0}
+           "static_frac": -1.0, "pair_diff_max": -1.0, "pair_diff_mean": -1.0}
     frames = [f for f in frames if f is not None]
     if not frames:
         out["subs_flag"] = -1
         return out
-    # STATIC-FRAME fraction — consecutive sample pairs that are near-identical. A frozen image
-    # airing as footage (thumbnail collage, AI-art still, promo composite) diffs at ~0 between
-    # samples; real footage — even locked-off candlelit dialogue — carries codec grain and
-    # micro-motion well above it. Threshold env-tunable; calibrated on job 5462677f95.
+    # STATIC-FRAME metrics — consecutive-pair mean|Δ|. A frozen image airing as footage
+    # (thumbnail collage, AI-art still, promo composite) diffs at ~0 between samples; real
+    # footage — even locked-off candlelit dialogue — carries codec grain and micro-motion
+    # (measured live-action floor on 220 control shots: 0.97). Calibrated on job 5462677f95;
+    # per-pair FREEZE threshold env-tunable.
     if len(frames) >= 2:
-        _sth = float(os.environ.get("VIDLORE_CLIPSTUDIO_STATIC_PAIR_DIFF", "1.5") or 1.5)
+        _sth = float(os.environ.get("VIDLORE_CLIPSTUDIO_STATIC_PAIR_DIFF", "0.9") or 0.9)
         _pairs = [float(np.abs(frames[i + 1] - frames[i]).mean())
                   for i in range(len(frames) - 1)]
         out["static_frac"] = round(sum(1 for d in _pairs if d < _sth) / len(_pairs), 3)
+        out["pair_diff_max"] = round(max(_pairs), 2)
+        out["pair_diff_mean"] = round(sum(_pairs) / len(_pairs), 2)
     lumas, hi_vals, confs, dark_fracs = [], [], [], []
     corner_or = {k: None for k in _CORNER_REGIONS}
     subs_any = False
@@ -536,6 +539,8 @@ def compute_shot_flags(path, shots: list, *, progress=None) -> int:
             sh.luma_min_black_frac = flags.get("luma_min_black_frac", -1.0)
             sh.corner_masks = flags["corner_masks"]
             sh.static_frac = flags.get("static_frac", -1.0)
+            sh.pair_diff_max = flags.get("pair_diff_max", -1.0)
+            sh.pair_diff_mean = flags.get("pair_diff_mean", -1.0)
             if flags["subs_flag"] >= 0:
                 done += 1
             if progress and (k % 50 == 0) and k:

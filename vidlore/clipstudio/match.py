@@ -589,6 +589,17 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
                              f"({_n_num}/{len(shots)} shots carry a burned countdown numeral)")
                 _reject(src.id, "numeral_overlay")
                 continue
+        # SLIDESHOW / AI-ART ESSAY source — most shots barely move (art cards under narration).
+        # Its occasional real-footage shots can't be trusted between keyframes either, same
+        # doctrine as the graphics-source drop. Content reject: backfill must not chase a
+        # "cleaner copy" of an essay.
+        if nonshow_on and os.environ.get("VIDLORE_CLIPSTUDIO_STATIC_GATE", "1").strip() \
+                not in ("0", "false", "no") and _slideshow_source_verdict(shots):
+            if progress:
+                progress(f"match: dropping slideshow/AI-art essay source {src.id} "
+                         f"(most shots are near-static art cards, not scene footage)")
+            _reject(src.id, "slideshow_source")
+            continue
         for _pos, sh in enumerate(shots):             # `embeds` loaded once above (reused here)
             if getattr(sh, "index", _pos) in _gfx_idx:
                 continue
@@ -912,6 +923,52 @@ def _shot_overlay_badge(sh) -> bool:
     return False
 
 
+def _shot_static_collage(sh) -> bool:
+    """A FROZEN IMAGE airing as footage — thumbnail collage, AI-art card, promo composite.
+    Two calibrated tiers (job 5462677f95: 8 true statics, 220 control shots, 0 confirmed
+    live-action FPs):
+      FREEZE (standalone): >=75% of sample pairs diff < 0.9 (the persisted static_frac), with
+        a luma guard — near-black live footage can sit that low (control floor: dmax 0.97 at
+        luma 3.2). NOT corroboration-gated: half the true statics are single-face freezes with
+        graphics_flag 0 and no OCR.
+      STILL (corroborated): every pair diff < 2.3 AND (graphics band+ OR OCR text OR >=2
+        faces) — slower slideshow pans over designed art.
+    Old indexes (-1 sentinels) fail open. Env: VIDLORE_CLIPSTUDIO_STATIC_GATE=0 disables."""
+    import os as _os_st
+    if _os_st.environ.get("VIDLORE_CLIPSTUDIO_STATIC_GATE", "1").strip() in ("0", "false", "no"):
+        return False
+    sf = getattr(sh, "static_frac", -1.0)
+    sf = -1.0 if sf is None else float(sf)
+    la = float(getattr(sh, "luma_avg", -1.0) or -1.0)
+    if sf >= 0.75 and la >= 5.0:
+        return True
+    pm = getattr(sh, "pair_diff_max", -1.0)
+    pm = -1.0 if pm is None else float(pm)
+    if 0.0 <= pm < 2.3:
+        gfx = int(getattr(sh, "graphics_flag", -1) or -1)
+        has_ocr = bool((getattr(sh, "ocr_text", "") or "").strip())
+        faces = int(getattr(sh, "faces", 0) or 0)
+        if gfx >= 1 or has_ocr or faces >= 2:
+            return True
+    return False
+
+
+def _slideshow_source_verdict(shots) -> bool:
+    """True when a WHOLE source is a slideshow/AI-art essay (drop it): >=65% of its shots have
+    a mean pair diff < 6 with at least 12 measured shots. Calibrated: 'The Strangler' 0.89 and
+    'When Roses Turn to Poison' 0.69 (both AI-art essays that supplied most non_show leaks) vs
+    <=0.51 across real-footage sources. Old indexes (no pair_diff_mean) never qualify."""
+    vals = []
+    for sh in shots:
+        pm = getattr(sh, "pair_diff_mean", -1.0)
+        pm = -1.0 if pm is None else float(pm)
+        if pm >= 0.0:
+            vals.append(pm)
+    if len(vals) < 12:
+        return False
+    return sum(1 for v in vals if v < 6.0) / len(vals) >= 0.65
+
+
 _NUMERAL_RX = re.compile(r"^\s*#?\d{1,2}\s*[.):]?\s*$")
 
 
@@ -1175,6 +1232,8 @@ def _shot_dirty_reason(sh, partial_corner: dict | None = None,
         return "ocr-text"
     if _shot_overlay_badge(sh):
         return "overlay-badge"
+    if _shot_static_collage(sh):
+        return "static-collage"
     try:
         import os as _os_g
         if int(getattr(sh, "graphics_flag", -1) or -1) >= 2 \
@@ -1578,6 +1637,8 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
             continue                                      # commenter-avatar badge NEVER airs
         if ggate_on and _shot_is_graphics(ps.shot, getattr(ps, "embed", None)):
             continue                                      # designed graphics/illustration NEVER airs
+        if _shot_static_collage(ps.shot):
+            continue                                      # frozen collage/AI-art card NEVER airs
         if subband_on and _shot_subtitle_band(ps.shot):
             continue                                      # burned subs (any script) NEVER air
         if _black_floor > 0 and float(getattr(ps.shot, "quality", 1.0) or 1.0) < _black_floor:

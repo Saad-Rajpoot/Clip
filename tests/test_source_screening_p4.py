@@ -91,6 +91,43 @@ def test_numeral_source_gate_wired_into_pool_load():
           '"numeral_overlay"' in osrc)
 
 
+def test_static_collage_gate_calibrated():
+    from vidlore.clipstudio.match import _shot_static_collage, _slideshow_source_verdict
+    # FREEZE tier: frozen collage (all pairs < 0.9), lit -> gated, standalone
+    check("frozen lit collage gated",
+          _shot_static_collage(_shot(static_frac=1.0, luma_avg=80.0)))
+    # single-face freeze with no corroboration still gated (segs 34/133/210/211 class)
+    check("uncorroborated freeze still gated",
+          _shot_static_collage(_shot(static_frac=1.0, luma_avg=40.0, graphics_flag=0,
+                                     ocr_text="", faces=1)))
+    # near-black live footage protected by the luma guard (control floor: dmax 0.97 @ luma 3.2)
+    check("near-black live shot NOT gated",
+          not _shot_static_collage(_shot(static_frac=1.0, luma_avg=3.2)))
+    # STILL tier needs corroboration
+    check("slow art pan + graphics band gated",
+          _shot_static_collage(_shot(static_frac=0.0, pair_diff_max=1.8, luma_avg=60.0,
+                                     graphics_flag=1)))
+    check("slow real shot without corroboration NOT gated",
+          not _shot_static_collage(_shot(static_frac=0.0, pair_diff_max=1.8, luma_avg=60.0,
+                                         graphics_flag=0, ocr_text="", faces=1)))
+    # real footage far above thresholds
+    check("normal footage NOT gated",
+          not _shot_static_collage(_shot(static_frac=0.0, pair_diff_max=25.0, luma_avg=60.0)))
+    # old index sentinels fail open
+    check("old index (-1 sentinels) fails open", not _shot_static_collage(_shot()))
+    # source-level slideshow verdict: the_strangler profile 0.89 vs good max 0.51
+    slides = [_shot(index=i, pair_diff_mean=2.0) for i in range(18)]
+    mixed = [_shot(index=i, pair_diff_mean=(2.0 if i < 9 else 30.0)) for i in range(18)]
+    check("slideshow essay source flagged (0.89 profile)",
+          _slideshow_source_verdict(slides))
+    check("half-static source spared (0.50 <= 0.51 good ceiling)",
+          not _slideshow_source_verdict(mixed))
+    check("small sources never qualify (<12 measured)",
+          not _slideshow_source_verdict(slides[:8]))
+    old = [_shot(index=i) for i in range(20)]
+    check("old index never qualifies", not _slideshow_source_verdict(old))
+
+
 def test_cursor_probe_wired_into_breakout_qc():
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "vidlore", "clipstudio", "build.py")).read()
