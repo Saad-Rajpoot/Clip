@@ -41,7 +41,8 @@ def _img_block(path: Path) -> dict:
 def verify_frame(keyframe_path, narration: str, required_entity: str, required_kind: str,
                  faceid_names: list[str], eng_cfg, model: str = "", is_specific: bool = True,
                  *, expected_visual: str = "", scene_query: str = "", era_hint: str = "",
-                 multiframe: bool = False, venue_fallback: bool = False) -> dict | None:
+                 multiframe: bool = False, venue_fallback: bool = False,
+                 must_see: str = "") -> dict | None:
     """One vision verdict for a frame (Gemini brain → Claude fallback). None on error.
 
     `is_specific` carries the beat's is_specific_claim: a SPECIFIC line ("Tyrion shoots Tywin with a
@@ -68,6 +69,17 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         "This is a GENERIC narration line (no specific scene claim) — a thematically RELEVANT filler "
         "clip is acceptable. Mark 'replace' ONLY if the footage is off-topic, jarring, or shows the "
         "WRONG character/era — NOT merely because it isn't a specific/exact scene.\n")
+    # INSTRUCTED LOOKING — the narration tells the viewer to look at a NAMED thing ("keep your eye
+    # on the dagger", "watch Bran's face"). These are the beats a viewer notices breaking, and on
+    # the v4 render the named thing was absent on 12 of them. When the line points at something,
+    # "the right people are on screen" is not an answer — the thing itself has to be there.
+    _look = ""
+    if must_see:
+        _look = (f"THE NARRATION TELLS THE VIEWER TO LOOK AT: {must_see}\n"
+                 f"Report target_visible=true ONLY if {must_see} is actually visible and "
+                 f"identifiable in the frame. If it is not, set target_visible=false — a clip with "
+                 f"the right characters or the right scene but WITHOUT {must_see} does not satisfy "
+                 f"this line. Judge the object/face itself, not the surrounding context.\n")
     _story = ""
     if expected_visual:
         _story += f"The exact moment should LOOK LIKE: {expected_visual}\n"
@@ -75,7 +87,11 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         _story += f"Target scene: {scene_query}\n"
     if era_hint:
         _story += (f"Era/season context: {era_hint} — footage from a clearly different era/season "
-                   f"than the moment described is WRONG even if the character matches.\n")
+                   f"than the moment described is WRONG even if the character matches.\n"
+                   f"Set era_ok=false when the frame is clearly from another season/era than "
+                   f"{era_hint} — a visibly younger or older cast, or a location that belongs to a "
+                   f"different point in the story. Set era_ok=true when it is consistent or you "
+                   f"cannot tell.\n")
     _mf = ("The image is a START -> MIDDLE -> END contact sheet (three moments of the clip, left to "
            "right). Judge whether the described ACTION actually happens across them — a single frame "
            "cannot prove an action, so require visible progression consistent with the line.\n"
@@ -137,7 +153,7 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         f'Narration line: "{narration}"\n'
         f"This clip should show: {required_entity or '(a general scene fitting the line)'} "
         f"(kind: {required_kind or 'any'}).\n"
-        + _story + _mf + _rule + _nonshow + _obj + _venue +
+        + _story + _look + _mf + _rule + _nonshow + _obj + _venue +
         f"Automatic Face-ID on this frame detected: {', '.join(faceid_names) if faceid_names else 'none'}.\n\n"
         "For wrong_subject_visible: set true ONLY if a DIFFERENT specific character (clearly NOT the "
         "one this line is about) is the main subject of the frame; set false for a wide / crowd / "
@@ -145,7 +161,12 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         "Answer ONLY this JSON:\n"
         '{"matches_narration": true/false, "correct_subject_visible": true/false, '
         '"wrong_subject_visible": true/false, '
-        '"specific_enough": true/false, "quality_ok": true/false, '
+        + ('"target_visible": true/false, ' if must_see else "")
+        # era_ok is asked whenever the beat declares an era. It gates the CONTEXTUAL FALLBACK, which
+        # used to re-admit a clip on "the subject is visible" alone and shipped season-1 child Bran
+        # under season-8 lines.
+        + ('"era_ok": true/false, ' if era_hint else "")
+        + '"specific_enough": true/false, "quality_ok": true/false, '
         '"confidence": 0.0-1.0, "verdict": "keep" or "replace", "reason": "one short sentence"}'
     )
     import time
@@ -278,7 +299,8 @@ def verdict_fingerprint(*, src_hash: str, source_id: str, shot_start: float, sho
                         expected_visual: str = "", scene_query: str = "", era: str = "",
                         visual_policy: str = "", is_specific: bool = True,
                         faceid_names=(), multiframe: bool = False, image_id: str = "",
-                        model: str = "", venue_fallback: bool = False) -> str:
+                        model: str = "", venue_fallback: bool = False,
+                        must_see: str = "") -> str:
     """Identity of a verdict: EVERY input that can change the answer.
 
     A verdict is reusable only when the QUESTION is byte-identical. The first cut of this keyed on
@@ -313,6 +335,11 @@ def verdict_fingerprint(*, src_hash: str, source_id: str, shot_start: float, sho
              PROMPT_VERSION, SHEET_VERSION]
     if venue_fallback:
         parts.append("venue")
+    # must_see changes the QUESTION ("is the dagger visible?"), so a verdict cached without it
+    # answers something else entirely and must not be reused. Appended only when set, so every
+    # pre-existing key stays valid.
+    if must_see:
+        parts.append("look:" + must_see.strip().lower())
     for part in parts:
         h.update(str(part).encode("utf-8", "replace"))
         h.update(b"\x1f")
@@ -455,6 +482,19 @@ def _contextual_subject_ok(vd) -> bool:
     is_specific_claim on every beat, so neither can gate this. A clip whose subject is WRONG
     (correct_subject_visible is False) is contradictory and never accepted. (A clip that literally
     matches the narration with the subject not-disproven is also accepted.)"""
+    # ERA still disqualifies. The verifier is already told that footage from a clearly different
+    # season is wrong even when the character matches — but that only drove `verdict`, and this
+    # function then re-admitted the clip because the subject was on screen. That is precisely how
+    # season-1 child Bran ships under a season-8 Dragonpit line: 16-18 beats tagged wrong_era on the
+    # frame eval, one of the two largest fallback failure modes.
+    #
+    # Read as "not disproven": a verdict cached before this field existed carries no era_ok and
+    # still passes, so the gate tightens on fresh verdicts without invalidating the whole cache
+    # (~$1 of vision calls per render).
+    import os as _os_era
+    if vd.get("era_ok") is False and _os_era.environ.get(
+            "VIDLORE_CLIPSTUDIO_ERA_FALLBACK_GATE", "1").strip() not in ("0", "false", "no"):
+        return False
     return (vd.get("correct_subject_visible") is True
             or (bool(vd.get("matches_narration"))
                 and vd.get("correct_subject_visible") is not False))
@@ -881,7 +921,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                                 eng_cfg, model, is_specific=_exact,
                                 expected_visual=getattr(_seg, "expected_visual", "") or "",
                                 scene_query=getattr(_seg, "scene_query", "") or "",
-                                era_hint=_era_of(_seg), multiframe=is_mf), is_mf
+                                era_hint=_era_of(_seg), multiframe=is_mf,
+                                must_see=_must_see(_seg)), is_mf
         finally:
             if is_mf:
                 try:
@@ -890,6 +931,24 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     pass
 
     _vcache_dirty = 0
+
+    _look_scope = {"on": True}          # False while judging ALTERNATES (see _try_promote)
+
+    def _must_see(_seg) -> str:
+        """The thing this beat tells the viewer to LOOK at, or "".
+
+        Env: VIDLORE_CLIPSTUDIO_LOOK_GATE=0 disables. When set, the verifier is asked whether that
+        specific thing is on screen and a frame without it cannot satisfy the beat — "the right
+        people are present" is not an answer to "keep your eye on the dagger"."""
+        import os as _os_ls
+        if not _look_scope["on"]:
+            return ""
+        if _os_ls.environ.get("VIDLORE_CLIPSTUDIO_LOOK_GATE", "1").strip() in ("0", "false", "no"):
+            return ""
+        try:
+            return _policy.deictic_target(_seg)
+        except Exception:                                    # noqa: BLE001
+            return ""
 
     def _served_model_of(v) -> str:
         """The provider that ACTUALLY served this fresh verdict (canonical id), falling back
@@ -920,7 +979,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             era=_era_of(_seg), visual_policy=_policy.policy_of(_seg),
             is_specific=strict_flag, faceid_names=list(faceids or []),
             multiframe=_ws, image_id=_image_id(_kf_a, ashot, _ws),
-            model=(model_id or _vmodel)), _ws
+            model=(model_id or _vmodel), must_see=_must_see(_seg)), _ws
 
     def _cached_verify_ctx(kf_path, ashot, _seg, strict_flag: bool, faceids, rung: str):
         """One cache layer for every fallback-rung verdict (strict promotion, contextual
@@ -1193,6 +1252,14 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 the production safeguards (reuse-ledger cap, Window-QC, beat_windows rewrite,
                 re-cut) are shared by all modes."""
                 nonlocal swapped, replaced
+                _look_scope["on"] = False        # alternates are judged WITHOUT the look question
+                try:
+                    return _try_promote_inner(downgrade, pool, label)
+                finally:
+                    _look_scope["on"] = True
+
+            def _try_promote_inner(downgrade: bool, pool=None, label: str = "") -> bool:
+                nonlocal swapped, replaced
                 tried = 0
                 # SCENE-AFFINITY ordering for exact beats — try same-scene sources first (see
                 # _scene_affinity_order). Ordering only; every gate below still applies.
@@ -1312,18 +1379,88 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             _downgrade_on = _os_ms.environ.get(
                 "VIDLORE_CLIPSTUDIO_EXACT_CONTEXTUAL_DOWNGRADE", "1").strip() \
                 not in ("0", "false", "no")
+            # DEEP BENCH — only for beats whose ORIGINAL pick is genuinely bad.
+            #
+            # The strict pass above sees just 6 alternates out of a ~4000-shot pool, so when none is
+            # the exact moment the code below keeps the original and relabels it contextual_fallback:
+            # 113 of 268 beats on job 69d80e9dd4_v4, averaging 4.34 on the frame eval against 5.92
+            # for beats that got a real replacement. Match now keeps a deeper ranked bench for those.
+            #
+            # But it must NOT be tried on a pick that is already fine. Measured over the 11 beats the
+            # bench first rescued: the group went 4.18 -> 5.36, and the two deictic beats the video
+            # turns on went 1 -> 6 ("keep your eye on the dagger") and 2 -> 9 ("watch the trial the
+            # way Bran watched it") — but two beats already scoring 9 fell to 4 and 5, because the
+            # verifier only knows "not the exact scene", not "already good", and swapped a strong
+            # clip for a strict-passing weaker one. `_contextual_subject_ok` separates the two cases
+            # exactly: the rescued beats failed it, the regressed ones passed it. So the bench is
+            # reached only down the branch where the original has ALREADY been judged unusable.
+            # ~14 extra vision calls per affected beat (~$0.007 each at the measured rate).
+            # Kill switch: VIDLORE_CLIPSTUDIO_DEEP_BENCH=0.
+            def _deep_bench() -> bool:
+                if _os_ms.environ.get("VIDLORE_CLIPSTUDIO_DEEP_BENCH", "1").strip() \
+                        in ("0", "false", "no"):
+                    return False
+                _bench = list(getattr(sel, "deep_alternates", None) or [])
+                if _bench and _try_promote(downgrade=False, pool=_bench):
+                    log(f"verify: seg{sel.segment_index} rescued from the deep bench "
+                        f"({len(_bench)} extra candidate(s)) — exact scene found, no downgrade")
+                    return True
+                return False
+
+            # A beat that POINTS at something cannot be satisfied by "the right people are here".
+            # "Keep your eye on the dagger" over a clip with no dagger is the failure the owner
+            # raises most, and the contextual downgrade below is exactly what lets it through: the
+            # required subject IS on screen, so the beat is kept and relabelled. When the narration
+            # names a target and the verifier could not see it, refuse that shortcut and let the
+            # deep bench / alternates look for footage that actually shows it.
+            _look_for = _must_see(seg)
+            _look_missed = bool(_look_for) and v.get("target_visible") is False
+            if _look_missed:
+                log(f"verify: seg{sel.segment_index} narration points at {_look_for!r} and it is "
+                    f"NOT on screen — no contextual downgrade, searching for footage that shows it")
+                # the still pass reads this: when nothing in the pool shows the named thing, a frame
+                # OF THAT MOMENT beats moving footage of the wrong one
+                try:
+                    if "look_target_missing" not in (sel.flag_reasons or []):
+                        sel.flag_reasons = list(sel.flag_reasons or []) + ["look_target_missing"]
+                except Exception:                                # noqa: BLE001
+                    pass
+
             if not swapped and _exact and _downgrade_on:
-                if _contextual_subject_ok(v):
+                def _keep_contextual(why: str) -> None:
                     v["verdict"] = "keep"
                     v["downgraded"] = "exact→contextual"
                     v["relevance_class"] = "contextual_fallback"
                     sel.verifier = v
+                    log(f"verify: seg{sel.segment_index} exact→contextual downgrade ({why})")
+
+                _orig_ok = _contextual_subject_ok(v)
+                if _look_missed and _orig_ok:
+                    # The named thing is not on screen — but the pick is otherwise usable, so it is
+                    # NOT thrown away. Measured twice: routing these beats to the deep bench moved 4
+                    # of them from 7.25 to 3.25 (8/9/9 -> 4/2/3), because the bench's "strict-
+                    # passing" replacement was worse than what it discarded and the eval disagreed
+                    # with the verifier's strict judgment. That is the same rule the bench already
+                    # follows — never replace a pick that clears the contextual bar — and the look
+                    # gate must not carve an exception out of it. The owner's own rule says the same:
+                    # "agar koi exact scene dastyab na ho, to wo uski zid na kare".
+                    # The beat still carries look_target_missing, so the still pass covers the moment
+                    # with a frame OF it, which is where the real gain is.
+                    _keep_contextual(f"{_look_for!r} is not on screen and no better clip exists — "
+                                     f"kept; still pass will cover the moment")
                     replaced += 1
                     swapped = True
-                    log(f"verify: seg{sel.segment_index} exact→contextual downgrade "
-                        f"(required subject on screen — kept, honestly labeled contextual_fallback)")
-                else:
-                    _try_promote(downgrade=True)     # scan alternates for a right-subject clip
+                elif _look_missed:
+                    # original is unusable AND the target is missing → worth searching
+                    if not _deep_bench():
+                        _try_promote(downgrade=True)
+                elif _orig_ok:
+                    _keep_contextual("required subject on screen — kept, honestly labeled "
+                                     "contextual_fallback")
+                    replaced += 1
+                    swapped = True
+                elif not _deep_bench():              # original unusable → reach for the deep bench
+                    _try_promote(downgrade=True)     # then scan alternates for a right-subject clip
 
             # SCENE-VENUE CONTEXTUAL EXPANSION — the rung between "no alternate passes" and the
             # honest gap. The alternates come from match's visual ranking, so when a beat cites a

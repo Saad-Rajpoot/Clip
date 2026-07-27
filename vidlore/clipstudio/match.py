@@ -20,7 +20,7 @@ from . import index as _index
 from . import policy as _policy
 
 
-def banned_source_ids(proj) -> set:
+def banned_source_ids(proj, *, include_auto: bool = True) -> set:
     """Source-ids banned from EVERY pool for this render.
 
     A ban means "this upload is not authentic show footage" (fan film, AI recreation,
@@ -31,9 +31,27 @@ def banned_source_ids(proj) -> set:
     or worse, keeps its real-audio BREAKOUT — after the operator has already banned it.
 
     Sources: proj.meta['banned_sources'] (persisted, so a re-render reproduces the ban
-    deterministically) plus VIDLORE_CLIPSTUDIO_BANNED_SOURCES (comma-separated, ad hoc)."""
+    deterministically) plus VIDLORE_CLIPSTUDIO_BANNED_SOURCES (comma-separated, ad hoc), plus
+    proj.meta['auto_rejected_sources'] — the SOURCE-LEVEL rejections _load_pool makes while
+    building the match pool (subtitled copy, static image, non-photographic, watermarked, modern
+    talking-head).
+
+    That last one closes a real leak. Those rejections used to be bare `continue`s inside
+    _load_pool, so they removed the source from match's pool ONLY — the still/image-fallback pool
+    and build's shot-walk read proj.sources directly and happily aired it anyway. Measured on job
+    69d80e9dd4: 'How Game of Thrones Filmed Arya And Brienne's Sword Fight' was dropped by
+    _load_pool as a subtitled copy, contributed ZERO beats to selections, and still put
+    behind-the-scenes stunt-rehearsal footage (modern t-shirts, gym mats, Nike trainers) on screen
+    three times. Same doctrine as the operator ban: reject once, hold everywhere.
+
+    include_auto=False is for _load_pool itself: it RE-DERIVES those rejections from the shots on
+    every call, so reading its own persisted output back would make the auto-bans sticky and a gate
+    kill-switch could never re-admit a source."""
     import os as _os_bl
-    out = {str(x) for x in ((getattr(proj, "meta", None) or {}).get("banned_sources") or [])}
+    _m = getattr(proj, "meta", None) or {}
+    out = {str(x) for x in (_m.get("banned_sources") or [])}
+    if include_auto:
+        out |= {str(x) for x in (_m.get("auto_rejected_sources") or [])}
     out |= {x.strip() for x in
             _os_bl.environ.get("VIDLORE_CLIPSTUDIO_BANNED_SOURCES", "").split(",") if x.strip()}
     return out
@@ -88,6 +106,52 @@ class _PoolShot:
     sid: str
     shot: Shot
     embed: object = None        # numpy vector or None
+
+
+# CHANNEL-PROMO OVERLAY: a burned "SUBSCRIBE"/"SUBSCRIBED"/bell/"thanks for watching" card is proof
+# the upload is a re-packaged fan compilation (quiz, listicle, reaction-adjacent) rather than a clean
+# scene rip — and such uploads carry the rest of the packaging too: numbered listicle titles, end
+# cards, promo lower-thirds. The tokens are already sitting in the per-shot OCR text from indexing,
+# so this costs nothing. Measured on job 69d80e9dd4 (1983 shots / 43 sources): exactly 3 sources fire,
+# all three genuinely promo-bearing — including 'Can you recognize all Valyrian steel weapons?', whose
+# "2. NEEDLE" listicle title aired over a beat about Arya's execution of Littlefinger.
+_PROMO_OVERLAY_RX = re.compile(
+    r"subscrib\w*|smash the (like|bell)|bell icon|turn on notification|hit the bell|"
+    r"thank ?you ?for ?watching|thanks ?for ?watching|like ?(and|&) ?subscribe|"
+    r"link in (the )?(bio|description)|patreon\.com|join this channel", re.I)
+
+
+def _source_has_promo_overlay(shots, *, min_hits: int = 1) -> bool:
+    """True when a source burns channel-promo furniture into its BODY (not just its outro).
+
+    The tail exclusion is the whole point. Nearly every clean scene rip ends on a subscribe
+    end-card — measured across two finished jobs, 4 of the 5 promo-bearing sources had their ONLY
+    promo shot in the last seconds (e.g. 'SIGN UP FOR MAX ... SUBSCRIBE' at 268s of a 278s upload),
+    and one of those supplied a flawless real-audio breakout. Banning on an outro card would throw
+    away good footage. A promo overlay in the BODY is different: it means the upload is packaged
+    content (quiz/listicle/compilation) that also carries numbered titles and lower-thirds — that is
+    the class that put another channel's '2. NEEDLE' title on screen.
+
+    Per-shot text gates still handle the outro shots themselves; this is only the source verdict."""
+    if not shots:
+        return False
+    try:
+        end = max(float(getattr(s, "end", 0.0) or 0.0) for s in shots)
+    except ValueError:
+        return False
+    # tail = last 20% or last 30s, whichever starts earlier (long uploads get the seconds rule)
+    tail_start = min(end * 0.80, end - 30.0) if end > 0 else 0.0
+    hits = 0
+    for sh in shots:
+        t = (getattr(sh, "ocr_text", "") or "")
+        if not t or not _PROMO_OVERLAY_RX.search(t):
+            continue
+        if float(getattr(sh, "start", 0.0) or 0.0) >= tail_start:
+            continue                                   # outro end-card — not a packaging signal
+        hits += 1
+        if hits >= min_hits:
+            return True
+    return False
 
 
 # A persistent rival-channel WATERMARK (a corner logo on every frame) is only OCR-legible on SOME
@@ -355,7 +419,25 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
     # at the SOURCE — never entering match — and its beats fall to real footage / stills / holds).
     # Persisted on the project (proj.meta['banned_sources']) or via env (comma-separated ids), so
     # a re-render reproduces the ban deterministically.
-    _banned = banned_source_ids(proj)
+    # include_auto=False: this pass re-derives its own source-level rejections below, so reading
+    # back what a previous pass wrote would make them sticky and defeat every gate kill-switch.
+    _banned = banned_source_ids(proj, include_auto=False)
+    # SOURCE-LEVEL rejections recorded here are promoted to the shared ban-list (persisted as
+    # proj.meta['auto_rejected_sources']) so they also hold in the still/image-fallback pool, the
+    # breakout pool and build's shot-walk. Before this, they were bare `continue`s that only
+    # emptied match's pool, and a rejected upload could still air as a still or a walked shot.
+    _auto_rej: set[str] = set()
+    # WHY each source was rejected. Two very different kinds hide in this set: a QUALITY reject
+    # (subtitled re-upload / burned watermark / promo card / screener) means "right footage, unusable
+    # copy" and is worth replacing, while a CONTENT reject (interview, reaction, wrong show, fan art)
+    # is footage we never wanted. The backfill pass needs the distinction — without it, it spends
+    # searches looking for a cleaner copy of a talking-head interview.
+    _auto_why: dict[str, str] = {}
+
+    def _reject(sid: str, code: str) -> None:
+        _auto_rej.add(sid)
+        _auto_why[sid] = code
+
     for src in proj.sources:
         if src.status != SOURCE_OK:
             continue
@@ -371,11 +453,13 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
             if progress:
                 progress(f"match: dropping wrong-show source {src.id} "
                          f"(franchise sibling/prequel: {(src.title or '')[:48]!r})")
+            _reject(src.id, "wrong_show")
             continue
         if nonshow_on and _NONSHOW_TITLE.search(src.title or ""):
             if progress:
                 progress(f"match: dropping non-show source {src.id} "
                          f"(game/AMV/animated: {(src.title or '')[:48]!r})")
+            _reject(src.id, "non_show")
             continue
         # REACTION/facecam video that slipped in (e.g. dialogue-verified back during discovery):
         # its footage is people on a couch over a tiny show inset — never let it into the pool.
@@ -383,6 +467,7 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
             if progress:
                 progress(f"match: dropping reaction/facecam source {src.id} "
                          f"({(src.title or '')[:48]!r})")
+            _reject(src.id, "reaction")
             continue
         # belt-and-suspenders: a talking-head / interview / featurette / promo source that was
         # downloaded BEFORE the discovery reject rule existed must still be kept OUT of the
@@ -391,6 +476,7 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
             if progress:
                 progress(f"match: dropping talking-head/promo source {src.id} "
                          f"({(src.title or '')[:48]!r})")
+            _reject(src.id, "talking_head_title")
             continue
         shots = _index.load_shots(proj, src.id)
         embeds = _index.load_embeds(proj, src.id)
@@ -398,6 +484,7 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
             if progress:
                 progress(f"match: dropping modern talking-head source {src.id} "
                          f"(podcast/vlog/interview/makeup-BTS look, not a scene: {(src.title or '')[:48]!r})")
+            _reject(src.id, "talking_head_visual")
             continue
         if gate_on and wm_mode == "drop" and \
                 (_source_is_watermarked(shots)
@@ -405,6 +492,7 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
                      not in ("0", "false", "no") and _source_corner_logo(shots))):
             if progress:
                 progress(f"match: dropping watermarked source {src.id} (persistent channel logo)")
+            _reject(src.id, "watermarked")
             continue
         # HEAVILY-SUBTITLED COPY: when ≥20% of a source's shots carry a burned-sub band, subs
         # appear on ANY dialogue moment — per-shot flags and window QC keep missing lines that
@@ -423,15 +511,27 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
                 if progress:
                     progress(f"match: dropping subtitled-copy source {src.id} "
                              f"({_sf:.0%} of shots carry a burned-sub band)")
+                _reject(src.id, "subtitled_copy")
                 continue
+        # CHANNEL-PROMO furniture burned into the frames = a re-packaged fan compilation, which
+        # brings its listicle titles / end cards along with it. Kill switch: PROMO_OVERLAY_GATE=0.
+        if os.environ.get("VIDLORE_CLIPSTUDIO_PROMO_OVERLAY_GATE", "1").strip() \
+                not in ("0", "false", "no") and _source_has_promo_overlay(shots):
+            if progress:
+                progress(f"match: dropping promo-overlay source {src.id} "
+                         f"(burned subscribe/bell card — repackaged compilation, not a clean rip)")
+            _reject(src.id, "promo_overlay")
+            continue
         if _source_is_static(shots):              # still-image / lyric card — not scene footage
             if progress:
                 progress(f"match: dropping static-image source {src.id} (repeating still, not footage)")
+            _reject(src.id, "static_image")
             continue
         if nonshow_on and _source_is_nonphotographic(proj, shots):
             if progress:
                 progress(f"match: dropping non-live-action source {src.id} "
                          f"(toy/claymation/AI-render — not real footage)")
+            _reject(src.id, "non_live_action")
             continue
         # NON-SHOW GRAPHICS — per-shot AND source-level. _source_is_nonphotographic above samples
         # only ~6 keyframes at a 55% bar, so a 40%-illustrated book-essay source passes it and,
@@ -468,6 +568,7 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
                              f"({_n_hard}/{len(shots)} shots are designed graphics — "
                              f"parody/fan-art/news content, not footage)")
                 _persist_graphics_flags(proj, src.id, shots)
+                _reject(src.id, "graphics")
                 continue
             if _gfx_idx and progress:
                 progress(f"match: {src.id} — {len(_gfx_idx)} designed-graphics shot(s) gated "
@@ -481,6 +582,36 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
             if embeds is not None and 0 <= _row < len(embeds):
                 vec = embeds[_row]
             pool.append(_PoolShot(src.id, sh, vec))
+    # PROMOTE this pass's source-level rejections to the shared ban-list so they hold in the
+    # still/image-fallback pool, the breakout pool and build's shot-walk too (see
+    # banned_source_ids). Persisted on the project, so a resume/re-render reproduces them.
+    try:
+        _meta = getattr(proj, "meta", None)
+        if _meta is None:
+            _meta = {}
+            proj.meta = _meta
+        _prev = {str(x) for x in (_meta.get("auto_rejected_sources") or [])}
+        # REPLACE, never union: the list must always describe the CURRENT gate configuration, so
+        # flipping a gate off (or a re-index changing a verdict) actually re-admits the source
+        # everywhere instead of leaving a stale ban behind.
+        if _auto_rej != _prev:
+            if _auto_rej:
+                _meta["auto_rejected_sources"] = sorted(_auto_rej)
+            else:
+                _meta.pop("auto_rejected_sources", None)
+            if progress and _auto_rej:
+                progress(f"match: {len(_auto_rej)} source-level rejection(s) promoted to the "
+                         f"shared ban-list (also excluded from stills / breakouts / shot-walk)")
+        # Reasons travel with the list, same REPLACE semantics — written every pass, not only when
+        # the id set changes, so a re-gated source can't keep a stale reason. The backfill pass reads
+        # this to tell a QUALITY reject (right footage, unusable copy — worth replacing) from a
+        # CONTENT reject (interview / reaction / wrong show — footage we never wanted).
+        if _auto_why:
+            _meta["auto_rejected_reasons"] = dict(sorted(_auto_why.items()))
+        else:
+            _meta.pop("auto_rejected_reasons", None)
+    except Exception:
+        pass                                       # never fail a render over bookkeeping
     return pool
 
 
@@ -523,6 +654,146 @@ def _dialogue_match(seg: ScriptSegment, transcript: str) -> float:
     return max(0.0, min(1.0, 0.35 * overlap + 0.65 * run_frac))
 
 
+# ---------------------------------------------------------------------------
+# DIALOGUE-BASED MOMENT MATCHING
+#
+# `_dialogue_match` above asks "is the beat's quote inside THIS SHOT's transcript?" — and
+# index._assign_transcript bins words into shots by MIDPOINT, so a line spoken across a cut belongs
+# to no single shot. index.py documents this ("per-shot transcripts useless for locating a QUOTE").
+# Measured on the v2 render: 85 of 268 beats carry the exact line they are about, yet the dialogue
+# signal — the heaviest weight in the scorer at w_dialogue=0.55 — fired on only 20 of them (23.5%,
+# mean 0.105). Sixty-five beats named their moment and got nothing for it.
+#
+# The fix is to locate the line in the source's CONTINUOUS word stream (index.find_quote_span, the
+# same primitive breakouts already use) and then score each shot by how close it sits to that span.
+# That is moment-level, not source-level: it tells us WHERE INSIDE a 6-minute upload the line is
+# spoken, so the cut lands on that frame instead of anywhere in the right source. It is also what an
+# editor actually does — find the line, cut to it.
+# ---------------------------------------------------------------------------
+
+_QSPAN_CACHE: dict = {}          # (sid, normalized quote) -> (t0, t1, ratio) | None
+# find_quote_span's own floor is 0.72; require a little more before a located span is allowed to
+# DECIDE a pick, so a loose phrase match never drags a beat onto the wrong second.
+_MOMENT_MIN_RATIO = 0.78
+# mean luma at/above which a copy is considered comfortably watchable; below it the moment bonus
+# is scaled down so a brighter copy of the SAME moment can win (see the damper in _score_pool).
+_MOMENT_LUMA_OK = 34.0
+
+
+def quote_span_in_source(proj, sid: str, quote: str):
+    """Locate `quote` in source `sid`'s word stream. Memoized — the sliding-window align is not
+    free and the same (beat quote x source) pair is asked for on every candidate shot."""
+    q = " ".join(_norm_words(quote or ""))
+    if not q or not sid:
+        return None
+    key = (sid, q)
+    if key in _QSPAN_CACHE:
+        return _QSPAN_CACHE[key]
+    span = None
+    try:
+        words = _index.load_words(proj, sid)
+        if words:
+            span = _index.find_quote_span(words, quote)
+    except Exception:
+        span = None
+    _QSPAN_CACHE[key] = span
+    return span
+
+
+def _moment_proximity(shot, span, *, pre_roll: float = 1.5, decay: float = None) -> float:
+    """How well does this shot sit ON the located line? 1.0 when the shot overlaps the spoken span,
+    decaying to 0 across `decay` seconds either side.
+
+    `pre_roll` lets a shot that starts just BEFORE the line still score 1.0 — an editor cuts to the
+    speaker a beat before they talk, and the reaction shot that precedes a line is part of the
+    moment. Nothing here depends on shot transcripts, so a line straddling a cut is fine."""
+    if not span:
+        return 0.0
+    if decay is None:
+        # 12s, not a couple of seconds, and the reason is editorial. Measured: 40 of the 85 quoted
+        # beats in one essay share their line with another beat ("chaos is a ladder" is referenced
+        # by 5 separate beats), so anti-reuse necessarily denies most of them the exact same two
+        # seconds. A wide neighbourhood means a returning beat lands on ANOTHER SHOT OF THE SAME
+        # SCENE — the reaction, the other angle — which is what an editor cuts, instead of falling
+        # through to unrelated footage. Swept on the real pool: decay 2.5 -> 12 traded 2 exact hits
+        # for 5 same-scene hits and cut unrelated picks 17 -> 14 (66% -> 72% on-or-in-scene).
+        decay = _f_env("VIDLORE_CLIPSTUDIO_MOMENT_DECAY", 12.0)
+    t0, t1 = float(span[0]), float(span[1])
+    s0, s1 = float(getattr(shot, "start", 0.0)), float(getattr(shot, "end", 0.0))
+    if s1 >= (t0 - pre_roll) and s0 <= t1:
+        return 1.0                                     # the shot is ON the line
+    gap = (t0 - s1) if s1 < t0 else (s0 - t1)
+    if gap <= 0:
+        return 1.0
+    return max(0.0, 1.0 - gap / decay)
+
+
+def _anchor_echo(seg, anchor_lines) -> str:
+    """The anchor-scene line this beat most clearly echoes, or "".
+
+    Scored by COVERAGE of the anchor line's content words, not a raw hit count. `_norm_words` strips
+    stopwords, so a perfectly good line — "I did it to protect the woman I love." — reduces to three
+    content words (protect / woman / love); any fixed ">= N shared words" rule silently ignores every
+    short line, which is most quoted dialogue."""
+    if not anchor_lines:
+        return ""
+    txt = set(_norm_words(getattr(seg, "text", "") or "")) | \
+        set(_norm_words(getattr(seg, "expected_visual", "") or "")) | \
+        set(_norm_words(getattr(seg, "quote", "") or ""))
+    if not txt:
+        return ""
+    best, best_score = "", 0.0
+    for line in anchor_lines:
+        lw = set(_norm_words(line))
+        if len(lw) < 2:
+            continue
+        hits = len(txt & lw)
+        cov = hits / float(len(lw))
+        # >=2 shared content words AND most of the line accounted for — enough to say the beat is
+        # talking about THIS line rather than merely sharing a word with it.
+        if hits >= 2 and cov >= 0.6 and cov > best_score:
+            best, best_score = line, cov
+    return best
+
+
+def beat_quote_candidates(seg, anchor_lines=None) -> list:
+    """Every phrasing worth looking for, best first.
+
+    The analyzer's quote is a PARAPHRASE as often as a transcription, and find_quote_span scores the
+    whole phrase, so extra words sink it below the 0.72 floor. Measured: the aired line is "I did it
+    to protect you"; the analyzer wrote it two ways across neighbouring beats —
+      "I did it to protect Sansa."        -> located, ratio 0.909
+      "I did what I did to protect Sansa." -> not located at all
+    Same moment, same source, one phrasing finds it and one does not. So try the beat's own quote
+    first, then the anchor scene's VERBATIM line that the beat echoes — the analyzer records those
+    separately and they are transcriptions, not paraphrases."""
+    out, seen = [], set()
+    for cand in ((getattr(seg, "quote", "") or "").strip(),
+                 _anchor_echo(seg, anchor_lines)):
+        if not cand:
+            continue
+        k = " ".join(_norm_words(cand))
+        if k and k not in seen:
+            seen.add(k)
+            out.append(cand)
+    return out
+
+
+def _beat_quote(seg, anchor_lines=None) -> str:
+    """Back-compat single-value view of `beat_quote_candidates` (tests call this)."""
+    c = beat_quote_candidates(seg, anchor_lines)
+    return c[0] if c else ""
+
+
+def locate_beat_moment(proj, sid: str, seg, anchor_lines=None):
+    """First phrasing of this beat that can be found in source `sid`. -> (t0, t1, ratio) | None."""
+    for q in beat_quote_candidates(seg, anchor_lines):
+        sp = quote_span_in_source(proj, sid, q)
+        if sp:
+            return sp
+    return None
+
+
 def _text_sim(seg: ScriptSegment, transcript: str) -> float:
     """Recall-oriented overlap of the segment's content words/entities with the clip's speech."""
     if not transcript:
@@ -541,10 +812,24 @@ def _text_sim(seg: ScriptSegment, transcript: str) -> float:
     return min(1.0, (kw_hits + 2 * ent_hits) / max(1, denom))
 
 
-def _trim_window(shot: Shot, seg: ScriptSegment, cfg: ClipConfig) -> tuple[float, float]:
-    """Pick an [in,out] inside the shot ~matching the segment's screen time, centered on it."""
+def _trim_window(shot: Shot, seg: ScriptSegment, cfg: ClipConfig,
+                 moment: tuple | None = None) -> tuple[float, float]:
+    """Pick an [in,out] inside the shot ~matching the segment's screen time.
+
+    Centred on the shot midpoint normally — but on the MOMENT when we know one. Picking the right
+    shot is only half of "hold on that scene": a 12-second shot trimmed to 2.5s around its midpoint
+    can easily miss the second the line is actually spoken, which is how a correctly-chosen shot
+    still aired the wrong instant. When find_quote_span has located the line, centre the window on
+    it so the cut CONTAINS the words the narration is talking about."""
     L = max(cfg.min_clip_sec, min(cfg.max_clip_sec, shot.duration, seg.est_duration + 0.6))
     center = (shot.start + shot.end) / 2.0
+    if moment:
+        m0, m1 = float(moment[0]), float(moment[1])
+        if m1 >= shot.start and m0 <= shot.end:      # the line lies in (or overlaps) this shot
+            mc = (max(m0, shot.start) + min(m1, shot.end)) / 2.0
+            # a line longer than the beat's screen time: start ON the line rather than centring,
+            # so the cut opens on the words instead of arriving halfway through them.
+            center = mc if (m1 - m0) <= L else (max(m0, shot.start) + L / 2.0)
     a = max(shot.start, center - L / 2.0)
     b = min(shot.end, a + L)
     a = max(shot.start, b - L)                      # re-pin if we hit the tail
@@ -766,7 +1051,25 @@ def _shot_unreadable(shot) -> bool:
     # average. Arm 2 catches the near-black Hall-of-Faces shot that aired (avg 19 cleared t_avg=11 but
     # its luma_hi was 49 — no pixel brighter than 49). Readable dark scenes (torch/candle privy) keep
     # bright highlights (hi 127-147) and pass both.
-    return (la < t_avg and lh < t_hi) or (lh < t_hi_hard)
+    if (la < t_avg and lh < t_hi) or (lh < t_hi_hard):
+        return True
+    # THIRD ARM — intra-shot dark SPAN. Both arms above are shot-wide, so a shot that is black for
+    # part of its run but carries a bright highlight somewhere passes: the v2 render aired a beat
+    # whose shot measured avg 39.4 / hi 255 while its delivered frames sat at mean luma 2.5 with
+    # 100% of pixels under 16. luma_min is that shot's DARKEST sample, and black_frac says how much
+    # of it is genuinely black — together they separate a low-key lit frame from an unusable one.
+    # Sentinel -1 (old index, not recomputed) fails open, exactly like the arms above.
+    lmin = float(getattr(shot, "luma_min", -1.0) or -1.0)
+    lbf = float(getattr(shot, "luma_min_black_frac", -1.0) or -1.0)
+    if lmin >= 0.0 and lbf >= 0.0:
+        try:
+            t_min = float(_os_u.environ.get("VIDLORE_CLIPSTUDIO_UNREADABLE_MIN", "9") or 9)
+            t_bf = float(_os_u.environ.get("VIDLORE_CLIPSTUDIO_UNREADABLE_BLACKFRAC", "0.90") or 0.90)
+        except (TypeError, ValueError):
+            t_min, t_bf = 9.0, 0.90
+        if lmin < t_min and lbf >= t_bf:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1013,7 +1316,7 @@ def _wqc_log_line(act: str, meta: dict, why: str) -> str:
 
 
 def wqc_arbitrate_selection(best, alternates, by_src_shots, ps_by_key, cfg, seg,
-                            stats=None, progress=None):
+                            stats=None, progress=None, shot_uses=None, shot_cap=None):
     """PRODUCTION selection-level window-QC arbitration, one beat at a time (module-level so
     tests drive the real path). Validates the winning candidate's final window; on 'rejected'
     scans the relevance-ranked `alternates` for the first whose window validates (fallback);
@@ -1030,7 +1333,17 @@ def wqc_arbitrate_selection(best, alternates, by_src_shots, ps_by_key, cfg, seg,
             progress(f"window-qc: shortened seg={seg_i} src={_candq.source_id[:28]} "
                      f"{_wqc_log_line(act, meta, why)}")
     elif act == "rejected":
-        for _alt in alternates:
+        # Prefer alternates that are still UNDER the reuse cap — this promotion runs after the
+        # greedy loop and would otherwise re-air an exhausted window. Over-cap alternates stay
+        # available as a last resort (an already-seen shot beats an unusable window).
+        _under, _over = [], []
+        for _c in alternates:
+            if shot_uses is not None and shot_cap is not None and \
+                    shot_uses.get((_c.source_id, _c.shot_index), 0) >= shot_cap:
+                _over.append(_c)
+            else:
+                _under.append(_c)
+        for _alt in (_under + _over):
             _aps = ps_by_key.get((_alt.source_id, _alt.shot_index))
             if _aps is None:
                 continue
@@ -1101,7 +1414,9 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
                 title_toks: dict | None = None,
                 mv_toks: set | None = None,
                 beat_era: str = "",
-                src_titles: dict | None = None) -> list[tuple[float, float, dict, _PoolShot]]:
+                src_titles: dict | None = None,
+                proj=None,
+                anchor_lines: list | None = None) -> list[tuple[float, float, dict, _PoolShot]]:
     import numpy as np
     import os
     # DETERMINISTIC ERA PENALTY. The vision verifier cannot read a season off a torch-lit hall —
@@ -1147,6 +1462,13 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
                     if len(w) > 2 and w not in (mv_toks or set()) and w not in _TA_STOP}
     gate_on = os.environ.get("VIDLORE_CLIPSTUDIO_OCR_GATE", "1").strip() not in ("0", "false", "no", "")
     tgate_on = os.environ.get("VIDLORE_CLIPSTUDIO_TEXT_GATE", "1").strip() not in ("0", "false", "no", "")
+    # MOMENT-LOCK: resolve the beat to a dialogue line ONCE per beat (not per candidate shot).
+    _mm_on = proj is not None and os.environ.get(
+        "VIDLORE_CLIPSTUDIO_MOMENT_LOCK", "1").strip() not in ("0", "false", "no")
+    _bq = _beat_quote(seg, anchor_lines) if _mm_on else ""
+    # big enough to beat CLIP's noise swing (w_clip 0.80 over a ~0.02-cosine real range), and only
+    # ever awarded when find_quote_span matched the phrase at >= _MOMENT_MIN_RATIO.
+    _mom_w = _f_env("VIDLORE_CLIPSTUDIO_MOMENT_WEIGHT", 0.9)
     # the graphics mirror keys on ITS OWN switch (same as the pool builder) — keying it on
     # TEXT_GATE made VIDLORE_CLIPSTUDIO_GRAPHICS_GATE=0 a dead switch (the pool re-admitted
     # shots that this mirror immediately dropped again)
@@ -1216,6 +1538,17 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
         if seg.keywords and ps.shot.tags:
             obj = min(1.0, len(set(seg.keywords) & {t.lower() for t in ps.shot.tags}) / max(1, len(seg.keywords)))
         dlg = _dialogue_match(seg, ps.shot.transcript)    # SCENE-LOCK: the line is spoken in this clip
+        # MOMENT-LOCK: where inside this SOURCE is that line actually spoken? The shot-transcript
+        # test above misses any line that straddles a cut (midpoint binning), which is most of them.
+        _mom = 0.0
+        _mom_ratio = 0.0
+        if _mm_on and _bq:
+            _sp = locate_beat_moment(proj, ps.sid, seg, anchor_lines)
+            if _sp:
+                _mom = _moment_proximity(ps.shot, _sp)
+                _mom_ratio = float(_sp[2])
+                if _mom > dlg:
+                    dlg = _mom                        # the stream located it; trust that over the bin
         base = (cfg.w_clip * clip01 + cfg.w_trans * trans + cfg.w_face * faceid
                 + cfg.w_obj * obj + cfg.w_dialogue * dlg)
         # ANCHOR CONTINUITY: for a single-scene deep-dive the editor must STAY on the one scene the
@@ -1226,6 +1559,28 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
         # out of `base` so a zero-signal anchor shot can't report 0.45 confidence and dodge the
         # low-confidence review flag.
         bonus = anchor_bonus if (anchor_bonus and anchor_sids and ps.sid in anchor_sids) else 0.0
+        # MOMENT-LOCK is EVIDENCE, not similarity: the words are demonstrably spoken here, in this
+        # source, at this second. CLIP is a guess whose whole discriminative range on this material
+        # is ~0.02 cosine (measured across 4301 shots) yet whose weight is 0.80 — so without a
+        # decisive term a shot sitting exactly on the line loses to CLIP noise. Rides on `bonus`
+        # (ranking only) so reported confidence stays an honest match-quality number.
+        _mom_bonus = 0.0
+        if _mom > 0.0 and _mom_ratio >= _MOMENT_MIN_RATIO:
+            _mom_bonus = _mom_w * _mom * min(1.0, _mom_ratio)
+            # LEGIBILITY DAMPER. Finding the moment is worthless if the copy holding it is
+            # unwatchable. Measured on the v3 render: moment-lock beats averaged 6.48 relevance vs
+            # 6.12 for the rest — the mechanism works — but 3 of 8 criticals came from it, all
+            # "too_dark_illegible", because a 0.9 bonus happily out-ranked a bright HD alternative
+            # of the same scene. "Keep your eye on the dagger" landed on the right handover in a
+            # copy where 95% of pixels sat under luma 48. So scale the bonus by how watchable this
+            # copy is: an unreadable shot gets none of it, a dim one gets part, and a clean copy of
+            # the same moment wins.
+            _la = float(getattr(ps.shot, "luma_avg", -1.0) or -1.0)
+            if _shot_unreadable(ps.shot):
+                _mom_bonus = 0.0
+            elif 0.0 <= _la < _MOMENT_LUMA_OK:
+                _mom_bonus *= max(0.25, _la / _MOMENT_LUMA_OK)
+            bonus += _mom_bonus
         _tbonus = 0.0
         if _sq_toks:
             _tw = (title_toks or {}).get(ps.sid) or set()
@@ -1253,6 +1608,11 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
                "transcript": round(trans, 4), "faceid": round(faceid, 3),
                "object": round(obj, 3), "dialogue": round(dlg, 3),
                "quality": round(ps.shot.quality, 3)}
+        if _mom:
+            sig["moment_lock"] = round(_mom, 3)
+            sig["moment_ratio"] = round(_mom_ratio, 3)
+        if _mom_bonus:
+            sig["moment_bonus"] = round(_mom_bonus, 3)
         if bonus:
             sig["anchor_bonus"] = round(bonus, 3)
         if _tbonus:
@@ -1264,6 +1624,42 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
         scored.append((base, bonus, sig, ps))
     scored.sort(key=lambda x: x[0] + x[1], reverse=True)
     return scored
+
+
+def usable_shot_yield(proj, source_id: str, cfg: Optional[ClipConfig] = None) -> tuple:
+    """(usable, total) shots for one source, applying the SHOT-level gates match will apply.
+
+    A source can clear every SOURCE-level gate and still contribute nothing: the backfill pass
+    fetched a replacement titled "Littlefinger gives Catspaw dagger to Bran Stark" — exactly the
+    footage 8 beats were asking for — and it turned out to be another screener with
+    "FOR INTERNAL VIEWING ONLY" burned into the picture, so all 11 of its shots died at
+    _ocr_text_heavy and it won zero beats. The pass reported "+3 clean sources" and the pool had
+    gained nothing. A replacement has to prove it can actually air."""
+    import os as _os_y
+    shots = _index.load_shots(proj, source_id)
+    if not shots:
+        return (0, 0)
+    embeds = _index.load_embeds(proj, source_id)
+    _on = lambda k, d="1": _os_y.environ.get(k, d).strip() not in ("0", "false", "no", "")  # noqa: E731
+    gate_on, tgate_on = _on("VIDLORE_CLIPSTUDIO_OCR_GATE"), _on("VIDLORE_CLIPSTUDIO_TEXT_GATE")
+    ggate_on = _on("VIDLORE_CLIPSTUDIO_GRAPHICS_GATE")
+    subband_on = _on("VIDLORE_CLIPSTUDIO_SUBBAND_GATE")
+    usable = 0
+    for pos, sh in enumerate(shots):
+        row = getattr(sh, "embed_row", -1)
+        vec = embeds[row] if (embeds is not None and 0 <= row < len(embeds)) else None
+        if gate_on and _ocr_is_junk(sh):
+            continue
+        if tgate_on and (_ocr_text_heavy(sh) or _shot_overlay_badge(sh)):
+            continue
+        if ggate_on and _shot_is_graphics(sh, vec):
+            continue
+        if subband_on and _shot_subtitle_band(sh):
+            continue
+        if _shot_unreadable(sh):
+            continue
+        usable += 1
+    return (usable, len(shots))
 
 
 def _res_tier(h: int) -> int:
@@ -1300,7 +1696,9 @@ def _cleanliness_key(sid: str, shot, src_dirty: dict, src_height: dict) -> tuple
 
 
 def _clean_copy_swap(seg, best, scored, src_dirty: dict, src_height: dict, cfg,
-                     *, eps: float = 0.03):
+                     *, eps: float = 0.03, shot_uses: dict | None = None,
+                     shot_cap: int | None = None, proj=None, beat_quote: str = "",
+                     anchor_lines: list | None = None):
     """SAME-SCENE CLEAN-COPY ARBITRATION. Scene compilations upload the same iconic moment many
     times — one copy clean 1080p, another with a channel bug / burned Turkish subs / 360p. The
     greedy pick takes the highest-scoring copy, which is blind to cleanliness (observed: a
@@ -1345,13 +1743,24 @@ def _clean_copy_swap(seg, best, scored, src_dirty: dict, src_height: dict, cfg,
                 same = len(sa & sb) / max(1, min(len(sa), len(sb))) >= 0.6
         if not same:
             continue
+        # REUSE-AWARE: this swap runs AFTER the greedy loop that owns the reuse ledger, so without
+        # this check it happily funnels many beats onto one "cleanest copy" and silently defeats the
+        # per-shot cap (measured: one window won 6 beats against a cap of 2).
+        if shot_uses is not None and shot_cap is not None and \
+                shot_uses.get((ps.sid, ps.shot.index), 0) >= shot_cap:
+            continue
         k = _cleanliness_key(ps.sid, ps.shot, src_dirty, src_height)
         if k < alt_key or (k == alt_key and alt is not None and base > alt_base):
             alt, alt_key, alt_base = (base, bonus, sig, ps), k, base
     if alt is None:
         return best, None
     base, bonus, sig, ps = alt
-    in_p, out_p = _trim_window(ps.shot, seg, cfg)
+    # the swap moves to a DIFFERENT copy of the scene, where the line sits at a different
+    # timestamp — re-locate it in the new source, or the window falls back to the shot midpoint
+    # and can miss the very words the beat is about.
+    _sw_mom = locate_beat_moment(proj, ps.sid, seg, anchor_lines) \
+        if (proj and beat_quote) else None
+    in_p, out_p = _trim_window(ps.shot, seg, cfg, _sw_mom)
     cand = ClipCandidate(segment_index=seg.index, source_id=ps.sid, shot_index=ps.shot.index,
                          score=round(max(0.0, min(1.0, base)), 4),
                          in_point=in_p, out_point=out_p, signals=sig)
@@ -1577,6 +1986,17 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
     # 13× with 14 relevant sources never touched). With abundant anchor footage keep the NORMAL
     # anti-reuse so the cut spreads across what discovery actually found.
     _anchor_abundant = len(anchor_sids) > int(_f_env("VIDLORE_CLIPSTUDIO_ANCHOR_SCARCE_MAX", 6))
+    # the anchor scene's own dialogue — the fallback referent for a beat that DISCUSSES a line
+    # without quoting it, so moment-lock still resolves (see _beat_quote).
+    _anchor_lines: list = []
+    for _as in ((getattr(proj, "meta", None) or {}).get("analysis", {}) or {}).get(
+            "anchor_scenes", []) or []:
+        for _dl in (_as.get("dialogue") or []):
+            if isinstance(_dl, str) and _dl.strip():
+                _anchor_lines.append(_dl.strip())
+    import os as _os_mm
+    _mm_gate = _os_mm.environ.get("VIDLORE_CLIPSTUDIO_MOMENT_LOCK", "1").strip() \
+        not in ("0", "false", "no")
     _src_height = {s.id: int(getattr(s, "height", 0) or 0) for s in proj.sources}
     # CLEANLINESS MAP for same-scene clean-copy arbitration: per-source corner-bug + burned-sub
     # fraction, computed once over the pooled shots (both detectors are memoized).
@@ -1616,9 +2036,22 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
     recent_sources: list[str] = []
     recent: list[dict] = []          # recency window: {pos, key, phash, embed} of recent picks
     selections: list[ClipSelection] = []
+    # PER-WINDOW ledger for the anti-repeat block below. `shot_uses` counts airings but forgets
+    # WHEN — and beat index is the wrong clock for "when" (a 272-beat essay runs 22 minutes, a
+    # 189-beat one 14). These remember the timeline second and beat of each window's last airing.
+    win_last_t: dict[tuple[str, int], float] = {}
+    win_last_pos: dict[tuple[str, int], int] = {}
+    # timeline clock: prefix sum over the planned beat durations, so "90 seconds ago" is real
+    # seconds of finished video rather than a beat count.
+    t_of: dict[int, float] = {}
+    _acc = 0.0
+    for _s in segments:
+        t_of[_s.index] = _acc
+        _acc += max(0.0, float(getattr(_s, "est_duration", 0.0) or 0.0))
 
     _hist_win = max(cfg.recency_cooldown, cfg.source_recency_window)
     for seg in segments:
+        t_now = t_of.get(seg.index, 0.0)
         # recency/source history only matters within the cooldown window — prune so candidate
         # scoring stays O(pool × window) instead of O(pool × all prior segments)
         if recent:
@@ -1665,7 +2098,8 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         _src_titles_m = {src.id: (src.title or "") for src in proj.sources}
         scored = _score_pool(seg, pool, text_vec, cfg, face_targets, anchor_sids, anchor_bonus,
                              all_faces=all_faces, title_toks=_ta_titles, mv_toks=_ta_mv,
-                             beat_era=_beat_era_m, src_titles=_src_titles_m)
+                             beat_era=_beat_era_m, src_titles=_src_titles_m,
+                             proj=proj, anchor_lines=_anchor_lines)
 
         # `base` = match QUALITY (drives the reported confidence + flagging).
         # `adj`  = base + anchor bonus minus diversity penalties (drives only WHICH is picked).
@@ -1676,7 +2110,14 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         # their reuse + source-recency penalties are amplified. exact_scene beats keep the multiplier
         # at 1.0 — the precise scene must win even from a recently-used source.
         _variety = 1.6 if _policy.maximize_variety(seg) else 1.0
-        for base, bonus, sig, ps in scored:
+        # the dialogue line this beat is about, resolved once per beat (mirrors _score_pool)
+        _bq_seg = _beat_quote(seg, _anchor_lines) if _mm_gate else ""
+        # The near-adjacent replay block below is a HARD skip, so it can in principle starve a beat
+        # of every candidate. `_hard_gap` is dropped on a second pass if that happens — a beat must
+        # never go unselected (that escalates to the still/release-block path).
+        _hard_gap = True
+        for _pass in (0, 1):
+          for base, bonus, sig, ps in scored:
             key = (ps.sid, ps.shot.index)
             # SINGLE-SCENE DEEP-DIVE: the anchor scene IS the video — an expert essayist keeps
             # cutting BETWEEN that one scene's shots (Bronn → the mug → the Hound → reaction), so the
@@ -1685,10 +2126,28 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
             # recency, so it never looks like a freeze/loop).
             relax = (single_scene and bool(anchor_sids) and ps.sid in anchor_sids
                      and not _anchor_abundant)    # abundant anchor footage → normal anti-reuse, spread
-            shot_cap = cfg.max_reuse_per_shot * (3 if relax else 1)
+            shot_cap = cfg.max_reuse_per_shot * (cfg.relax_reuse_mult if relax else 1)
             if shot_uses.get(key, 0) >= shot_cap:
                 continue                              # this exact shot is exhausted
+            # HARD near-adjacent block — applies EVEN under relax. Measured on the delivered file, the
+            # ugliest repeats were the same window either side of a cut 2-5s apart ("cut to nowhere");
+            # relax had disabled the same-scene arm of the recency rule that used to stop them.
+            if _hard_gap and key in win_last_pos and (
+                    (seg.index - win_last_pos[key]) <= cfg.window_min_gap_beats
+                    or (t_now - win_last_t.get(key, -1e9)) < cfg.window_min_gap_sec):
+                continue
             pen = cfg.reuse_penalty * source_uses.get(ps.sid, 0) * (0.25 if relax else _variety)
+            # PER-WINDOW reuse cost: scales with how OFTEN this exact window already aired and how
+            # RECENTLY in timeline seconds. Capped so a genuinely exact scene with no alternative can
+            # still win rather than being replaced by something irrelevant.
+            _nw = shot_uses.get(key, 0)
+            if _nw:
+                _wp = cfg.window_reuse_penalty * _nw * (0.5 if relax else _variety)
+                _dt = t_now - win_last_t.get(key, -1e9)
+                if _dt < cfg.window_reuse_gap_sec:
+                    _wp += cfg.window_reuse_recency_weight * (
+                        1.0 - max(0.0, _dt) / cfg.window_reuse_gap_sec)
+                pen += min(_wp, 0.55)
             if not relax and len(recent_sources) >= cfg.max_consecutive_same_source and \
                all(s == ps.sid for s in recent_sources[-cfg.max_consecutive_same_source:]):
                 pen += 0.15                           # break long runs from one source
@@ -1750,7 +2209,9 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
             adj = max(0.0, base + bonus - pen + hd_pref
                       + 0.08 * (ps.shot.quality - 0.5))  # mild quality pref
             qual = round(max(0.0, min(1.0, base)), 4)
-            in_p, out_p = _trim_window(ps.shot, seg, cfg)
+            # centre the cut on the located line when there is one (see _trim_window)
+            _cand_mom = locate_beat_moment(proj, ps.sid, seg, _anchor_lines) if _bq_seg else None
+            in_p, out_p = _trim_window(ps.shot, seg, cfg, _cand_mom)
             cand = ClipCandidate(segment_index=seg.index, source_id=ps.sid,
                                  shot_index=ps.shot.index, score=qual,
                                  in_point=in_p, out_point=out_p, signals=sig)
@@ -1765,13 +2226,22 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
                 cur = alt_best.get(ps.sid)
                 if cur is None or cand.score > cur.score:
                     alt_best[ps.sid] = cand
+          # the hard near-adjacent block starved this beat of every candidate — retry once without
+          # it rather than leave the beat unselected (which escalates to the still/release path).
+          if best is not None or not _hard_gap:
+              break
+          _hard_gap = False
 
         # SAME-SCENE CLEAN-COPY ARBITRATION: if another source holds a near-duplicate of the
         # winning shot at ~equal relevance, air the cleanest copy (no watermark → no burned subs →
         # higher resolution → sharper). The displaced pick stays available as an alternate.
         if _clean_gate and best is not None:
             _old_cand = best[3]
-            best, _swap_note = _clean_copy_swap(seg, best, scored, _src_dirty, _src_height, cfg)
+            best, _swap_note = _clean_copy_swap(seg, best, scored, _src_dirty, _src_height, cfg,
+                                                shot_uses=shot_uses,
+                                                shot_cap=cfg.max_reuse_per_shot,
+                                                proj=proj, beat_quote=_bq_seg,
+                                                anchor_lines=_anchor_lines)
             if _swap_note:
                 _pc = alt_best.get(_old_cand.source_id)
                 if _pc is None or _old_cand.score > _pc.score:
@@ -1785,10 +2255,21 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         # the anchor scene's shots, while the reported score stays pure quality.
         if best is not None:
             _ckey = (best[3].source_id, best[3].shot_index)
+            # Ranked DEEPER than the beat will use. The first `candidates_per_segment` are the
+            # alternates every stage sees; the tail is the verifier's deep bench (see
+            # ClipSelection.deep_alternates), read only when it is about to settle for a contextual
+            # fallback. Truncating to 6 here left that bench empty and the rescue path dead.
+            import os as _os_alt
+            try:
+                _keep_n = max(cfg.candidates_per_segment,
+                              int(_os_alt.environ.get("VIDLORE_CLIPSTUDIO_DEEP_ALTERNATES", "20")
+                                  or 20))
+            except (TypeError, ValueError):
+                _keep_n = max(cfg.candidates_per_segment, 20)
             alternates = sorted(
                 (c for c in alt_best.values() if (c.source_id, c.shot_index) != _ckey),
                 key=lambda c: c.score + float((c.signals or {}).get("anchor_bonus", 0.0)),
-                reverse=True)[:cfg.candidates_per_segment]
+                reverse=True)[:_keep_n]
         else:
             alternates = []
 
@@ -1801,7 +2282,8 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         if _wqc_gate and best is not None:
             best, alternates = wqc_arbitrate_selection(
                 best, alternates, _by_src_shots, _ps_by_key, cfg, seg,
-                stats=_wqc_stats, progress=progress)
+                stats=_wqc_stats, progress=progress,
+                shot_uses=shot_uses, shot_cap=cfg.max_reuse_per_shot)
 
         if best is None:
             sel = ClipSelection(segment_index=seg.index, source_id="", shot_index=-1,
@@ -1816,6 +2298,21 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
                 alternates=alternates[:cfg.candidates_per_segment],
                 source_url=(proj.source(ps.sid).url if proj.source(ps.sid) else ""),
             )
+            # DEEP BENCH for the verifier's last resort. `alternates` is 6 deep out of a ~4000-shot
+            # pool, and when none of those 6 is the exact moment the verifier keeps the original and
+            # relabels it contextual_fallback. Measured on job 69d80e9dd4_v4: that path took 113 of
+            # 268 beats, and those beats score 4.34 on the frame eval against 5.92 for the beats
+            # where a replacement WAS found — the worst group in the video. So keep a deeper ranked
+            # bench the verifier can reach for before it settles. Ranking-only: nothing else reads
+            # it, so a beat the verifier never questions is byte-identical.
+            import os as _os_deep
+            try:
+                _deep_n = int(_os_deep.environ.get(
+                    "VIDLORE_CLIPSTUDIO_DEEP_ALTERNATES", "20") or 20)
+            except (TypeError, ValueError):
+                _deep_n = 20
+            if _deep_n > cfg.candidates_per_segment:
+                sel.deep_alternates = alternates[cfg.candidates_per_segment:_deep_n]
             if ps.shot.face_ids:
                 sel.identity = ps.shot.face_ids[0]
                 if ps.shot.identities:
@@ -1842,6 +2339,10 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
             sel.beat_windows = wins
             source_uses[ps.sid] = source_uses.get(ps.sid, 0) + 1
             shot_uses[(ps.sid, ps.shot.index)] = shot_uses.get((ps.sid, ps.shot.index), 0) + 1
+            # per-window ledger keyed the same way, remembering WHEN (both clocks) so the next beat
+            # can price the repeat by real elapsed video, not beat count.
+            win_last_t[(ps.sid, ps.shot.index)] = t_now
+            win_last_pos[(ps.sid, ps.shot.index)] = seg.index
             recent_sources.append(ps.sid)
             recent.append({"pos": seg.index, "key": (ps.sid, ps.shot.index), "sid": ps.sid,
                            "t0": ps.shot.start, "t1": ps.shot.end,

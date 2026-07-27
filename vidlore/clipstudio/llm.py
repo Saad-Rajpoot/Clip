@@ -34,6 +34,89 @@ if _LIBS.exists() and str(_LIBS) not in sys.path:
 # every knob reads at CALL time, not import time — the engine loads .env after this module
 # may already have been imported
 
+# ---------------------------------------------------------------------------
+# TOKEN / COST ACCOUNTING
+#
+# A render makes hundreds of vision calls — 512 fresh on job 69d80e9dd4_v4 with a warm verdict
+# cache, ~2000+ cold — and none of it was recorded anywhere, so "what did this render cost" had no
+# answer and decisions like "should verify run a second round" were guesses. Every provider branch
+# now reports its usage here; accounting NEVER raises, so a missing usage field can't fail a render.
+#
+# Prices are USD per 1M tokens and are configuration, not fact — override per model with
+# VIDLORE_CLIPSTUDIO_PRICE_<MODEL>_IN / _OUT (dots and dashes become underscores) when the
+# provider's rate card changes.
+_USAGE: dict = {}
+
+_PRICE_DEFAULTS = {
+    "gemini-2.5-flash": (0.30, 2.50),
+    "gemini-2.5-pro": (1.25, 10.00),
+    "claude-sonnet-4-6": (3.00, 15.00),
+    "deepseek-v4-pro": (0.28, 0.42),
+    "deepseek-v4-flash": (0.07, 0.14),
+}
+
+
+def _price_for(model: str) -> tuple:
+    key = (model or "").strip().lower()
+    env = key.replace(".", "_").replace("-", "_").upper()
+    lo, hi = _PRICE_DEFAULTS.get(key, (0.0, 0.0))
+    try:
+        lo = float(os.environ.get(f"VIDLORE_CLIPSTUDIO_PRICE_{env}_IN", "") or lo)
+        hi = float(os.environ.get(f"VIDLORE_CLIPSTUDIO_PRICE_{env}_OUT", "") or hi)
+    except (TypeError, ValueError):
+        pass
+    return (lo, hi)
+
+
+def record_usage(model: str, *, prompt: int = 0, completion: int = 0, stage: str = "") -> None:
+    """Book one call's token usage. Safe to call with zeros or junk."""
+    try:
+        k = (model or "unknown").strip().lower()
+        e = _USAGE.setdefault(k, {"calls": 0, "prompt": 0, "completion": 0, "stages": {}})
+        e["calls"] += 1
+        e["prompt"] += max(0, int(prompt or 0))
+        e["completion"] += max(0, int(completion or 0))
+        if stage:
+            e["stages"][stage] = e["stages"].get(stage, 0) + 1
+    except Exception:                                  # noqa: BLE001 — never break a render
+        pass
+
+
+def _usage_from(resp) -> tuple:
+    """(prompt, completion) from a Gemini or Claude response object; (0, 0) when absent."""
+    try:
+        u = getattr(resp, "usage_metadata", None)      # Gemini
+        if u is not None:
+            return (int(getattr(u, "prompt_token_count", 0) or 0),
+                    int(getattr(u, "candidates_token_count", 0) or 0))
+        u = getattr(resp, "usage", None)               # Claude
+        if u is not None:
+            return (int(getattr(u, "input_tokens", 0) or 0),
+                    int(getattr(u, "output_tokens", 0) or 0))
+    except Exception:                                  # noqa: BLE001
+        pass
+    return (0, 0)
+
+
+def usage_summary() -> dict:
+    """Everything booked so far: per-model tokens/calls plus a USD estimate."""
+    out = {"models": {}, "calls": 0, "prompt": 0, "completion": 0, "usd": 0.0}
+    for model, e in _USAGE.items():
+        pin, pout = _price_for(model)
+        usd = e["prompt"] / 1e6 * pin + e["completion"] / 1e6 * pout
+        out["models"][model] = {**e, "usd": round(usd, 4),
+                                "price_per_1m": {"in": pin, "out": pout}}
+        out["calls"] += e["calls"]
+        out["prompt"] += e["prompt"]
+        out["completion"] += e["completion"]
+        out["usd"] += usd
+    out["usd"] = round(out["usd"], 4)
+    return out
+
+
+def reset_usage() -> None:
+    _USAGE.clear()
+
 
 def _provider() -> str:
     # DeepSeek is the default brain (Claude is now only the last-resort fallback).
@@ -166,6 +249,9 @@ def _deepseek_complete(system, messages, max_tokens, model) -> str:
         _to = 300
     resp = urllib.request.urlopen(req, timeout=_to)
     d = json.loads(resp.read())
+    _u = d.get("usage") or {}                          # OpenAI-shaped usage block
+    record_usage(d.get("model") or model or "deepseek",
+                 prompt=_u.get("prompt_tokens", 0), completion=_u.get("completion_tokens", 0))
     return (d.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
 
 
@@ -290,6 +376,8 @@ def _gemini_complete(system, messages, max_tokens, model) -> str:
     resp = cl.models.generate_content(
         model=mdl, contents=contents,
         config=types.GenerateContentConfig(**gcfg))
+    _p, _c = _usage_from(resp)
+    record_usage(mdl, prompt=_p, completion=_c)
     return getattr(resp, "text", None) or ""
 
 
@@ -306,6 +394,8 @@ def _claude_complete(system, messages, max_tokens, eng_cfg, model) -> str:
             mdl = "claude-sonnet-4-6"
     resp = cl.messages.create(model=mdl, max_tokens=max_tokens,
                               system=(system or ""), messages=messages)
+    _p, _c = _usage_from(resp)
+    record_usage(mdl, prompt=_p, completion=_c)
     return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
 
 

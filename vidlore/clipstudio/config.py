@@ -118,6 +118,24 @@ class ClipConfig:
     source_recency_weight: float = field(default_factory=lambda: _f("VIDLORE_CLIPSTUDIO_SOURCE_RECENCY_WEIGHT", 0.3))
     source_recency_window: int = field(default_factory=lambda: _i("VIDLORE_CLIPSTUDIO_SOURCE_RECENCY_WINDOW", 7))
     candidates_per_segment: int = field(default_factory=lambda: _i("VIDLORE_CLIPSTUDIO_CANDIDATES_PER_SEGMENT", 6))
+    # PER-WINDOW anti-repeat. The penalties above are keyed on the SOURCE, so a window's 2nd airing
+    # cost nothing extra below the hard cap and one shot could win 6 beats of a 22-minute cut (audit
+    # 2026-07-26: 46% of delivered scenes were visual repeats of another scene, one look aired 9×,
+    # several only 2-5s apart across a cut). These key on the WINDOW and on TIMELINE SECONDS — beat
+    # index is the wrong clock, because a 272-beat essay and a 189-beat one have the same cooldown in
+    # beats but very different runtimes.
+    window_reuse_penalty: float = field(default_factory=lambda: _f("VIDLORE_CLIPSTUDIO_WINDOW_REUSE_PENALTY", 0.25))
+    window_reuse_gap_sec: float = field(default_factory=lambda: _f("VIDLORE_CLIPSTUDIO_WINDOW_REUSE_GAP_SEC", 90.0))
+    window_reuse_recency_weight: float = field(
+        default_factory=lambda: _f("VIDLORE_CLIPSTUDIO_WINDOW_REUSE_RECENCY_WEIGHT", 0.8))
+    # HARD block: the identical window may never return inside this gap (either clock). A viewer reads
+    # a sub-20s repeat as a cut that goes nowhere, no matter how well the beat scores.
+    window_min_gap_sec: float = field(default_factory=lambda: _f("VIDLORE_CLIPSTUDIO_WINDOW_MIN_GAP_SEC", 20.0))
+    window_min_gap_beats: int = field(default_factory=lambda: _i("VIDLORE_CLIPSTUDIO_WINDOW_MIN_GAP_BEATS", 3))
+    # `relax` (single-scene deep-dive on scarce anchor footage) multiplies the per-shot cap. 3× took
+    # the cap to 6 airings of one window, which is never editorially right — 2× is the deep-dive
+    # allowance without the loop.
+    relax_reuse_mult: int = field(default_factory=lambda: _i("VIDLORE_CLIPSTUDIO_RELAX_REUSE_MULT", 2))
 
     # --- index ---
     whisper_model: str = field(default_factory=lambda: _s("VIDLORE_CLIPSTUDIO_WHISPER_MODEL", "base"))

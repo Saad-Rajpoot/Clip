@@ -280,17 +280,18 @@ def _flags_from_frames(frames: list) -> dict:
     frame-source-agnostic so it is unit-testable without video files."""
     import numpy as np
     out = {"subs_flag": 0, "text_conf": 0.0, "luma_avg": -1.0, "luma_hi": -1.0,
-           "corner_masks": {}}
+           "luma_min": -1.0, "luma_min_black_frac": -1.0, "corner_masks": {}}
     frames = [f for f in frames if f is not None]
     if not frames:
         out["subs_flag"] = -1
         return out
-    lumas, hi_vals, confs = [], [], []
+    lumas, hi_vals, confs, dark_fracs = [], [], [], []
     corner_or = {k: None for k in _CORNER_REGIONS}
     subs_any = False
     for fr in frames:
         lumas.append(float(fr.mean()))
         hi_vals.append(float(np.percentile(fr, 99.8)))
+        dark_fracs.append(float((fr < 16.0).mean()))    # black-pixel share of THIS sample
         # subtitle band on the 320×180 downsample — SAME calibrated geometry/thresholds as
         # match._shot_subtitle_band (Turkish/Arabic/English positives, 30+ clean negatives)
         small = fr[::2, ::2]
@@ -324,6 +325,16 @@ def _flags_from_frames(frames: list) -> dict:
     out["text_conf"] = round(max(confs), 2) if confs else 0.0
     out["luma_avg"] = round(float(np.mean(lumas)), 1)
     out["luma_hi"] = round(float(max(hi_vals)), 1)
+    # DARKEST SAMPLE. luma_avg is the mean across the shot's samples and luma_hi the brightest
+    # highlight anywhere in it, so a shot that is black for half its span but carries a torch
+    # reads as perfectly fine: the v2 render aired a beat whose shot measured avg 39.4 / hi 255
+    # yet whose delivered frames sat at mean luma 2.5 with 100% of pixels below 16. Nothing in
+    # the persisted stats could see an intra-shot dark SPAN. This is that missing number.
+    out["luma_min"] = round(float(min(lumas)), 1)
+    # ...and how much of the darkest sample is genuinely black, so a low-key-but-lit frame
+    # (deep shadow round a face) is separable from an unusable one.
+    out["luma_min_black_frac"] = round(float(dark_fracs[int(np.argmin(lumas))]), 3) \
+        if dark_fracs else -1.0
     for name, g in corner_or.items():
         if g is not None and g.sum() >= 2:            # store only corners with real edge content
             out["corner_masks"][name] = _mask_to_hex(g)
@@ -511,6 +522,8 @@ def compute_shot_flags(path, shots: list, *, progress=None) -> int:
             sh.text_conf = flags["text_conf"]
             sh.luma_avg = flags["luma_avg"]
             sh.luma_hi = flags["luma_hi"]
+            sh.luma_min = flags.get("luma_min", -1.0)
+            sh.luma_min_black_frac = flags.get("luma_min_black_frac", -1.0)
             sh.corner_masks = flags["corner_masks"]
             if flags["subs_flag"] >= 0:
                 done += 1

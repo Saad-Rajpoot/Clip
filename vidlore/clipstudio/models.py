@@ -116,6 +116,12 @@ class Shot:
     luma_hi: float = -1.0         # max over samples of the ~99.8th-percentile pixel — the
                               # "brightest real content" level that separates a readable
                               # candlelit scene (lit face/candle ≥120) from true murk (<90)
+    luma_min: float = -1.0        # DARKEST sample's mean luma. luma_avg/luma_hi are shot-wide, so a
+                                  # shot that goes black for part of its span but carries a torch
+                                  # reads as fine (measured: avg 39.4 / hi 255 on a shot whose
+                                  # delivered frames sat at luma 2.5). This is the intra-shot floor.
+    luma_min_black_frac: float = -1.0   # share of pixels <16 in that darkest sample — separates a
+                                  # low-key lit frame from an actually unusable one
     corner_masks: dict = field(default_factory=dict)    # per-corner hex edge-bitmask (11x29 grid)
     graphics_flag: int = -1       # 2 = HARD designed graphics (news CGI/game UI/cartoon/fan art —
                                   # never airs), 1 = band-art (gated only in a source with hard
@@ -214,6 +220,12 @@ class ClipSelection:
     flag_reasons: list[str] = field(default_factory=list)
     approved: bool = False        # set by a human in the review surface
     alternates: list[ClipCandidate] = field(default_factory=list)
+    # The verifier's DEEP BENCH — ranked candidates beyond `alternates`, read only when the verifier
+    # is about to give up on an exact beat and keep a contextual fallback. Measured on job
+    # 69d80e9dd4_v4: that give-up path took 113 of 268 beats and they score 4.34 on the frame eval,
+    # against 5.92 for beats where a replacement was found. Six alternates out of a ~4000-shot pool
+    # was simply too shallow a bench to find the exact moment.
+    deep_alternates: list[ClipCandidate] = field(default_factory=list)
     source_url: str = ""          # denormalized for the ledger
     # IMAGE FALLBACK (Phase 11): when no YouTube clip was relevant enough, an exact-scene
     # still fetched + face/CLIP-verified from the open web. build.py renders it as a
@@ -227,14 +239,16 @@ class ClipSelection:
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        d["alternates"] = [a.to_dict() if isinstance(a, ClipCandidate) else a
-                           for a in self.alternates]
+        for k in ("alternates", "deep_alternates"):
+            d[k] = [a.to_dict() if isinstance(a, ClipCandidate) else a
+                    for a in (getattr(self, k) or [])]
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "ClipSelection":
         d = dict(d)
-        d["alternates"] = [ClipCandidate.from_dict(a) for a in d.get("alternates", [])]
+        for k in ("alternates", "deep_alternates"):
+            d[k] = [ClipCandidate.from_dict(a) for a in d.get(k, [])]
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 

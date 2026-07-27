@@ -232,4 +232,34 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
     proj.save()
     ok = sum(1 for s in proj.sources if s.status == SOURCE_OK)
     log(f"download: {ok} usable sources downloaded")
+
+    # HD-PATH HEALTH. The per-source fallback reason is already recorded in extra['hd_fallback'],
+    # but nothing ever SUMMARISED it — so a machine-wide HD failure degraded a whole render to
+    # 360p in total silence. Measured on two finished jobs: 42/44 and 34/34 sources fell back with
+    # 'HTTP Error 403: Forbidden' (the PO-token server was not up), leaving 95% of the footage
+    # sub-480p on a 1080p canvas. Both renders were then audited as murky/low-res/illegible and
+    # the cause was invisible in the build log. One loud line, and the numbers on the project.
+    _yt = [s for s in proj.sources if s.status == SOURCE_OK
+           and ((s.extra or {}).get("hd_path") or (s.extra or {}).get("hd_fallback"))]
+    if _yt:
+        _fell = [s for s in _yt if not (s.extra or {}).get("hd_path")]
+        _sd = [s for s in proj.sources
+               if s.status == SOURCE_OK and 0 < int(getattr(s, "height", 0) or 0) < 480]
+        _frac = len(_fell) / float(len(_yt))
+        proj.meta.setdefault("download_audit", {})
+        proj.meta["download_audit"].update({
+            "youtube_sources": len(_yt),
+            "hd_path_ok": len(_yt) - len(_fell),
+            "hd_fallback": len(_fell),
+            "sub_480p_sources": len(_sd),
+            "top_fallback_reason": (sorted(
+                ((s.extra or {}).get("hd_fallback", "") for s in _fell))[0][:160] if _fell else ""),
+        })
+        if _frac >= 0.5:
+            log(f"download: ⚠ HD PATH DEGRADED — {len(_fell)}/{len(_yt)} YouTube source(s) fell "
+                f"back to the legacy 360p downloader; {len(_sd)} source(s) are sub-480p. "
+                f"The whole render will be built from SD footage upscaled to the 1080p canvas. "
+                f"First reason: {(proj.meta['download_audit']['top_fallback_reason'] or '?')[:120]}")
+            log("download: ⚠ fix the HD path before trusting this render's image quality "
+                "(needs .hdvenv + node + deno + the .pot PO-token server reachable)")
     return proj.sources

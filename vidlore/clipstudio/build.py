@@ -1960,7 +1960,16 @@ def _frame_has_burned_text(src_path, t) -> bool:
         val = False
         if p.returncode == 0 and Path(png).exists() and Path(png).stat().st_size > 0:
             txt = _ocr_rt.read_text(png)
-            val = (len(_re12.findall(r"[A-Za-z']{3,}", txt or "")) >= 3
+            _wrds = _re12.findall(r"[A-Za-z']{3,}", txt or "")
+            # A SINGLE long word counts too — parity with the post-cut detector
+            # (_clip_has_burned_text, which fires on any confident box of >=6 letters). Without
+            # this the cut-time probe needed >=3 words or a >=6.5%-height box, so a one-word
+            # third-party listicle title ("2. NEEDLE") sailed through the candidate loop and was
+            # only caught after the cut — by which point the only remaining move was to hide OUR
+            # caption and air the foreign graphic anyway (job 69d80e9dd4, scene at 8:34).
+            # Catching it HERE means the loop simply picks a different window.
+            val = (len(_wrds) >= 3
+                   or any(len(w) >= 6 for w in _wrds)
                    or _ocr_rt.has_big_text(png))     # large overlay caption — geometry test
         try:
             _os12.unlink(png)
@@ -4731,7 +4740,7 @@ def _ass_ts(t: float) -> str:
     return f"{h}:{m:02d}:{s:05.2f}"
 
 
-def _correct_breakout_words(words: list, known_line: str, *, log=None) -> list:
+def _correct_breakout_words(words: list, known_line: str, *, log=None, return_meta: bool = False):
     """Repair ASR slips in a breakout caption using the KNOWN dialogue line, keeping ASR timings.
 
     Breakout captions are re-ASR'd from the extracted audio, so they inherit its mistakes — and a
@@ -4753,10 +4762,20 @@ def _correct_breakout_words(words: list, known_line: str, *, log=None) -> list:
 
     Note what is deliberately NOT here: a per-word similarity check. "and"/"when" scores 0.29
     character-wise, so a word-level gate would reject the exact repair that matters most — and
-    judging one word in isolation is what produced the error in the first place. Context decides."""
+    judging one word in isolation is what produced the error in the first place. Context decides.
+
+    return_meta=True additionally yields (words, align, src_ok, opcodes, known_words):
+      align   — source-side RECALL (matched source tokens / total source tokens). Recall, not
+                SequenceMatcher.ratio(), because a breakout window runs to the end of a complete
+                spoken line and often carries extra dialogue past the quote, which sinks the
+                symmetric ratio even when every quote word was actually spoken.
+      src_ok  — per-ASR-word booleans: True where the source line corroborates that word.
+    The caller uses those to KEEP a low-ASR-confidence caption line that the verified source line
+    already vouches for, instead of deleting it (see _breakout_caption_ass)."""
     kw = [w for w in re.findall(r"[\w']+", known_line or "")]
+    _nometa = (words, 0.0, [False] * len(words or []), [], kw)
     if not words or len(kw) < 3:
-        return words
+        return _nometa if return_meta else words
     from difflib import SequenceMatcher as _SM
 
     def _n(s):
@@ -4767,7 +4786,8 @@ def _correct_breakout_words(words: list, known_line: str, *, log=None) -> list:
     sm = _SM(None, aw, kn)
     ratio = sm.ratio()
     if ratio < _BK_CAP_ALIGN_FUZZY:
-        return words                       # not the same line — leave the audio's own words alone
+        # not the same line — leave the audio's own words alone
+        return _nometa if return_meta else words
     # TWO TIERS, because context and phonetics corroborate each other:
     #   strong context (>= 0.80) — the surrounding phrase is unmistakably this line, so a lone
     #     differing slot is an ASR slip. This is the tier that fixes "and"/"when", which no word-
@@ -4779,7 +4799,16 @@ def _correct_breakout_words(words: list, known_line: str, *, log=None) -> list:
     _strong = ratio >= _BK_CAP_ALIGN_MIN
     out = list(words)
     fixed = 0
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+    _ops = sm.get_opcodes()
+    src_ok = [False] * len(words)
+    _matched_src = 0
+    for tag, i1, i2, j1, j2 in _ops:
+        if tag == "equal":
+            # ASR already agrees with the source line across this run
+            for oi in range(i1, i2):
+                src_ok[oi] = True
+            _matched_src += (j2 - j1)
+            continue
         if tag != "replace" or (i2 - i1) != (j2 - j1):
             continue                       # 1:1 slots only — never insert/delete/re-time
         for oi, kj in zip(range(i1, i2), range(j1, j2)):
@@ -4789,10 +4818,15 @@ def _correct_breakout_words(words: list, known_line: str, *, log=None) -> list:
                 continue                   # weak context needs phonetic corroboration
             w = out[oi]
             out[oi] = (kw[kj], w[1], w[2], w[3])
+            src_ok[oi] = True              # this word is now literally the source's word
+            _matched_src += 1
             fixed += 1
     if fixed and log:
         log(f"build: breakout caption — corrected {fixed} ASR slip(s) against the verified source "
             f"line (phrase align {ratio:.2f})")
+    if return_meta:
+        align = _matched_src / float(len(kn)) if kn else 0.0
+        return out, min(1.0, align), src_ok, _ops, kw
     return out
 
 
@@ -4847,28 +4881,59 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None, *, preset=None) -
                                   float(getattr(w, "probability", 1.0) or 1.0)))
         if not words:
             continue
-        words = _correct_breakout_words(words, cap.get("line", ""), log=log)
+        words, _bk_align, _bk_srcok, _bk_ops, _bk_kw = _correct_breakout_words(
+            words, cap.get("line", ""), log=log, return_meta=True)
         base = float(cap["start"])
         dur = float(cap["dur"])
         # WIDTH-AWARE grouping: accumulate words into karaoke lines whose 2-row layout fits the BK
         # safe area (never a clipped third row). Cap at 6 words OR ~two rows' width, whichever first.
         grp, cur = [], []
+        _idx, _gidx, _curidx = 0, [], []
         for w in words:
             if cur and (len(cur) >= 6 or _grp_w(cur + [w]) > _budget):
-                grp.append(cur); cur = []
-            cur.append(w)
+                grp.append(cur); _gidx.append(_curidx); cur = []; _curidx = []
+            cur.append(w); _curidx.append(_idx); _idx += 1
         if cur:
-            grp.append(cur)
+            grp.append(cur); _gidx.append(_curidx)
         # ASR-CONFIDENCE floor per line: whisper mishears movie audio occasionally ("...poison
         # your SON" transcribed as "poison your three."), and a wrong word burned on screen
         # reads like a third-party subtitle. A missing caption line beats a wrong one — drop
         # any line whose weakest word is below the floor.
-        _pfloor = 0.45
+        #
+        # SOURCE-BACKED RESCUE. That floor is right when the ASR is the only evidence — but it was
+        # deleting lines the audio says perfectly. Measured on job 69d80e9dd4, all four breakouts
+        # lost text this way (35-71% of words survived); one showed only "white winds blow, the lone
+        # wolf" and never showed the payoff "but the pack survives", while the delivered audio said
+        # the full line verbatim (confirmed by re-transcribing the delivered mix). The cause is that
+        # "base" int8 whisper mis-hears movie audio and reports low confidence — yet
+        # _correct_breakout_words has, three lines earlier, already matched those very words against
+        # the VERIFIED source line. A word the source line corroborates is not a guess, whatever the
+        # acoustic model's confidence, so keep it. A line with no such corroboration still drops.
+        import os as _os_bkc
+        try:
+            _pfloor = float(_os_bkc.environ.get("VIDLORE_CLIPSTUDIO_BK_CAP_CONF_FLOOR",
+                                                "0.45") or 0.45)
+        except (TypeError, ValueError):
+            _pfloor = 0.45
         _kept = []
-        for line in grp:
+        _rescued = 0
+        _src_strong = bool(cap.get("line")) and _bk_align >= _BK_CAP_ALIGN_MIN
+        for _gi, line in enumerate(grp):
             _minp = min(w[3] for w in line)
             if _minp >= _pfloor:
                 _kept.append(line)
+                continue
+            _ids = _gidx[_gi] if _gi < len(_gidx) else []
+            _backed = bool(_ids) and all(
+                (i < len(_bk_srcok) and _bk_srcok[i]) for i in _ids)
+            _content = sum(1 for w in line if len(re.sub(r"[^\w']", "", w[0])) > 1)
+            if _src_strong and _backed and _content >= 2:
+                _kept.append(line)
+                _rescued += 1
+                if log:
+                    log(f"build: breakout caption line kept — every word matches the verified "
+                        f"source line (align {_bk_align:.2f}, min ASR conf {_minp:.2f}): "
+                        f"{' '.join(w[0] for w in line)!r}")
             elif log:
                 log(f"build: breakout caption line dropped (ASR word confidence "
                     f"{_minp:.2f} < {_pfloor}): {' '.join(w[0] for w in line)!r}")
@@ -5130,6 +5195,14 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
 
     # 2) narration — user voiceover (forced-aligned) > edge-tts > silent fallback
     narration = None
+    # A caller that NAMES a voiceover wants that voice. A typo'd/missing path used to slide all
+    # the way down to the silent fallback and render a full-length video with no narration at all
+    # (captions and music only) — an hours-long failure that looks like a success. Fail loudly and
+    # immediately instead: the fallbacks below exist for TTS outages, not for caller mistakes.
+    if voiceover and not Path(voiceover).exists():
+        raise FileNotFoundError(
+            f"voiceover file not found: {voiceover} — refusing to render a silent-narration video. "
+            f"Pass a real path, or pass voiceover=None to use TTS.")
     if voiceover and Path(voiceover).exists():
         try:
             # caption-sync FIRST: per-scene-tolerant word alignment (the engine's all-or-nothing
@@ -5183,6 +5256,12 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             except Exception as e:                   # noqa: BLE001
                 log(f"build: TTS unavailable ({str(e)[:80]}) — using silent narration")
                 narration = None
+    if narration is None and voiceover and not use_tts:
+        # the voiceover was found but could not be turned into narration, and TTS is off — there is
+        # no voice left to fall back to. Same reasoning as the missing-file guard above.
+        raise RuntimeError(
+            f"voiceover {voiceover} could not be aligned and use_tts=False — refusing to render a "
+            f"silent-narration video. See the 'voiceover align failed' line above for the cause.")
     if narration is None:
         narration = _silent_narration(segments, work / "silent", cfg)
         log(f"build: narration {narration.total:.1f}s (silent fallback)")
@@ -5744,6 +5823,10 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                                                      sel.in_point - 0.2))
                 if src:
                     used_at[_wkey(sid, start)] = gbeat
+                    # count this airing too — the walk used to write only `used_at`, so a
+                    # walk-aired window stayed invisible to the "a window airs ONCE, ever" gate
+                    # and a later beat could legally re-air the very same window.
+                    _air_ct[_wkey(sid, start)] = _air_ct.get(_wkey(sid, start), 0) + 1
                     _aired_hashes.append(_frame_hash(src.local_path, start + 1.2)
                                          if src.local_path else None)
             gbeat += 1

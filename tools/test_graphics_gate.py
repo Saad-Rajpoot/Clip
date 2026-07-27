@@ -149,8 +149,12 @@ def main():
     _say('"gatev2-graphics"' in osrc,
          "resume signature folds the gate version (cached pre-gate selections never replay)")
     vsrc = (root / "verify.py").read_text()
+    # asserted on the INTENT (_nonshow reaches every rung) rather than the exact concatenation:
+    # the prompt gains blocks over time (_look, the instructed-target question, was added between
+    # _story and _mf) and a literal match fails on an unrelated, correct change.
+    _prompt_line = next((ln for ln in vsrc.splitlines() if "+ _rule + _nonshow" in ln), "")
     _say("HARD RULE" in vsrc and "news/broadcast motion graphics" in vsrc
-         and "+ _story + _mf + _rule + _nonshow + _obj + _venue" in vsrc,
+         and bool(_prompt_line) and "_venue" in _prompt_line,
          "verifier: non-show hard rule in EVERY rung's prompt")
     _say('PROMPT_VERSION = "v7' in vsrc,
          "verifier prompt version bumped (cached verdicts from v6 never reused)")
