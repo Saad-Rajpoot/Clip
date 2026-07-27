@@ -29,6 +29,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import time
 import urllib.request
@@ -65,6 +66,66 @@ import threading as _threading
 
 _POT_PROC = None  # bgutil server we started (if any)
 _POT_LOCK = _threading.Lock()
+
+# Concurrency cap for ACTIVE HD yt-dlp subprocesses. A render fires download workers per core;
+# dozens of simultaneous SABR/HD data fetches from one IP+session is exactly the burst profile
+# that trips YouTube's 403 throttle (measured: a whole 86-source render mass-403'd to 360p while
+# a 3-way test from the same machine minutes later succeeded). Legacy stays parallel — only the
+# HD data fetch is paced. Backoff sleeps happen OUTSIDE the semaphore so waiters can proceed.
+_HD_SEM = _threading.BoundedSemaphore(max(1, int(os.environ.get("VIDLORE_HD_MAX_CONCURRENCY", "3") or 3)))
+_POT_403_RESTARTED = False  # one pot-server restart per process on first 403 (stale-token remedy)
+
+
+def _classify_dl_err(text: str) -> str:
+    """'throttle_403' (transient: throttle or stale PO token), 'unavailable' (permanent — do not
+    retry), or 'other'. Classification drives retry/backoff; NEVER treat 403 as unavailability."""
+    t = (text or "").lower()
+    if "403" in t and "forbidden" in t:
+        return "throttle_403"
+    for pat in ("video unavailable", "private video", "sign in to confirm",
+                "members-only", "this video is not available", "account associated",
+                "has been removed", "video is no longer available", "age-restricted",
+                "geo restricted", "not available in your country"):
+        if pat in t:
+            return "unavailable"
+    return "other"
+
+
+def _restart_pot_server(progress=None) -> bool:
+    """Kill + relaunch the bgutil PO-token server ONCE per process when HD data URLs 403.
+    /ping proves the deno process answers, NOT that the tokens it mints are still valid — a
+    long-lived server (observed: 6 days up) can hand out stale tokens that 403 on every
+    adaptive format while health checks pass. Gated by VIDLORE_HD_POT_RESTART_ON_403."""
+    global _POT_PROC, _POT_403_RESTARTED
+    if os.environ.get("VIDLORE_HD_POT_RESTART_ON_403", "1").lower() in ("0", "false", "no"):
+        return False
+    with _POT_LOCK:
+        if _POT_403_RESTARTED:
+            return False
+        _POT_403_RESTARTED = True
+        try:
+            if _POT_PROC is not None and _POT_PROC.poll() is None:
+                _POT_PROC.terminate()
+                try:
+                    _POT_PROC.wait(timeout=8)
+                except Exception:
+                    _POT_PROC.kill()
+                _POT_PROC = None
+            else:
+                # server started by a previous run/portal — find its pid on our port
+                p = subprocess.run(["lsof", "-ti", f"tcp:{POT_PORT}"],
+                                   capture_output=True, text=True, timeout=10)
+                for pid in (p.stdout or "").split():
+                    try:
+                        os.kill(int(pid), signal.SIGTERM)
+                    except (OSError, ValueError):
+                        pass
+                time.sleep(1.5)
+        except Exception:                                    # noqa: BLE001
+            pass
+    if progress:
+        progress("hd: 403 on data URLs — restarting PO-token server (stale-token remedy)")
+    return ensure_pot_server(progress=progress)
 
 
 def is_youtube(url: str) -> bool:
@@ -259,19 +320,37 @@ def download_hd(url: str, out_stem: str, *, max_height: int = 1080, ffmpeg_dir: 
 
     env = _env_with_runtimes()
     last = ""
+    last_class = "other"
     ok = False
     for attempt in range(1, retries + 2):
         try:
-            p = subprocess.run(cmd, cwd=os.path.dirname(out_stem) or ".", env=env,
-                               capture_output=True, text=True, timeout=timeout)
+            with _HD_SEM:      # pace ACTIVE HD fetches — parallel bursts trip the 403 throttle
+                p = subprocess.run(cmd, cwd=os.path.dirname(out_stem) or ".", env=env,
+                                   capture_output=True, text=True, timeout=timeout)
             if p.returncode == 0:
                 ok = True
                 break
-            last = (p.stderr or p.stdout or "").strip()[-300:]
+            # keep enough stderr to actually diagnose (the old 300-char cut lost the 403 context)
+            last = (p.stderr or p.stdout or "").strip()[-2000:]
         except subprocess.TimeoutExpired:
             last = f"timeout after {timeout}s"
         except Exception as e:                               # noqa: BLE001
             last = str(e)[:300]
+        last_class = _classify_dl_err(last)
+        if last_class == "unavailable":
+            # permanent (private/removed/sign-in) — retrying is pure waste
+            break
+        if last_class == "throttle_403":
+            # transient: stale PO token or burst throttle. Fresh tokens once, then long backoff —
+            # the whole point is that a 403 must NOT quietly become a 360p render.
+            if not _POT_403_RESTARTED:
+                _restart_pot_server(progress=progress)
+            if attempt <= retries:
+                back = min(15 * attempt, 45)
+                if progress:
+                    progress(f"hd: 403 (throttle/token) — waiting {back}s before retry {attempt + 1}")
+                time.sleep(back)
+            continue
         time.sleep(min(2 ** attempt, 8))
     # locate produced file — only on a clean exit, and never a video-only .fNNN fragment
     # (an interrupted merge leaves <stem>.f616.mp4, which is silent → ASR/dialogue-lock dies)
@@ -307,7 +386,11 @@ def download_hd(url: str, out_stem: str, *, max_height: int = 1080, ffmpeg_dir: 
         except OSError:
             pass
         if progress:
-            progress(f"hd: no HD file ({last[:120]}) — fallback")
+            # the [class] tag is machine-read by download.py's end-of-stage 403 sweep — keep it
+            _tag = {"throttle_403": "[403]", "unavailable": "[unavailable]"}.get(last_class, "")
+            _line = next((ln for ln in reversed(last.splitlines()) if "error" in ln.lower()),
+                         last[-200:] if last else "")
+            progress(f"hd: no HD file {_tag}({_line[:160]}) — fallback")
         return None
     meta = {}
     try:

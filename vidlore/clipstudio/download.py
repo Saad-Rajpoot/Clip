@@ -14,6 +14,7 @@ The chosen policy + per-source permission are written to the ledger; the tool ce
 from __future__ import annotations
 
 import concurrent.futures as cf
+import os
 import time
 from pathlib import Path
 
@@ -233,6 +234,72 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
     ok = sum(1 for s in proj.sources if s.status == SOURCE_OK)
     log(f"download: {ok} usable sources downloaded")
 
+    # 403 RECOVERY SWEEP. A 403 on the HD data URL is TRANSIENT (burst throttle / stale PO token),
+    # not "this upload has no HD" — but the per-source fallback made it permanent: one bad window
+    # turned an entire render into a 360p upscale (measured: 83/86 sources on one job). After the
+    # parallel pass, re-attempt the HD path serially for every 403-fallen source after a cooldown;
+    # only genuine unavailability may leave a source at 360p. Env: VIDLORE_HD_403_SWEEP=0 disables,
+    # _WAIT cooldown seconds, _MAX caps the sweep size.
+    from . import hd_download as _hd
+    if os.environ.get("VIDLORE_HD_403_SWEEP", "1").lower() not in ("0", "false", "no"):
+        _fell403 = [s for s in proj.sources
+                    if s.status == SOURCE_OK and s.url and _hd.is_youtube(s.url)
+                    and "403" in ((s.extra or {}).get("hd_fallback") or "")
+                    and 0 < int(s.height or 0) < cfg.discover_prefer_height]
+        _cap = max(0, int(os.environ.get("VIDLORE_HD_403_SWEEP_MAX", "24") or 24))
+        _fell403 = _fell403[:_cap]
+        if _fell403 and _hd.available():
+            _wait = max(0, int(os.environ.get("VIDLORE_HD_403_SWEEP_WAIT", "45") or 45))
+            log(f"download: 403 sweep — {len(_fell403)} source(s) fell back on HTTP 403; "
+                f"cooling down {_wait}s then retrying the HD path serially")
+            time.sleep(_wait)
+            _rec = 0
+            for sv in _fell403:
+                stem = proj.sources_dir / f"{sv.id}.hdretry"
+                try:
+                    hi = _hd.download_hd(sv.url, str(stem), max_height=cfg.max_height,
+                                         ffmpeg_dir=str(Path(ffmpeg_exe()).parent),
+                                         retries=1, progress=None)
+                except Exception:                            # noqa: BLE001
+                    hi = None
+                got = Path(hi["path"]) if (hi and hi.get("path")
+                                           and Path(hi["path"]).exists()) else None
+                if got and int(hi.get("height") or 0) > int(sv.height or 0):
+                    final = proj.sources_dir / f"{sv.id}{got.suffix.lower()}"
+                    try:
+                        old = Path(sv.local_path) if sv.local_path else None
+                        if old and old.exists() and old.resolve() != got.resolve():
+                            old.unlink(missing_ok=True)
+                        got.replace(final)
+                        sv.local_path = str(final)
+                        sv.width = int(hi.get("width") or sv.width or 0)
+                        sv.height = int(hi.get("height") or sv.height or 0)
+                        sv.fps = float(hi.get("fps") or sv.fps or 0.0)
+                        sv.duration = float(hi.get("duration") or sv.duration or 0.0)
+                        sv.checksum = _sha1_file(final)
+                        sv.extra.pop("hd_fallback", None)
+                        sv.extra["hd_path"] = True
+                        sv.extra["hd_recovered"] = True
+                        if "quality_audit" in sv.extra:
+                            sv.extra["quality_audit"]["actual"] = int(sv.height)
+                            sv.extra["quality_audit"].pop("reason", None)
+                        _rec += 1
+                        log(f"download: {sv.id} HD RECOVERED on sweep → {sv.height}p")
+                    except OSError as e:
+                        log(f"download: {sv.id} sweep replace failed ({e}) — keeping legacy file")
+                else:
+                    # clean the temp namespace; the legacy file stays authoritative
+                    for f in proj.sources_dir.glob(f"{sv.id}.hdretry*"):
+                        try:
+                            f.unlink()
+                        except OSError:
+                            pass
+            if _rec:
+                proj.save()
+            log(f"download: 403 sweep done — {_rec}/{len(_fell403)} source(s) recovered to HD")
+        elif _fell403:
+            log("download: 403 sweep skipped — HD path unavailable (check .hdvenv/.pot)")
+
     # HD-PATH HEALTH. The per-source fallback reason is already recorded in extra['hd_fallback'],
     # but nothing ever SUMMARISED it — so a machine-wide HD failure degraded a whole render to
     # 360p in total silence. Measured on two finished jobs: 42/44 and 34/34 sources fell back with
@@ -251,6 +318,9 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
             "youtube_sources": len(_yt),
             "hd_path_ok": len(_yt) - len(_fell),
             "hd_fallback": len(_fell),
+            "hd_recovered": sum(1 for s in _yt if (s.extra or {}).get("hd_recovered")),
+            "hd_403_fallbacks": sum(1 for s in _fell
+                                    if "403" in ((s.extra or {}).get("hd_fallback") or "")),
             "sub_480p_sources": len(_sd),
             "top_fallback_reason": (sorted(
                 ((s.extra or {}).get("hd_fallback", "") for s in _fell))[0][:160] if _fell else ""),
