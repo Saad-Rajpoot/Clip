@@ -1731,19 +1731,28 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
             if _thits >= 2:
                 _tbonus = _aff * min(_thits, 4) / 4.0
                 bonus += _tbonus
-        # DEICTIC-TARGET bonus — "watch the chalice": shots where the CLIP probe ranks the named
-        # target visible get a ranking-only nudge (rides on `bonus`, flows into deep-alternates
-        # ordering via the anchor_bonus signal). Never touches confidence.
+        # DEICTIC-TARGET signal — "watch the chalice": the CLIP probe's per-shot visibility rank
+        # is RECORDED (sig['target_vis'] below) for the verifier's deep-bench ordering and the
+        # still pass, but it does NOT move ranking by default. MEASURED TWICE on job 5462677f95
+        # (gate_ab, 24-25 changed beats, same-stage arms): a flat bonus scored −0.21 and a
+        # clip01-multiplied bonus −0.54 — both imported LOOK-ALIKE WRONG SCENES (Red Wedding /
+        # S3-wedding banquets under Purple Wedding beats; 7→2 regressions), because CLIP cannot
+        # separate two candlelit feasts at the granularity that matters. Same lesson as look-gate
+        # v1: searching harder for the named thing finds a worse clip. The probe's value survives
+        # on the FAILURE paths only (bench order when the pick is already unusable; still query),
+        # which never gamble a usable pick. VIDLORE_CLIPSTUDIO_LOOK_MATCH_BONUS=1 re-enables the
+        # (measured-negative) ranking bonus for experiments.
         _tgvis = 0.0
         if tgt01 is not None:
             _tgvis = float(tgt01.get((ps.sid, ps.shot.index), 0.0))
-            if _tgvis > 0.0:
+            if _tgvis > 0.0 and clip01 > 0.0 and os.environ.get(
+                    "VIDLORE_CLIPSTUDIO_LOOK_MATCH_BONUS", "0").strip() in ("1", "true", "yes"):
                 try:
                     _tgw = float(os.environ.get("VIDLORE_CLIPSTUDIO_LOOK_MATCH_W",
                                                 "0.12") or 0.12)
                 except (TypeError, ValueError):
                     _tgw = 0.12
-                bonus += _tgw * _tgvis
+                bonus += _tgw * _tgvis * clip01
         # SOFT preference for clean frames: a burned-in source dialogue subtitle (readable on-frame
         # text that survived the junk-gate) clashes with our own narration caption. Small penalty so
         # a clean frame wins a near-tie, but a subtitled frame still wins if it's clearly more
@@ -2232,12 +2241,14 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
             except Exception:
                 text_vec = None
         # DEICTIC-TARGET probe — when the narration instructs the viewer ("watch the chalice"),
-        # rank candidate shots by whether the named target is actually visible. Uses the
-        # persisted embeds + a cached text probe; no vision calls, adaptive per-beat scaling.
+        # score candidate shots for whether the named target is visible. SIGNAL-ONLY by default
+        # (sig['target_vis'] feeds the verifier's deep-bench ordering + the still pass); the
+        # ranking bonus is opt-in and measured negative — see the note in _score_pool.
+        # Uses persisted embeds + a cached text probe; no vision calls, adaptive per-beat scaling.
         _tgt01 = None
         import os as _os_tgt
         if vr is not None and _os_tgt.environ.get(
-                "VIDLORE_CLIPSTUDIO_LOOK_MATCH_BONUS", "1").strip() not in ("0", "false", "no"):
+                "VIDLORE_CLIPSTUDIO_LOOK_PROBE", "1").strip() not in ("0", "false", "no"):
             _tgt_phrase = _policy.deictic_target(seg)
             if _tgt_phrase:
                 _tgt01 = _target_pool_scores(_tgt_phrase, pool, vr)

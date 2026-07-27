@@ -107,7 +107,10 @@ def is_deictic(seg) -> bool:
 # named thing was clearly visible in 8, partly in 10, and absent in 12 — and the two the essay turns
 # on ("keep your eye on the dagger", "watch the trial the way Bran watched it") were both misses.
 _LOOK_RX = re.compile(
-    r"\b(?:watch|look at|keep (?:your )?eyes? on|notice|count|study|listen to)\s+"
+    # 'listen to' removed: an AUDIO instruction ("listen to the register") must never become a
+    # VISUAL must-see — the verifier's target_visible question and the target-led still query
+    # are nonsensical for a sound, and the A/B showed such beats steering footage.
+    r"\b(?:watch|look at|keep (?:your )?eyes? on|notice|count|study)\s+"
     r"((?:the|his|her|their|its|that|this|those|these|\w+'s)\b.*)", re.I)
 
 # the same verbs aimed at a BARE PROPER NOUN — "watch Bran", "watch Olenna, not the cup". The
