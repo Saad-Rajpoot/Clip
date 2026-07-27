@@ -1893,8 +1893,10 @@ def test_source_budget_scales_with_script():
     from vidlore.clipstudio.orchestrate import _scaled_source_budget as B
     # short clip: unchanged (respect user's small budget)
     check("short script keeps the requested budget", B(8, 12, "essay") == 8)
-    # long 181-beat essay: scales up well past 8 (~1 src / 5 beats)
-    check("181-beat essay scales up", B(8, 181, "essay") == min(48, (181 + 4) // 5))
+    # long 181-beat essay: scales up well past 8 (~1 src / 4 beats since the 2026-07-26 raise —
+    # the old 1-per-5 / cap-48 budget starved long scripts, which the frame-by-frame audit of job
+    # 69d80e9dd4 measured as 5% exact-scene hits and 46% near-duplicate scenes)
+    check("181-beat essay scales up", B(8, 181, "essay") == min(72, (181 + 3) // 4))
     check("181-beat essay budget is much larger than 8", B(8, 181, "essay") >= 30)
     # never below the user's explicit ask
     check("explicit high budget is never lowered", B(40, 60, "essay") == 40)
@@ -1903,11 +1905,27 @@ def test_source_budget_scales_with_script():
     # LONG single-scene deep-dive gets a >=20 source floor (avoids airing one clip 57x — the Cersei
     # 20-min render used its top source 57x because single_scene returned base=10)
     check("long single_scene gets a >=20 floor", B(10, 211, "single_scene") >= 20)
-    check("long single_scene scales gently with length", B(10, 211, "single_scene") == min(32, 20 + (211 - 100) // 15))
+    check("long single_scene scales gently with length",
+          B(10, 211, "single_scene") == min(56, 24 + (211 - 100) // 8))
     # long-form floor applies to multi-scene too, but scaling can exceed it
     check("100-beat video reaches the 20 floor", B(6, 100, "essay") >= 20)
-    # capped so it can't explode
-    check("budget is capped at 48", B(8, 9999, "essay") == 48)
+    # capped so it can't explode (cap raised 48 -> 72; SOURCE_BUDGET_CAP env is the hard ceiling)
+    check("budget is capped at 72", B(8, 9999, "essay") == 72)
+    # the operator can trade render time for footage breadth
+    import os as _os_b
+    _plain = B(8, 272, "single_scene")
+    _os_b.environ["VIDLORE_CLIPSTUDIO_SOURCE_BUDGET_MULT"] = "1.5"
+    try:
+        check("SOURCE_BUDGET_MULT scales the budget up", B(8, 272, "single_scene") > _plain)
+        check("MULT never drops below the operator's explicit ask", B(40, 12, "essay") >= 40)
+    finally:
+        _os_b.environ.pop("VIDLORE_CLIPSTUDIO_SOURCE_BUDGET_MULT", None)
+    check("budget returns to the default once MULT is unset", B(8, 272, "single_scene") == _plain)
+    _os_b.environ["VIDLORE_CLIPSTUDIO_SOURCE_BUDGET_CAP"] = "20"
+    try:
+        check("SOURCE_BUDGET_CAP is the hard ceiling", B(8, 9999, "essay") == 20)
+    finally:
+        _os_b.environ.pop("VIDLORE_CLIPSTUDIO_SOURCE_BUDGET_CAP", None)
 
 
 def test_caption_sync_per_scene_tolerant():

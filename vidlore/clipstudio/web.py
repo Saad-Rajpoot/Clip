@@ -548,7 +548,9 @@ def create():
         _m = brain.split(":", 1)[1] if ":" in brain else "deepseek-v4-pro"
         ds_model = _m if _m in ("deepseek-v4-pro", "deepseek-v4-flash") else "deepseek-v4-pro"
     try:
-        max_sources = max(2, min(40, int(request.form.get("max_sources") or 8)))
+        # ceiling raised 40 → 96 to match the scaled source budget (orchestrate._scaled_source_budget):
+        # a long essay needs real footage BREADTH or the matcher re-airs the same handful of clips.
+        max_sources = max(2, min(96, int(request.form.get("max_sources") or 8)))
     except Exception:
         max_sources = 8
 

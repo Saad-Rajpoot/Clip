@@ -40,15 +40,35 @@ def _scaled_source_budget(max_sources: int, n_beats: int, video_type: str = "") 
     single-scene deep-dive — otherwise the matcher re-airs one clip dozens of times (observed: a
     211-beat single-scene essay used its top source 57× → 99% of beats were the same scene). So long
     videos get a ≥20-source floor (scaling gently with length, capped), subject to what discovery can
-    actually find. A SHORT single-scene clip still just wants its own raw footage (no floor)."""
+    actually find. A SHORT single-scene clip still just wants its own raw footage (no floor).
+
+    BUDGET RAISE (2026-07-26). The old floor gave a 272-beat single-scene essay only 31 sources, and
+    the frame-by-frame audit of that render showed exactly the failure this docstring predicts: 78% of
+    beats were tagged exact_scene but only 5% actually showed the described moment, and 46% of
+    delivered scenes were near-duplicates of another scene. Both are pool-starvation symptoms — the
+    matcher cannot pick a distinct exact shot that was never downloaded. Budgets are now ~1 source per
+    4 beats with materially higher caps, and VIDLORE_CLIPSTUDIO_SOURCE_BUDGET_MULT scales the whole
+    thing (e.g. 1.5 for a "max footage" run) for operators who will trade render time for relevance."""
+    import os as _os_sb
     base = max(4, int(max_sources or 4))
     n = int(n_beats or 0)
-    longform_floor = min(32, 20 + (n - 100) // 15) if n >= 100 else 0
+    # long-form floor: steeper slope (per 8 beats, was per 15) and a 56 cap (was 32)
+    longform_floor = min(56, 24 + (n - 100) // 8) if n >= 100 else 0
     if (video_type or "").strip().lower() == "single_scene":
         # short deep-dive → raw scene only; LONG deep-dive → still needs angle/B-roll variety
-        return max(base, longform_floor)
-    scaled = min(48, (n + 4) // 5)
-    return max(base, scaled, longform_floor)
+        out = max(base, longform_floor)
+    else:
+        scaled = min(72, (n + 3) // 4)          # ~1 per 4 beats (was 1 per 5, cap 48)
+        out = max(base, scaled, longform_floor)
+    try:
+        _mult = float(_os_sb.environ.get("VIDLORE_CLIPSTUDIO_SOURCE_BUDGET_MULT", "1") or 1)
+    except (TypeError, ValueError):
+        _mult = 1.0
+    if _mult and _mult != 1.0:
+        out = int(round(out * max(0.1, _mult)))
+    # never below the operator's explicit request; hard ceiling keeps a runaway script from
+    # queueing hundreds of downloads.
+    return max(base, min(out, int(_os_sb.environ.get("VIDLORE_CLIPSTUDIO_SOURCE_BUDGET_CAP", "96") or 96)))
 
 
 # ---------------------------------------------------------------------------
@@ -517,7 +537,14 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
             or FLAG_EXACT_MISSING in (sel.flag_reasons or [])
             or "verifier_failed" in (sel.flag_reasons or []))
         no_clip = sel is None or not has_src
-        want_still = no_clip or pol == _policy.ABSTRACT or (pol == _policy.FILLER and repeat) or weak
+        # A beat that tells the viewer to LOOK at something and never got footage showing it is
+        # better served by a still OF THAT MOMENT than by moving footage of the wrong scene: the
+        # owner's rule is "exact scene ka screenshot bhi use kar sakta ho". The verifier records the
+        # miss (see the look gate in verify), so this reads the flag rather than re-deciding.
+        look_missed = bool(sel is not None
+                           and "look_target_missing" in (sel.flag_reasons or []))
+        want_still = (no_clip or pol == _policy.ABSTRACT
+                      or (pol == _policy.FILLER and repeat) or weak or look_missed)
         # ESSENTIAL fills (a beat with NO clip, or an exact-scene recovery) must always proceed — the
         # still_cap only throttles OPTIONAL repeat-breaking / variety stills, not coverage (req. 5).
         # a verifier-REJECTED beat's still is COVERAGE, not variety — the release gate blocks
@@ -933,6 +960,161 @@ def _beat_is_unresolved(sel, seg, _policy) -> bool:
     return bool(verifier_failed)
 
 
+def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, roster,
+                               policy, max_sources, show_title, log) -> int:
+    """Replace footage the pool gates threw out, BEFORE match ever runs.
+
+    The gates themselves are right — a burned-caption re-upload, a promo-card compilation, a screener
+    with a timecode burned into the frame are all genuinely unusable. The defect is what happens
+    next: discovery spends its budget once, then `_load_pool` silently drops those sources at MATCH
+    time, and nothing goes looking for a clean copy. Measured on job 69d80e9dd4_v4 — 11 of 84 ok
+    sources dropped (7 subtitled copies, 2 promo cards, 1 screener, 1 talking-head), and among them
+    the single most on-topic upload in the pool ("The Trial of Petyr Baelish", 1080p, 23 min, 215
+    shots) plus the only clip of the dagger handover. 207 beats then asked for the trial and got
+    scene packs of adjacent scenes: right character, wrong scene, 135 times.
+
+    So: derive the rejections early (a `_load_pool` pass persists them), search for a CLEAN copy of
+    each lost upload using its own title as the query, download and index whatever is new, and
+    repeat while progress is being made. Every candidate goes through the same gates on the next
+    round, so a replacement that is itself subtitled simply gets rejected too and costs one round.
+
+    Returns the number of new sources admitted. Kill switch: VIDLORE_CLIPSTUDIO_BACKFILL_REJECTED=0.
+    """
+    import os as _os_b
+    import re as _re_b
+    if _os_b.environ.get("VIDLORE_CLIPSTUDIO_BACKFILL_REJECTED", "1").strip() in ("0", "false", "no"):
+        return 0
+    try:
+        rounds = int(_os_b.environ.get("VIDLORE_CLIPSTUDIO_BACKFILL_ROUNDS", "2") or 2)
+    except (TypeError, ValueError):
+        rounds = 2
+
+    from . import match as _M
+    from .discover import discover_sources
+    from .download import download_candidates
+    from .index import index_all as _index_all
+
+    audit = {"rounds": [], "admitted": 0}
+    tried_titles: set = set()
+    admitted_total = 0
+
+    # A replacement indexed WITHOUT Face-ID is structurally unable to win the beats it was fetched
+    # for: `faceid` carries w_face (0.30) of the score, so its shots start a third of a point behind
+    # every incumbent that has cast data. Measured while testing this pass — backfilled sources came
+    # in with faceid=False and won 0 of the 8 beats whose expected_visual names their exact scene,
+    # which reads exactly like "the picker ignores the right footage" and is really a missing input.
+    if faceid_obj is None or not refs:
+        log("5b/9 · backfill: WARNING — no Face-ID references available; replacements would be "
+            "indexed without cast data and could not compete. Skipping.")
+        return 0
+
+    for rnd in range(max(1, rounds)):
+        # a pool pass re-derives and persists this round's source-level rejections
+        try:
+            _M._load_pool(proj, cfg, progress=None, show_title=show_title)
+        except Exception as e:                                   # noqa: BLE001
+            log(f"5b/9 · backfill: pool probe failed ({str(e)[:70]}) — skipping")
+            return admitted_total
+        # Only QUALITY rejects deserve a replacement: the footage was right and the copy was not.
+        # A CONTENT reject (interview, reaction, wrong show, fan art, still-image) is material we
+        # never wanted, and searching for "a cleaner copy" of it just spends the budget pulling in
+        # more of the same — measured on the first live run, which burned a search on
+        # "Arya and Bran Stark actors on growing up on the set".
+        _why = (proj.meta or {}).get("auto_rejected_reasons") or {}
+        _replaceable = {"subtitled_copy", "watermarked", "promo_overlay"}
+        rejected = [s for s in proj.sources
+                    if s.id in set((proj.meta or {}).get("auto_rejected_sources") or [])
+                    and _why.get(s.id, "subtitled_copy") in _replaceable]
+        fresh = [s for s in rejected if (s.title or "").strip()
+                 and (s.title or "").strip().lower() not in tried_titles]
+        if not fresh:
+            if rnd == 0:
+                log("5b/9 · backfill: no gate-rejected source to replace")
+            break
+
+        # the rejected upload's own title IS the description of the footage we lost; strip the
+        # channel furniture that would otherwise pull the search back to more re-uploads
+        def _q(title: str) -> str:
+            t = _re_b.sub(r"\s*[|\-–—]\s*(4k|hd|1080p|720p|full\s*scene|reaction|explained|"
+                          r"subtitles?|eng(lish)?\s*sub\w*).*$", "", title, flags=_re_b.I)
+            t = _re_b.sub(r"[\[(][^\])]*[\])]", " ", t)
+            return _re_b.sub(r"\s+", " ", t).strip()[:90]
+
+        queries = [q for q in (_q(s.title or "") for s in fresh) if len(q) > 8]
+        for s in fresh:
+            tried_titles.add((s.title or "").strip().lower())
+        log(f"5b/9 · backfill round {rnd + 1}: {len(fresh)} gate-rejected source(s) → "
+            f"searching for clean copies")
+
+        have = {(getattr(s, "url", "") or "").strip() for s in proj.sources if getattr(s, "url", "")}
+        try:
+            cands = discover_sources(analysis, cfg, segments=segs, progress=None,
+                                     extra_queries=queries) or []
+        except Exception as e:                                   # noqa: BLE001
+            log(f"5b/9 · backfill: discovery failed ({str(e)[:70]})")
+            break
+        new = [c for c in cands if (getattr(c, "url", "") or "").strip()
+               and (getattr(c, "url", "") or "").strip() not in have][:max(4, max_sources)]
+        audit["rounds"].append({"round": rnd + 1,
+                                "rejected": [s.id for s in fresh],
+                                "queries": queries,
+                                "candidates": len(cands), "new": len(new)})
+        if not new:
+            log("5b/9 · backfill: no NEW candidate found — the pool keeps what it has")
+            break
+
+        before = {s.id for s in proj.sources if s.status == SOURCE_OK}
+        try:
+            download_candidates(proj, new, cfg, policy=policy, limit=len(new), progress=None)
+        except Exception as e:                                   # noqa: BLE001
+            log(f"5b/9 · backfill: download failed ({str(e)[:70]})")
+            break
+        newly = [s for s in proj.sources if s.status == SOURCE_OK and s.id not in before]
+        if not newly:
+            log(f"5b/9 · backfill: nothing downloaded under policy={policy}")
+            break
+        try:
+            _index_all(proj, cfg, references=refs, faceid=faceid_obj, roster=roster,
+                       force=False, progress=None)
+        except Exception as e:                                   # noqa: BLE001
+            log(f"5b/9 · backfill: indexing failed ({str(e)[:70]})")
+            break
+        # A replacement only counts once it can actually AIR. Clearing the source-level gates is not
+        # enough: a fetched copy of the exact scene we lost came back as another screener with
+        # "FOR INTERNAL VIEWING ONLY" burned in, cleared every source gate, and then lost all 11 of
+        # its shots to the shot-level text gate. Measure the yield and say so.
+        kept, dead = [], []
+        for s in newly:
+            try:
+                ok, tot = _M.usable_shot_yield(proj, s.id, cfg)
+            except Exception:                                    # noqa: BLE001
+                ok, tot = 1, 1                                   # can't measure → don't punish
+            (kept if ok else dead).append((s, ok, tot))
+        admitted_total += len(kept)
+        audit["rounds"][-1]["downloaded"] = [
+            {"id": s.id, "title": (s.title or "")[:70], "usable_shots": ok, "shots": tot}
+            for s, ok, tot in kept + dead]
+        for s, ok, tot in dead:
+            proj.meta.setdefault("banned_sources", [])
+            if s.id not in proj.meta["banned_sources"]:
+                proj.meta["banned_sources"].append(s.id)
+            log(f"5b/9 · backfill: {(s.title or s.id)[:44]!r} has 0 usable shots of {tot} "
+                f"(burned text / graphics / too dark) — banned, not a replacement")
+        if kept:
+            log(f"5b/9 · backfill: +{len(kept)} usable source(s) indexed — "
+                + ", ".join(f"{(s.title or s.id)[:36]} ({ok}/{tot} shots)" for s, ok, tot in kept[:3]))
+        elif dead:
+            log("5b/9 · backfill: every replacement this round was unusable — pool unchanged")
+
+    audit["admitted"] = admitted_total
+    try:
+        proj.meta["backfill_audit"] = audit
+        proj.save()
+    except Exception:                                            # noqa: BLE001
+        pass
+    return admitted_total
+
+
 def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, refs, roster,
                               policy, log) -> int:
     """R4-5 BOUNDED AUTONOMOUS RECOVERY. For EXACT beats still unresolved after match + verify, run
@@ -1334,6 +1516,16 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
     else:
         log("5/9 · deep index — ↻ skipped (resume, all footage stages cached)")
 
+    # 5b — backfill footage the pool gates will reject. Runs BEFORE match, because at match time the
+    # discovery budget is already spent and a dropped source just leaves a hole nothing fills.
+    if _need_footage_stages and not _skip_match:
+        try:
+            _backfill_rejected_sources(
+                proj, segs, analysis, cfg, refs=refs, faceid_obj=faceid_obj, roster=roster,
+                policy=policy, max_sources=max_sources, show_title=movie_hint or "", log=log)
+        except Exception as e:                                   # noqa: BLE001
+            log(f"5b/9 · backfill: skipped ({str(e)[:80]})")
+
     # 6 — match
     if _skip_match:
         log("6/9 · match — ↻ skipped (resume, selections cached)")
@@ -1479,7 +1671,29 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
     if _pm_stage.enabled():
         _pm_stage.write_report(proj.output_dir / "perf_report.json")
 
+    # What this render actually spent. Hundreds of vision calls go into verify alone and none of it
+    # used to be recorded, so cost was unanswerable and "run verify twice" was an unpriced decision.
+    _cost = {}
+    try:
+        from . import llm as _llm_cost
+        _cost = _llm_cost.usage_summary()
+        if _cost.get("calls"):
+            _per = " · ".join(
+                f"{m.split('/')[-1]}: {d['calls']} calls ${d['usd']:.2f}"
+                for m, d in sorted(_cost["models"].items(), key=lambda kv: -kv[1]["usd"]))
+            log(f"cost: ~${_cost['usd']:.2f} over {_cost['calls']} LLM/vision call(s) "
+                f"({_cost['prompt'] / 1000:.0f}k in / {_cost['completion'] / 1000:.0f}k out) — {_per}")
+            log("cost: prices are configurable estimates "
+                "(VIDLORE_CLIPSTUDIO_PRICE_<MODEL>_IN/_OUT), not a provider invoice")
+        proj.meta["cost"] = _cost
+        proj.save()
+        import json as _json_cost
+        (proj.output_dir / "cost_report.json").write_text(_json_cost.dumps(_cost, indent=1))
+    except Exception as e:                                       # noqa: BLE001
+        log(f"cost: accounting unavailable ({str(e)[:60]})")
+
     return {
+        "cost": _cost,
         "project": str(proj.root),
         "summary": summ,
         "analysis": analysis.to_dict(),

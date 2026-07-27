@@ -97,6 +97,67 @@ def is_deictic(seg) -> bool:
     return bool(_DEICTIC_RX.search(getattr(seg, "text", "") or ""))
 
 
+# INSTRUCTED LOOKING — the narrator tells the viewer to look at a NAMED thing: "keep your eye on
+# the dagger", "watch his face", "count the chairs", "notice the division of labour". Different from
+# _DEICTIC_RX above, which catches a pointing determiner bound to a scene noun ("that table") and
+# only decides POLICY. Here the sentence names its own target, and that target is checkable: either
+# the dagger is on screen or it is not.
+#
+# These are the beats a viewer notices breaking. Measured on the v4 render: of 30 such beats the
+# named thing was clearly visible in 8, partly in 10, and absent in 12 — and the two the essay turns
+# on ("keep your eye on the dagger", "watch the trial the way Bran watched it") were both misses.
+_LOOK_RX = re.compile(
+    r"\b(?:watch|look at|keep (?:your )?eyes? on|notice|count|study|listen to)\s+"
+    r"((?:the|his|her|their|its|that|this|those|these|\w+'s)\b.*)", re.I)
+
+# a target must be something you can SEE — drop the abstract nouns the same phrasing produces
+# ("notice the division of labour", "watch the way it changes")
+_TARGET_STOP = frozenset("""way ways point points fact facts idea ideas reason reasons question
+questions answer answers thing things order timing logic argument division labour labor
+difference differences pattern patterns detail details sense
+strategy tactics approach method plan intent motive meaning implication""".split())
+
+# a target phrase ENDS here — the trailing clause is about the target, not part of it:
+# "the dagger IN that room", "the trial THE WAY Bran watched it", "his strategy IN the next…"
+_TARGET_CUT = frozenset("""in on at to for of with from by as and or but because while when
+before after during until since so that which who whom whose again
+the a an his her their its this these those""".split())
+
+
+def deictic_target(seg) -> str:
+    """The concrete thing this beat tells the viewer to look at, or "".
+
+    Returns the noun phrase ("the dagger", "his face", "the chairs") so the verifier can require it
+    on screen instead of settling for a clip that merely has the right people in it. The phrase is
+    cut at the first preposition or conjunction: greedy capture turned "watch the trial the way Bran
+    watched it" into "the trial the way", whose head noun then read as abstract and lost the beat."""
+    m = _LOOK_RX.search(getattr(seg, "text", "") or "")
+    if not m:
+        return ""
+    words, out = m.group(1).split(), []
+    for i, w in enumerate(words):
+        bare = w.lower().strip(".,;:!?\"")
+        if bare.endswith("'s") and i == 0:
+            out.append(w.strip(".,;:!?\""))
+            continue
+        bare = bare.strip("'")
+        if i and (bare in _TARGET_CUT or not bare):
+            break
+        out.append(w.strip(".,;:!?\"'"))
+        if len(out) >= 4:
+            break
+    if len(out) < 2:
+        return ""
+    head = out[-1].lower().rstrip("'s")
+    if head in _TARGET_STOP or len(head) < 3:
+        return ""
+    return " ".join(out)
+
+
+def has_deictic_target(seg) -> bool:
+    return bool(deictic_target(seg))
+
+
 def classify(seg) -> str:
     """Heuristic policy from the signals the analyzer already produces. Deterministic — always works
     even with no LLM. The LLM's explicit `visual_policy` (when present + valid) takes precedence."""

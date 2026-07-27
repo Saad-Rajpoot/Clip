@@ -62,6 +62,17 @@ _REJECT_TITLE = re.compile(
     # joke/meme re-edits (fart/crack/YTP edits, bad lip reading) — both aired junk on the
     # Tyrion render (an 'Anatomy of a Scene' BTS clip showed lights+reflectors mid-conclusion):
     r"anatomy of (a|the) scene|making[- ]of|the making of|fart edition|\bfart\b|"
+    # 'How <show> Filmed/Shot/Made <scene>' — the making-of phrasing the words above all miss.
+    # Observed: "How 'Game of Thrones' Filmed Arya And Brienne's Sword Fight Scene" downloaded
+    # clean, then put stunt-rehearsal footage (modern t-shirts, gym crash mats, Nike trainers,
+    # burned social captions, pillarboxed) on screen three times in one render.
+    r"how [a-z'\" ]{0,28}(filmed|shot|made|created|pulled off|choreograph)|"
+    r"how (they|we) (filmed|shot|made)|the choreography (of|behind)|stunt (team|double|rehearsal)|"
+    # QUIZ / LISTICLE compilations: numbered titles, subscribe cards and end screens burned into
+    # the frames. Observed: 'Can you recognize all Valyrian steel weapons?' aired another
+    # channel's '2. NEEDLE' title over a beat about Arya's execution of Littlefinger.
+    r"can you (recognize|recognise|name|guess|identify|spot)|how well do you know|"
+    r"\bquiz\b|guess the (scene|character|episode)|"
     r"crack ?(vid|video|edition)|\bytp\b|bad lip reading|"
     r"record straight|sets? the record|addresses?[a-z' ]{0,18}(rumor|salary)|salary (rumor|talk)|"
     r"season (9|10|11|12|nine|ten|eleven|twelve)|red nose day|fundrais|"
@@ -898,17 +909,26 @@ def resolve_quality(cands: list[SourceCandidate], cfg: ClipConfig, progress=None
 
 
 def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None,
-                     progress=None) -> list[SourceCandidate]:
+                     progress=None, extra_queries=None) -> list[SourceCandidate]:
     """Return a ranked, de-duplicated, diverse candidate list (~discover_target items).
-    `segments` enables PER-BEAT targeted queries (the exact scene each line needs)."""
+    `segments` enables PER-BEAT targeted queries (the exact scene each line needs).
+
+    `extra_queries` are caller-supplied searches run FIRST, at anchor depth. The backfill pass uses
+    them to go looking for a clean copy of a source the pool gates threw out: the rejected upload's
+    own title is the sharpest description we have of the footage that was lost, and no beat-derived
+    query reproduces it."""
     def log(m):
         if progress:
             progress(m)
 
     queries = build_queries(analysis, segments)
+    if extra_queries:
+        _seen_q = {q.lower() for q in queries}
+        queries = [q for q in dict.fromkeys(extra_queries) if q and q.lower() not in _seen_q] + queries
     # the anchor-scene queries are the most important searches — go DEEPER on them (more results) so
     # the exact raw scene clip can't be missed under the noise of essays/compilations.
     anchor_qset = {q.lower() for q in anchor_queries(analysis, segments)}
+    anchor_qset |= {q.lower() for q in (extra_queries or []) if q}   # backfill searches go deep too
     log(f"discover: {len(queries)} queries ({len(anchor_qset)} anchor) · type={getattr(analysis,'video_type','')}")
     from . import perf_metrics as _pm
 
