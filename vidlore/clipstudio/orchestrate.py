@@ -1021,7 +1021,7 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
         # more of the same — measured on the first live run, which burned a search on
         # "Arya and Bran Stark actors on growing up on the set".
         _why = (proj.meta or {}).get("auto_rejected_reasons") or {}
-        _replaceable = {"subtitled_copy", "watermarked", "promo_overlay"}
+        _replaceable = {"subtitled_copy", "watermarked", "promo_overlay", "numeral_overlay"}
         rejected = [s for s in proj.sources
                     if s.id in set((proj.meta or {}).get("auto_rejected_sources") or [])
                     and _why.get(s.id, "subtitled_copy") in _replaceable]

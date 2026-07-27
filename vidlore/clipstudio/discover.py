@@ -30,6 +30,12 @@ _REJECT_TITLE = re.compile(
     # downloaded + indexed at 360p). Plural-safe per the trailing-\b note above.
     r"audio ?books?|"
     r"reviews?|reviewers?|review(ed|ing)?|commentar(y|ies)|podcasts?|tier list|ranking every|honest trailer|"
+    # LISTICLE / COUNTDOWN essays — 'Top 5 Suspects' aired giant burned countdown numerals and
+    # static suspect-collages on 15 beats of job 5462677f95; none of the existing markers matched.
+    # All plural-safe (trailing token is a digit or already-suffixed word):
+    r"top \d+|\d+ (things|facts|details|theories|questions|mistakes|clues|moments you)|"
+    r"ranked|countdown|video essays?|the (real|true) (reason|story)|"
+    r"what you (missed|didn'?t notice)|things you missed|hidden details?|"
     r"everything wrong|cinemasins|recaps?|recap(ped|ping)?|explained|breakdowns?|easter eggs|"
     r"spoiler talk|let'?s play|live ?stream|full movie|whole movie|"
     # talking-head / press / cast content — NOT scene footage:

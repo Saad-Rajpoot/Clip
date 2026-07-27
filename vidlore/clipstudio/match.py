@@ -574,6 +574,21 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
                 progress(f"match: {src.id} — {len(_gfx_idx)} designed-graphics shot(s) gated "
                          f"(news CGI / game UI / illustration never airs)")
             _persist_graphics_flags(proj, src.id, shots)
+        # LISTICLE COUNTDOWN NUMERALS — a 'Top 5'-style essay parks a giant burned '1'/'3' on
+        # otherwise-real footage; digits defeat every text rule (no junk keyword, one token,
+        # no letters for the badge rule). Measured on job 5462677f95: the listicle source has
+        # numeral OCR on 75% of its shots; every legit source <=2.7% (OCR noise) — so the gate
+        # is SOURCE-level: >=3 numeral shots AND >=10% of the source. Sparse hits never gate.
+        if nonshow_on and os.environ.get("VIDLORE_CLIPSTUDIO_NUMERAL_GATE", "1").strip() \
+                not in ("0", "false", "no"):
+            _n_num = sum(1 for sh in shots if _shot_numeral_overlay(sh))
+            if _n_num >= 3 and _n_num / max(1, len(shots)) >= float(
+                    os.environ.get("VIDLORE_CLIPSTUDIO_NUMERAL_SRC_FRAC", "0.10") or 0.10):
+                if progress:
+                    progress(f"match: dropping listicle/countdown source {src.id} "
+                             f"({_n_num}/{len(shots)} shots carry a burned countdown numeral)")
+                _reject(src.id, "numeral_overlay")
+                continue
         for _pos, sh in enumerate(shots):             # `embeds` loaded once above (reused here)
             if getattr(sh, "index", _pos) in _gfx_idx:
                 continue
@@ -895,6 +910,22 @@ def _shot_overlay_badge(sh) -> bool:
         if m is not None and float(m.mean()) >= 0.25:
             return True
     return False
+
+
+_NUMERAL_RX = re.compile(r"^\s*#?\d{1,2}\s*[.):]?\s*$")
+
+
+def _shot_numeral_overlay(sh) -> bool:
+    """Listicle COUNTDOWN NUMERAL burned into the frame — 'Top 5'-style essays park a giant
+    '1'/'3' on the edge of otherwise-real footage. The numeral defeats every text rule: digits
+    match no junk keyword, one token is under _ocr_text_heavy's floors, and _NAME_BADGE_RX wants
+    letters. Rule: the shot's OCR is a LONE 1-2-digit token (optionally '#'/'.'/')'/':') and
+    nothing else. NOT a safe per-shot gate on its own — measured on job 5462677f95 (4267 shots),
+    OCR noise puts 1-2 stray digit reads in legit scene packs too (63 raw hits total). The
+    listicle source carried them on 75% of its shots vs <=2.7% everywhere else, so the CALLER
+    gates at source level (>=3 hits and >=10% of shots; see _load_pool)."""
+    txt = (getattr(sh, "ocr_text", "") or "").strip()
+    return bool(txt) and bool(_NUMERAL_RX.match(txt))
 
 
 def _shot_graphics_tier(sh, vec=None) -> int:

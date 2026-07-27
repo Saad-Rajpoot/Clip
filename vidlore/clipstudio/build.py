@@ -986,6 +986,112 @@ def _breakout_src_ok(src, shots) -> bool:
     return True
 
 
+def _breakout_cursor_probe(video: Path, dur: float) -> str:
+    """Screen-recording MOUSE-CURSOR detector for an extracted breakout clip — '' when clean,
+    else a reject reason. Job 5462677f95 aired a 12.6s breakout with a white cursor burned at
+    frame-centre for its whole duration ('game of thrones Joffrey death' was a screen capture);
+    no gate looks at small static mid-frame furniture.
+
+    Deliberately BOUNDED to dodge the candle-sconce precedent (static scene furniture fires
+    positionally-consistent-edge detectors): (1) only runs on breakout clips (seconds long, one
+    scene, high stakes); (2) requires the SCENE to move (global inter-frame diff — a locked-off
+    shot is skipped as undecidable); (3) the blob must be small, bright, near-ACHROMATIC (white/
+    grey cursor — a candle sconce/flame is warm, high channel spread) and frozen (per-pixel std
+    ~0 across frames while the scene changes); (4) away from corners (corner logos have their own
+    detector + crop path). A miss costs one breakout candidate, never footage.
+    Env: VIDLORE_CLIPSTUDIO_BREAKOUT_CURSOR_GATE=0 disables."""
+    import os as _os_cur
+    if _os_cur.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_CURSOR_GATE", "1").strip() \
+            in ("0", "false", "no"):
+        return ""
+    try:
+        import numpy as np
+        import tempfile as _tf
+        from PIL import Image
+        frames = []
+        # sample past the first 30% — breakout clips open on a cross-dissolve from the previous
+        # beat, and a global fade makes every ring look "moving" (a night-sky star survived the
+        # ring test exactly this way)
+        with _tf.TemporaryDirectory(prefix="bkcur_") as td:
+            for k, frac in enumerate((0.30, 0.50, 0.70, 0.90)):
+                fp = Path(td) / f"f{k}.png"
+                subprocess.run(
+                    [ffmpeg_exe(), "-y", "-loglevel", "error",
+                     "-ss", f"{max(0.0, frac * float(dur)):.3f}", "-i", str(video),
+                     "-frames:v", "1", "-vf", "scale=640:360", str(fp)],
+                    capture_output=True, timeout=60)
+                if fp.exists():
+                    frames.append(np.asarray(Image.open(fp).convert("RGB"),
+                                             dtype="float32"))
+        if len(frames) < 3:
+            return ""
+        gray = [f.mean(axis=2) for f in frames]
+        # (2) the scene must move — a locked-off shot is undecidable, skip
+        moves = [float(np.abs(gray[i + 1] - gray[i]).mean()) for i in range(len(gray) - 1)]
+        if max(moves) < 2.0:
+            return ""
+        stack = np.stack(gray)                            # [n, 360, 640]
+        rgb_mean = np.stack(frames).mean(axis=0)          # [360, 640, 3]
+        chroma = rgb_mean.max(axis=2) - rgb_mean.min(axis=2)
+        mask = ((stack.mean(axis=0) > 190.0)              # bright
+                & (stack.std(axis=0) < 3.5)               # frozen while the scene moves
+                & (chroma < 18.0))                        # achromatic (white/grey, not flame)
+        # (4) corners are another detector's jurisdiction
+        mask[:44, :116] = mask[:44, 524:] = mask[316:, :116] = mask[316:, 524:] = False
+        if not mask.any():
+            return ""
+        # small connected component = cursor-sized furniture (4-neighbour flood fill)
+        seen = np.zeros_like(mask, dtype=bool)
+        ys, xs = np.nonzero(mask)
+        for y0, x0 in zip(ys, xs):
+            if seen[y0, x0]:
+                continue
+            comp = [(int(y0), int(x0))]
+            seen[y0, x0] = True
+            qi = 0
+            while qi < len(comp) and len(comp) <= 900:
+                cy, cx = comp[qi]
+                qi += 1
+                for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    ny, nx = cy + dy, cx + dx
+                    if 0 <= ny < 360 and 0 <= nx < 640 and mask[ny, nx] and not seen[ny, nx]:
+                        seen[ny, nx] = True
+                        comp.append((ny, nx))
+            # measured on the real leak: a 1280-wide screen-recording's arrow shrinks to a
+            # ~6x6 white blob (~13px) once the 360p source is decoded at 640x360
+            if 8 <= len(comp) <= 500:
+                cys = [p[0] for p in comp]
+                cxs = [p[1] for p in comp]
+                if min(cys) < 4 or min(cxs) < 4 or max(cys) >= 356 or max(cxs) >= 636:
+                    continue    # frame-edge sliver (upload border artifact, sits under bars)
+                # SOLID-WHITE FROZEN CORE — a rendered cursor saturates (mean 255, std 0);
+                # a specular rim-light on a near-static shot peaks ~235 and shimmers
+                # (measured: real cursor 11 core px, the Bran-hood highlight FP 0)
+                _mean0 = stack.mean(axis=0)
+                _std0 = stack.std(axis=0)
+                _core = sum(1 for cy, cx in comp
+                            if _mean0[cy, cx] > 245.0 and _std0[cy, cx] < 1.5)
+                if _core < 3:
+                    continue
+                if (max(cys) - min(cys)) <= 36 and (max(cxs) - min(cxs)) <= 36:
+                    # THE CANDLE-SCONCE/STAR DISCRIMINATOR: a cursor floats OVER moving
+                    # content, static scene furniture (a star in a night sky, a lit sconce
+                    # on a wall) sits IN a static region. Require the ring around the blob
+                    # to actually move across the samples.
+                    y0 = max(0, min(cys) - 12); y1 = min(360, max(cys) + 13)
+                    x0 = max(0, min(cxs) - 12); x1 = min(640, max(cxs) + 13)
+                    ring = np.ones((y1 - y0, x1 - x0), dtype=bool)
+                    for cy, cx in comp:
+                        ring[cy - y0, cx - x0] = False
+                    _rstd = float(stack.std(axis=0)[y0:y1, x0:x1][ring].mean())
+                    if _rstd >= 4.0:
+                        return (f"cursor-overlay(~{len(comp)}px @ "
+                                f"{int(np.mean(cxs))},{int(np.mean(cys))})")
+        return ""
+    except Exception:                                    # noqa: BLE001
+        return ""
+
+
 def _breakout_window_luma(src_path, start: float, dur: float) -> float:
     """LEGIBILITY score (0–255-ish) across a breakout's air window, on a 128×72 decode.
 
@@ -1812,6 +1918,13 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                     if _dark9(_s9):
                         _bk_dirty = f"unreadable(shot {_s9.index})"
                         break
+            if not _bk_dirty:
+                # SCREEN-RECORDING CURSOR — small white frozen blob mid-frame while the scene
+                # moves (the 12.6s cursor breakout of job 5462677f95). Probes the EXTRACTED
+                # clip, so it sees exactly what would air.
+                _cur9 = _breakout_cursor_probe(v, float(real))
+                if _cur9:
+                    _bk_dirty = _cur9
             if _bk_dirty:
                 _rej["window_commentary"] += 0        # tracked separately in the log line
                 # breakouts are quote-locked (policy=exact by definition): the aired window is
