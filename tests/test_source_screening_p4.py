@@ -93,37 +93,49 @@ def test_numeral_source_gate_wired_into_pool_load():
 
 def test_static_collage_gate_calibrated():
     from vidlore.clipstudio.match import _shot_static_collage, _slideshow_source_verdict
-    # FREEZE tier: frozen collage (all pairs < 0.9), lit -> gated, standalone
-    check("frozen lit collage gated",
-          _shot_static_collage(_shot(static_frac=1.0, luma_avg=80.0)))
-    # single-face freeze with no corroboration still gated (segs 34/133/210/211 class)
-    check("uncorroborated freeze still gated",
-          _shot_static_collage(_shot(static_frac=1.0, luma_avg=40.0, graphics_flag=0,
+    # FREEZE tier keys on pair_diff_max: a frozen digital card is zero-diff at ANY resolution
+    check("frozen digital card gated (pmax 0.00)",
+          _shot_static_collage(_shot(pair_diff_max=0.0, luma_avg=35.3)))
+    check("uncorroborated frozen card still gated",
+          _shot_static_collage(_shot(pair_diff_max=0.05, luma_avg=40.0, graphics_flag=0,
                                      ocr_text="", faces=1)))
-    # near-black live footage protected by the luma guard (control floor: dmax 0.97 @ luma 3.2)
-    check("near-black live shot NOT gated",
-          not _shot_static_collage(_shot(static_frac=1.0, luma_avg=3.2)))
-    # STILL tier needs corroboration
-    check("slow art pan + graphics band gated",
-          _shot_static_collage(_shot(static_frac=0.0, pair_diff_max=1.8, luma_avg=60.0,
-                                     graphics_flag=1)))
+    # the HD calibration-transfer FP: real slow dark scene (Ramsay bedroom pmax 0.61) SPARED
+    check("HD slow real footage NOT gated (pmax 0.61 — the Ramsay FP)",
+          not _shot_static_collage(_shot(pair_diff_max=0.61, luma_avg=14.9, static_frac=1.0)))
+    # near-black protected by the luma guard
+    check("near-black shot NOT gated",
+          not _shot_static_collage(_shot(pair_diff_max=0.0, luma_avg=3.2)))
+    # STILL tier needs graphics/text corroboration AND near-frozen diffs
+    check("near-frozen art card + graphics band gated",
+          _shot_static_collage(_shot(pair_diff_max=0.3, luma_avg=60.0, graphics_flag=1)))
     check("slow real shot without corroboration NOT gated",
-          not _shot_static_collage(_shot(static_frac=0.0, pair_diff_max=1.8, luma_avg=60.0,
+          not _shot_static_collage(_shot(pair_diff_max=1.8, luma_avg=60.0,
                                          graphics_flag=0, ocr_text="", faces=1)))
-    # real footage far above thresholds
+    check("faces alone never corroborate (HD two-person dialogue FP)",
+          not _shot_static_collage(_shot(pair_diff_max=0.3, luma_avg=60.0,
+                                         graphics_flag=0, ocr_text="", faces=2)))
+    check("slow-but-not-frozen band shot NOT gated (HD slow scene)",
+          not _shot_static_collage(_shot(pair_diff_max=1.8, luma_avg=60.0, graphics_flag=1)))
     check("normal footage NOT gated",
-          not _shot_static_collage(_shot(static_frac=0.0, pair_diff_max=25.0, luma_avg=60.0)))
-    # old index sentinels fail open
+          not _shot_static_collage(_shot(pair_diff_max=25.0, luma_avg=60.0)))
     check("old index (-1 sentinels) fails open", not _shot_static_collage(_shot()))
-    # source-level slideshow verdict: the_strangler profile 0.89 vs good max 0.51
-    slides = [_shot(index=i, pair_diff_mean=2.0) for i in range(18)]
-    mixed = [_shot(index=i, pair_diff_mean=(2.0 if i < 9 else 30.0)) for i in range(18)]
-    check("slideshow essay source flagged (0.89 profile)",
-          _slideshow_source_verdict(slides))
-    check("half-static source spared (0.50 <= 0.51 good ceiling)",
-          not _slideshow_source_verdict(mixed))
+    # SLIDESHOW verdict now needs corroboration: slowness alone does not transfer to HD
+    # ('When Roses' 8 hard-gfx vs Cersei-dinner 0 hard at the same slowness)
+    essay = [_shot(index=i, pair_diff_mean=2.0, pair_diff_max=25.0,
+                   graphics_flag=(2 if i < 4 else 0)) for i in range(18)]
+    hd_dialogue = [_shot(index=i, pair_diff_mean=2.0, pair_diff_max=25.0,
+                         graphics_flag=0) for i in range(18)]
+    check("AI-art essay flagged (slow + >=3 hard gfx)",
+          _slideshow_source_verdict(essay))
+    check("HD slow dialogue scene SPARED (slow but 0 hard gfx — the Cersei-dinner FP)",
+          not _slideshow_source_verdict(hd_dialogue))
+    frozen_cards = [_shot(index=i, pair_diff_mean=2.0,
+                          pair_diff_max=(0.0 if i < 4 else 25.0), luma_avg=40.0)
+                    for i in range(18)]
+    check("card-deck slideshow flagged via >=3 frozen cards",
+          _slideshow_source_verdict(frozen_cards))
     check("small sources never qualify (<12 measured)",
-          not _slideshow_source_verdict(slides[:8]))
+          not _slideshow_source_verdict(essay[:8]))
     old = [_shot(index=i) for i in range(20)]
     check("old index never qualifies", not _slideshow_source_verdict(old))
 

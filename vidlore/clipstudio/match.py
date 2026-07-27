@@ -963,36 +963,54 @@ def _shot_static_collage(sh) -> bool:
     import os as _os_st
     if _os_st.environ.get("VIDLORE_CLIPSTUDIO_STATIC_GATE", "1").strip() in ("0", "false", "no"):
         return False
-    sf = getattr(sh, "static_frac", -1.0)
-    sf = -1.0 if sf is None else float(sf)
+    # FREEZE tier keys on pair_diff_max, NOT static_frac: HD-clean slow dark scenes sit under
+    # the 0.9 per-pair threshold (measured on a Ramsay bedroom shot: pmax 0.61, real footage),
+    # while a genuinely frozen digital card is EXACTLY zero-diff at any resolution (outro card
+    # pmax 0.00). 0.20 splits them with wide margins on both sides.
+    pmx = getattr(sh, "pair_diff_max", -1.0)
+    pmx = -1.0 if pmx is None else float(pmx)
     la = float(getattr(sh, "luma_avg", -1.0) or -1.0)
-    if sf >= 0.75 and la >= 5.0:
+    if 0.0 <= pmx < 0.20 and la >= 5.0:
         return True
-    pm = getattr(sh, "pair_diff_max", -1.0)
-    pm = -1.0 if pm is None else float(pm)
-    if 0.0 <= pm < 2.3:
+    # STILL tier: near-frozen (digital stills read ~0-0.3 at any resolution; HD real footage
+    # floors ~0.4) AND corroborated by designed-graphics/text evidence. faces>=2 was measured
+    # OUT as a corroborator: at HD, slow two-person dialogue sits under the old 2.3 bound and
+    # every real conversation has two faces — it flagged 39 real shots on one 6-source test.
+    if 0.0 <= pmx < 0.60:
         gfx = int(getattr(sh, "graphics_flag", -1) or -1)
         has_ocr = bool((getattr(sh, "ocr_text", "") or "").strip())
-        faces = int(getattr(sh, "faces", 0) or 0)
-        if gfx >= 1 or has_ocr or faces >= 2:
+        if gfx >= 1 or has_ocr:
             return True
     return False
 
 
 def _slideshow_source_verdict(shots) -> bool:
     """True when a WHOLE source is a slideshow/AI-art essay (drop it): >=65% of its shots have
-    a mean pair diff < 6 with at least 12 measured shots. Calibrated: 'The Strangler' 0.89 and
-    'When Roses Turn to Poison' 0.69 (both AI-art essays that supplied most non_show leaks) vs
-    <=0.51 across real-footage sources. Old indexes (no pair_diff_mean) never qualify."""
+    a mean pair diff < 6 (>=12 measured) AND the slowness is CORROBORATED by designed-graphics
+    evidence — >=3 HARD graphics shots or >=3 frozen digital cards. Slowness alone does NOT
+    transfer across source quality: the 0.65 floor was calibrated on 360p uploads, and clean HD
+    downloads put real slow candlelit dialogue (Cersei dinner 0.72, Ramsay bedroom 0.72) right
+    where the 360p AI-art essays sat — while those essays carry hard-graphics shots real scenes
+    never do ('When Roses' 8 hard, 'The Strangler' 3 hard vs 0 across every real HD source)."""
     vals = []
+    hard = 0
+    frozen = 0
     for sh in shots:
         pm = getattr(sh, "pair_diff_mean", -1.0)
         pm = -1.0 if pm is None else float(pm)
         if pm >= 0.0:
             vals.append(pm)
+        try:
+            if int(getattr(sh, "graphics_flag", -1) or -1) >= 2:
+                hard += 1
+        except (TypeError, ValueError):
+            pass
+        if _shot_static_collage(sh):
+            frozen += 1
     if len(vals) < 12:
         return False
-    return sum(1 for v in vals if v < 6.0) / len(vals) >= 0.65
+    slow = sum(1 for v in vals if v < 6.0) / len(vals) >= 0.65
+    return slow and (hard >= 3 or frozen >= 3)
 
 
 _NUMERAL_RX = re.compile(r"^\s*#?\d{1,2}\s*[.):]?\s*$")
