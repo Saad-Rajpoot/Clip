@@ -37,8 +37,11 @@ _REJECT_TITLE = re.compile(
     r"ranked|countdown|video essays?|the (real|true) (reason|story)|"
     r"what you (missed|didn'?t notice)|things you missed|hidden details?|"
     # merch/prop content — a 'Widow's Wail replica unboxing' was fetched by a targeted search
-    # and nearly aired under 'He draws Valyrian steel' (plural-safe):
+    # and nearly aired under 'He draws Valyrian steel'; an 'Aladean Vintage Chalice ... Handmade'
+    # PRODUCT LISTING aired a turntable goblet commercial on 2 beats (plural-safe):
     r"unboxing|unboxed|replicas?|prop swords?|merch|figurines? review|"
+    r"handmade|for sale|\betsy\b|\bamazon\b|aliexpress|collectibles?|official merchandise|"
+    r"product (video|review|showcase)s?|"
     r"everything wrong|cinemasins|recaps?|recap(ped|ping)?|explained|breakdowns?|easter eggs|"
     r"spoiler talk|let'?s play|live ?stream|full movie|whole movie|"
     # talking-head / press / cast content — NOT scene footage:
@@ -158,6 +161,15 @@ _NONSHOW_TITLE = re.compile(
     r"\(\d{3,4}\s?ac\)|\d{3,4}\s?ac\b|house \w+ vs\.? house \w+|"
     r"\bvs\.?\b.{0,30}\bbattle\b|\bbattle\b.{0,30}\bvs\.?\b)", re.I)
 _TYPE_BONUS = re.compile(r"\b(scene|clip|fight|battle|death|kills?|moment|confronts?|speech)\b", re.I)
+
+# uploads that announce APPENDED NON-SCENE content ('... + BONUS Scene'): the main footage is
+# fine but the tail carries interviews/featurettes — an Emilia Clarke press junket aired
+# mid-beat from exactly such a tail. Consumers gate the source's trailing span, not the title.
+_BONUS_TAIL_RX = re.compile(r"\+ ?bonus|bonus (scenes?|clips?|footage|content)|\bextras\b", re.I)
+
+
+def source_has_bonus_tail(title: str) -> bool:
+    return bool(_BONUS_TAIL_RX.search(title or ""))
 
 
 def is_unwanted_source_title(title: str) -> bool:

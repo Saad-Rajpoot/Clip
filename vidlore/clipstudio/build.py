@@ -1569,10 +1569,19 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         # that point — a single shared word let tangential lines air (e.g. a Tywin-throne "I did not
         # do" over a strangling beat). Mined evidence MERGES with located verbatim quotes; only if
         # nothing matched at all do we fall back to tier-1 "any line" (the scene IS the subject).
-        mined = (_mine_tier([s for s in srcs if s.id in _tier1], 2)
-                 + _mine_tier([s for s in srcs if s.id in _tier2], 2))
+        try:
+            _min_ov9 = max(1, int(_os9b.environ.get(
+                "VIDLORE_CLIPSTUDIO_BREAKOUT_MINE_MIN_OV", "2") or 2))
+        except (TypeError, ValueError):
+            _min_ov9 = 2
+        mined = (_mine_tier([s for s in srcs if s.id in _tier1], _min_ov9)
+                 + _mine_tier([s for s in srcs if s.id in _tier2], _min_ov9))
         if not cands and not mined:
-            mined = _mine_tier([s for s in srcs if s.id in _tier1], 0)
+            # LAST-RESORT tier used to accept ZERO-overlap lines — that is how an S2 war-council
+            # clip aired mid-trial-argument and a Bronn/Shae consolation aired under Olenna's
+            # confession (audited 2-3/10 both times). The floor now holds even here: a breakout
+            # that shares no content with the narration is worse than no breakout at all.
+            mined = _mine_tier([s for s in srcs if s.id in _tier1], _min_ov9)
         _seen_shot = {(c[2].id, int(float(c[3].start) * 10)) for c in cands}
         for c in mined:
             kk = (c[2].id, int(float(c[3].start) * 10))
@@ -3830,43 +3839,63 @@ def preassemble_release_block_reason(proj, segments, analysis=None):
             f"Rediscovery / more footage needed (CONTENT failure: re-running unchanged will not fix it).")
 
 
-def _resolve_music(music, theme_name: str, total: float, work: Path):
+def _resolve_music(music, theme_name: str, total: float, work: Path, log=None):
     """A cinematic background bed. User-supplied path wins; else the engine's theme-aware
-    compose_score(); else a deterministic track from the matching music bucket."""
+    compose_score(); else a deterministic track from the matching music bucket.
+
+    THREE measured defects fixed here after a full render shipped with NO music at all:
+      1. the arc cues used {"t": ...} points while compose_score's contract is
+         {"start","end"} SEGMENTS — KeyError('end') on every call, so the 'retention arc'
+         had never actually run and every render silently used the single-track fallback;
+      2. that KeyError was swallowed by a bare `except: pass` (the voiceover-v3 bug class);
+      3. the fallback globbed the PACKAGE-relative assets dir, ignoring VIDLORE_MUSIC_DIR —
+         empty in a git worktree (mp3s are gitignored), so the fallback also returned None.
+    Failures are now LOGGED, the fallback is env-aware (musiclib.library_root), and the
+    caller hard-fails on a None result unless VIDLORE_CLIPSTUDIO_ALLOW_NO_MUSIC=1."""
     import os
     if music and Path(music).exists():
         return music
     bucket = _MUSIC_BUCKET.get(theme_name, "historical_epic")
     try:                                              # engine's crossfaded, ducked, arc-aware score
         from vidlore.musiclib import compose_score
-        # RETENTION MUSIC ARC: a dynamic emotional curve, not a flat bed — punchy hook intensity,
-        # ease back so the early narration breathes, a mid build, then SWELL into the climax
-        # (~80%) and soften for the outro. Dynamics keep the ear engaged. (env: MUSIC_ARC=0 → flat)
+        # RETENTION MUSIC ARC as SEGMENTS (compose_score's contract): hook → ease → build →
+        # swell into the climax (~80%) → outro soften. env: MUSIC_ARC=0 → flat two segments.
         _t = max(2.0, float(total))
         if os.environ.get("VIDLORE_CLIPSTUDIO_MUSIC_ARC", "1").strip() not in ("0", "false", "no"):
-            cues = [{"t": 0.0, "category": bucket, "intensity": 4},          # hook: strong open
-                    {"t": _t * 0.08, "category": bucket, "intensity": 2},    # ease: let the VO land
-                    {"t": _t * 0.35, "category": bucket, "intensity": 3},    # build
-                    {"t": _t * 0.62, "category": bucket, "intensity": 4},
-                    {"t": _t * 0.82, "category": bucket, "intensity": 5},    # climax SWELL
-                    {"t": _t * 0.95, "category": bucket, "intensity": 3}]    # outro soften
+            _pts = [(0.0, 4), (_t * 0.08, 2), (_t * 0.35, 3),
+                    (_t * 0.62, 4), (_t * 0.82, 5), (_t * 0.95, 3)]
         else:
-            cues = [{"t": 0.0, "category": bucket, "intensity": 3},
-                    {"t": max(1.0, total * 0.6), "category": bucket, "intensity": 4}]
+            _pts = [(0.0, 3), (max(1.0, _t * 0.6), 4)]
+        cues = [{"start": p[0], "end": (_pts[i + 1][0] if i + 1 < len(_pts) else _t),
+                 "category": bucket, "intensity": p[1]}
+                for i, p in enumerate(_pts)]
         dest = work / "score.wav"
-        p = compose_score(cues, max(2.0, float(total)), dest)
+        p = compose_score(cues, _t, dest)
         if p and Path(p).exists():
+            if log:
+                log(f"build: music — composed {len(cues)}-segment '{bucket}' arc score")
             return str(p)
-    except Exception:
-        pass
-    try:                                              # reliable fallback: pick a track directly
+        if log:
+            log(f"build: music — compose_score returned no track for bucket '{bucket}' "
+                f"(library empty?) — falling back to a single track")
+    except Exception as e:                            # noqa: BLE001 — log it, NEVER swallow it
+        if log:
+            log(f"build: music — compose_score FAILED ({type(e).__name__}: {str(e)[:80]}) — "
+                f"falling back to a single track")
+    try:                                              # env-aware fallback: pick a track directly
         import vidlore.musiclib as _ml
-        base = Path(_ml.__file__).resolve().parent / "assets" / "music"
+        base = _ml.library_root()                     # honors VIDLORE_MUSIC_DIR (worktree-safe)
         tracks = sorted((base / bucket).glob("*.mp3")) or sorted(base.glob("*/*.mp3"))
         if tracks:
-            return str(tracks[len(tracks) // 3])
-    except Exception:
-        pass
+            pick = tracks[len(tracks) // 3]
+            if log:
+                log(f"build: music — single-track fallback: {pick.name}")
+            return str(pick)
+        if log:
+            log(f"build: music — library at {base} has NO tracks")
+    except Exception as e:                            # noqa: BLE001
+        if log:
+            log(f"build: music — fallback failed ({type(e).__name__}: {str(e)[:80]})")
     return None
 
 
@@ -6649,8 +6678,20 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 _reveal_wins.append((min(float(w.start) for w in _ws),
                                      max(float(w.end) for w in _ws)))
     _reveal_wins = _reveal_wins[:12]                    # bound the volume-expression length
+    _resolved_music = _resolve_music(music, theme_name,
+                                     getattr(narration, "total", 0.0) + 1.0, work, log=log)
+    # NEVER a silent-music render by accident (the voiceover-never-silent doctrine, applied to
+    # music): a full 19-minute video shipped with no bed because two silent fallthroughs stacked.
+    # A music-less render now requires the explicit env override.
+    import os as _os_mus
+    if not _resolved_music and _os_mus.environ.get(
+            "VIDLORE_CLIPSTUDIO_ALLOW_NO_MUSIC", "0").strip().lower() not in ("1", "true", "yes"):
+        raise RuntimeError(
+            "music resolution failed (no composed score AND no fallback track) — refusing a "
+            "silent-music render. Check VIDLORE_MUSIC_DIR / vidlore/assets/music, or set "
+            "VIDLORE_CLIPSTUDIO_ALLOW_NO_MUSIC=1 to render without a bed on purpose.")
     _music_track = _shape_music_envelope(
-        _resolve_music(music, theme_name, getattr(narration, "total", 0.0) + 1.0, work),
+        _resolved_music,
         getattr(narration, "total", 0.0), _bk_wins, _reveal_wins, work, log=log)
     # assemble() internally does len() on these per-scene lists, so pass them explicitly as
     # the engine's own pipeline does (its None defaults are a latent bug that never fires there).

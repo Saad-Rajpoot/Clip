@@ -600,6 +600,29 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
                          f"(most shots are near-static art cards, not scene footage)")
             _reject(src.id, "slideshow_source")
             continue
+        # BONUS-TAIL guard — '... + BONUS Scene' uploads append interviews/featurettes after the
+        # real footage; a press-junket frame aired mid-beat from such a tail. Stamp trailing-span
+        # shots (last 25% of the file) so BOTH candidate scoring and window-QC treat them dirty
+        # (the stamp rides on shot.scores, so _shot_dirty_reason needs no source context).
+        try:
+            from .discover import source_has_bonus_tail as _has_bonus
+            _dur_bt = float(getattr(src, "duration", 0) or 0)
+            if _has_bonus(getattr(src, "title", "") or "") and _dur_bt > 60:
+                _cut_bt = 0.75 * _dur_bt
+                _n_bt = 0
+                for sh in shots:
+                    if float(getattr(sh, "start", 0) or 0) >= _cut_bt:
+                        try:
+                            sh.scores = dict(getattr(sh, "scores", None) or {})
+                            sh.scores["bonus_tail"] = 1
+                            _n_bt += 1
+                        except Exception:                # noqa: BLE001
+                            pass
+                if _n_bt and progress:
+                    progress(f"match: {src.id} — {_n_bt} trailing shot(s) gated as bonus-tail "
+                             f"(post-scene interview/featurette risk)")
+        except Exception:                                # noqa: BLE001
+            pass
         # SCREEN-RECORDING source — a burned mouse cursor sat mid-frame for a whole 12.6s
         # breakout AND aired again on a regular beat (job 5462677f95 / the shorttest). One
         # whole-source probe: 4 frames at 30/50/70/90% of the file — a solid-white frozen
@@ -1278,6 +1301,8 @@ def _shot_dirty_reason(sh, partial_corner: dict | None = None,
         return "overlay-badge"
     if _shot_static_collage(sh):
         return "static-collage"
+    if int((getattr(sh, "scores", None) or {}).get("bonus_tail", 0) or 0):
+        return "bonus-tail"
     try:
         import os as _os_g
         if int(getattr(sh, "graphics_flag", -1) or -1) >= 2 \
@@ -1683,6 +1708,8 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
             continue                                      # designed graphics/illustration NEVER airs
         if _shot_static_collage(ps.shot):
             continue                                      # frozen collage/AI-art card NEVER airs
+        if int((getattr(ps.shot, "scores", None) or {}).get("bonus_tail", 0) or 0):
+            continue                                      # '+ BONUS' tail (interview/featurette)
         if subband_on and _shot_subtitle_band(ps.shot):
             continue                                      # burned subs (any script) NEVER air
         if _black_floor > 0 and float(getattr(ps.shot, "quality", 1.0) or 1.0) < _black_floor:

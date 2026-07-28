@@ -277,9 +277,47 @@ def _llm_queries(seg, movie: str) -> list[str]:
         return fallback
 
 
+def _yt_search_candidates(queries: list[str], *, per_query: int = 6, log=print) -> list:
+    """Direct yt-dlp ytsearch (flat) — the method that beat discovery in every manual precision
+    pass: search the LLM's exact query, keep titles that look like clean scene uploads
+    (title gates applied), 1-15 min long. Returns SourceCandidate-compatible objects."""
+    from .discover import SourceCandidate, is_unwanted_source_title
+    from . import hd_download as _hd
+    ytdlp = str(Path(_hd.HD_PY).parent / "yt-dlp") if getattr(_hd, "HD_PY", "") else ""
+    if not ytdlp or not Path(ytdlp).exists():
+        return []
+    out = []
+    for q in queries[:2]:
+        try:
+            r = subprocess.run(
+                [ytdlp, f"ytsearch{per_query}:{q}", "--flat-playlist", "--no-warnings",
+                 "--print", "%(id)s\t%(duration)s\t%(title)s"],
+                capture_output=True, text=True, timeout=90)
+            for line in (r.stdout or "").splitlines():
+                parts = line.split("\t")
+                if len(parts) != 3:
+                    continue
+                vid, dur, title = parts
+                try:
+                    d = float(dur or 0)
+                except (TypeError, ValueError):
+                    d = 0
+                if not (45 <= d <= 900):
+                    continue                              # shorts and hour-long reactions out
+                if is_unwanted_source_title(title):
+                    continue
+                out.append(SourceCandidate(
+                    id=vid, url=f"https://www.youtube.com/watch?v={vid}",
+                    title=title, provider="youtube", query=q))
+        except Exception as e:                            # noqa: BLE001
+            log(f"self-heal: ytsearch failed for {q[:40]!r} ({str(e)[:60]})")
+    return out
+
+
 def acquire_for_beat(proj, seg, cfg, *, policy: str, log=print) -> list:
     """Discover→download→index up to SELFHEAL_MAX_SRC new sources for this beat's scene.
-    Returns the newly indexed SourceVideo objects."""
+    Direct ytsearch results (the precision method) are considered FIRST, the broader
+    discovery machinery second. Returns the newly indexed SourceVideo objects."""
     from . import discover as D
     from . import index as I
     from .download import download_candidates
@@ -299,11 +337,13 @@ def acquire_for_beat(proj, seg, cfg, *, policy: str, log=print) -> list:
         visual_keywords=[], episode_hint="", episode_hint_verified=False,
         video_type="multi_scene"))()
     cfg_r = _dc.replace(cfg, discover_target=16)
+    cands = _yt_search_candidates(queries, log=log)
     try:
-        cands = D.discover_sources(ana, cfg_r, segments=[seg], progress=None) or []
+        cands = cands + (D.discover_sources(ana, cfg_r, segments=[seg], progress=None) or [])
     except Exception as e:                               # noqa: BLE001
         log(f"self-heal: discovery failed ({str(e)[:60]})")
-        return []
+        if not cands:
+            return []
     have = {(s.url or "").strip() for s in proj.sources}
     qtoks = {w.lower() for q in queries for w in re.findall(r"[a-z']{3,}", q.lower())}
     new = [c for c in cands if (c.url or "").strip() and (c.url or "").strip() not in have]
