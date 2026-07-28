@@ -23,7 +23,7 @@ from flask import Flask, request, jsonify, send_file, redirect, url_for, abort
 
 from .config import ClipConfig, engine_config, _NCPU
 from . import llm as _llm
-from .orchestrate import produce_auto
+from .orchestrate import produce_auto_resilient as produce_auto
 
 _ROOT = Path(os.environ.get("VIDLORE_CLIPSTUDIO_PORTAL_DIR",
                             str(Path.home() / "Desktop" / "clipstudio_output" / "portal")))

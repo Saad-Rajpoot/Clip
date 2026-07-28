@@ -1320,6 +1320,55 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
     return len(recovered)
 
 
+def produce_auto_resilient(project_dir, **kw):
+    """produce_auto wrapped by the INCIDENT ADVISOR: on an unexpected technical failure the
+    reasoning LLM (DeepSeek primary) triages the error with full context and may order a
+    bounded retry FROM STAGE CHECKPOINTS (resume=True — completed stages are never redone).
+    Content failures keep their own machinery: NonRetryableBuildError (footage feasibility)
+    and VisionBackendError (billing/outage) are never retried here — retrying cannot fix
+    them and the advisor's menu exists precisely to avoid such waste. Cap:
+    VIDLORE_CLIPSTUDIO_INCIDENT_MAX (2) interventions per render; kill switch:
+    VIDLORE_CLIPSTUDIO_INCIDENT_ADVISOR=0 (then this is produce_auto verbatim)."""
+    import os as _os
+    import time as _time
+    from . import incident as _inc
+    from .verify import NonRetryableBuildError, VisionBackendError
+    progress = kw.get("progress")
+
+    def _log(m):
+        (progress or print)(m)
+
+    attempt = 0
+    while True:
+        try:
+            return produce_auto(project_dir, **kw)
+        except (NonRetryableBuildError, VisionBackendError):
+            raise                                        # content/billing — their own machinery
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:                           # noqa: BLE001 — unexpected technical failure
+            proj = None
+            try:
+                proj = ClipProject.load(str(project_dir))
+            except Exception:                            # noqa: BLE001
+                pass
+            _max = max(0, int(_os.environ.get("VIDLORE_CLIPSTUDIO_INCIDENT_MAX", "2") or 2))
+            used = _inc.interventions_used(proj) if proj is not None else attempt
+            if used >= _max:
+                _log(f"incident-advisor: intervention cap ({_max}) reached — aborting")
+                raise
+            v = _inc.advise("produce_auto", e, proj=proj, log=_log)
+            if v["action"] not in ("retry", "retry_after_wait"):
+                raise
+            if v["action"] == "retry_after_wait" and v.get("wait_s"):
+                _log(f"incident-advisor: waiting {v['wait_s']}s before the checkpoint resume")
+                _time.sleep(v["wait_s"])
+            attempt += 1
+            kw["resume"] = True
+            _log(f"incident-advisor: retrying produce from stage checkpoints "
+                 f"(intervention {used + 1}/{_max})")
+
+
 def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = None,
                  script_text: Optional[str] = None, movie_hint: str = "",
                  policy: str = "block", max_sources: int = 6, cfg: Optional[ClipConfig] = None,
