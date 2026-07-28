@@ -1061,16 +1061,18 @@ def test_breakout_intelligence():
     check("breakout scenes excluded from hold/freeze",
           "_breakout_clip}" in src or "_breakout_clip" in src and "hold_pos = _hold" in src)
     check("tiered mining: exact episode first, scene-titled needs overlap",
-          "_mine_tier([s for s in srcs if s.id in _tier1], 0)" in src
-          and "_mine_tier([s for s in srcs if s.id in _tier2], 2)" in src)
+          "_mine_tier([s for s in srcs if s.id in _tier1], _min_ov9)" in src
+          and "_mine_tier([s for s in srcs if s.id in _tier2], _min_ov9)" in src)
     check("evidence mining merges with located quotes (not fallback-only)",
-          "_mine_tier([s for s in srcs if s.id in _tier1], 2)" in src
-          and "_seen_shot" in src)
-    # tier-1 mining now demands >=2 narration content-word overlap (was 1) so a tangential line
-    # (one shared word) can't air as a breakout — fallback to "any line" (0) only if NOTHING matched
+          "mined = (_mine_tier(" in src and "_seen_shot" in src)
+    # the overlap floor (default 2, env BREAKOUT_MINE_MIN_OV) now holds EVERYWHERE — the old
+    # zero-overlap last-resort tier aired an S2 war-council clip mid-trial-argument (3/10 twice)
     check("tier-1 breakout overlap tightened to >=2 (no 1-word tangents)",
           "_mine_tier([s for s in srcs if s.id in _tier1], 1)" not in src
-          and "_mine_tier([s for s in srcs if s.id in _tier1], 0)" in src)
+          and "_mine_tier([s for s in srcs if s.id in _tier1], 0)" not in src
+          and "VIDLORE_CLIPSTUDIO_BREAKOUT_MINE_MIN_OV" in src)
+    check("miner overlap ignores semantically-empty words (never/said/know class)",
+          '"never", "ever", "always", "said"' in src)
     check("competitor evidence density cap (~1 per 28s, max 8)",
           "n_max = max(1, min(8, 1 + int(total // 28)))" in src)
     check("verbatim quote outranks mined evidence", "run + 3 +" in src)
@@ -1706,7 +1708,10 @@ def test_image_fallback():
     check("hook: opening beats forced dynamic (no slow hold) + stronger push",
           "_hold -= set(range(max(0, _hook_n))" in bsrc and "pos < _hook_n" in bsrc)
     check("retention music arc (hook→ease→build→climax swell→outro)",
-          "MUSIC_ARC" in bsrc and "climax SWELL" in bsrc and "intensity\": 5" in bsrc)
+          "MUSIC_ARC" in bsrc and "swell into the climax" in bsrc
+          and "(_t * 0.82, 5)" in bsrc          # climax point at intensity 5
+          and '"start": p[0]' in bsrc)          # compose_score SEGMENT contract (the {t} points
+                                                # never matched it — KeyError on every render)
     # Option B: analyze prompt now asks for ALL named characters
     asrc = (Path(__file__).resolve().parent.parent / "vidlore" / "clipstudio" /
             "analyze.py").read_text(encoding="utf-8")
@@ -3206,8 +3211,8 @@ def test_breakout_era_scene_gate():
           "_main_faces9" in bsrc and "_fids9 & _main_faces9" in bsrc)
     check("EXACT episode / anchor-verified source PREFERRED (tier1 mined before tier2)",
           "anchor_verified" in bsrc
-          and "_mine_tier([s for s in srcs if s.id in _tier1], 2)" in bsrc
-          and "_mine_tier([s for s in srcs if s.id in _tier2], 2)" in bsrc)
+          and "_mine_tier([s for s in srcs if s.id in _tier1], _min_ov9)" in bsrc
+          and "_mine_tier([s for s in srcs if s.id in _tier2], _min_ov9)" in bsrc)
     # (d) every render must REPORT a greppable breakout audit: candidates + per-reason counts + kept
     check("greppable [BREAKOUT-AUDIT] summary with per-reason rejection counts",
           "[BREAKOUT-AUDIT]" in bsrc and "candidates=" in bsrc and "accepted=" in bsrc
