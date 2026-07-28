@@ -1685,6 +1685,16 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
         except Exception as _e:                          # never let the fast-path itself break a render
             _pre = None
             log(f"pre-assemble gate: skipped ({type(_e).__name__}: {_e})")
+        # SELF-HEALING FOOTAGE RECOVERY — the automated gate-unblock playbook (verified stills
+        # at the venue bar → targeted LLM-queried acquisition → retry), bounded rounds, never
+        # weakens the gate. Manual on job olenna_v2_allfixes it took 17 blocked beats to 0;
+        # this makes that loop the pipeline's own behavior. VIDLORE_CLIPSTUDIO_SELFHEAL=0 off.
+        if _pre:
+            try:
+                from . import selfheal as _selfheal
+                _pre = _selfheal.run(proj, segs, cfg, analysis, policy=policy, log=log)
+            except Exception as _e:                      # noqa: BLE001 — heal must never break a render
+                log(f"self-heal: skipped ({type(_e).__name__}: {str(_e)[:80]})")
         if _pre:
             _mode = _os.environ.get("VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE", "block").strip().lower()
             if _mode == "warn":
@@ -1699,11 +1709,39 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
     out = None
     if do_build:
         log("9/9 · assemble final video")
-        out = build_video(proj, segs, cfg, voice=voice, captions=captions,
-                          caption_style=caption_style,
-                          title=title or analysis.movie_title or proj.name,
-                          theme_name=theme, voiceover=voiceover, voice_provider=voice_provider,
-                          voice_preset=voice_preset, use_tts=use_tts, progress=progress)
+        try:
+            out = build_video(proj, segs, cfg, voice=voice, captions=captions,
+                              caption_style=caption_style,
+                              title=title or analysis.movie_title or proj.name,
+                              theme_name=theme, voiceover=voiceover, voice_provider=voice_provider,
+                              voice_preset=voice_preset, use_tts=use_tts, progress=progress)
+        except RuntimeError as _be:
+            # The AUTHORITATIVE in-build release gate sees hold-cap failures the pre-gate
+            # predictor cannot (it is a documented subset). Heal the audit's unresolved list
+            # once and rebuild — same bounded machinery, gate stays the final word.
+            import os as _os_bh
+            if ("NO valid fallback" in str(_be)
+                    and _os_bh.environ.get("VIDLORE_CLIPSTUDIO_SELFHEAL", "1").strip().lower()
+                    not in ("0", "false", "no")
+                    and _os_bh.environ.get("VIDLORE_CLIPSTUDIO_SELFHEAL_BUILD_RETRY", "1")
+                    .strip().lower() not in ("0", "false", "no")):
+                from . import selfheal as _selfheal_b
+                _idxs = _selfheal_b.blocked_indexes(proj)
+                log(f"self-heal: in-build release gate blocked {len(_idxs)} beat(s) — healing "
+                    f"and rebuilding once")
+                _n = _selfheal_b.heal_blocked_beats(proj, segs, cfg, blocked=_idxs,
+                                                    policy=policy, log=log)
+                proj.save()
+                if not _n:
+                    raise
+                out = build_video(proj, segs, cfg, voice=voice, captions=captions,
+                                  caption_style=caption_style,
+                                  title=title or analysis.movie_title or proj.name,
+                                  theme_name=theme, voiceover=voiceover,
+                                  voice_provider=voice_provider,
+                                  voice_preset=voice_preset, use_tts=use_tts, progress=progress)
+            else:
+                raise
 
     if _pm_stage.enabled():
         _pm_stage.write_report(proj.output_dir / "perf_report.json")
