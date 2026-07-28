@@ -177,6 +177,35 @@ def still_recover(proj, seg, sel, eng_cfg, *, pool=None, cand_n: int = 8,
     return False
 
 
+def _frame_text_dirty(fp: str) -> bool:
+    """Deterministic burned-text screen for a RAW sampled frame — the same class of checks the
+    index applies to shots, because region frames bypass the persisted flags entirely.
+    Measured necessity: the first live self-heal run installed a frame with giant Italian
+    meme text + a cartoon watermark, and another with a French burned subtitle — the vision
+    venue bar judges the SCENE and ignores overlay text by design, so text safety must be
+    deterministic and happen BEFORE vision."""
+    try:
+        import numpy as np
+        from PIL import Image
+        from .index import _flags_from_frames
+        im = Image.open(fp).convert("L").resize((640, 360))
+        arr = np.asarray(im, dtype="float32")
+        flags = _flags_from_frames([arr])
+        if int(flags.get("subs_flag", 0) or 0) == 1:
+            return True                                  # subtitle band (any script)
+    except Exception:                                    # noqa: BLE001
+        return True                                      # cannot check → do not air
+    try:
+        from . import ocr as _ocr
+        txt = (_ocr.read_text(fp) or "").strip() if hasattr(_ocr, "read_text") else ""
+        words = re.findall(r"[A-Za-z']{2,}", txt)
+        if len(words) >= 3 or sum(len(w) for w in words) >= 14:
+            return True                                  # readable overlay text never airs
+    except Exception:                                    # noqa: BLE001
+        pass                                             # OCR unavailable → band check stands
+    return False
+
+
 def _region_frames_recover(proj, seg, sel, src, eng_cfg, *, log=print, n: int = 8) -> bool:
     """Coarse-shot/dark-source fallback: sample frames straight from the FILE across its span,
     venue-verify the brightest few (the arrest-scene trick from the manual recovery)."""
@@ -209,6 +238,8 @@ def _region_frames_recover(proj, seg, sel, src, eng_cfg, *, log=print, n: int = 
                 continue
     cands.sort(reverse=True)
     for luma, fp in cands[:4]:
+        if _frame_text_dirty(fp):
+            continue                                     # burned subs/meme text/watermark card
         v = _venue_verify(fp, seg, [], eng_cfg)
         if isinstance(v, dict) and v.get("verdict") == "keep":
             _install_still(sel, fp, src.id, -1, 0.8)

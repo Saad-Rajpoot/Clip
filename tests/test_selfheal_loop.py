@@ -217,6 +217,36 @@ class TestLoop(unittest.TestCase):
             healed.assert_not_called()
 
 
+class TestRegionFrameTextSafety(unittest.TestCase):
+    """Live-found gap: region frames bypass the persisted flags, so a frame with giant burned
+    meme-text (Italian caption + cartoon watermark) and one with a French subtitle both
+    passed the vision venue bar — text safety must be deterministic and pre-vision."""
+
+    def test_dirty_frames_never_reach_vision(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = _proj(td)
+            seg = _seg(9)
+            sel = ClipSelection(segment_index=9, source_id="x", shot_index=0,
+                                in_point=0, out_point=2, confidence=0.5)
+            src = types.SimpleNamespace(id="s1", local_path=str(Path(td) / "v.mp4"),
+                                        duration=100.0)
+            Path(src.local_path).write_bytes(b"fake")
+            frames = [str(Path(td) / f"f{i}.jpg") for i in range(4)]
+            with mock.patch("vidlore.clipstudio.selfheal.subprocess.run"), \
+                    mock.patch.object(SH, "_frame_text_dirty", return_value=True) as dirty, \
+                    mock.patch.object(SH, "_venue_verify") as venue, \
+                    mock.patch("vidlore.clipstudio.selfheal.Path.exists", return_value=True), \
+                    mock.patch("PIL.Image.open"), \
+                    mock.patch("numpy.asarray", return_value=__import__("numpy").zeros((4, 4))):
+                ok = SH._region_frames_recover(p, seg, sel, src, None, log=lambda m: None)
+            self.assertFalse(ok)
+            venue.assert_not_called()
+
+    def test_unfetchable_frame_counts_dirty(self):
+        self.assertTrue(SH._frame_text_dirty("/nonexistent/frame.jpg"),
+                        "an uncheckable frame must never air")
+
+
 class TestWiring(unittest.TestCase):
     def test_orchestrate_wires_pre_gate_and_build_retry(self):
         src = (Path(__file__).resolve().parents[1]

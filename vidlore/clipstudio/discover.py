@@ -36,6 +36,9 @@ _REJECT_TITLE = re.compile(
     r"top \d+|\d+ (things|facts|details|theories|questions|mistakes|clues|moments you)|"
     r"ranked|countdown|video essays?|the (real|true) (reason|story)|"
     r"what you (missed|didn'?t notice)|things you missed|hidden details?|"
+    # merch/prop content — a 'Widow's Wail replica unboxing' was fetched by a targeted search
+    # and nearly aired under 'He draws Valyrian steel' (plural-safe):
+    r"unboxing|unboxed|replicas?|prop swords?|merch|figurines? review|"
     r"everything wrong|cinemasins|recaps?|recap(ped|ping)?|explained|breakdowns?|easter eggs|"
     r"spoiler talk|let'?s play|live ?stream|full movie|whole movie|"
     # talking-head / press / cast content — NOT scene footage:
