@@ -1445,6 +1445,13 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         # OVERLAP a beat's narration (the show speaks about the same thing the narration is
         # explaining — exactly when a real-audio breakout feels natural).
         from .segment import _STOP as _STOP9
+        # MINER-ONLY extra stopwords for the beat-overlap count: generic verbs/adverbs made
+        # semantically empty matches count as "topic overlap" — 'never' + 'seize/seized' let an
+        # S2 war-council clip air mid-trial-argument (audited 3/10, twice). Content overlap must
+        # come from words that actually carry the beat's subject.
+        _STOP9 = set(_STOP9) | {"never", "ever", "always", "said", "says", "tell", "told",
+                                "thing", "things", "every", "little", "great", "want",
+                                "wants", "know", "knows", "make", "makes", "made"}
         # restrict mining to ANCHOR-scene sources (episode-code / verified / scene-title match) —
         # a compilation's unrelated episode dialogue must not become a breakout
         _ana9 = (getattr(proj, "meta", None) or {}).get("analysis", {})
