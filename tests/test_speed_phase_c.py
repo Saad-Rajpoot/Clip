@@ -153,3 +153,34 @@ class TestPrewarmerWiring(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestRungPrefetch(unittest.TestCase):
+    def test_sheet_names_unique_per_call(self):
+        src = (ROOT / "verify.py").read_text()
+        # concurrent same-beat alternates must never share a contact-sheet path
+        self.assertIn("_uuid_vs.uuid4().hex[:6]", src)
+        self.assertNotIn('f"_vsheet_{_seg.index}_{getattr(ashot, \'index\', 0)}.jpg"', src)
+
+    def test_phase2_ask_set_replicates_serial_walk(self):
+        src = (ROOT / "verify.py").read_text()
+        seg = src.split("PHASE-2 RUNG PREFETCH")[1].split("for sel in proj.selections:")[0]
+        # only warmed-replace exact beats; slot consumed even when shotless (serial parity)
+        self.assertIn('str(_v0.get("verdict")) != "replace" or not _exP', seg)
+        self.assertIn("slot consumed even when shotless", seg)
+        # scene-affinity ordering mirrored, both rungs through _cached_verify_ctx
+        self.assertIn("_scene_affinity_order(selP.alternates, segP, proj,", seg)
+        self.assertIn('rung="strict_promote"', seg)
+        self.assertIn('rung="lenient_filler"', seg)
+        # look scope: off for alternates, restored for lenient — two separate sub-passes
+        self.assertIn('_look_scope["on"] = False', seg)
+        self.assertIn('_look_scope["on"] = True', seg)
+        # its own kill-switch + abort on repeated transport failures
+        self.assertIn("VIDLORE_CLIPSTUDIO_VERIFY_PREFETCH_RUNGS", seg)
+        self.assertIn("VERIFIER_BREAKER_TRIP", seg)
+
+    def test_phase2_mirrors_lenient_env_gates(self):
+        src = (ROOT / "verify.py").read_text()
+        seg = src.split("PHASE-2 RUNG PREFETCH")[1].split("for sel in proj.selections:")[0]
+        self.assertIn("VIDLORE_CLIPSTUDIO_EXACT_CONTEXTUAL_DOWNGRADE", seg)
+        self.assertIn("VIDLORE_CLIPSTUDIO_GENERIC_FILLER_DOWNGRADE", seg)
