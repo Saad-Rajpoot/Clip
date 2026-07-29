@@ -1044,6 +1044,59 @@ def _ensure_anchor_coverage(proj, analysis, cfg, *, policy: str, log=print) -> i
     return n
 
 
+class _IndexPrewarmer:
+    """SPEED (OPT-8): one worker THREAD pre-builds per-source index artifacts while the paced
+    download window is otherwise dead wait (measured: the 6s-per-file 403-protection gap makes
+    ~100% of download wall time deliberate sleep, and the backfill rounds then re-index
+    serially). Model thread-safety invariant intact: models are used by exactly ONE thread at
+    a time — the worker owns them during the download stage (the main thread only waits on
+    yt-dlp subprocesses there) and close() JOINS it before index_all touches them again.
+    index_all then runs UNCHANGED and cache-hits the prewarmed artifacts through the same
+    battle-tested resume path, so every decision is identical whether or not a source was
+    prewarmed; a prewarm failure just means that source indexes fresh, serially, as today.
+    download_candidates only hands over sources whose media file is FINAL (403-swept files are
+    held back until their sweep resolves, and a sweep replacement purges any stale artifacts).
+    VIDLORE_CLIPSTUDIO_INDEX_OVERLAP=0 disables."""
+
+    def __init__(self, proj, cfg, *, references, faceid, roster, log=None):
+        import queue as _queue
+        import threading as _threading
+        self._q: "_queue.Queue" = _queue.Queue()
+        self._STOP = object()
+        self.count = 0
+        self._log = log
+        self._t = _threading.Thread(target=self._run, daemon=True,
+                                    args=(proj, cfg, references, faceid, roster))
+        self._t.start()
+
+    def submit(self, sv):
+        self._q.put(sv)
+
+    def _run(self, proj, cfg, references, faceid, roster):
+        from .index import index_source as _ix_src
+        while True:
+            sv = self._q.get()
+            if sv is self._STOP:
+                return
+            try:
+                _ix_src(proj, sv, cfg, references=references, faceid=faceid,
+                        roster=roster, progress=None)
+                self.count += 1
+            except Exception:                            # noqa: BLE001 — partial artifacts
+                pass                                     # fail the cache check → fresh re-index
+
+    def close(self):
+        """Drain + join. MUST complete before any other thread touches the models."""
+        self._q.put(self._STOP)
+        self._t.join()
+
+
+def _index_overlap_on() -> bool:
+    import os as _os_ov
+    return _os_ov.environ.get("VIDLORE_CLIPSTUDIO_INDEX_OVERLAP", "1").strip().lower() \
+        not in ("0", "false", "no")
+
+
 def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, roster,
                                policy, max_sources, show_title, log) -> int:
     """Replace footage the pool gates threw out, BEFORE match ever runs.
@@ -1149,11 +1202,22 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
             break
 
         before = {s.id for s in proj.sources if s.status == SOURCE_OK}
+        _pw = None
+        if _index_overlap_on():
+            try:
+                _pw = _IndexPrewarmer(proj, cfg, references=refs, faceid=faceid_obj,
+                                      roster=roster, log=log)
+            except Exception:                                    # noqa: BLE001
+                _pw = None
         try:
-            download_candidates(proj, new, cfg, policy=policy, limit=len(new), progress=None)
+            download_candidates(proj, new, cfg, policy=policy, limit=len(new), progress=None,
+                                on_ready=(_pw.submit if _pw is not None else None))
         except Exception as e:                                   # noqa: BLE001
             log(f"5b/9 · backfill: download failed ({str(e)[:70]})")
             break
+        finally:
+            if _pw is not None:
+                _pw.close()
         newly = [s for s in proj.sources if s.status == SOURCE_OK and s.id not in before]
         if not newly:
             log(f"5b/9 · backfill: nothing downloaded under policy={policy}")
@@ -1641,11 +1705,41 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
     log(f"3/9 · download (policy={policy}, budget={_budget}+coverage)")
     _sig_download = _sig(_sig_discover, policy)
     _usable0 = [s for s in proj.sources if s.status == "ok"]
+    _refs_pre, _faceid_pre = None, None      # set when the index-overlap prewarmer builds refs early
     if _stage_skip(proj, "download", _sig_download, resume, artifact_ok=bool(_usable0)):
         usable = _usable0
         log(f"  ↻ skipped (resume) — {len(usable)} source(s) already downloaded")
     else:
-        download_candidates(proj, candidates, cfg, policy=policy, limit=dl_limit, progress=progress)
+        # SPEED (OPT-8): the download wall is ~100% deliberate 6s 403-pacing gaps — index each
+        # completed source in a single prewarm worker during that dead wait. Face-ID refs are
+        # built EARLY for it (they depend only on analysis identities, never on sources); the
+        # regular stage 4 below reuses them. Worker is JOINED before anything else touches the
+        # models. VIDLORE_CLIPSTUDIO_INDEX_OVERLAP=0 restores the serial order.
+        _pw_main, _refs_pre, _faceid_pre = None, None, None
+        if _index_overlap_on():
+            try:
+                log("4/9 · build Face-ID references (early — feeds the index prewarmer)")
+                if _faceid.available():
+                    _faceid_pre = _faceid.FaceID()
+                    _refs_pre = _faceid.build_references(analysis.reference_identities(),
+                                                         proj.index_dir, _faceid_pre,
+                                                         progress=progress)
+                else:
+                    _refs_pre = {}
+                _pw_main = _IndexPrewarmer(proj, cfg, references=_refs_pre, faceid=_faceid_pre,
+                                           roster=analysis.actors, log=log)
+            except Exception:                            # noqa: BLE001 — overlap is optional
+                _pw_main, _refs_pre, _faceid_pre = None, None, None
+        try:
+            download_candidates(proj, candidates, cfg, policy=policy, limit=dl_limit,
+                                progress=progress,
+                                on_ready=(_pw_main.submit if _pw_main is not None else None))
+        finally:
+            if _pw_main is not None:
+                _pw_main.close()
+                if _pw_main.count:
+                    log(f"5/9 · index prewarm — {_pw_main.count} source(s) indexed during the "
+                        f"download window")
         usable = [s for s in proj.sources if s.status == "ok"]
         if not usable:
             raise PipelineError(f"no usable sources under policy={policy}. Use --policy approved_testing "
@@ -1681,7 +1775,10 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
     roster = analysis.actors
     if _need_footage_stages:
         log("4/9 · build Face-ID references")
-        if _faceid.available():
+        if _refs_pre is not None:
+            faceid_obj, refs = _faceid_pre, _refs_pre
+            log("  ↻ reused (built early for the index prewarmer)")
+        elif _faceid.available():
             faceid_obj = _faceid.FaceID()
             refs = _faceid.build_references(analysis.reference_identities(), proj.index_dir,
                                             faceid_obj, progress=progress)

@@ -153,8 +153,15 @@ def _download_one(cand: SourceCandidate, sid: str, perm: str, note: str,
 
 
 def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cfg: ClipConfig, *,
-                        policy: str = "block", limit: int = 0, progress=None) -> list[SourceVideo]:
-    """Download permitted candidates with concurrency/retry/resume/dedup. Updates proj.sources."""
+                        policy: str = "block", limit: int = 0, progress=None,
+                        on_ready=None) -> list[SourceVideo]:
+    """Download permitted candidates with concurrency/retry/resume/dedup. Updates proj.sources.
+
+    `on_ready(sv)` (optional): called once per SOURCE_OK source the moment that source is FINAL —
+    after checksum-dedup and the quality audit, and, for a source that fell back on an HTTP 403,
+    only after the recovery sweeps have resolved it (the sweep REPLACES the media file; nothing
+    downstream may look at the pre-sweep bytes). Used by the index-overlap prewarmer; callback
+    errors are swallowed (a prewarm failure must never break a download)."""
     proj.ensure_dirs()
 
     def log(m):
@@ -185,6 +192,7 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
 
     # concurrent downloads
     seen_checksums: set[str] = set()
+    _ready_fired: set[str] = set()
     if allowed:
         # weekly yt-dlp self-update BEFORE the batch — the maintainers' standing fix for
         # fleet-wide 403 waves is a new release; version rot re-earns the block
@@ -226,6 +234,15 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
                         sv.extra["quality_audit"]["reason"] = "source_has_no_hd_stream"
                         log(f"download: {sv.id} LOW-RES {sv.height}p < preferred "
                             f"{cfg.discover_prefer_height}p (source max — kept for relevance)")
+                # index-overlap: a CLEAN source (no 403 fallback — the sweeps may replace that
+                # file later) is final right now; hand it to the prewarmer while peers download
+                if (on_ready is not None and sv.status == SOURCE_OK
+                        and "403" not in ((sv.extra or {}).get("hd_fallback") or "")):
+                    try:
+                        on_ready(sv)
+                        _ready_fired.add(sv.id)
+                    except Exception:                    # noqa: BLE001
+                        pass
 
     # merge into project: PRESERVE any pre-existing sources, then add/refresh the just-downloaded
     # ones in discovery order. (For a fresh build proj.sources is empty so this is identical to the
@@ -287,6 +304,8 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
                         sv.extra.pop("hd_fallback", None)
                         sv.extra["hd_path"] = True
                         sv.extra["hd_recovered"] = True
+                        from .index import purge_source_index as _purge_ix
+                        _purge_ix(proj, sv.id)      # media replaced → stale index must die
                         if "quality_audit" in sv.extra:
                             sv.extra["quality_audit"]["actual"] = int(sv.height)
                             sv.extra["quality_audit"].pop("reason", None)
@@ -339,6 +358,8 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
                             sv.extra.pop("hd_fallback", None)
                             sv.extra["hd_path"] = True
                             sv.extra["hd_recovered"] = True
+                            from .index import purge_source_index as _purge_ix2
+                            _purge_ix2(proj, sv.id)  # media replaced → stale index must die
                             _rec2 += 1
                             log(f"download: {sv.id} HD RECOVERED on sweep-2 → {sv.height}p")
                         except OSError:
@@ -354,6 +375,17 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
                 log(f"download: 403 sweep-2 done — {_rec2}/{len(_fell403)} recovered")
         elif _fell403:
             log("download: 403 sweep skipped — HD path unavailable (check .hdvenv/.pot)")
+
+    # index-overlap: everything not yet handed over (403-fallen sources now sweep-resolved,
+    # plus every source when the sweep block was skipped) is final here
+    if on_ready is not None:
+        for sv in new_in_order:
+            if sv.status == SOURCE_OK and sv.id not in _ready_fired:
+                try:
+                    on_ready(sv)
+                    _ready_fired.add(sv.id)
+                except Exception:                        # noqa: BLE001
+                    pass
 
     # HD-PATH HEALTH. The per-source fallback reason is already recorded in extra['hd_fallback'],
     # but nothing ever SUMMARISED it — so a machine-wide HD failure degraded a whole render to

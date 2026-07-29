@@ -228,6 +228,24 @@ def find_quote_span(words, quote: str, *, min_ratio: float = 0.72,
 # Keyframes
 # ---------------------------------------------------------------------------
 
+def purge_source_index(proj, sid: str) -> None:
+    """Delete every persisted index artifact for one source. REQUIRED whenever a source's
+    MEDIA FILE is replaced after indexing (the 403 HD sweep swaps a 360p file for the HD
+    copy): the index cache keys on shots-file existence + capability meta, NOT the media
+    checksum, so stale 360p embeds/flags would silently survive the swap and change
+    decisions. Missing files are fine (fresh source)."""
+    import shutil
+    try:
+        for suf in (".shots.json", ".embeds.npy", ".embeds.manifest.json",
+                    ".words.json", ".index.meta.json"):
+            (proj.index_dir / f"{sid}{suf}").unlink(missing_ok=True)
+        d = proj.index_dir / sid
+        if d.is_dir():
+            shutil.rmtree(d, ignore_errors=True)
+    except Exception:                                    # noqa: BLE001 — purge is best-effort;
+        pass                                             # a partial purge still fails the cache check
+
+
 def extract_keyframe(path: Path, t: float, dest: Path) -> bool:
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [ffmpeg_exe(), "-y", "-ss", f"{max(0.0, t):.3f}", "-i", str(path),

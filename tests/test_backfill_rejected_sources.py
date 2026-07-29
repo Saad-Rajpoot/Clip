@@ -50,7 +50,7 @@ def _wire(monkeypatch, *, cands=None, downloads=None):
         seen["queries"].append(list(extra_queries or []))
         return list(cands)
 
-    def _dl(proj, new, cfg, *, policy=None, limit=None, progress=None):
+    def _dl(proj, new, cfg, *, policy=None, limit=None, progress=None, on_ready=None):
         for s in downloads:
             proj.sources.append(s)
         seen["downloaded"].append(len(new))
