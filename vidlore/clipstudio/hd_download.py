@@ -74,6 +74,55 @@ _POT_LOCK = _threading.Lock()
 # HD data fetch is paced. Backoff sleeps happen OUTSIDE the semaphore so waiters can proceed.
 _HD_SEM = _threading.BoundedSemaphore(max(1, int(os.environ.get("VIDLORE_HD_MAX_CONCURRENCY", "3") or 3)))
 _POT_403_RESTARTED = False  # one pot-server restart per process on first 403 (stale-token remedy)
+_PACE_LOCK = _threading.Lock()
+_PACE_LAST = [0.0]
+
+
+def _pace_hd_start() -> None:
+    """Global minimum gap between HD download STARTS (default 6s, env VIDLORE_HD_MIN_GAP).
+    The Extractors wiki documents ~300 videos/hour as the guest ceiling with 5-10s delays
+    recommended; a render fetching 100+ sources as fast as cores allow is exactly the burst
+    profile that earns an hours-long IP block (measured twice)."""
+    try:
+        gap = float(os.environ.get("VIDLORE_HD_MIN_GAP", "6") or 6)
+    except (TypeError, ValueError):
+        gap = 6.0
+    if gap <= 0:
+        return
+    with _PACE_LOCK:                                    # reserve the next start slot atomically
+        now = time.monotonic()
+        start_at = max(now, _PACE_LAST[0] + gap)
+        _PACE_LAST[0] = start_at
+        wait = start_at - now
+    if wait > 0:
+        time.sleep(wait)
+
+
+def maybe_update_ytdlp(log=None, *, force: bool = False) -> bool:
+    """Weekly (or forced) self-update of the HD venv's yt-dlp stack. The maintainers' standing
+    fix for fleet-wide 403 waves is 'update to the latest release first' (verified: the
+    Oct-2025 mass-403 event was closed by a stopgap RELEASE, not a config change) — so version
+    rot IS a 403 root cause, and a pipeline that never updates re-earns it every few weeks.
+    Env: VIDLORE_HD_AUTOUPDATE=0 disables. Fail-open always."""
+    if os.environ.get("VIDLORE_HD_AUTOUPDATE", "1").strip().lower() in ("0", "false", "no"):
+        return False
+    if not HD_PY:
+        return False
+    marker = Path(HD_PY).parent.parent / ".last_ytdlp_check"
+    try:
+        if not force and marker.exists() and (time.time() - marker.stat().st_mtime) < 7 * 86400:
+            return False
+        p = subprocess.run([HD_PY, "-m", "pip", "install", "-q", "-U",
+                            "yt-dlp", "yt-dlp-ejs", "bgutil-ytdlp-pot-provider"],
+                           capture_output=True, text=True, timeout=240)
+        marker.touch()
+        if p.returncode == 0 and log:
+            v = subprocess.run([HD_PY, "-m", "yt_dlp", "--version"],
+                               capture_output=True, text=True, timeout=30)
+            log(f"hd: yt-dlp stack updated (now {(v.stdout or '').strip()})")
+        return p.returncode == 0
+    except Exception:                                    # noqa: BLE001
+        return False
 
 
 def _classify_dl_err(text: str) -> str:
@@ -299,24 +348,55 @@ def download_hd(url: str, out_stem: str, *, max_height: int = 1080, ffmpeg_dir: 
     out_stem = str(Path(out_stem).expanduser().resolve())
     out_tmpl = f"{out_stem}.%(ext)s"
     info_json = f"{out_stem}.info.json"
-    cmd = [
-        HD_PY, "-m", "yt_dlp",
-        "--cookies-from-browser", COOKIES_BROWSER,
-        "--extractor-args", f"youtubepot-bgutilhttp:base_url=http://127.0.0.1:{POT_PORT}",
-        "-f", _format_selector(max_height),
-        "-S", _format_sort(max_height),
-        "--merge-output-format", "mp4",
-        "--no-playlist", "--no-warnings", "--quiet", "--no-progress",
-        "--retries", str(retries), "--fragment-retries", str(retries),
-        "--write-info-json",
-        "-o", out_tmpl,
-    ]
+
+    def _base_cmd(client_args: str = "") -> list:
+        # PERMANENT 403-resistance layer (each element maintainer-documented — see the
+        # yt-dlp FAQ / Extractors wiki / PO-Token-Guide):
+        #  -4                : googlevideo format URLs are BOUND to the requesting IP; macOS
+        #                      rotating IPv6 privacy addresses make extraction and download
+        #                      egress differ -> guaranteed 403. Pin the family.
+        #  --sleep-requests  : the official heavy-use pacing (`-t sleep` preset value).
+        #  --retry-sleep     : exponential backoff on http errors instead of hammering.
+        c = [
+            HD_PY, "-m", "yt_dlp", "-4",
+            "--sleep-requests", "0.75",
+            "--retry-sleep", "http:exp=1:120",
+            "--extractor-args", f"youtubepot-bgutilhttp:base_url=http://127.0.0.1:{POT_PORT}",
+            "-f", _format_selector(max_height),
+            "-S", _format_sort(max_height),
+            "--merge-output-format", "mp4",
+            "--no-playlist", "--no-warnings", "--quiet", "--no-progress",
+            "--retries", str(retries), "--fragment-retries", str(max(retries, 5)),
+            "--write-info-json",
+            "-o", out_tmpl,
+        ]
+        # cookies: a cookies FILE (exported once from a private window) is the wiki-endorsed
+        # stable method — live browser profiles get their cookies ROTATED by YouTube mid-run.
+        _cfile = os.environ.get("VIDLORE_HD_COOKIES_FILE", "").strip()
+        if _cfile and Path(_cfile).expanduser().exists():
+            c += ["--cookies", str(Path(_cfile).expanduser())]
+        elif COOKIES_BROWSER:
+            c += ["--cookies-from-browser", COOKIES_BROWSER]
+        if client_args:
+            c += ["--extractor-args", f"youtube:player_client={client_args}"]
+        return c
+
+    # CLIENT LADDER on 403 (PO-Token-Guide): default clients first; then mweb (the guide's
+    # recommended POT pairing); then android_vr/web_embedded, which need NO PO token at all —
+    # the escape hatch when the token path itself is what YouTube is rejecting.
+    _LADDER = ["", "mweb", "android_vr,web_embedded"]
+    cmd = _base_cmd()
     # ALWAYS give yt-dlp a properly-named ffmpeg so it MERGES video+audio (else ASR sees a silent
     # video-only file and dialogue-lock dies). _merge_ffmpeg_dir guarantees a usable `ffmpeg`.
     mdir = _merge_ffmpeg_dir(ffmpeg_dir)
-    if mdir:
-        cmd += ["--ffmpeg-location", mdir]
-    cmd.append(url)
+
+    def _cmd_for(attempt: int) -> list:
+        client = _LADDER[min(attempt - 1, len(_LADDER) - 1)]
+        c = _base_cmd(client)
+        if mdir:
+            c += ["--ffmpeg-location", mdir]
+        c.append(url)
+        return c
 
     env = _env_with_runtimes()
     last = ""
@@ -324,6 +404,9 @@ def download_hd(url: str, out_stem: str, *, max_height: int = 1080, ffmpeg_dir: 
     ok = False
     for attempt in range(1, retries + 2):
         try:
+            cmd = _cmd_for(attempt)
+            _pace_hd_start()   # global inter-start gap: stay far under the ~300 videos/hour
+                               # guest ceiling the Extractors wiki documents
             with _HD_SEM:      # pace ACTIVE HD fetches — parallel bursts trip the 403 throttle
                 p = subprocess.run(cmd, cwd=os.path.dirname(out_stem) or ".", env=env,
                                    capture_output=True, text=True, timeout=timeout)

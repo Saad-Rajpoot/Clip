@@ -186,6 +186,13 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
     # concurrent downloads
     seen_checksums: set[str] = set()
     if allowed:
+        # weekly yt-dlp self-update BEFORE the batch — the maintainers' standing fix for
+        # fleet-wide 403 waves is a new release; version rot re-earns the block
+        try:
+            from . import hd_download as _hd_up
+            _hd_up.maybe_update_ytdlp(log)
+        except Exception:                                # noqa: BLE001
+            pass
         with cf.ThreadPoolExecutor(max_workers=max(1, cfg.download_concurrency)) as ex:
             futs = {}
             for (c, sid, perm, note) in allowed:
@@ -297,6 +304,54 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
             if _rec:
                 proj.save()
             log(f"download: 403 sweep done — {_rec}/{len(_fell403)} source(s) recovered to HD")
+            # SECOND sweep after a LONG cooldown when the first recovered nothing: a 45s pause
+            # cannot outlast a sustained IP block (measured: 0/24 recovered, block held for
+            # hours). Update yt-dlp first (the maintainers' standing fix), wait, retry once.
+            if _rec == 0 and os.environ.get("VIDLORE_HD_403_SWEEP2", "1").strip().lower() \
+                    not in ("0", "false", "no"):
+                _wait2 = max(0, int(os.environ.get("VIDLORE_HD_403_SWEEP2_WAIT", "900") or 900))
+                _hd.maybe_update_ytdlp(log, force=True)
+                log(f"download: 403 sweep-2 — first sweep recovered nothing (sustained block); "
+                    f"cooling down {_wait2 // 60} min then retrying once more")
+                time.sleep(_wait2)
+                _rec2 = 0
+                for sv in _fell403:
+                    stem = proj.sources_dir / f"{sv.id}.hdretry2"
+                    try:
+                        hi = _hd.download_hd(sv.url, str(stem), max_height=cfg.max_height,
+                                             ffmpeg_dir=str(Path(ffmpeg_exe()).parent),
+                                             retries=2, progress=None)
+                    except Exception:                    # noqa: BLE001
+                        hi = None
+                    got = Path(hi["path"]) if (hi and hi.get("path")
+                                               and Path(hi["path"]).exists()) else None
+                    if got and int(hi.get("height") or 0) > int(sv.height or 0):
+                        final = proj.sources_dir / f"{sv.id}{got.suffix.lower()}"
+                        try:
+                            old = Path(sv.local_path) if sv.local_path else None
+                            if old and old.exists() and old.resolve() != got.resolve():
+                                old.unlink(missing_ok=True)
+                            got.replace(final)
+                            sv.local_path = str(final)
+                            sv.width = int(hi.get("width") or sv.width or 0)
+                            sv.height = int(hi.get("height") or sv.height or 0)
+                            sv.checksum = _sha1_file(final)
+                            sv.extra.pop("hd_fallback", None)
+                            sv.extra["hd_path"] = True
+                            sv.extra["hd_recovered"] = True
+                            _rec2 += 1
+                            log(f"download: {sv.id} HD RECOVERED on sweep-2 → {sv.height}p")
+                        except OSError:
+                            pass
+                    else:
+                        for f in proj.sources_dir.glob(f"{sv.id}.hdretry2*"):
+                            try:
+                                f.unlink()
+                            except OSError:
+                                pass
+                if _rec2:
+                    proj.save()
+                log(f"download: 403 sweep-2 done — {_rec2}/{len(_fell403)} recovered")
         elif _fell403:
             log("download: 403 sweep skipped — HD path unavailable (check .hdvenv/.pot)")
 
