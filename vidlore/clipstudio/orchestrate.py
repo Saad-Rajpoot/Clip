@@ -960,6 +960,90 @@ def _beat_is_unresolved(sel, seg, _policy) -> bool:
     return bool(verifier_failed)
 
 
+def _ensure_anchor_coverage(proj, analysis, cfg, *, policy: str, log=print) -> int:
+    """single_scene renders: guarantee the ANCHOR scene has dedicated sources in the pool.
+
+    Coverage test is deterministic: a source counts when its title matches >=2 anchor content
+    tokens (prefix-tolerant, movie-title tokens excluded); episode-coded titles matching the
+    anchor's episode count double. Below VIDLORE_CLIPSTUDIO_ANCHOR_MIN_SOURCES (2), fetch the
+    anchor's own uploads via DIRECT ytsearch (anchor query + episode-code variants), download,
+    index. Fail-open everywhere. Env kill: VIDLORE_CLIPSTUDIO_ANCHOR_COVERAGE=0."""
+    import os as _os_ac
+    import re as _re_ac
+    if _os_ac.environ.get("VIDLORE_CLIPSTUDIO_ANCHOR_COVERAGE", "1").strip() \
+            in ("0", "false", "no"):
+        return 0
+    a = analysis.to_dict() if hasattr(analysis, "to_dict") else dict(analysis or {})
+    if (a.get("video_type") or "") != "single_scene":
+        return 0
+    anchors = a.get("anchor_scenes") or []
+    if not anchors:
+        return 0
+    anchor = anchors[0] if isinstance(anchors[0], dict) else {}
+    aq = " ".join(str(anchor.get(k, "") or "") for k in ("name", "query"))
+    from .era import parse_episode
+    epc = parse_episode(str(anchor.get("episode", "") or "") or aq)
+    movie = str(a.get("movie_title", "") or "")
+    _mv = {w for w in _re_ac.findall(r"[a-z']+", movie.lower()) if len(w) > 2}
+    toks = {w for w in _re_ac.findall(r"[a-z']+", aq.lower())
+            if len(w) > 3 and w not in _mv and w not in ("scene", "episode", "season", "game",
+                                                         "thrones")}
+    if len(toks) < 2:
+        return 0
+
+    def _hits(title: str) -> int:
+        tw = set(_re_ac.findall(r"[a-z']+", (title or "").lower()))
+        n = sum(1 for w in toks
+                if any(t == w or (t.startswith(w) and len(t) - len(w) <= 2) for t in tw))
+        if epc and parse_episode(title or "") == epc:
+            n += 2                                       # right episode code is strong identity
+        return n
+
+    covered = [s for s in proj.sources
+               if getattr(s, "status", "") == SOURCE_OK and _hits(s.title or "") >= 3]
+    need = max(1, int(_os_ac.environ.get("VIDLORE_CLIPSTUDIO_ANCHOR_MIN_SOURCES", "2") or 2))
+    if len(covered) >= need:
+        log(f"5a2/9 · anchor coverage OK — {len(covered)} dedicated source(s) for the anchor "
+            f"scene ({sorted(toks)[:4]}…)")
+        return 0
+    log(f"5a2/9 · anchor coverage LOW ({len(covered)}/{need}) — fetching the anchor scene's "
+        f"own uploads directly")
+    from . import selfheal as _sh
+    from .download import download_candidates
+    from . import index as _I
+    queries = [f"{movie} {anchor.get('query') or anchor.get('name')}"]
+    if epc:
+        queries.append(f"{movie} {anchor.get('name', '')} scene "
+                       f"S{epc[0]:02d}E{epc[1]:02d}")
+        queries.append(f"{movie} {anchor.get('name', '')} {epc[0]}x{epc[1]:02d}")
+    cands = _sh._yt_search_candidates(queries[:3], per_query=6, log=log)
+    have = {(s.url or "").strip() for s in proj.sources}
+    fresh = [c for c in cands if (c.url or "").strip() not in have and _hits(c.title) >= 2]
+    fresh.sort(key=lambda c: _hits(c.title), reverse=True)
+    fresh = fresh[:max(1, need + 1 - len(covered))]
+    if not fresh:
+        log("5a2/9 · anchor coverage: no dedicated upload found by direct search")
+        return 0
+    for c in fresh:
+        log(f"5a2/9 · anchor fetch: {(c.title or '')[:76]!r}")
+    try:
+        download_candidates(proj, fresh, cfg, policy=policy, progress=None)
+    except Exception as e:                               # noqa: BLE001
+        log(f"5a2/9 · anchor download failed ({str(e)[:60]})")
+        return 0
+    n = 0
+    for sv in proj.sources:
+        if sv.url in {c.url for c in fresh} and sv.status == SOURCE_OK and sv.local_path:
+            try:
+                _I.index_source(proj, sv, cfg, progress=None)
+                n += 1
+            except Exception as e:                       # noqa: BLE001
+                log(f"5a2/9 · anchor index failed for {sv.id} ({str(e)[:50]})")
+    proj.save()
+    log(f"5a2/9 · anchor coverage: +{n} dedicated source(s) indexed")
+    return n
+
+
 def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, roster,
                                policy, max_sources, show_title, log) -> int:
     """Replace footage the pool gates threw out, BEFORE match ever runs.
@@ -1601,6 +1685,18 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
                   force=(force_index and not resume), progress=progress)
     else:
         log("5/9 · deep index — ↻ skipped (resume, all footage stages cached)")
+
+    # 5a2 — ANCHOR COVERAGE (single_scene): the whole essay orbits ONE scene, yet the global
+    # discovery selection can spend every slot on look-alike uploads of OTHER scenes (measured:
+    # an S8E4 night-courtyard essay shipped with S8E2 daytime-yard footage under its anchor
+    # narration — 44 wrong-scene beats — because no dedicated anchor upload survived selection).
+    # Deterministic check + direct ytsearch top-up BEFORE match, so the pool is right from the
+    # first pick rather than healed afterwards.
+    if _need_footage_stages and not _skip_match:
+        try:
+            _ensure_anchor_coverage(proj, analysis, cfg, policy=policy, log=log)
+        except Exception as e:                                   # noqa: BLE001
+            log(f"5a2/9 · anchor coverage: skipped ({str(e)[:80]})")
 
     # 5b — backfill footage the pool gates will reject. Runs BEFORE match, because at match time the
     # discovery budget is already spent and a dropped source just leaves a hole nothing fills.

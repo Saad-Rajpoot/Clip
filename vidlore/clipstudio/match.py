@@ -1037,6 +1037,8 @@ def _slideshow_source_verdict(shots) -> bool:
 
 
 _NUMERAL_RX = re.compile(r"^\s*#?\d{1,2}\s*[.):]?\s*$")
+_EPCODE_CACHE: dict = {}                # sid -> parsed title episode code (per-process memo)
+_SENTINEL = object()
 
 
 def _shot_numeral_overlay(sh) -> bool:
@@ -1624,7 +1626,8 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
                 src_titles: dict | None = None,
                 proj=None,
                 anchor_lines: list | None = None,
-                tgt01: dict | None = None) -> list[tuple[float, float, dict, _PoolShot]]:
+                tgt01: dict | None = None,
+                anchor_ep=None) -> list[tuple[float, float, dict, _PoolShot]]:
     import numpy as np
     import os
     # DETERMINISTIC ERA PENALTY. The vision verifier cannot read a season off a torch-lit hall —
@@ -1838,6 +1841,26 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
         _era_conf = ps.sid in _era_conf_sids
         if _era_conf:
             base -= _era_pen
+        # WRONG-EPISODE soft nudge (single_scene, EXACT beats only): an S8E2-titled upload under
+        # an S8E4-anchored exact beat aired look-alike wrong-scene footage on 44 beats. SOFT by
+        # design: small penalty, only when the title DECLARES a different episode code, never on
+        # codeless titles and never on generic/abstract/character beats — exactness is demanded
+        # only where the narration demands it.
+        if anchor_ep is not None and _policy.policy_of(seg) == _policy.EXACT:
+            _t_ep = _EPCODE_CACHE.get(ps.sid, _SENTINEL)
+            if _t_ep is _SENTINEL:
+                try:
+                    from .era import parse_episode as _pe_sp
+                    _t_ep = _pe_sp((src_titles or {}).get(ps.sid, "") or "")
+                except Exception:
+                    _t_ep = None
+                _EPCODE_CACHE[ps.sid] = _t_ep
+            if _t_ep is not None and tuple(_t_ep) != tuple(anchor_ep):
+                try:
+                    base -= float(os.environ.get("VIDLORE_CLIPSTUDIO_EPCODE_PENALTY",
+                                                 "0.12") or 0.12)
+                except (TypeError, ValueError):
+                    base -= 0.12
         sig = {"clip": round(clip01, 4), "clip_cos": round(clip_cos, 4),
                "transcript": round(trans, 4), "faceid": round(faceid, 3),
                "object": round(obj, 3), "dialogue": round(dlg, 3),
@@ -2344,10 +2367,24 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         except Exception:
             _beat_era_m = ""
         _src_titles_m = {src.id: (src.title or "") for src in proj.sources}
+        # single_scene ANCHOR EPISODE CODE — for the soft wrong-episode nudge on EXACT beats
+        # only (see _score_pool). Deliberately NARROW: never a gate, never on generic/abstract
+        # beats, never on codeless titles — strictness beyond the exact-scene beats would
+        # starve the pool ("scene milna band ho jayega").
+        _anchor_ep_m = None
+        if single_scene:
+            try:
+                from .era import parse_episode as _pe_m
+                _anc0 = ((_ana_m.get("anchor_scenes") or [{}])[0] or {})
+                _anchor_ep_m = _pe_m(str(_anc0.get("episode", "") or "")
+                                     or str(_anc0.get("query", "") or ""))
+            except Exception:
+                _anchor_ep_m = None
         scored = _score_pool(seg, pool, text_vec, cfg, face_targets, anchor_sids, anchor_bonus,
                              all_faces=all_faces, title_toks=_ta_titles, mv_toks=_ta_mv,
                              beat_era=_beat_era_m, src_titles=_src_titles_m,
-                             proj=proj, anchor_lines=_anchor_lines, tgt01=_tgt01)
+                             proj=proj, anchor_lines=_anchor_lines, tgt01=_tgt01,
+                             anchor_ep=_anchor_ep_m)
 
         # `base` = match QUALITY (drives the reported confidence + flagging).
         # `adj`  = base + anchor bonus minus diversity penalties (drives only WHICH is picked).
