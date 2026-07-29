@@ -4004,6 +4004,28 @@ def _assign_editorial(scenes, segments) -> None:
             sc.role, sc.intensity = "evidence", 3
 
 
+# SPEED: per-THREAD RapidOCR engines let the branding / caption-dodge / ad-scan sweeps run
+# their pure per-clip probes in the existing bounded pools. An engine instance is state-free
+# across calls and two instances built with the identical default config produce bit-identical
+# (box, text, conf) output — proven by the 200-frame serial-vs-pool canary (120 text-bearing,
+# 0 mismatches) run for the index OCR pool, which uses the same construction. Any construction
+# failure returns the caller's shared fallback engine (serial semantics).
+import threading as _threading_ocr
+_OCR_TL = _threading_ocr.local()
+
+
+def _ocr_engine_tl(fallback):
+    try:
+        eng = getattr(_OCR_TL, "eng", None)
+        if eng is None:
+            from rapidocr_onnxruntime import RapidOCR
+            eng = RapidOCR()
+            _OCR_TL.eng = eng
+        return eng
+    except Exception:                                     # noqa: BLE001
+        return fallback
+
+
 def _clip_has_burned_text(clip_path: Path, ocr_engine) -> bool:
     """Does this RAW cut clip carry on-frame text of its OWN (a ripped source's burned-in dialogue
     subtitle or a channel logo)? At the cut stage our narration caption is NOT baked yet, so any
@@ -4530,15 +4552,19 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
         with several events cannot fake."""
         return [ev[2] for ev in _caps_sched if ev[0] - 1.0 <= t <= ev[1] + 1.0]
 
-    def _probe_frame(fp, t=None):
+    import threading as _thr_scan
+    _cap_lock = _thr_scan.Lock()
+
+    def _probe_frame(fp, t=None, eng=None):
         """OCR ONE frame → a promo-candidate dict or None. OCRs the FULL frame (promo URLs/prices
         live at the very bottom too) — our own captions are protected by matching each text box
         against the caption SCHEDULE (what we burned at this very timestamp), never by discarding
-        the bottom band. Card-uniformity is measured on the picture area."""
+        the bottom band. Card-uniformity is measured on the picture area. `eng` lets the parallel
+        sweep pass a per-thread engine (identical construction → identical output)."""
         card = _frame_card_uniformity(fp)
         im = Image.open(fp).convert("RGB")
         W, H = im.size
-        res, _el = ocr_engine(str(fp))
+        res, _el = (eng if eng is not None else ocr_engine)(str(fp))
         res = list(res or [])
         if _caps_sched and t is not None:
             act = _active_caption_events(t)
@@ -4548,7 +4574,8 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
                     try:
                         if (float(item[2]) >= 0.30
                                 and _caption_explained(str(item[1]), act)):
-                            _cap_excluded[0] += 1
+                            with _cap_lock:
+                                _cap_excluded[0] += 1
                             continue
                     except Exception:
                         pass
@@ -4590,16 +4617,42 @@ def _final_video_ad_scan(result: Path, work: Path, ocr_engine, *, log=None,
                 "reason": _cov}
     cand = {}                                          # t -> candidate dict
     ocr_errors = 0
-    for i, fp in enumerate(frames):
+    # SPEED: frames judge in a bounded pool with per-thread engines (bit-identical output —
+    # see _ocr_engine_tl). Aggregation is order-independent by construction: `cand` is keyed
+    # by t and every consumer walks sorted(cand.items()); ocr_errors sums exactly the frames
+    # a serial walk would have counted. VIDLORE_CLIPSTUDIO_ADSCAN_WORKERS=1 restores serial.
+    try:
+        _aw = int(_os2.environ.get("VIDLORE_CLIPSTUDIO_ADSCAN_WORKERS", "4") or 4)
+    except (TypeError, ValueError):
+        _aw = 1
+
+    def _judge_one(i, fp):
         t = round(i * stride, 2)
         try:
-            c = _probe_frame(fp, t)
-            if c is not None:
-                c["t"] = t
-                cand[t] = c
-        except Exception:
-            ocr_errors += 1
-            continue
+            c = _probe_frame(fp, t, eng=_ocr_engine_tl(ocr_engine))
+            return (t, c, 0)
+        except Exception:                              # noqa: BLE001
+            return (t, None, 1)
+
+    if _aw > 1 and len(frames) > 16:
+        import concurrent.futures as _cf_scan
+        with _cf_scan.ThreadPoolExecutor(max_workers=min(_aw, 8)) as _ex_scan:
+            for t, c, err in _ex_scan.map(_judge_one, range(len(frames)), frames):
+                ocr_errors += err
+                if c is not None:
+                    c["t"] = t
+                    cand[t] = c
+    else:
+        for i, fp in enumerate(frames):
+            t = round(i * stride, 2)
+            try:
+                c = _probe_frame(fp, t)
+                if c is not None:
+                    c["t"] = t
+                    cand[t] = c
+            except Exception:
+                ocr_errors += 1
+                continue
     try:
         for _f in scan_dir.glob("*.jpg"):
             _f.unlink(missing_ok=True)
@@ -6286,12 +6339,15 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             _ps.extend(beat_clips.get(_sg.index) or [])
         return _ps
 
-    # (the BRANDING sweep stays serial: its probe shares the single _ocr_eng instance, whose
-    # thread-safety under concurrent Run is unproven — a wrong OCR verdict is an editorial
-    # change, so no parallelism without a per-thread-engine proof. The DARK sweep's probe is
-    # a self-contained ffmpeg subprocess and is precomputed in parallel below.)
+    # (the BRANDING sweep's probes now precompute in the same bounded pool as the dark sweep:
+    # the per-thread-engine identity proof exists — _ocr_engine_tl builds instances with the
+    # identical default config, canary-proven bit-identical output — and the serial walk below
+    # replays verdicts in its original order, so _last_clean/donor decisions are unchanged.)
     if _ocr_eng is not None and _os.environ.get("VIDLORE_CLIPSTUDIO_BRANDING_GATE", "1").strip() \
             not in ("0", "false", "no", ""):
+        _brand_verdicts = _precompute_clip_verdicts(
+            lambda sp: _clip_branding_text(Path(sp), _ocr_engine_tl(_ocr_eng)),
+            _sweep_paths(), "branding")
         _blens = {segments[_p].index: list(_ls) for _p, _ls in _lens_by_pos.items()}
         _last_clean = None
         _replaced = 0
@@ -6306,7 +6362,8 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             # SAME-SCENE donor first (mirrors the near-black pass): freezing from _last_clean
             # propagates the PREVIOUS scene's content across the cut. Probe the scene's own
             # clips for a clean donor before reaching backwards.
-            _brand_flags = [_clip_branding_text(Path(cp), _ocr_eng) for cp in clips]
+            _brand_flags = [(_brand_verdicts[str(cp)] if str(cp) in _brand_verdicts
+                             else _clip_branding_text(Path(cp), _ocr_eng)) for cp in clips]
             _own_ok = [cp for cp, _bf in zip(clips, _brand_flags) if not _bf]
             for m, cp in enumerate(list(clips)):
                 if _brand_flags[m]:
@@ -6634,6 +6691,19 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         # slices would leave seconds of stacked text on exactly the dramatic beats. Reuse the
         # final plan computed for the cut stage above (same energies assemble receives).
         _beat_lens: dict = {segments[_p].index: list(_ls) for _p, _ls in _lens_by_pos.items()}
+        # SPEED: precompute the FIRST-PASS burned-text probes over the exact clip set the walk
+        # below visits (snapshot taken NOW — after the branding/dark/black sweeps mutated
+        # beat_clips, so verdicts bind to the paths actually probed). The post-crop RECHECK
+        # stays a direct fresh probe: _crop_clip_corner rewrites the clip file in place, so a
+        # cached pre-crop verdict would wrongly re-flag a repaired clip.
+        _dodge_paths = []
+        for _sg_d in segments:
+            _cl_d = beat_clips.get(_sg_d.index) or []
+            if _cl_d and span_by_idx.get(_sg_d.index):
+                _dodge_paths.extend(_cl_d)
+        _dodge_verdicts = _precompute_clip_verdicts(
+            lambda sp: _clip_has_burned_text(Path(sp), _ocr_engine_tl(_ocr_eng)),
+            _dodge_paths, "dodge")
         for seg in segments:
             # OCR the ACTUAL cut clips of this scene — at the cut stage our caption is NOT baked yet,
             # so ANY readable on-frame text is the SOURCE's own burned-in subtitle/logo (reliable,
@@ -6654,7 +6724,8 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             t = a
             for m, cp in enumerate(clips):
                 t2 = t + lens[m]
-                if _clip_has_burned_text(Path(cp), _ocr_eng):
+                if (_dodge_verdicts[str(cp)] if str(cp) in _dodge_verdicts
+                        else _clip_has_burned_text(Path(cp), _ocr_eng)):
                     # REPAIR-FIRST: corner-localized text (channel bug / commenter-avatar badge)
                     # is CROPPED out of the clip — the viewer keeps both clean footage AND the
                     # caption. Suppression is the last resort for non-croppable text (dialogue

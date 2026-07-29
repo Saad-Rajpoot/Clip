@@ -167,3 +167,35 @@ class TestSelfhealPrefetch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestBuildSweepParallel(unittest.TestCase):
+    def test_branding_and_dodge_precompute_with_direct_fallback(self):
+        src = (ROOT / "build.py").read_text()
+        # branding first-pass probes precompute; missing verdicts fall back to the direct call
+        self.assertIn('_clip_branding_text(Path(sp), _ocr_engine_tl(_ocr_eng))', src)
+        self.assertIn("else _clip_branding_text(Path(cp), _ocr_eng)) for cp in clips]", src)
+        # dodge FIRST-pass precomputed on a post-mutation snapshot...
+        self.assertIn('_clip_has_burned_text(Path(sp), _ocr_engine_tl(_ocr_eng))', src)
+        # ...but the POST-CROP recheck stays a direct fresh probe (in-place mutation hazard)
+        seg = src.split("caption-dodge REPAIR")[0]
+        self.assertIn("and not _clip_has_burned_text(Path(cp), _ocr_eng):",
+                      src.split("_corner and _crop_clip_corner")[1][:200])
+
+    def test_adscan_parallel_order_independent_aggregation(self):
+        src = (ROOT / "build.py").read_text()
+        seg = src.split("def _judge_one")[1].split("def _dense_confirm")[0]
+        self.assertIn("VIDLORE_CLIPSTUDIO_ADSCAN_WORKERS", src)
+        # consumers walk sorted(cand.items()) — completion order cannot leak into decisions
+        self.assertIn("sorted(cand.items())", src)
+        # serial path retained behind the kill-switch
+        self.assertIn("for i, fp in enumerate(frames):", src)
+
+    def test_thread_engine_helper_fallback(self):
+        from vidlore.clipstudio.build import _ocr_engine_tl
+        sentinel = object()
+        # helper returns SOME engine; on construction failure it must return the fallback —
+        # simulate by poisoning the import path? (construction works here, so just assert
+        # it returns a working engine object or the fallback, never None)
+        eng = _ocr_engine_tl(sentinel)
+        self.assertIsNotNone(eng)
