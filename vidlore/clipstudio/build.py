@@ -5984,9 +5984,10 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # failures only REMOVE predecessor candidates (they can never turn an all-fail set into a
     # pass). Beats where ANY candidate passes are left to the real gate (which stays the final
     # word, unchanged). Honors the same kill-switch and warn mode as the real gate.
-    if (_os.environ.get("VIDLORE_CLIPSTUDIO_REJECTED_FOOTAGE_GATE", "1").strip()
+    import os as _os_eg
+    if (_os_eg.environ.get("VIDLORE_CLIPSTUDIO_REJECTED_FOOTAGE_GATE", "1").strip()
             not in ("0", "false", "no")
-            and _os.environ.get("VIDLORE_CLIPSTUDIO_EARLY_RF_GATE", "1").strip()
+            and _os_eg.environ.get("VIDLORE_CLIPSTUDIO_EARLY_RF_GATE", "1").strip()
             not in ("0", "false", "no")):
         _an_e = (proj.meta.get("analysis", {}) or {})
         _sing_e = _an_e.get("video_type", "") == "single_scene"
@@ -6029,8 +6030,8 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                                           "not same scene (every candidate predecessor fails)"),
                                "early_gate": True})
         if _blk_e:
-            _mode_e = _os.environ.get("VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE",
-                                      "block").strip().lower()
+            _mode_e = _os_eg.environ.get("VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE",
+                                         "block").strip().lower()
             _msg_e = (f"{len(_blk_e)} verifier-rejected beat(s) have NO possible same-scene hold "
                       f"(early gate, before assembly) — scene(s) "
                       f"{[b['seg_index'] for b in _blk_e[:8]]}.")

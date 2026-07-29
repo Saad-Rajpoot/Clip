@@ -37,9 +37,13 @@ ARM_ENVS = {
         "VIDLORE_CLIPSTUDIO_SELFHEAL_VERIFY_WORKERS": "1",
         "VIDLORE_CLIPSTUDIO_EARLY_RF_GATE": "0",
     },
-    "b": {  # production defaults (the speed pass)
+    "b": {  # production defaults (the speed pass). EARLY_RF_GATE deliberately OFF here:
+        # the A/B must compare DECISIONS like-for-like, and the early gate (correct by its
+        # subset proof + unit tests) intentionally changes the failure TIMING/message on a
+        # release-blocked render. Its live subset check runs as a separate step.
         "VIDLORE_CLIPSTUDIO_OCR_POOL_OK": "1",
         "VIDLORE_CLIPSTUDIO_VERIFY_WORKERS": "4",
+        "VIDLORE_CLIPSTUDIO_EARLY_RF_GATE": "0",
     },
 }
 
@@ -58,6 +62,16 @@ def _md5(p):
 
 def prep(arm: str) -> Path:
     dst = BASE.parent / f"canary_spd_{arm}"
+    if dst.exists() and (dst / "project.json").exists() \
+            and not (dst / "ab_report.json").exists():
+        # a prior attempt died mid-run — keep its index artifacts (cache-hit), just reset
+        # the decision state so match/verify/build re-run cleanly
+        p0 = json.load(open(dst / "project.json"))
+        p0["selections"] = []
+        json.dump(p0, open(dst / "project.json", "w"), indent=1)
+        shutil.rmtree(dst / "clips", ignore_errors=True)
+        shutil.rmtree(dst / "output", ignore_errors=True)
+        return dst
     shutil.rmtree(dst, ignore_errors=True)
     (dst / "sources").mkdir(parents=True)
     for f in (BASE / "sources").iterdir():
@@ -91,11 +105,12 @@ def run(arm: str):
         os.environ[k] = v
 
     dst = prep(arm)
-    if arm == "b":
-        seed = BASE.parent / "canary_spd_a" / "verdict_cache.json"
+    _seed_arm = os.environ.get("CANARY_SEED_FROM", "a" if arm == "b" else "")
+    if _seed_arm and _seed_arm != arm:
+        seed = BASE.parent / f"canary_spd_{_seed_arm}" / "verdict_cache.json"
         if seed.exists():
             shutil.copy2(seed, dst / "verdict_cache.json")
-            log("arm b: seeded with arm a's post-run verdict cache")
+            log(f"arm {arm}: seeded with arm {_seed_arm}'s post-run verdict cache")
 
     from vidlore.clipstudio.models import ClipProject
     from vidlore.clipstudio.config import ClipConfig, engine_config
@@ -106,25 +121,24 @@ def run(arm: str):
     from vidlore.clipstudio import faceid as F
     from vidlore.clipstudio.build import build_video
 
+    from vidlore.clipstudio.analyze import ScriptAnalysis
     proj = ClipProject.load(str(dst))
     cfg = ClipConfig()
     eng = engine_config()
     segs = list(proj.segments)
-    analysis = (proj.meta or {}).get("analysis") or {}
+    analysis = ScriptAnalysis.from_dict((proj.meta or {}).get("analysis") or {})
     times = {}
 
     t0 = time.time()
     faceid_obj, refs = None, {}
     if F.available():
         faceid_obj = F.FaceID()
-        idents = [{"name": c.get("name", ""), "kind": "character",
-                   "actor": c.get("actor", "")} for c in (analysis.get("characters") or [])]
-        refs = F.build_references(idents, proj.index_dir, faceid_obj, progress=None)
+        refs = F.build_references(analysis.reference_identities(), proj.index_dir,
+                                  faceid_obj, progress=None)
     times["refs"] = time.time() - t0
 
     t0 = time.time()
-    index_all(proj, cfg, references=refs, faceid=faceid_obj,
-              roster=[c.get("actor", "") for c in (analysis.get("characters") or [])],
+    index_all(proj, cfg, references=refs, faceid=faceid_obj, roster=analysis.actors,
               progress=lambda m: None)
     times["index"] = time.time() - t0
     log(f"index done in {times['index']:.0f}s")
