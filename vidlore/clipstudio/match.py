@@ -1627,7 +1627,8 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
                 proj=None,
                 anchor_lines: list | None = None,
                 tgt01: dict | None = None,
-                anchor_ep=None) -> list[tuple[float, float, dict, _PoolShot]]:
+                anchor_ep=None,
+                beat_era_soft: bool = False) -> list[tuple[float, float, dict, _PoolShot]]:
     import numpy as np
     import os
     # DETERMINISTIC ERA PENALTY. The vision verifier cannot read a season off a torch-lit hall —
@@ -1840,7 +1841,9 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
             base -= cfg.wrongface_penalty
         _era_conf = ps.sid in _era_conf_sids
         if _era_conf:
-            base -= _era_pen
+            # soft (anchor-inherited) era = HALF penalty: a nudge toward the anchor's season for
+            # era-silent beats, never the hard wrong-era hammer reserved for explicit claims
+            base -= _era_pen * (0.5 if beat_era_soft else 1.0)
         # WRONG-EPISODE soft nudge (single_scene, EXACT beats only): an S8E2-titled upload under
         # an S8E4-anchored exact beat aired look-alike wrong-scene footage on 44 beats. SOFT by
         # design: small penalty, only when the title DECLARES a different episode code, never on
@@ -2372,19 +2375,31 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         # beats, never on codeless titles — strictness beyond the exact-scene beats would
         # starve the pool ("scene milna band ho jayega").
         _anchor_ep_m = None
+        _era_soft_m = False
         if single_scene:
             try:
-                from .era import parse_episode as _pe_m
+                from .era import parse_episode as _pe_m, parse_season as _ps_m
                 _anc0 = ((_ana_m.get("anchor_scenes") or [{}])[0] or {})
-                _anchor_ep_m = _pe_m(str(_anc0.get("episode", "") or "")
-                                     or str(_anc0.get("query", "") or ""))
+                _anc_txt = (str(_anc0.get("episode", "") or "")
+                            or str(_anc0.get("query", "") or ""))
+                _anchor_ep_m = _pe_m(_anc_txt)
+                # ANCHOR-ERA SOFT AFFINITY: a single_scene essay's era-SILENT beats default to
+                # the anchor's season at HALF penalty — measured: 35 wrong-era beats (S1 Ned/
+                # S3 captive-Jaime under S8E4-night narration) filled anchor beats era-blind.
+                # Beats that carry their OWN era (the S1/S2/S6 backstory crimes) keep it and
+                # are untouched; sources with no declared season are never penalized.
+                if not _beat_era_m:
+                    _a_season = _ps_m(_anc_txt)
+                    if _a_season:
+                        _beat_era_m = f"season {_a_season}"
+                        _era_soft_m = True
             except Exception:
                 _anchor_ep_m = None
         scored = _score_pool(seg, pool, text_vec, cfg, face_targets, anchor_sids, anchor_bonus,
                              all_faces=all_faces, title_toks=_ta_titles, mv_toks=_ta_mv,
                              beat_era=_beat_era_m, src_titles=_src_titles_m,
                              proj=proj, anchor_lines=_anchor_lines, tgt01=_tgt01,
-                             anchor_ep=_anchor_ep_m)
+                             anchor_ep=_anchor_ep_m, beat_era_soft=_era_soft_m)
 
         # `base` = match QUALITY (drives the reported confidence + flagging).
         # `adj`  = base + anchor bonus minus diversity penalties (drives only WHICH is picked).

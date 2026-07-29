@@ -93,3 +93,24 @@ class TestEpcodePenalty(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestAnchorEraSoftAffinity(unittest.TestCase):
+    def test_wiring_and_semantics(self):
+        src = (Path(__file__).resolve().parents[1]
+               / "vidlore" / "clipstudio" / "match.py").read_text()
+        # era-silent beats inherit the anchor season at HALF penalty, single_scene only
+        self.assertIn('_beat_era_m = f"season {_a_season}"', src)
+        self.assertIn("_era_soft_m = True", src)
+        self.assertIn("if not _beat_era_m:", src)
+        self.assertIn("_era_pen * (0.5 if beat_era_soft else 1.0)", src)
+        # beats with their OWN era keep the full penalty path (soft only when era was empty)
+        seg = src.split("ANCHOR-ERA SOFT AFFINITY")[1][:900]
+        self.assertIn("if not _beat_era_m:", seg)
+
+    def test_title_era_conflict_respects_undeclared(self):
+        from vidlore.clipstudio import era as E
+        # undeclared-title sources are NEVER era-penalized (the not-strict doctrine)
+        self.assertFalse(E.title_era_conflicts("season 8", "Jaime and Brienne best moments"))
+        self.assertTrue(E.title_era_conflicts("season 8", "Game of Thrones Season 1 Winterfell scenes"))
+        self.assertFalse(E.title_era_conflicts("season 8", "GoT Seasons 1-8 compilation"))
