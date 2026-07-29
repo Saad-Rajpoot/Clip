@@ -1044,6 +1044,59 @@ def _ensure_anchor_coverage(proj, analysis, cfg, *, policy: str, log=print) -> i
     return n
 
 
+class _IndexPrewarmer:
+    """SPEED (OPT-8): one worker THREAD pre-builds per-source index artifacts while the paced
+    download window is otherwise dead wait (measured: the 6s-per-file 403-protection gap makes
+    ~100% of download wall time deliberate sleep, and the backfill rounds then re-index
+    serially). Model thread-safety invariant intact: models are used by exactly ONE thread at
+    a time — the worker owns them during the download stage (the main thread only waits on
+    yt-dlp subprocesses there) and close() JOINS it before index_all touches them again.
+    index_all then runs UNCHANGED and cache-hits the prewarmed artifacts through the same
+    battle-tested resume path, so every decision is identical whether or not a source was
+    prewarmed; a prewarm failure just means that source indexes fresh, serially, as today.
+    download_candidates only hands over sources whose media file is FINAL (403-swept files are
+    held back until their sweep resolves, and a sweep replacement purges any stale artifacts).
+    VIDLORE_CLIPSTUDIO_INDEX_OVERLAP=0 disables."""
+
+    def __init__(self, proj, cfg, *, references, faceid, roster, log=None):
+        import queue as _queue
+        import threading as _threading
+        self._q: "_queue.Queue" = _queue.Queue()
+        self._STOP = object()
+        self.count = 0
+        self._log = log
+        self._t = _threading.Thread(target=self._run, daemon=True,
+                                    args=(proj, cfg, references, faceid, roster))
+        self._t.start()
+
+    def submit(self, sv):
+        self._q.put(sv)
+
+    def _run(self, proj, cfg, references, faceid, roster):
+        from .index import index_source as _ix_src
+        while True:
+            sv = self._q.get()
+            if sv is self._STOP:
+                return
+            try:
+                _ix_src(proj, sv, cfg, references=references, faceid=faceid,
+                        roster=roster, progress=None)
+                self.count += 1
+            except Exception:                            # noqa: BLE001 — partial artifacts
+                pass                                     # fail the cache check → fresh re-index
+
+    def close(self):
+        """Drain + join. MUST complete before any other thread touches the models."""
+        self._q.put(self._STOP)
+        self._t.join()
+
+
+def _index_overlap_on() -> bool:
+    import os as _os_ov
+    return _os_ov.environ.get("VIDLORE_CLIPSTUDIO_INDEX_OVERLAP", "1").strip().lower() \
+        not in ("0", "false", "no")
+
+
 def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, roster,
                                policy, max_sources, show_title, log) -> int:
     """Replace footage the pool gates threw out, BEFORE match ever runs.
@@ -1149,11 +1202,22 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
             break
 
         before = {s.id for s in proj.sources if s.status == SOURCE_OK}
+        _pw = None
+        if _index_overlap_on():
+            try:
+                _pw = _IndexPrewarmer(proj, cfg, references=refs, faceid=faceid_obj,
+                                      roster=roster, log=log)
+            except Exception:                                    # noqa: BLE001
+                _pw = None
         try:
-            download_candidates(proj, new, cfg, policy=policy, limit=len(new), progress=None)
+            download_candidates(proj, new, cfg, policy=policy, limit=len(new), progress=None,
+                                on_ready=(_pw.submit if _pw is not None else None))
         except Exception as e:                                   # noqa: BLE001
             log(f"5b/9 · backfill: download failed ({str(e)[:70]})")
             break
+        finally:
+            if _pw is not None:
+                _pw.close()
         newly = [s for s in proj.sources if s.status == SOURCE_OK and s.id not in before]
         if not newly:
             log(f"5b/9 · backfill: nothing downloaded under policy={policy}")
@@ -1364,7 +1428,17 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
         match_segments(proj, segs, cfg_r, analysis=analysis, progress=None)
         cut_all(proj, cfg_r, progress=None)
         from . import verify as _verify_r
-        _verify_r.verify_and_repair(proj, segs, cfg, eng, only_indices=set(unresolved), progress=None)
+        # same scoped 4-worker prefetch as the main verify stage (set + restore, never leaked)
+        import os as _os_vwr
+        _vwr_unset = "VIDLORE_CLIPSTUDIO_VERIFY_WORKERS" not in _os_vwr.environ
+        if _vwr_unset:
+            _os_vwr.environ["VIDLORE_CLIPSTUDIO_VERIFY_WORKERS"] = "4"
+        try:
+            _verify_r.verify_and_repair(proj, segs, cfg, eng, only_indices=set(unresolved),
+                                        progress=None)
+        finally:
+            if _vwr_unset:
+                _os_vwr.environ.pop("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", None)
 
         new_sel_by_idx = {s.segment_index: s for s in proj.selections}
         for i in unresolved:
@@ -1500,6 +1574,39 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
         proj = ClipProject(name=project_dir.name, root=str(project_dir))
     proj.ensure_dirs()
 
+    # SLEEP DETECTION (log/meta only — zero effect on any decision): a clamshell/idle sleep
+    # mid-render froze the process for 85 min on a measured run and the stall was
+    # indistinguishable from slow code in every timing report. CLOCK_UPTIME_RAW ticks only
+    # while the machine is awake; its drift against wall time IS the slept time.
+    import threading as _thr_sl
+    import time as _time_sl
+    _sleep_state = {"stop": False, "total": 0.0}
+
+    def _sleep_watch():
+        try:
+            up0, w0 = _time_sl.clock_gettime(_time_sl.CLOCK_UPTIME_RAW), _time_sl.time()
+        except (AttributeError, OSError):
+            return                               # clock unavailable → no watcher, no harm
+        while not _sleep_state["stop"]:
+            _time_sl.sleep(30)
+            try:
+                up1, w1 = _time_sl.clock_gettime(_time_sl.CLOCK_UPTIME_RAW), _time_sl.time()
+            except OSError:
+                return
+            drift = (w1 - w0) - (up1 - up0)
+            if drift > 60:
+                _sleep_state["total"] += drift
+                log(f"⏸ system SLEPT ~{drift / 60:.0f} min mid-render (lid closed / idle "
+                    f"sleep) — wall-clock timings include this; the render itself is fine")
+                try:
+                    proj.meta["sleep_seconds"] = round(
+                        float(proj.meta.get("sleep_seconds", 0.0)) + drift, 1)
+                except Exception:
+                    pass
+            up0, w0 = up1, w1
+
+    _thr_sl.Thread(target=_sleep_watch, daemon=True).start()
+
     # VISUAL-FILTER REQUIREMENT (fail-CLOSED). The animated / video-game / toy footage gate
     # (_source_is_nonphotographic -> _photographic_ok, verified to correctly flag Telltale 'Game of
     # Thrones' game cut-scenes as art) is CLIP-based. Without the CLIP model it SILENTLY fails open,
@@ -1631,11 +1738,41 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
     log(f"3/9 · download (policy={policy}, budget={_budget}+coverage)")
     _sig_download = _sig(_sig_discover, policy)
     _usable0 = [s for s in proj.sources if s.status == "ok"]
+    _refs_pre, _faceid_pre = None, None      # set when the index-overlap prewarmer builds refs early
     if _stage_skip(proj, "download", _sig_download, resume, artifact_ok=bool(_usable0)):
         usable = _usable0
         log(f"  ↻ skipped (resume) — {len(usable)} source(s) already downloaded")
     else:
-        download_candidates(proj, candidates, cfg, policy=policy, limit=dl_limit, progress=progress)
+        # SPEED (OPT-8): the download wall is ~100% deliberate 6s 403-pacing gaps — index each
+        # completed source in a single prewarm worker during that dead wait. Face-ID refs are
+        # built EARLY for it (they depend only on analysis identities, never on sources); the
+        # regular stage 4 below reuses them. Worker is JOINED before anything else touches the
+        # models. VIDLORE_CLIPSTUDIO_INDEX_OVERLAP=0 restores the serial order.
+        _pw_main, _refs_pre, _faceid_pre = None, None, None
+        if _index_overlap_on():
+            try:
+                log("4/9 · build Face-ID references (early — feeds the index prewarmer)")
+                if _faceid.available():
+                    _faceid_pre = _faceid.FaceID()
+                    _refs_pre = _faceid.build_references(analysis.reference_identities(),
+                                                         proj.index_dir, _faceid_pre,
+                                                         progress=progress)
+                else:
+                    _refs_pre = {}
+                _pw_main = _IndexPrewarmer(proj, cfg, references=_refs_pre, faceid=_faceid_pre,
+                                           roster=analysis.actors, log=log)
+            except Exception:                            # noqa: BLE001 — overlap is optional
+                _pw_main, _refs_pre, _faceid_pre = None, None, None
+        try:
+            download_candidates(proj, candidates, cfg, policy=policy, limit=dl_limit,
+                                progress=progress,
+                                on_ready=(_pw_main.submit if _pw_main is not None else None))
+        finally:
+            if _pw_main is not None:
+                _pw_main.close()
+                if _pw_main.count:
+                    log(f"5/9 · index prewarm — {_pw_main.count} source(s) indexed during the "
+                        f"download window")
         usable = [s for s in proj.sources if s.status == "ok"]
         if not usable:
             raise PipelineError(f"no usable sources under policy={policy}. Use --policy approved_testing "
@@ -1671,7 +1808,10 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
     roster = analysis.actors
     if _need_footage_stages:
         log("4/9 · build Face-ID references")
-        if _faceid.available():
+        if _refs_pre is not None:
+            faceid_obj, refs = _faceid_pre, _refs_pre
+            log("  ↻ reused (built early for the index prewarmer)")
+        elif _faceid.available():
             faceid_obj = _faceid.FaceID()
             refs = _faceid.build_references(analysis.reference_identities(), proj.index_dir,
                                             faceid_obj, progress=progress)
@@ -1730,7 +1870,21 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
         log("8/9 · AI verify + repair — ↻ skipped (resume, verdicts cached)")
     elif verify:
         log("8/9 · AI verify + repair")
-        _vres = _verify.verify_and_repair(proj, segs, cfg, eng, progress=progress) or {}
+        # The proven 4-worker verdict prefetch was only enabled by the portal and CLI entrypoints;
+        # direct produce_auto callers (tools scripts, tests driving real renders) ran verify fully
+        # serial — measured 28 min on a render whose warm prefetch cost is minutes. Scoped set +
+        # restore (not a bare setdefault) so the env never leaks into later direct
+        # verify_and_repair callers in the same process (the outage suite's serial call-count
+        # contract depends on workers=1).
+        import os as _os_vw
+        _vw_unset = "VIDLORE_CLIPSTUDIO_VERIFY_WORKERS" not in _os_vw.environ
+        if _vw_unset:
+            _os_vw.environ["VIDLORE_CLIPSTUDIO_VERIFY_WORKERS"] = "4"
+        try:
+            _vres = _verify.verify_and_repair(proj, segs, cfg, eng, progress=progress) or {}
+        finally:
+            if _vw_unset:
+                _os_vw.environ.pop("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", None)
         # VISION-BACKEND OUTAGE (billing / bad key / persistent down): the whole stage errored, so
         # every exact beat is unresolved. Do NOT checkpoint this stage 'done' — that made a later
         # Resume SKIP verify and re-hit the block forever. Do NOT grind hours of image-fallback
@@ -1865,7 +2019,8 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
             # predictor cannot (it is a documented subset). Heal the audit's unresolved list
             # once and rebuild — same bounded machinery, gate stays the final word.
             import os as _os_bh
-            if ("NO valid fallback" in str(_be)
+            from .verify import NonRetryableBuildError as _NRBE
+            if (isinstance(_be, _NRBE) and getattr(_be, "kind", "") == "rejected_footage"
                     and _os_bh.environ.get("VIDLORE_CLIPSTUDIO_SELFHEAL", "1").strip().lower()
                     not in ("0", "false", "no")
                     and _os_bh.environ.get("VIDLORE_CLIPSTUDIO_SELFHEAL_BUILD_RETRY", "1")

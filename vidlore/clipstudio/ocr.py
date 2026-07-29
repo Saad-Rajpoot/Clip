@@ -77,6 +77,90 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s.lower())
 
 
+# ---------------------------------------------------------------------------
+# Parallel OCR worker pool (speed only — decision-identical by construction)
+#
+# read_text on a shared singleton serialized the index keyframe pass and three build
+# sweeps (measured ~10 min index + ~9.5 min build per render). Workers are separate
+# PROCESSES each owning a RapidOCR() built with the IDENTICAL default config as the
+# singleton — same ONNX weights, same onnxruntime defaults — so per-image output is
+# bit-identical (proven by canary before enabling; VIDLORE_CLIPSTUDIO_OCR_WORKERS=0
+# kills the pool and restores the serial singleton). Inputs stay FILE PATHS (the
+# decoder-identity rule from the 2026-07 speed audit: RapidOCR must decode the jpg
+# itself). Any pool/worker failure falls back to the serial singleton per path.
+# ---------------------------------------------------------------------------
+
+_pool = None
+_pool_failed = False
+
+
+def _pool_workers() -> int:
+    import os
+    # OPT-IN by entrypoint, not default-on: spawn re-imports __main__, and an UNGUARDED
+    # driver script would re-execute its top level inside every worker (worst case: a
+    # child starting its own render). Only entrypoints that are provably
+    # `if __name__ == "__main__"`-guarded (portal web.py, cli.py) set this.
+    if os.environ.get("VIDLORE_CLIPSTUDIO_OCR_POOL_OK", "").strip().lower() \
+            not in ("1", "true", "yes"):
+        return 0
+    try:
+        n = int(os.environ.get("VIDLORE_CLIPSTUDIO_OCR_WORKERS", "4") or 4)
+    except (TypeError, ValueError):
+        n = 4
+    return max(0, min(n, 8))
+
+
+def _worker_read(img_path: str) -> str:
+    # runs in the CHILD process: same module, same _get_engine construction, same
+    # read_text body as the parent singleton
+    return read_text(img_path)
+
+
+def _worker_ping() -> str:
+    return "ok"
+
+
+def _ensure_pool():
+    """Lazy persistent pool (one per pipeline process — workers keep models loaded).
+    A ping self-test guards environments where spawn cannot re-import __main__
+    (REPL/stdin drivers): there the pool is marked dead once and every caller uses
+    the serial singleton."""
+    global _pool, _pool_failed
+    if _pool is not None or _pool_failed:
+        return _pool
+    n = _pool_workers()
+    if n <= 0 or not available():
+        _pool_failed = True
+        return None
+    try:
+        import concurrent.futures as _cf
+        import multiprocessing as _mp
+        p = _cf.ProcessPoolExecutor(max_workers=n, mp_context=_mp.get_context("spawn"))
+        if p.submit(_worker_ping).result(timeout=60) != "ok":
+            raise RuntimeError("ocr pool ping failed")
+        _pool = p
+    except Exception:
+        try:
+            p.shutdown(wait=False)
+        except Exception:
+            pass
+        _pool = None
+        _pool_failed = True
+    return _pool
+
+
+def read_text_async(img_path):
+    """Submit read_text to the worker pool. Returns a Future or None (pool unavailable).
+    Callers must fall back to read_text(img_path) on None or on Future exception."""
+    p = _ensure_pool()
+    if p is None:
+        return None
+    try:
+        return p.submit(_worker_read, str(img_path))
+    except Exception:
+        return None
+
+
 def names_in_text(text: str, roster: list[str]) -> list[str]:
     """Which roster names appear in the OCR text (space/case-insensitive — robust to the way
     stylized name-cards OCR as 'FARRAHFAWCETT'). This is the corroboration signal Face-ID uses."""

@@ -222,7 +222,16 @@ class NonRetryableBuildError(RuntimeError):
     because the vision API had finally died: 0 verdicts, 0 rejections, 0 unresolved, publish.
     Scene 25 was never fixed. It just stopped being checked.
 
-    Retry transient plumbing. Never retry a judgment."""
+    Retry transient plumbing. Never retry a judgment.
+
+    `kind` is the machine-readable identity of the gate that raised — routing (e.g. the in-build
+    heal-and-rebuild catch) MUST dispatch on it, never on message substrings: the catch that
+    matched "NO valid fallback" against a message that actually says "no valid editorial hold"
+    was dead code for its whole life."""
+
+    def __init__(self, msg: str = "", *, kind: str = ""):
+        super().__init__(msg)
+        self.kind = kind
 
 
 class VisionBackendError(RuntimeError):
@@ -909,7 +918,14 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 _src = proj.source(_sid) if _sid else None
                 _sp = getattr(_src, "local_path", "") if _src else ""
                 if _sp:
-                    _dest = proj.clips_dir / f"_vsheet_{_seg.index}_{getattr(ashot, 'index', 0)}.jpg"
+                    # UNIQUE dest per call: concurrent warms of the SAME beat's alternates can
+                    # share a shot index — a shared name would judge one alternate's pixels
+                    # against another's question. The name is not a fingerprint input.
+                    import uuid as _uuid_vs
+                    _dest = proj.clips_dir / (
+                        f"_vsheet_{_seg.index}_"
+                        f"{(getattr(ashot, 'source_id', '') or 'x')[:10]}_"
+                        f"{getattr(ashot, 'index', 0)}_{_uuid_vs.uuid4().hex[:6]}.jpg")
                     _got = _action_contact_sheet(_sp, getattr(ashot, "start", 0.0),
                                                  getattr(ashot, "end", 0.0), _dest)
                     if _got:
@@ -1035,6 +1051,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         _pf_workers = 1
     if _pf_workers > 1 and not _breaker_open:
         _pending = []
+        _prim_items = []      # EVERY eligible selection (cached or not) — feeds phase-2 rung warms
         for sel in proj.selections:
             if _subset is not None and sel.segment_index not in _subset:
                 continue
@@ -1064,6 +1081,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 image_id=_image_id(kf, shot, _want_sheet), model=_vmodel,
                 must_see=_must_see(seg))
             _c0 = _vcache.get(_fp)
+            if _fp:
+                _prim_items.append((_fp, sel, seg, shot, kf, faceid_names, _exact))
             if _fp and (_c0 is None or not _verdict_schema_ok(_c0)
                         or not _hit_provider_ok(_c0, _vmodel)):
                 _pending.append((_fp, seg, shot, kf, faceid_names, _exact, _want_sheet))
@@ -1119,6 +1138,107 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                             break
             log(f"verify: prefetch warmed {_pf_ok}/{len(_pending)} verdict(s)")
             _save_verdict_cache(proj, _vcache)
+
+        # PHASE-2 RUNG PREFETCH (the unimplemented half of prior-audit OPT-3) — the repair
+        # chain's ~450-600 vision calls stayed SERIAL even with phase-1 on (measured ~17-20
+        # min: 146/202 beats entered repair). For every beat whose warmed PRIMARY verdict is
+        # 'replace' and that is EXACT, warm the questions the serial loop will provably ask:
+        #   (a) the strict-promotion rung over the first max_replacements alternates in the
+        #       exact serial order (_scene_affinity_order when enabled), judged WITHOUT the
+        #       look question (_look_scope off — same as _try_promote); a slot-consuming
+        #       shotless alternate is skipped exactly like the serial walk;
+        #   (b) the lenient generic-filler re-ask of the ORIGINAL shot (look scope ON).
+        # All warms flow through _cached_verify_ctx — identical fingerprints, store-on-
+        # success-only, breaker semantics untouched. The serial loop runs UNCHANGED and hits
+        # cache. Superset waste is bounded (the loop stops at its first accept; a warm it
+        # never reads is just an unused cache entry). The two sub-passes run one after the
+        # other so the shared _look_scope flag is uniform within each pool.
+        # VIDLORE_CLIPSTUDIO_VERIFY_PREFETCH_RUNGS=0 disables phase-2 only.
+        if _prim_items and _os_pf.environ.get(
+                "VIDLORE_CLIPSTUDIO_VERIFY_PREFETCH_RUNGS", "1").strip().lower() \
+                not in ("0", "false", "no"):
+            _aff_on2 = _os_pf.environ.get("VIDLORE_CLIPSTUDIO_SCENE_AFFINITY", "1").strip() \
+                not in ("0", "false", "no", "")
+            _alt_jobs, _len_jobs = [], []
+            for (_fpP, selP, segP, shotP, kfP, fidsP, _exP) in _prim_items:
+                _v0 = _vcache.get(_fpP)
+                if not (_v0 is not None and _verdict_schema_ok(_v0)
+                        and _hit_provider_ok(_v0, _vmodel)):
+                    continue                             # primary not warm → serial pays as today
+                if str(_v0.get("verdict")) != "replace" or not _exP:
+                    continue
+                _altsP = selP.alternates
+                if _aff_on2:
+                    try:
+                        _altsP = _scene_affinity_order(selP.alternates, segP, proj,
+                                                       selP.source_id)
+                    except Exception:                    # noqa: BLE001
+                        _altsP = selP.alternates
+                _t2 = 0
+                for _altP in _altsP:
+                    if _t2 >= max_replacements:
+                        break
+                    _t2 += 1                             # slot consumed even when shotless
+                    _ashP = get_shot(_altP.source_id, _altP.shot_index)
+                    if _ashP is None:
+                        continue
+                    _alt_jobs.append((_ashP, segP))
+                # lenient re-ask fires serially only when the downgrade + filler rungs are
+                # enabled — mirror those envs so the warm never asks a question the serial
+                # loop provably won't
+                if (_os_pf.environ.get("VIDLORE_CLIPSTUDIO_EXACT_CONTEXTUAL_DOWNGRADE",
+                                       "1").strip() not in ("0", "false", "no")
+                        and _os_pf.environ.get("VIDLORE_CLIPSTUDIO_GENERIC_FILLER_DOWNGRADE",
+                                               "1").strip() not in ("0", "false", "no")):
+                    _len_jobs.append((kfP, shotP, segP, fidsP))
+            if _alt_jobs or _len_jobs:
+                log(f"verify: rung prefetch — warming {len(_alt_jobs)} promotion + "
+                    f"{len(_len_jobs)} lenient question(s) ({_pf_workers} workers; the serial "
+                    f"repair loop and every gate stay unchanged)")
+                import concurrent.futures as _cf2
+                _rp_fail = 0
+
+                def _warm(fn, jobs):
+                    nonlocal _rp_fail
+                    with _cf2.ThreadPoolExecutor(max_workers=_pf_workers) as _ex2:
+                        _fs2 = [_ex2.submit(fn, j) for j in jobs]
+                        for _f2 in _fs2:
+                            try:
+                                _ok2 = _f2.result()
+                            except Exception:            # noqa: BLE001
+                                _ok2 = False
+                            if _ok2:
+                                _rp_fail = 0
+                            else:
+                                _rp_fail += 1
+                                if _rp_fail >= VERIFIER_BREAKER_TRIP:
+                                    for _f3 in _fs2:
+                                        _f3.cancel()
+                                    log("verify: rung prefetch aborted — repeated transport "
+                                        "failures; the serial loop takes over")
+                                    return False
+                    return True
+
+                def _warm_alt(j):
+                    _a, _s = j
+                    _v_w, _ = _cached_verify_ctx(_a.keyframe_path, _a, _s, True,
+                                                 _a.face_ids or [], rung="strict_promote")
+                    return _v_w is not None
+
+                def _warm_len(j):
+                    _kf_w, _sh_w, _s_w, _fi_w = j
+                    _v_w, _ = _cached_verify_ctx(_kf_w, _sh_w, _s_w, False, _fi_w,
+                                                 rung="lenient_filler")
+                    return _v_w is not None
+
+                _look_scope["on"] = False                # alternates: no look question
+                try:
+                    _go_on = _warm(_warm_alt, _alt_jobs)
+                finally:
+                    _look_scope["on"] = True
+                if _go_on:
+                    _warm(_warm_len, _len_jobs)          # original shots: look scope ON
+                _save_verdict_cache(proj, _vcache)
 
     for sel in proj.selections:
         if _subset is not None and sel.segment_index not in _subset:

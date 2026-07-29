@@ -876,9 +876,31 @@ def verify_anchor_candidates(kept: list, analysis, segments, *, limit: int = 14,
     # spend the budget on the LIKELIEST first: surfaced by an anchor query, then relevance
     pool.sort(key=lambda c: (((c.query or "").lower() in aq), _tok_hit(c), c.relevance),
               reverse=True)
+    # SPEED: prefetch subs for EXACTLY the pool[:limit] slice (up to 14 serial network
+    # fetches ≈ 2 min) in a small pool. The serial loop below consumes the prefetched
+    # result directly — including '' failures — so per-URL attempt counts and the
+    # positive-only _SUBS_TEXT_CACHE semantics are byte-identical to the serial walk.
+    # Nothing outside the slice is warmed (that would change later rounds' outcomes).
+    _slice = pool[:limit]
+    _pre_subs: dict = {}
+    if len(_slice) > 1:
+        try:
+            import concurrent.futures as _cf
+            with _cf.ThreadPoolExecutor(max_workers=4) as _ex:
+                # one fetch per UNIQUE url (candidates are already URL-deduped upstream;
+                # this keeps per-URL attempt counts identical even if that ever changes)
+                _fs = {_ex.submit(_fetch_subs_text, u): u
+                       for u in dict.fromkeys(c.url for c in _slice)}
+                for _f in _cf.as_completed(_fs):
+                    try:
+                        _pre_subs[_fs[_f]] = _f.result()
+                    except Exception:
+                        _pre_subs[_fs[_f]] = ""
+        except Exception:
+            _pre_subs = {}
     n = 0
-    for c in pool[:limit]:
-        subs = _fetch_subs_text(c.url)
+    for c in _slice:
+        subs = _pre_subs[c.url] if c.url in _pre_subs else _fetch_subs_text(c.url)
         if _subs_contain_quote(subs, quotes):
             c.anchor_verified = True
             c.relevance = min(1.0, round(c.relevance + 0.5, 4))
@@ -903,30 +925,59 @@ def resolve_quality(cands: list[SourceCandidate], cfg: ClipConfig, progress=None
             "noplaylist": True, "socket_timeout": 25,
             "extractor_args": {"youtube": {"player_client": ["web_safari", "web"]}}}
     todo = [c for c in cands if c.provider == "youtube"][:cfg.discover_resolve_limit]
-    with yt_dlp.YoutubeDL(opts) as y:
-        for c in todo:
-            _pk = (c.url, int(getattr(cfg, "max_height", 0) or 0))   # cap changes the answer
-            if use_hd and _pk in _PROBE_H_CACHE:
-                h = _PROBE_H_CACHE[_pk]
-            elif use_hd:
+
+    def _probe_one(c, y=None):
+        """Resolve one candidate. Writes only to THIS candidate (+ the positive-only probe
+        cache) — the caller's re-reject and _hd_bonus re-sort run strictly after the full
+        barrier below, so completion order cannot influence any decision."""
+        _pk = (c.url, int(getattr(cfg, "max_height", 0) or 0))   # cap changes the answer
+        if use_hd and _pk in _PROBE_H_CACHE:
+            h = _PROBE_H_CACHE[_pk]
+        elif use_hd:
+            # share the proven 3-slot HD envelope with active fetches — probes are
+            # metadata-only but this removes any new-403-surface argument
+            with _hd._HD_SEM:
                 h = _hd.probe_max_height(c.url, max_height=cfg.max_height)
-                if h > 0:
-                    _PROBE_H_CACHE[_pk] = h              # positive probes only — failures retry
-            else:
-                h = 0
-            if h <= 0:                                    # HD probe off/failed → legacy estimate
+            if h > 0:
+                _PROBE_H_CACHE[_pk] = h              # positive probes only — failures retry
+        else:
+            h = 0
+        if h <= 0:                                    # HD probe off/failed → legacy estimate
+            try:
+                _y = y if y is not None else yt_dlp.YoutubeDL(opts)  # per-worker instance
                 try:
-                    info = y.extract_info(c.url, download=False)
-                    heights = [f.get("height") or 0 for f in (info.get("formats") or [])]
-                    h = int(max(heights or [info.get("height") or 0]) or 0)
-                    c.duration = c.duration or float(info.get("duration") or 0)
-                    c.view_count = c.view_count or int(info.get("view_count") or 0)
-                except Exception:
-                    pass
-            if h:
-                c.height = h
-            if progress:
-                progress(f"discover: resolved {c.height}p · {c.title[:40]!r}")
+                    info = _y.extract_info(c.url, download=False)
+                finally:
+                    if y is None:
+                        _y.close()
+                heights = [f.get("height") or 0 for f in (info.get("formats") or [])]
+                h = int(max(heights or [info.get("height") or 0]) or 0)
+                c.duration = c.duration or float(info.get("duration") or 0)
+                c.view_count = c.view_count or int(info.get("view_count") or 0)
+            except Exception:
+                pass
+        if h:
+            c.height = h
+        if progress:
+            progress(f"discover: resolved {c.height}p · {c.title[:40]!r}")
+
+    # SPEED: 28 serial probes ≈ 3 min of discover. Bounded 3-worker fan-out (matching
+    # VIDLORE_HD_MAX_CONCURRENCY); full barrier before return. Env =1 restores serial.
+    import os as _os_pw
+    try:
+        _pw = int(_os_pw.environ.get("VIDLORE_CLIPSTUDIO_HD_PROBE_WORKERS", "3") or 3)
+    except (TypeError, ValueError):
+        _pw = 3
+    if _pw > 1 and len(todo) > 1:
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(max_workers=min(_pw, 3)) as _ex:
+            _futs = [_ex.submit(_probe_one, c) for c in todo]
+            for _f in _futs:
+                _f.result()   # barrier; exceptions propagate in submission order (serial parity)
+    else:
+        with yt_dlp.YoutubeDL(opts) as y:
+            for c in todo:
+                _probe_one(c, y=y)
 
 
 def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None,
