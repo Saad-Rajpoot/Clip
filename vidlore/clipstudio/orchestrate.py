@@ -1574,6 +1574,39 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
         proj = ClipProject(name=project_dir.name, root=str(project_dir))
     proj.ensure_dirs()
 
+    # SLEEP DETECTION (log/meta only — zero effect on any decision): a clamshell/idle sleep
+    # mid-render froze the process for 85 min on a measured run and the stall was
+    # indistinguishable from slow code in every timing report. CLOCK_UPTIME_RAW ticks only
+    # while the machine is awake; its drift against wall time IS the slept time.
+    import threading as _thr_sl
+    import time as _time_sl
+    _sleep_state = {"stop": False, "total": 0.0}
+
+    def _sleep_watch():
+        try:
+            up0, w0 = _time_sl.clock_gettime(_time_sl.CLOCK_UPTIME_RAW), _time_sl.time()
+        except (AttributeError, OSError):
+            return                               # clock unavailable → no watcher, no harm
+        while not _sleep_state["stop"]:
+            _time_sl.sleep(30)
+            try:
+                up1, w1 = _time_sl.clock_gettime(_time_sl.CLOCK_UPTIME_RAW), _time_sl.time()
+            except OSError:
+                return
+            drift = (w1 - w0) - (up1 - up0)
+            if drift > 60:
+                _sleep_state["total"] += drift
+                log(f"⏸ system SLEPT ~{drift / 60:.0f} min mid-render (lid closed / idle "
+                    f"sleep) — wall-clock timings include this; the render itself is fine")
+                try:
+                    proj.meta["sleep_seconds"] = round(
+                        float(proj.meta.get("sleep_seconds", 0.0)) + drift, 1)
+                except Exception:
+                    pass
+            up0, w0 = up1, w1
+
+    _thr_sl.Thread(target=_sleep_watch, daemon=True).start()
+
     # VISUAL-FILTER REQUIREMENT (fail-CLOSED). The animated / video-game / toy footage gate
     # (_source_is_nonphotographic -> _photographic_ok, verified to correctly flag Telltale 'Game of
     # Thrones' game cut-scenes as art) is CLIP-based. Without the CLIP model it SILENTLY fails open,
