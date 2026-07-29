@@ -151,23 +151,61 @@ def still_recover(proj, seg, sel, eng_cfg, *, pool=None, cand_n: int = 8,
     used_paths = used_paths if used_paths is not None else set()
     q = " ".join(x for x in (getattr(seg, "scene_query", ""),
                              getattr(seg, "expected_visual", "")) if x) or seg.text
+
+    # SPEED: rank via the certified persisted-embed path (_shot_relevance is numerically
+    # identical to _clip_relevance — the persisted row IS the vector it would recompute;
+    # falls back to the live CLIP pass per candidate when a row is missing/stale). One
+    # embeds cache per call; ordering and every downstream decision unchanged.
+    from . import index as _ix_sr
+    _emb_cache: dict = {}
+
+    def _embeds_of(sid):
+        if sid not in _emb_cache:
+            try:
+                _emb_cache[sid] = _ix_sr.load_embeds_verified(proj, sid)
+            except Exception:                            # noqa: BLE001
+                _emb_cache[sid] = (None, None)
+        return _emb_cache[sid]
+
+    _rel_memo: dict = {}
     ranked = []
     for sid, sh in pool:
         rel = None
         try:
-            rel = IF._clip_relevance(Path(sh.keyframe_path), q)
+            rel = IF._shot_relevance(sh, Path(sh.keyframe_path), q,
+                                     embeds_of=_embeds_of, rel_memo=_rel_memo)
         except Exception:                                # noqa: BLE001
             rel = None
         ranked.append((rel if rel is not None and rel >= 0 else 0.0, sid, sh))
     ranked.sort(key=lambda c: -c[0])
-    tried = 0
-    for rel, sid, sh in ranked:
-        if tried >= cand_n:
-            break
-        if sh.keyframe_path in used_paths:
-            continue
-        tried += 1
-        v = _venue_verify(sh.keyframe_path, seg, getattr(sh, "face_ids", []), eng_cfg)
+
+    # SPEED: the serial walk paid one ~2s vision verify per candidate. The accept decision
+    # is UNCHANGED — walk the ranked list in original order, install the first 'keep' —
+    # but the verifies for the exact candidate window are warmed concurrently first.
+    # used_paths is filtered BEFORE taking the window (a used path never consumed a
+    # `tried` slot in the serial walk either), and it is static during this call.
+    cands = [(rel, sid, sh) for rel, sid, sh in ranked
+             if sh.keyframe_path not in used_paths][:cand_n]
+    verdicts: dict = {}
+    if len(cands) > 1 and _env_int("VIDLORE_CLIPSTUDIO_SELFHEAL_VERIFY_WORKERS", 4) > 1:
+        try:
+            import concurrent.futures as _cf
+            _nw = min(_env_int("VIDLORE_CLIPSTUDIO_SELFHEAL_VERIFY_WORKERS", 4), 6)
+            with _cf.ThreadPoolExecutor(max_workers=_nw) as _ex:
+                _fs = {_ex.submit(_venue_verify, sh.keyframe_path, seg,
+                                  getattr(sh, "face_ids", []), eng_cfg): sh.keyframe_path
+                       for _rel, _sid, sh in cands}
+                for _f in _cf.as_completed(_fs):
+                    try:
+                        verdicts[_fs[_f]] = _f.result()
+                    except Exception:                    # noqa: BLE001
+                        pass                             # serial re-ask below
+        except Exception:                                # noqa: BLE001
+            verdicts = {}
+    for rel, sid, sh in cands:
+        v = verdicts.get(sh.keyframe_path)
+        if v is None:
+            v = _venue_verify(sh.keyframe_path, seg, getattr(sh, "face_ids", []), eng_cfg)
         if isinstance(v, dict) and v.get("verdict") == "keep":
             _install_still(sel, sh.keyframe_path, sid, int(getattr(sh, "index", -1)), rel)
             used_paths.add(sh.keyframe_path)

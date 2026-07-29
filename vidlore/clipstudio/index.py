@@ -488,9 +488,164 @@ def _band_ocr_hit(pil_frame) -> bool:
 
 
 def compute_shot_flags(path, shots: list, *, progress=None) -> int:
-    """Decode 3-5 frames per shot (start..end) via PyAV and persist multi-frame flags on each
+    """Decode 3-9 frames per shot (start..end) via PyAV and persist multi-frame flags on each
     Shot. Returns the number of shots flagged. Tolerant: a source that can't be decoded leaves
-    the sentinel values (-1) in place and every gate falls back to keyframe heuristics."""
+    the sentinel values (-1) in place and every gate falls back to keyframe heuristics.
+
+    Fast path: ONE monotonic decode of the file assigns every (shot, sample) target — the
+    per-sample seek path re-decoded each GOP 2-5x (sample density ~1/s vs 2-5s GOPs) and was
+    the single largest index block (measured 29.5 min/render). Frame SELECTION is replicated
+    exactly (first frame at/after the last keyframe ≤ t with time ≥ t-0.05; last-decoded-frame
+    EOF fallback), so flags are bit-identical; any mid-walk decode error falls back to the
+    original seek path for the whole source. VIDLORE_CLIPSTUDIO_FLAGS_FAST=0 restores the old
+    path outright."""
+    import os as _os
+    if (_os.environ.get("VIDLORE_CLIPSTUDIO_FLAGS_FAST", "1").strip().lower()
+            in ("0", "false", "no")):
+        return _compute_shot_flags_seek(path, shots, progress=progress)
+    try:
+        return _compute_shot_flags_mono(path, shots, progress=progress)
+    except Exception:
+        # damaged/exotic media: recompute everything with the battle-tested seek walk
+        # (assignments are overwritten wholesale, so a partial mono pass leaves no residue)
+        return _compute_shot_flags_seek(path, shots, progress=progress)
+
+
+def _flags_finish_shot(sh, frames, pil_mid) -> int:
+    """Shared per-shot tail of both flag walks: flags math + gated band-OCR + assignment.
+    Returns 1 when the shot got a real verdict. Byte-identical inputs in both walks."""
+    flags = _flags_from_frames(frames)
+    # band OCR on the mid sample — catches thin Latin subs the edge heuristic misses.
+    # Only consulted when the visual pass reads clean AND the shot has dialogue (burned
+    # subs track speech), keeping the OCR cost to the shots that can actually leak.
+    if flags["subs_flag"] == 0 and pil_mid is not None \
+            and (getattr(sh, "transcript", "") or "").strip() \
+            and _band_ocr_hit(pil_mid):
+        flags["subs_flag"] = 1
+        flags["text_conf"] = max(flags["text_conf"], 9.9)
+    sh.subs_flag = flags["subs_flag"]
+    sh.text_conf = flags["text_conf"]
+    sh.luma_avg = flags["luma_avg"]
+    sh.luma_hi = flags["luma_hi"]
+    sh.luma_min = flags.get("luma_min", -1.0)
+    sh.luma_min_black_frac = flags.get("luma_min_black_frac", -1.0)
+    sh.corner_masks = flags["corner_masks"]
+    sh.static_frac = flags.get("static_frac", -1.0)
+    sh.pair_diff_max = flags.get("pair_diff_max", -1.0)
+    sh.pair_diff_mean = flags.get("pair_diff_mean", -1.0)
+    return 1 if flags["subs_flag"] >= 0 else 0
+
+
+def _compute_shot_flags_mono(path, shots: list, *, progress=None) -> int:
+    """Single monotonic decode. Selection rule replicated from the seek walk EXACTLY:
+    the seek path lands on the last keyframe ≤ t and takes the first frame with
+    time ≥ t-0.05 from there — so a candidate frame seen BEFORE a later keyframe ≤ t
+    must be discarded (the seek would never have decoded it). Decoder threading is safe
+    here: h264/vp9/av1 decode is spec-exact, threads change scheduling, not pixels."""
+    import numpy as np
+    import av
+    done = 0
+    c = av.open(str(path))
+    try:
+        try:
+            c.streams.video[0].thread_type = "AUTO"
+        except Exception:
+            pass
+        # global ascending target list: (t, shot_idx, sample_idx)
+        per_shot_ts = [_sample_times(sh.start, sh.end) for sh in shots]
+        targets = []
+        for k, ts in enumerate(per_shot_ts):
+            for j, t in enumerate(ts):
+                targets.append((float(t), k, j))
+        targets.sort(key=lambda x: x[0])
+        if not targets:
+            return 0
+        # per-shot result holders: {j: PIL-or-None}; converted at shot completion
+        got_pil = [dict() for _ in shots]
+        remaining = [len(ts) for ts in per_shot_ts]
+        ti = 0
+        cand = None            # first eligible candidate frame for targets[ti]
+        last = None            # last decoded frame (EOF fallback)
+
+        def _assign(fr):
+            nonlocal ti, cand, done
+            t, k, j = targets[ti]
+            try:
+                got_pil[k][j] = fr.to_image()
+            except Exception:
+                got_pil[k][j] = None            # per-sample tolerance, like the seek walk
+            remaining[k] -= 1
+            if remaining[k] == 0:
+                done += _finish(k)
+            ti += 1
+            cand = None
+
+        def _finish(k):
+            sh = shots[k]
+            ts = per_shot_ts[k]
+            frames, pil_mid = [], None
+            for j in range(len(ts)):
+                pim = got_pil[k].get(j)
+                if pim is None:
+                    continue
+                try:
+                    if j == len(ts) // 2:
+                        pil_mid = pim
+                    im = pim.convert("L").resize((640, 360))
+                    frames.append(np.asarray(im, dtype="float32"))
+                except Exception:
+                    continue
+            got_pil[k].clear()
+            n = _flags_finish_shot(sh, frames, pil_mid)
+            if progress and (k % 50 == 0) and k:
+                progress(f"index: multi-frame flags {k}/{len(shots)}")
+            return n
+
+        for fr in c.decode(video=0):
+            last = fr
+            ft = float(fr.time or 0.0)
+            # a frame can satisfy several stacked targets (adjacent-shot boundaries)
+            while ti < len(targets):
+                t = targets[ti][0]
+                if fr.key_frame and ft <= t:
+                    cand = None                 # seek would restart from THIS keyframe
+                if ft >= t - 0.05 and cand is None:
+                    cand = fr
+                if ft > t and cand is not None:
+                    _assign(cand)
+                    continue                    # re-check next target against this frame
+                if cand is not None and ft >= t:
+                    # candidate is this very frame at/after t — no later keyframe ≤ t can
+                    # exist (times are monotonic), assign immediately
+                    _assign(cand)
+                    continue
+                break
+            if ti >= len(targets):
+                break
+        # EOF: unresolved targets take the pending candidate, else the last decoded frame
+        while ti < len(targets):
+            fr = cand if cand is not None else last
+            if fr is None:
+                # nothing decoded at all for this target: skip the sample (seek parity)
+                t, k, j = targets[ti]
+                got_pil[k][j] = None
+                remaining[k] -= 1
+                if remaining[k] == 0:
+                    done += _finish(k)
+                ti += 1
+                cand = None
+            else:
+                _assign(fr)
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+    return done
+
+
+def _compute_shot_flags_seek(path, shots: list, *, progress=None) -> int:
+    """Original per-sample seek walk — kept verbatim as the fallback/reference path."""
     import numpy as np
     try:
         import av
@@ -522,27 +677,7 @@ def compute_shot_flags(path, shots: list, *, progress=None) -> int:
                         frames.append(np.asarray(im, dtype="float32"))
                 except Exception:
                     continue
-            flags = _flags_from_frames(frames)
-            # band OCR on the mid sample — catches thin Latin subs the edge heuristic misses.
-            # Only consulted when the visual pass reads clean AND the shot has dialogue (burned
-            # subs track speech), keeping the OCR cost to the shots that can actually leak.
-            if flags["subs_flag"] == 0 and pil_mid is not None \
-                    and (getattr(sh, "transcript", "") or "").strip() \
-                    and _band_ocr_hit(pil_mid):
-                flags["subs_flag"] = 1
-                flags["text_conf"] = max(flags["text_conf"], 9.9)
-            sh.subs_flag = flags["subs_flag"]
-            sh.text_conf = flags["text_conf"]
-            sh.luma_avg = flags["luma_avg"]
-            sh.luma_hi = flags["luma_hi"]
-            sh.luma_min = flags.get("luma_min", -1.0)
-            sh.luma_min_black_frac = flags.get("luma_min_black_frac", -1.0)
-            sh.corner_masks = flags["corner_masks"]
-            sh.static_frac = flags.get("static_frac", -1.0)
-            sh.pair_diff_max = flags.get("pair_diff_max", -1.0)
-            sh.pair_diff_mean = flags.get("pair_diff_mean", -1.0)
-            if flags["subs_flag"] >= 0:
-                done += 1
+            done += _flags_finish_shot(sh, frames, pil_mid)
             if progress and (k % 50 == 0) and k:
                 progress(f"index: multi-frame flags {k}/{len(shots)}")
     finally:
@@ -702,10 +837,46 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
         from . import faceid as _fid
     shots: list[Shot] = []
     embeds = []
+
+    # SPEED: pre-extract every keyframe with the IDENTICAL ffmpeg argv in a small thread
+    # pool (subprocesses release the GIL) — the serial loop paid one cold spawn per shot
+    # (measured ~5.3 min/render). Same command → same jpg bytes; the pool result is
+    # authoritative (single attempt, same 60s timeout), so the success/failure set keeps
+    # single-attempt semantics. Never trusts a pre-existing file: only THIS run's recorded
+    # result counts (a stale keyframe from an older index must not be resurrected).
+    # VIDLORE_CLIPSTUDIO_KF_PREEXTRACT=0 restores the inline spawns.
+    _prex: dict = {}
+    if len(bounds) >= 4 and os.environ.get(
+            "VIDLORE_CLIPSTUDIO_KF_PREEXTRACT", "1").strip().lower() not in ("0", "false", "no"):
+        try:
+            import concurrent.futures as _cf
+            with _cf.ThreadPoolExecutor(max_workers=6) as _ex:
+                _futs = {_ex.submit(extract_keyframe, path, (s + e) / 2.0,
+                                    kf_dir / f"shot_{i:04d}.jpg"): i
+                         for i, (s, e) in enumerate(bounds)}
+                for _f in _cf.as_completed(_futs):
+                    try:
+                        _prex[_futs[_f]] = bool(_f.result())
+                    except Exception:
+                        _prex[_futs[_f]] = False
+        except Exception:
+            _prex = {}
+
+    # SPEED: OCR runs in the persistent worker pool (child processes own their engines,
+    # bit-identical output — see ocr.py) so it overlaps the main-thread CLIP/Face-ID work;
+    # results are consumed strictly per shot index below, serial fallback on any failure.
+    _ocr_futs: dict = {}
+    if do_ocr and _prex:
+        for _i, _ok in _prex.items():
+            if _ok:
+                _fut = _ocr.read_text_async(kf_dir / f"shot_{_i:04d}.jpg")
+                if _fut is not None:
+                    _ocr_futs[_i] = _fut
+
     for i, (s, e) in enumerate(bounds):
         sh = Shot(source_id=source.id, index=i, start=round(s, 3), end=round(e, 3))
         kf = kf_dir / f"shot_{i:04d}.jpg"
-        if extract_keyframe(path, (s + e) / 2.0, kf):
+        if (_prex[i] if i in _prex else extract_keyframe(path, (s + e) / 2.0, kf)):
             sh.keyframe_path = str(kf)
             try:
                 im = Image.open(kf)
@@ -740,7 +911,14 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
                         pass
                 if do_ocr:
                     try:
-                        txt = _ocr.read_text(kf)
+                        txt = None
+                        if i in _ocr_futs:
+                            try:
+                                txt = _ocr_futs[i].result(timeout=120)
+                            except Exception:
+                                txt = None       # worker died → serial singleton below
+                        if txt is None:
+                            txt = _ocr.read_text(kf)
                         sh.ocr_text = txt[:200]
                         sh.ocr_names = _ocr.names_in_text(txt, roster)
                     except Exception:

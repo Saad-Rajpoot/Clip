@@ -80,6 +80,9 @@ def main(argv=None) -> int:
     # (including =1 to force the fully-serial path, as the breaker suites do) always wins.
     import os as _os_vw
     _os_vw.environ.setdefault("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", "4")
+    # OCR worker pool opt-in — cli.py is __main__-guarded, so spawn re-imports are safe
+    # (unguarded driver scripts must not set this; see ocr.py)
+    _os_vw.environ.setdefault("VIDLORE_CLIPSTUDIO_OCR_POOL_OK", "1")
 
     specs: list[SourceSpec] = []
     if args.sources:

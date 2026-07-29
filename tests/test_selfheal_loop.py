@@ -252,8 +252,27 @@ class TestWiring(unittest.TestCase):
         src = (Path(__file__).resolve().parents[1]
                / "vidlore" / "clipstudio" / "orchestrate.py").read_text()
         self.assertIn("_selfheal.run(proj, segs, cfg, analysis, policy=policy", src)
-        self.assertIn('"NO valid fallback" in str(_be)', src)
+        # the catch routes on the TYPED exception kind — the old message-substring match
+        # ("NO valid fallback") never matched the real gate message and was dead code
+        self.assertIn('getattr(_be, "kind", "") == "rejected_footage"', src)
+        self.assertNotIn('"NO valid fallback" in str(_be)', src)
         self.assertIn("VIDLORE_CLIPSTUDIO_SELFHEAL_BUILD_RETRY", src)
+
+    def test_build_retry_catch_fires_on_real_gate_exception(self):
+        """The REAL gate exception (as raised by build.py) must route into heal_blocked_beats —
+        the exact contract the dead string-match silently broke."""
+        from vidlore.clipstudio.verify import NonRetryableBuildError
+        e = NonRetryableBuildError(
+            "rejected-footage gate: 2 beat(s) unresolved (no valid editorial hold or "
+            "contextual fallback) — rediscovery needed for scene(s) [71, 73]. This is a "
+            "CONTENT failure: re-running the same render will not fix it.",
+            kind="rejected_footage")
+        self.assertIsInstance(e, RuntimeError)
+        self.assertEqual(getattr(e, "kind", ""), "rejected_footage")
+        # build.py raises with the kind set
+        bsrc = (Path(__file__).resolve().parents[1]
+                / "vidlore" / "clipstudio" / "build.py").read_text()
+        self.assertIn('kind="rejected_footage"', bsrc)
 
 
 if __name__ == "__main__":

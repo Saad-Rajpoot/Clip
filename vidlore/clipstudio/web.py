@@ -130,6 +130,10 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
             # process-start value (captured once at import) always wins, including =1 for the
             # fully-serial path.
             os.environ["VIDLORE_CLIPSTUDIO_VERIFY_WORKERS"] = _VERIFY_WORKERS_START or "4"
+            # OCR worker pool opt-in: web.py is a provably __main__-guarded entrypoint, so
+            # multiprocessing spawn re-imports are safe here (see ocr.py — unguarded driver
+            # scripts must NOT set this).
+            os.environ["VIDLORE_CLIPSTUDIO_OCR_POOL_OK"] = "1"
             # REVIEW mode = accept the render even if some beats have no proven footage, flagging them
             # loudly instead of release-blocking. Set symmetrically every run so 'block' (production
             # default) is restored and a prior review retry never bleeds into a fresh job.

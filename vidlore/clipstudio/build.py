@@ -5923,6 +5923,85 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         log("build: visual budget — lowered scene energies so plan_beats converges with the "
             "distinct-look budget (no first-clip replay)")
 
+    # ---- EARLY RELEASE-GATE DRY-RUN (fail-fast; PROVABLY a subset of the authoritative gate) ----
+    # The authoritative rejected-footage gate below runs only AFTER the full beat-encode loop
+    # (~11-22 min), yet a doomed render can be known NOW: a rejected beat whose every possible
+    # hold predecessor fails _hold_scene_compat can never be resolved by any encode outcome —
+    # compat failure forces _hold_block_reason regardless of durations/consec state, and encode
+    # failures only REMOVE predecessor candidates (they can never turn an all-fail set into a
+    # pass). Beats where ANY candidate passes are left to the real gate (which stays the final
+    # word, unchanged). Honors the same kill-switch and warn mode as the real gate.
+    if (_os.environ.get("VIDLORE_CLIPSTUDIO_REJECTED_FOOTAGE_GATE", "1").strip()
+            not in ("0", "false", "no")
+            and _os.environ.get("VIDLORE_CLIPSTUDIO_EARLY_RF_GATE", "1").strip()
+            not in ("0", "false", "no")):
+        _an_e = (proj.meta.get("analysis", {}) or {})
+        _sing_e = _an_e.get("video_type", "") == "single_scene"
+        _era_e = str(_an_e.get("episode_hint", "") or "")
+        _ovl_e = _cfg_f("VIDLORE_CLIPSTUDIO_HOLD_SCENE_OVERLAP", 0.4)
+        _c2a_e = {str(c.get("name", "")): str(c.get("actor", ""))
+                  for c in (_an_e.get("characters") or []) if isinstance(c, dict)}
+        _seg_by_idx_e = {s.index: s for s in segments}
+        _fin2orig_e = {v: k for k, v in (_bidx or {}).items()}
+        _blk_e = []
+        _preds_e: list = []                 # candidate predecessor indexes seen so far, in order
+        for seg in segments:
+            _sel_e = sel_by_idx.get(seg.index)
+            _rej_e = bool(_sel_e is not None
+                          and "verifier_failed" in (getattr(_sel_e, "flag_reasons", None) or [])
+                          and not getattr(_sel_e, "image_path", ""))
+            if seg.index in _breakout_clip or not _rej_e:
+                # SUPERSET of the real gate's predecessor rule (which additionally requires the
+                # beat to have produced clips): more candidates here → fewer early blocks → safe
+                if not _rej_e and seg.index not in _breakout_clip:
+                    _preds_e.append(seg.index)
+                continue
+            _any_ok = False
+            for _p_e in reversed(_preds_e):
+                try:
+                    _ok_e, _ev_e = _hold_scene_compat(
+                        _seg_by_idx_e.get(_p_e), _seg_by_idx_e.get(seg.index),
+                        sel_by_idx.get(_p_e), sel_by_idx.get(seg.index),
+                        single_scene=_sing_e, global_era=_era_e,
+                        overlap_min=_ovl_e, char2actor=_c2a_e)
+                except Exception:           # noqa: BLE001 — evaluation failure ≠ proof of doom
+                    _ok_e = True
+                if _ok_e:
+                    _any_ok = True
+                    break
+            if not _any_ok:
+                _blk_e.append({"seg_index": _fin2orig_e.get(seg.index, seg.index),
+                               "final_index": seg.index,
+                               "reason": ("no clean predecessor" if not _preds_e else
+                                          "not same scene (every candidate predecessor fails)"),
+                               "early_gate": True})
+        if _blk_e:
+            _mode_e = _os.environ.get("VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE",
+                                      "block").strip().lower()
+            _msg_e = (f"{len(_blk_e)} verifier-rejected beat(s) have NO possible same-scene hold "
+                      f"(early gate, before assembly) — scene(s) "
+                      f"{[b['seg_index'] for b in _blk_e[:8]]}.")
+            if _mode_e == "warn":
+                log(f"build: ⚠ EARLY RELEASE-BLOCK (mode=warn, REVIEW BUILD) — {_msg_e} "
+                    f"Continuing; the authoritative gate reports after assembly.")
+            else:
+                try:
+                    import json as _json_e
+                    (proj.output_dir / "rejected_footage_audit.json").write_text(_json_e.dumps(
+                        {"editorial_holds": [], "unresolved_release_block": _blk_e,
+                         "early_gate": True}, indent=1), encoding="utf-8")
+                except Exception:
+                    pass
+                log(f"build: ⛔ RELEASE-BLOCKED EARLY — {_msg_e} Skipping the doomed "
+                    f"assembly (~20 min) — heal/rediscovery needed.")
+                from .verify import NonRetryableBuildError
+                raise NonRetryableBuildError(
+                    f"rejected-footage gate: {len(_blk_e)} beat(s) unresolved (no valid editorial "
+                    f"hold or contextual fallback) — rediscovery needed for scene(s) "
+                    f"{[b['seg_index'] for b in _blk_e[:8]]}. This is a CONTENT failure: "
+                    f"re-running the same render will not fix it.",
+                    kind="rejected_footage")
+
     for pos, seg in enumerate(segments):
         sel = sel_by_idx.get(seg.index)
         k = nbeats[pos]
@@ -6498,7 +6577,8 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                     f"rejected-footage gate: {len(_rf_block)} beat(s) unresolved (no valid editorial "
                     f"hold or contextual fallback) — rediscovery needed for scene(s) "
                     f"{[b['seg_index'] for b in _rf_block[:8]]}. This is a CONTENT failure: "
-                    f"re-running the same render will not fix it.")
+                    f"re-running the same render will not fix it.",
+                    kind="rejected_footage")
 
     # ---- UNVERIFIED-EXACT GATE -------------------------------------------------------------
     # A separate gate from the rejected-footage one above, deliberately. That gate handles footage

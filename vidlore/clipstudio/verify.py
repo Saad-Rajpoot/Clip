@@ -222,7 +222,16 @@ class NonRetryableBuildError(RuntimeError):
     because the vision API had finally died: 0 verdicts, 0 rejections, 0 unresolved, publish.
     Scene 25 was never fixed. It just stopped being checked.
 
-    Retry transient plumbing. Never retry a judgment."""
+    Retry transient plumbing. Never retry a judgment.
+
+    `kind` is the machine-readable identity of the gate that raised — routing (e.g. the in-build
+    heal-and-rebuild catch) MUST dispatch on it, never on message substrings: the catch that
+    matched "NO valid fallback" against a message that actually says "no valid editorial hold"
+    was dead code for its whole life."""
+
+    def __init__(self, msg: str = "", *, kind: str = ""):
+        super().__init__(msg)
+        self.kind = kind
 
 
 class VisionBackendError(RuntimeError):

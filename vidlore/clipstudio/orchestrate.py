@@ -1364,7 +1364,17 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
         match_segments(proj, segs, cfg_r, analysis=analysis, progress=None)
         cut_all(proj, cfg_r, progress=None)
         from . import verify as _verify_r
-        _verify_r.verify_and_repair(proj, segs, cfg, eng, only_indices=set(unresolved), progress=None)
+        # same scoped 4-worker prefetch as the main verify stage (set + restore, never leaked)
+        import os as _os_vwr
+        _vwr_unset = "VIDLORE_CLIPSTUDIO_VERIFY_WORKERS" not in _os_vwr.environ
+        if _vwr_unset:
+            _os_vwr.environ["VIDLORE_CLIPSTUDIO_VERIFY_WORKERS"] = "4"
+        try:
+            _verify_r.verify_and_repair(proj, segs, cfg, eng, only_indices=set(unresolved),
+                                        progress=None)
+        finally:
+            if _vwr_unset:
+                _os_vwr.environ.pop("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", None)
 
         new_sel_by_idx = {s.segment_index: s for s in proj.selections}
         for i in unresolved:
@@ -1730,7 +1740,21 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
         log("8/9 · AI verify + repair — ↻ skipped (resume, verdicts cached)")
     elif verify:
         log("8/9 · AI verify + repair")
-        _vres = _verify.verify_and_repair(proj, segs, cfg, eng, progress=progress) or {}
+        # The proven 4-worker verdict prefetch was only enabled by the portal and CLI entrypoints;
+        # direct produce_auto callers (tools scripts, tests driving real renders) ran verify fully
+        # serial — measured 28 min on a render whose warm prefetch cost is minutes. Scoped set +
+        # restore (not a bare setdefault) so the env never leaks into later direct
+        # verify_and_repair callers in the same process (the outage suite's serial call-count
+        # contract depends on workers=1).
+        import os as _os_vw
+        _vw_unset = "VIDLORE_CLIPSTUDIO_VERIFY_WORKERS" not in _os_vw.environ
+        if _vw_unset:
+            _os_vw.environ["VIDLORE_CLIPSTUDIO_VERIFY_WORKERS"] = "4"
+        try:
+            _vres = _verify.verify_and_repair(proj, segs, cfg, eng, progress=progress) or {}
+        finally:
+            if _vw_unset:
+                _os_vw.environ.pop("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", None)
         # VISION-BACKEND OUTAGE (billing / bad key / persistent down): the whole stage errored, so
         # every exact beat is unresolved. Do NOT checkpoint this stage 'done' — that made a later
         # Resume SKIP verify and re-hit the block forever. Do NOT grind hours of image-fallback
@@ -1865,7 +1889,8 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
             # predictor cannot (it is a documented subset). Heal the audit's unresolved list
             # once and rebuild — same bounded machinery, gate stays the final word.
             import os as _os_bh
-            if ("NO valid fallback" in str(_be)
+            from .verify import NonRetryableBuildError as _NRBE
+            if (isinstance(_be, _NRBE) and getattr(_be, "kind", "") == "rejected_footage"
                     and _os_bh.environ.get("VIDLORE_CLIPSTUDIO_SELFHEAL", "1").strip().lower()
                     not in ("0", "false", "no")
                     and _os_bh.environ.get("VIDLORE_CLIPSTUDIO_SELFHEAL_BUILD_RETRY", "1")
