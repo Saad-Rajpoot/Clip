@@ -57,7 +57,7 @@ echo  [*] Python mila: !PYLAUNCH!
 
 REM --- 2) .env (API keys) check - config.py ise khud load karta hai -----------------------------
 if not exist ".env" (
-  echo  [!] .env file nahi mili ^(ismein DeepSeek aur baaki API keys hoti hain^).
+  echo  [X] .env file nahi mili ^(ismein DeepSeek aur baaki API keys hoti hain^).
   echo      ".env.example" ko copy kar ke ".env" banayein aur apni keys daalein.
   echo      Bina keys ke brain/AI kaam nahi karega.
   echo.
@@ -106,21 +106,39 @@ if exist "%~dp0.hdvenv\Scripts\python.exe" (
     echo  [*] yt-dlp ^+ PO-token provider install kar raha hoon ^(HD ke liye^) ...
     "%~dp0.hdvenv\Scripts\python.exe" -m pip install --upgrade pip >nul 2>nul
     "%~dp0.hdvenv\Scripts\python.exe" -m pip install -U yt-dlp yt-dlp-ejs bgutil-ytdlp-pot-provider
-    if errorlevel 1 echo  [!] HD venv install fail hua - footage 360p par aayegi ^(baad mein dobara chalayein^).
+    if errorlevel 1 echo  [X] HD venv install fail hua - footage 360p par aayegi ^(baad mein dobara chalayein^).
   )
 ) else (
-  echo  [!] .hdvenv nahi ban saka - HD downloads band rahengi ^(footage 360p^).
+  echo  [X] .hdvenv nahi ban saka - HD downloads band rahengi ^(footage 360p^).
 )
 
-REM  Deno: PO-token server ISI se chalta hai. PATH par na ho to user-local install kar do
-REM  (official installer, sirf is user ke liye - admin ki zaroorat nahi).
-where deno >nul 2>nul
-if errorlevel 1 if not exist "%USERPROFILE%\.deno\bin\deno.exe" (
+REM  Deno: PO-token server ISI se chalta hai (HD ka asli darwaza).
+REM  Pehli koshish = seedha official release ZIP (deterministic, ek hi file: deno.exe).
+REM  `irm install.ps1 | iex` ko fallback rakha hai: woh ek measured Windows run par CHUP-CHAAP
+REM  fail hua tha kyunki output >nul par jaa raha tha - isliye ab koi output chhupaya NAHI jata.
+set "DENO_EXE=%USERPROFILE%\.deno\bin\deno.exe"
+set "DENO_FOUND="
+where deno >nul 2>nul && set "DENO_FOUND=1"
+if exist "%DENO_EXE%" set "DENO_FOUND=1"
+if not defined DENO_FOUND (
   echo  [*] Deno install kar raha hoon ^(HD PO-token server iske baghair nahi chalta^) ...
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://deno.land/install.ps1 | iex" >nul 2>nul
-  if errorlevel 1 echo  [!] Deno install fail hua - HD band rahega. Manually: irm https://deno.land/install.ps1 ^| iex
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { New-Item -ItemType Directory -Force -Path \"$env:USERPROFILE\.deno\bin\" ^| Out-Null; $z=Join-Path $env:TEMP 'deno-win-x64.zip'; Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip' -OutFile $z; Expand-Archive -Path $z -DestinationPath \"$env:USERPROFILE\.deno\bin\" -Force; Remove-Item $z -Force } catch { Write-Host ('     Deno ZIP fail: ' + $_.Exception.Message) }"
+  if not exist "%DENO_EXE%" (
+    echo  [*] Doosra tareeqa: official installer ...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://deno.land/install.ps1 | iex"
+  )
 )
-if exist "%USERPROFILE%\.deno\bin\deno.exe" set "PATH=%USERPROFILE%\.deno\bin;%PATH%"
+if exist "%DENO_EXE%" (
+  set "PATH=%USERPROFILE%\.deno\bin;%PATH%"
+  set "VIDLORE_HD_DENO=%DENO_EXE%"
+) else (
+  where deno >nul 2>nul || (
+    echo  [X] Deno install nahi hua - HD band rahega ^(saari footage ~360p aayegi^).
+    echo      Khud install karne ka tareeqa - PowerShell mein:
+    echo         irm https://deno.land/install.ps1 ^| iex
+    echo      Phir yeh launcher dobara chalayein.
+  )
+)
 :hdskip
 
 REM --- 5) environment -------------------------------------------------------------------------
@@ -174,6 +192,6 @@ REM  :checkvenv  -> agar maujooda .venv ka python 3.10-3.12 NAHI hai to use hata
 :checkvenv
 "%VENV_PY%" -c "import sys;sys.exit(0 if sys.version_info[:2] in ((3,10),(3,11),(3,12)) else 1)" >nul 2>nul
 if not errorlevel 1 goto :eof
-echo  [!] Purana .venv galat Python ^(3.13/3.14^) se bana tha - hata kar naya banata hoon...
+echo  [X] Purana .venv galat Python ^(3.13/3.14^) se bana tha - hata kar naya banata hoon...
 rmdir /S /Q ".venv"
 goto :eof

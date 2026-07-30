@@ -269,3 +269,42 @@ class TestPreflightRunsOnLaunch(unittest.TestCase):
         src = (ROOT / "tools" / "clipstudio_preflight.py").read_text()
         self.assertNotIn("clip_available()", src)
         self.assertNotIn("_try_load", src)
+
+
+class TestLauncherDenoProvisioning(unittest.TestCase):
+    """Measured on a real Windows run: `.hdvenv` provisioned fine but Deno did NOT, and the
+    failure was invisible because the PowerShell output went to >nul. The launcher now uses a
+    deterministic ZIP install, shows every error, and exports the path explicitly."""
+
+    def setUp(self):
+        self.bat = (ROOT / "run-windows.bat").read_text()
+
+    def test_deterministic_zip_first_then_official_installer(self):
+        self.assertIn("deno-x86_64-pc-windows-msvc.zip", self.bat)
+        self.assertIn("deno.land/install.ps1", self.bat)          # fallback kept
+        self.assertLess(self.bat.find("deno-x86_64-pc-windows-msvc.zip"),
+                        self.bat.find("Doosra tareeqa"))
+
+    def test_deno_errors_are_never_suppressed(self):
+        for line in self.bat.splitlines():
+            if "deno" in line.lower() and "powershell" in line.lower():
+                self.assertNotIn(">nul", line,
+                                 "a silent Deno failure is exactly what hid this bug")
+
+    def test_resolved_path_is_exported_not_left_to_path_lookup(self):
+        self.assertIn('set "VIDLORE_HD_DENO=', self.bat)
+
+    def test_no_bare_exclamation_in_messages(self):
+        """EnableDelayedExpansion makes '!' a metacharacter — batch EATS it, so '[!] ...' printed
+        as '[ ...' and truncated the remedy on the owner's screen."""
+        self.assertNotIn("[!]", self.bat)
+
+    def test_env_override_is_honoured_by_the_resolver(self):
+        with mock.patch.dict(os.environ, {"VIDLORE_HD_DENO": "/some/deno"}):
+            import importlib
+            from vidlore.clipstudio import hd_download as fresh
+            importlib.reload(fresh)
+            self.assertEqual(fresh.DENO_BIN, "/some/deno")
+        import importlib
+        from vidlore.clipstudio import hd_download as restore
+        importlib.reload(restore)
