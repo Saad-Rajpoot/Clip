@@ -308,3 +308,23 @@ class TestLauncherDenoProvisioning(unittest.TestCase):
         import importlib
         from vidlore.clipstudio import hd_download as restore
         importlib.reload(restore)
+
+
+class TestFixDenoHelper(unittest.TestCase):
+    """The owner could not act on a pasted PowerShell one-liner, so the remedy is a file they
+    can double-click. It must be self-contained and must not close its own window on failure."""
+
+    def setUp(self):
+        self.bat = (ROOT / "windows" / "Fix-Deno.bat").read_text()
+
+    def test_installs_deno_both_ways_and_reports(self):
+        self.assertIn("deno-x86_64-pc-windows-msvc.zip", self.bat)
+        self.assertIn("deno.land/install.ps1", self.bat)
+        self.assertIn("--version", self.bat)               # proves it actually landed
+        self.assertGreaterEqual(self.bat.count("pause"), 2, "window must stay open to be read")
+
+    def test_no_delayed_expansion_so_messages_survive(self):
+        self.assertNotIn("EnableDelayedExpansion", self.bat)
+
+    def test_readme_points_at_it(self):
+        self.assertIn("Fix-Deno.bat", (ROOT / "windows" / "README.txt").read_text())

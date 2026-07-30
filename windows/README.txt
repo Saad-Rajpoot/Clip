@@ -103,6 +103,9 @@ KUCH CHAL NA RAHA HO TO
     Python 3.12 install karein (upar link), phir launcher dobara chalayein.
     Launcher purana galat .venv khud hata kar 3.12 se naya bana dega.
 - windows\Diagnose.bat  double-click  ->  "vidlore_diag.txt" banegi; wo bhej dein.
+- Pre-flight mein "HD download OFF (Deno nahi)" aaye  ->  windows\Fix-Deno.bat
+    double-click karein, phir Start-ClipStudio.bat dobara chalayein.
+    (Iske baghair sab chalega magar SAARI footage ~360p aayegi.)
 - GPU/encode check ke liye (optional) "tools" folder mein:
     check_windows_gpu_acceleration.bat   (GPU encode kaam kar raha hai?)
     fetch_windows_nvenc_ffmpeg.py        (NVENC wala ffmpeg dobara laana ho to)
