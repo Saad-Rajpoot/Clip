@@ -27,6 +27,32 @@ class PipelineError(RuntimeError):
     it back to a non-zero exit at its boundary."""
 
 
+# A stage that "must never break a render" is wrapped in a fail-open catch. That is right for
+# ENVIRONMENTAL faults (network, provider, disk) — but it also swallowed a plain NameError in the
+# bounded-recovery stage for MONTHS: `recovery: skipped (NameError: name 'os' is not defined)`
+# reads exactly like a benign skip, so the whole R4-5 subsystem was dead on every render and no
+# one could tell from the log. Programming errors are not environmental: they can never be
+# resolved by retrying, and they mean the stage did NOT run. Say so loudly and record it, while
+# keeping the fail-open behaviour (a render must still finish).
+_BUG_EXC = (NameError, UnboundLocalError, AttributeError, TypeError, ImportError)
+
+
+def _log_stage_skip(log, proj, stage: str, exc: Exception) -> None:
+    """Log a fail-open stage skip; a programming error gets a loud, greppable BUG line and is
+    recorded in proj.meta['stage_bugs'] so audits and the portal can surface it."""
+    _n = type(exc).__name__
+    if isinstance(exc, _BUG_EXC):
+        log(f"⚠ BUG — {stage} did NOT run: {_n}: {exc}. This is a CODE fault, not an "
+            f"environmental one; retrying cannot fix it and the stage's protection is absent "
+            f"from this render.")
+        try:
+            proj.meta.setdefault("stage_bugs", []).append({"stage": stage, "error": f"{_n}: {exc}"[:200]})
+        except Exception:                                # noqa: BLE001 — never break a render
+            pass
+    else:
+        log(f"{stage}: skipped ({_n}: {str(exc)[:80]})")
+
+
 def _scaled_source_budget(max_sources: int, n_beats: int, video_type: str = "") -> int:
     """Footage budget scaled to the SCRIPT length.
 
@@ -1324,7 +1350,7 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
     # pick: a look-miss beat only changes if rediscovery positively resolves it at the strict
     # bar; otherwise the snapshot is restored. Env: VIDLORE_CLIPSTUDIO_LOOK_RECOVERY=0 disables.
     _look_aug: dict[int, str] = {}
-    if os.environ.get("VIDLORE_CLIPSTUDIO_LOOK_RECOVERY", "1").strip() \
+    if _os.environ.get("VIDLORE_CLIPSTUDIO_LOOK_RECOVERY", "1").strip() \
             not in ("0", "false", "no"):
         _lm = [s.segment_index for s in proj.selections
                if "look_target_missing" in (getattr(s, "flag_reasons", None) or [])
@@ -1953,7 +1979,7 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
             _recover_unresolved_beats(proj, segs, analysis, cfg, eng, faceid_obj=faceid_obj, refs=refs,
                                       roster=roster, policy=policy, log=log)
         except Exception as _e:
-            log(f"recovery: skipped ({type(_e).__name__}: {_e})")
+            _log_stage_skip(log, proj, "recovery", _e)
 
         # 8b — EXACT-SCENE IMAGE FALLBACK: beats that still have no relevant footage (no source,
         # low confidence, or a confirmed wrong-character pick) get a face/CLIP-verified still from
@@ -1963,7 +1989,7 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
             try:
                 _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, eng_cfg=eng)
             except Exception as _e:
-                log(f"image-fallback: skipped ({type(_e).__name__}: {_e})")
+                _log_stage_skip(log, proj, "image-fallback", _e)
         _stage_done(proj, "recover", _sig_recover)
 
     # ledger + QC report
@@ -1983,7 +2009,7 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
             _pre = preassemble_release_block_reason(proj, segs, analysis)
         except Exception as _e:                          # never let the fast-path itself break a render
             _pre = None
-            log(f"pre-assemble gate: skipped ({type(_e).__name__}: {_e})")
+            _log_stage_skip(log, proj, "pre-assemble gate", _e)
         # SELF-HEALING FOOTAGE RECOVERY — the automated gate-unblock playbook (verified stills
         # at the venue bar → targeted LLM-queried acquisition → retry), bounded rounds, never
         # weakens the gate. Manual on job olenna_v2_allfixes it took 17 blocked beats to 0;
@@ -1993,7 +2019,7 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
                 from . import selfheal as _selfheal
                 _pre = _selfheal.run(proj, segs, cfg, analysis, policy=policy, log=log)
             except Exception as _e:                      # noqa: BLE001 — heal must never break a render
-                log(f"self-heal: skipped ({type(_e).__name__}: {str(_e)[:80]})")
+                _log_stage_skip(log, proj, "self-heal", _e)
         if _pre:
             _mode = _os.environ.get("VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE", "block").strip().lower()
             if _mode == "warn":

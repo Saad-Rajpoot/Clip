@@ -74,11 +74,17 @@ def main():
                                  ex, _policy),
          "exact beat with a validated web-exact-scene still is RESOLVED")
 
-    # a GENERIC/contextual beat is NEVER 'unresolved' — it has a legitimate fallback treatment
-    _say(not _beat_is_unresolved(Sel("", verdict="replace"), gen, _policy),
-         "generic_filler beat is NOT unresolved (it has a legitimate fallback, not exact)")
+    # A verifier-REJECTED non-exact beat IS unresolved. This test used to assert the opposite —
+    # the original R4-5 contract exempted every non-exact policy — but that exemption was removed
+    # deliberately: a rejected character/filler clip whose editorial hold later fails the R4-3/R4-4
+    # validity checks release-blocks the finished render exactly like an exact one (observed: 7
+    # character_specific beats FATALed a 4½-hour render while recovery reported ZERO unresolved).
+    # Recovery and the build-stage gate must see the SAME set. Only the REJECTION makes it
+    # unresolved, though — a non-exact beat that simply has no source still has its fallback.
+    _say(_beat_is_unresolved(Sel("", verdict="replace"), gen, _policy),
+         "verifier-rejected generic beat IS unresolved (gate would block it → recovery)")
     _say(not _beat_is_unresolved(Sel(""), gen, _policy),
-         "generic beat with no source is NOT unresolved (only EXACT beats trigger recovery)")
+         "generic beat with no source is NOT unresolved (no rejection = fallback treatment)")
 
     # a verifier ERROR (transient) is NOT a rejection → not unresolved on that basis alone
     _say(not _beat_is_unresolved(Sel("src_A", status="error", verdict="replace"), ex, _policy),
