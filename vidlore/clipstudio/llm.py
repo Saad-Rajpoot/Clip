@@ -46,14 +46,68 @@ if _LIBS.exists() and str(_LIBS) not in sys.path:
 # VIDLORE_CLIPSTUDIO_PRICE_<MODEL>_IN / _OUT (dots and dashes become underscores) when the
 # provider's rate card changes.
 _USAGE: dict = {}
+_CLAUDE_VISION_CALLS = [0]        # last-resort vision fallback counter (see _claude_vision_budget_ok)
 
 _PRICE_DEFAULTS = {
     "gemini-2.5-flash": (0.30, 2.50),
+    "gemini-2.5-flash-lite": (0.10, 0.40),   # no row → a lite call books $0 and hides its own spend
     "gemini-2.5-pro": (1.25, 10.00),
     "claude-sonnet-4-6": (3.00, 15.00),
     "deepseek-v4-pro": (0.28, 0.42),
     "deepseek-v4-flash": (0.07, 0.14),
 }
+
+# WHICH PIPELINE STAGE is spending. record_usage has always accepted stage=, but no call site ever
+# passed it, so every cost_report shipped `stages: {}` and "what did verify cost vs the still layer"
+# could only be inferred by reading code. The provider functions are far below the stages that call
+# them, so the label rides a context var: a stage wraps its work in `with llm.usage_stage("verify")`
+# and every call underneath books against it. Thread-safe and task-safe by construction (ContextVar),
+# which matters because verify/still/selfheal all fan out to worker threads.
+import contextvars as _contextvars
+_STAGE: "_contextvars.ContextVar[str]" = _contextvars.ContextVar("clipstudio_usage_stage",
+                                                                default="")
+# ContextVars are NOT inherited by plain worker threads, and the expensive stages (verify prefetch,
+# still layer, self-heal) all fan out to ThreadPoolExecutors — their calls would book against no
+# stage at all. So the label is also kept in a module global that any thread can read. One render
+# per process is the production shape (the portal runs jobs serially), so the global is accurate;
+# were two renders ever to share a process the ContextVar still gives the calling task the right
+# label and only unlabelled worker calls could blur. Attribution is observability, never a decision.
+_STAGE_GLOBAL = [""]
+
+
+def set_stage(name: str) -> None:
+    """Label everything booked from now on (until the next set_stage). Never raises."""
+    try:
+        n = (name or "").strip()[:48]
+        _STAGE_GLOBAL[0] = n
+        _STAGE.set(n)
+    except Exception:                                  # noqa: BLE001 — accounting is never fatal
+        pass
+
+
+class usage_stage:
+    """Scoped variant of set_stage for a bounded block of work."""
+
+    def __init__(self, name: str):
+        self.name = (name or "").strip()[:48]
+        self._prev = ""
+
+    def __enter__(self):
+        self._prev = current_stage()
+        set_stage(self.name)
+        return self
+
+    def __exit__(self, *exc):
+        set_stage(self._prev)
+        return False
+
+
+def current_stage() -> str:
+    try:
+        v = _STAGE.get()
+    except Exception:                                  # noqa: BLE001
+        v = ""
+    return v or _STAGE_GLOBAL[0]
 
 
 def _price_for(model: str) -> tuple:
@@ -69,26 +123,41 @@ def _price_for(model: str) -> tuple:
 
 
 def record_usage(model: str, *, prompt: int = 0, completion: int = 0, stage: str = "") -> None:
-    """Book one call's token usage. Safe to call with zeros or junk."""
+    """Book one call's token usage. Safe to call with zeros or junk.
+
+    `stage` defaults to the ambient `usage_stage(...)` label, so provider functions book against
+    whatever pipeline stage is running without every call site having to pass it. Tokens are
+    booked per stage too — call counts alone can't tell a cheap stage from an expensive one."""
     try:
         k = (model or "unknown").strip().lower()
-        e = _USAGE.setdefault(k, {"calls": 0, "prompt": 0, "completion": 0, "stages": {}})
+        e = _USAGE.setdefault(k, {"calls": 0, "prompt": 0, "completion": 0, "stages": {},
+                                  "stage_tokens": {}})
+        _p, _c = max(0, int(prompt or 0)), max(0, int(completion or 0))
         e["calls"] += 1
-        e["prompt"] += max(0, int(prompt or 0))
-        e["completion"] += max(0, int(completion or 0))
-        if stage:
-            e["stages"][stage] = e["stages"].get(stage, 0) + 1
+        e["prompt"] += _p
+        e["completion"] += _c
+        st = (stage or current_stage() or "").strip()
+        if st:
+            e["stages"][st] = e["stages"].get(st, 0) + 1
+            _t = e.setdefault("stage_tokens", {}).setdefault(st, {"prompt": 0, "completion": 0})
+            _t["prompt"] += _p
+            _t["completion"] += _c
     except Exception:                                  # noqa: BLE001 — never break a render
         pass
 
 
 def _usage_from(resp) -> tuple:
-    """(prompt, completion) from a Gemini or Claude response object; (0, 0) when absent."""
+    """(prompt, completion) from a Gemini or Claude response object; (0, 0) when absent.
+
+    THINKING tokens count as completion. Gemini reports them separately (thoughts_token_count) and
+    they are billed at the output rate — a silently re-enabled thinking config would otherwise
+    multiply the real bill several times over while the recorded cost stayed flat."""
     try:
         u = getattr(resp, "usage_metadata", None)      # Gemini
         if u is not None:
             return (int(getattr(u, "prompt_token_count", 0) or 0),
-                    int(getattr(u, "candidates_token_count", 0) or 0))
+                    int(getattr(u, "candidates_token_count", 0) or 0)
+                    + int(getattr(u, "thoughts_token_count", 0) or 0))
         u = getattr(resp, "usage", None)               # Claude
         if u is not None:
             return (int(getattr(u, "input_tokens", 0) or 0),
@@ -115,7 +184,12 @@ def usage_summary() -> dict:
 
 
 def reset_usage() -> None:
+    """Start a fresh accounting scope. The portal is a long-lived process, so without this every
+    job's cost_report accumulated every PREVIOUS job's spend too."""
     _USAGE.clear()
+    _CLAUDE_VISION_CALLS[0] = 0
+    set_stage("")                    # BOTH the global and the ContextVar — clearing only one
+                                     # leaves the previous job's stage labelling the next one's
 
 
 def _provider() -> str:
@@ -367,8 +441,17 @@ def _gemini_complete(system, messages, max_tokens, model) -> str:
     think = os.environ.get("VIDLORE_GEMINI_THINKING", "0").strip()
     try:                                              # thinking OFF by default (else empty output)
         gcfg["thinking_config"] = types.ThinkingConfig(thinking_budget=int(think))
-    except Exception:
-        pass
+    except Exception as _te:                          # noqa: BLE001
+        # NOT silent: thinking tokens bill at the OUTPUT rate, so an SDK rename that drops this
+        # config quietly multiplies the render's bill (measured probe: 400-900 thought-tokens on a
+        # verifier-shaped payload vs ~100 answer tokens). Loud once, and counted.
+        from . import perf_metrics as _pm_tc
+        _pm_tc.incr("llm.thinking_config.dropped")
+        if not globals().get("_THINK_WARNED"):
+            globals()["_THINK_WARNED"] = True
+            print(f"[clipstudio] ⚠ COST: Gemini thinking_config could NOT be set "
+                  f"({type(_te).__name__}) — thought tokens may now be billed as output.",
+                  flush=True)
     # callers forward eng_cfg.anthropic_model verbatim — a Claude id must not kill the fallback
     mdl = (model or "").strip()
     if not mdl.lower().startswith("gemini"):
@@ -381,11 +464,48 @@ def _gemini_complete(system, messages, max_tokens, model) -> str:
     return getattr(resp, "text", None) or ""
 
 
+def _claude_vision_budget_ok(messages) -> bool:
+    """Claude is the LAST-RESORT vision fallback and costs ~10x Gemini flash on input
+    ($3.00 vs $0.30 per 1M). It is silent by design, so a Gemini-side outage could quietly
+    re-price a whole render. Allow a generous number of genuine transient fallbacks, then
+    refuse — the verifier's existing fail-closed semantics treat a refusal exactly like an
+    outage (release-block; never a silent pass). Env: VIDLORE_CLIPSTUDIO_MAX_CLAUDE_VISION."""
+    has_image = False
+    try:
+        for m in (messages or []):
+            for part in (m.get("content") or []):
+                if isinstance(part, dict) and part.get("type") == "image":
+                    has_image = True
+                    break
+    except Exception:                                  # noqa: BLE001
+        return True
+    if not has_image:
+        return True
+    try:
+        cap = int(os.environ.get("VIDLORE_CLIPSTUDIO_MAX_CLAUDE_VISION", "50") or 50)
+    except (TypeError, ValueError):
+        cap = 50
+    _CLAUDE_VISION_CALLS[0] += 1
+    n = _CLAUDE_VISION_CALLS[0]
+    if n == 1:
+        print("[clipstudio] ⚠ COST: vision fell back to CLAUDE (~10x Gemini flash input price) — "
+              "check the Gemini backend.", flush=True)
+    if cap > 0 and n > cap:
+        if n == cap + 1:
+            print(f"[clipstudio] ⛔ COST GUARD: Claude vision call budget ({cap}) exhausted — "
+                  f"refusing further Claude vision calls. Beats verify fail-closed from here "
+                  f"(release-block, never a silent pass). Restore the Gemini backend.", flush=True)
+        return False
+    return True
+
+
 def _claude_complete(system, messages, max_tokens, eng_cfg, model) -> str:
     import anthropic
     key = _claude_key(eng_cfg)
     if not key:
         return ""
+    if not _claude_vision_budget_ok(messages):
+        return ""                                      # same shape as "no key": fail-closed
     cl = anthropic.Anthropic(api_key=key)
     mdl = model or (getattr(eng_cfg, "anthropic_model", "") if eng_cfg else "") or _claude_model()
     if not mdl.lower().startswith("claude"):     # a Gemini id forwarded by a caller

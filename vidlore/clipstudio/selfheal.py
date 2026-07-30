@@ -121,16 +121,122 @@ def _clean_pool(proj) -> list[tuple[str, object]]:
     return pool
 
 
-def _venue_verify(kf_path: str, seg, faces, eng_cfg):
+_VV_CACHE = {"root": "", "data": {}}
+
+
+def _venue_cache(proj) -> dict:
+    """The project's verdict cache, loaded once per project — self-heal runs up to 3 rounds per
+    pass (and the whole pass twice on a review-draft retry), so re-reading per candidate would
+    be pointless IO."""
+    root = str(getattr(proj, "root", ""))
+    if _VV_CACHE["root"] != root:
+        try:
+            from .verify import _load_verdict_cache
+            _VV_CACHE["data"] = _load_verdict_cache(proj) or {}
+        except Exception:                                # noqa: BLE001
+            _VV_CACHE["data"] = {}
+        _VV_CACHE["root"] = root
+    return _VV_CACHE["data"]
+
+
+def _venue_cache_save(proj) -> None:
+    """Persist new venue verdicts by MERGING onto whatever is on disk — verify.py and the still
+    layer write the same file, and a blind overwrite from a stale in-memory copy would silently
+    drop their entries (and re-buy those verdicts on the next pass)."""
+    try:
+        from .verify import _load_verdict_cache, _save_verdict_cache
+        merged = _load_verdict_cache(proj) or {}
+        merged.update(_VV_CACHE.get("data") or {})
+        _save_verdict_cache(proj, merged)
+        _VV_CACHE["data"] = merged
+    except Exception:                                    # noqa: BLE001 — cache is an optimisation
+        pass
+
+
+def _venue_fp(proj, kf_path: str, seg, faces, eng_cfg, model_id: str = "") -> str:
+    """Fingerprint of the question _venue_verify ACTUALLY asks.
+
+    Deliberately NOT the still layer's `_still_fp`: that one bakes `era=_beat_era(...)` into the
+    key while this call sends no era_hint at all. Sharing keys would let one layer consume the
+    other layer's answer to a weaker/stronger question — the exact cross-question reuse the
+    whole full-fingerprint doctrine exists to prevent. era/must_see stay empty here because they
+    are empty in the prompt."""
+    try:
+        from . import verify as _V
+        from . import policy as _P
+        return _V.verdict_fingerprint(
+            src_hash=_src_hash_of(proj, kf_path), source_id=_sid_of_kf(kf_path),
+            shot_start=0.0, shot_end=0.0,
+            beat_text=getattr(seg, "text", ""),
+            required_entity=getattr(seg, "required_entity", "") or "",
+            required_kind=getattr(seg, "required_kind", "") or "",
+            expected_visual=getattr(seg, "expected_visual", "") or "",
+            scene_query=getattr(seg, "scene_query", "") or "",
+            era="", visual_policy=_P.policy_of(seg), is_specific=False,
+            faceid_names=list(faces or []), multiframe=False,
+            image_id=f"kf:{_V._file_fingerprint(kf_path)}",
+            model=(model_id or _vision_model(eng_cfg)), venue_fallback=True, must_see="")
+    except Exception:                                    # noqa: BLE001 — no key → uncached call
+        return ""
+
+
+def _vision_model(eng_cfg) -> str:
+    try:
+        from . import llm as _L
+        return _L.vision_config(eng_cfg)
+    except Exception:                                    # noqa: BLE001
+        return str(getattr(eng_cfg, "anthropic_model", "") or "")
+
+
+def _sid_of_kf(kf_path: str) -> str:
+    """Source id from a keyframe path (…/index/<sid>/keyframes/shot_NNNN.jpg)."""
+    try:
+        return Path(kf_path).parent.parent.name
+    except Exception:                                    # noqa: BLE001
+        return ""
+
+
+def _src_hash_of(proj, kf_path: str) -> str:
+    """Content hash of the source the keyframe came from ('' when unresolvable) — the same
+    derivation the still layer uses (`_file_fingerprint` of the source's local_path)."""
+    try:
+        from . import verify as _V
+        sv = proj.source(_sid_of_kf(kf_path))
+        return _V._file_fingerprint(getattr(sv, "local_path", "") or "") if sv is not None else ""
+    except Exception:                                    # noqa: BLE001
+        return ""
+
+
+def _venue_verify(kf_path: str, seg, faces, eng_cfg, *, proj=None, cache=None):
     """One venue-bar vision verdict (right scene/venue, no contradiction) — the still layer's
-    real question. Returns the verdict dict or None."""
-    from .verify import verify_frame
-    return verify_frame(str(kf_path), seg.text, getattr(seg, "required_entity", "") or "",
-                        getattr(seg, "required_kind", "") or "", list(faces or []), eng_cfg,
-                        is_specific=False,
-                        expected_visual=getattr(seg, "expected_visual", "") or "",
-                        scene_query=getattr(seg, "scene_query", "") or "",
-                        venue_fallback=True)
+    real question. Returns the verdict dict or None.
+
+    Served from the project's verdict_cache when the identical question was already answered.
+    This was the last uncached vision path in the pipeline: self-heal runs up to 3 rounds per
+    render (twice over, on the review-draft retry), the CLIP ranking is deterministic and
+    used_paths only grows on INSTALL — so every round re-bought verdicts for the same rejected
+    frames. Same doctrine as every other layer: identical question → cached answer; only
+    schema-valid successes are stored, so retry/breaker behaviour is untouched."""
+    from .verify import verify_frame, _verdict_schema_ok, _hit_provider_ok
+    from . import perf_metrics as _pm_vv
+    _fp = _venue_fp(proj, kf_path, seg, faces, eng_cfg) if (proj is not None
+                                                            and cache is not None) else ""
+    if _fp:
+        _hit = cache.get(_fp)
+        if _hit is not None and _verdict_schema_ok(_hit) \
+                and _hit_provider_ok(_hit, _vision_model(eng_cfg)):
+            _pm_vv.incr("selfheal.venue.cache_hit")
+            return dict(_hit)                            # copy: callers mutate their verdict
+    _pm_vv.incr("selfheal.venue.call")
+    v = verify_frame(str(kf_path), seg.text, getattr(seg, "required_entity", "") or "",
+                     getattr(seg, "required_kind", "") or "", list(faces or []), eng_cfg,
+                     is_specific=False,
+                     expected_visual=getattr(seg, "expected_visual", "") or "",
+                     scene_query=getattr(seg, "scene_query", "") or "",
+                     venue_fallback=True)
+    if _fp and v is not None and _verdict_schema_ok({**v, "status": "ok"}):
+        cache[_fp] = {k: val for k, val in v.items() if k != "reused"}
+    return v
 
 
 def _install_still(sel, kf_path: str, sid: str, shot_idx: int, rel: float) -> None:
@@ -167,6 +273,7 @@ def still_recover(proj, seg, sel, eng_cfg, *, pool=None, cand_n: int = 8,
                 _emb_cache[sid] = (None, None)
         return _emb_cache[sid]
 
+    _vv_cache = _venue_cache(proj)
     _rel_memo: dict = {}
     ranked = []
     for sid, sh in pool:
@@ -179,33 +286,49 @@ def still_recover(proj, seg, sel, eng_cfg, *, pool=None, cand_n: int = 8,
         ranked.append((rel if rel is not None and rel >= 0 else 0.0, sid, sh))
     ranked.sort(key=lambda c: -c[0])
 
-    # SPEED: the serial walk paid one ~2s vision verify per candidate. The accept decision
-    # is UNCHANGED — walk the ranked list in original order, install the first 'keep' —
-    # but the verifies for the exact candidate window are warmed concurrently first.
-    # used_paths is filtered BEFORE taking the window (a used path never consumed a
-    # `tried` slot in the serial walk either), and it is static during this call.
+    # The accept decision is UNCHANGED — walk the ranked list in order, install the first
+    # 'keep'. Verdicts are warmed concurrently for wall-clock, but in WAVES rather than all
+    # cand_n at once: the winner is usually rank 1-2, so warming the whole window bought
+    # verdicts nobody reads (measured ~5-7 discarded per successful heal). A wave stops as
+    # soon as it contains a keep, because everything after the winner is unreadable by
+    # construction. used_paths is filtered BEFORE the window (a used path never consumed a
+    # `tried` slot in the serial walk either) and is static during this call.
     cands = [(rel, sid, sh) for rel, sid, sh in ranked
              if sh.keyframe_path not in used_paths][:cand_n]
+    _nw = min(_env_int("VIDLORE_CLIPSTUDIO_SELFHEAL_VERIFY_WORKERS", 4), 6)
+    _wave = max(1, _env_int("VIDLORE_CLIPSTUDIO_SELFHEAL_VERIFY_WAVE", 4))
     verdicts: dict = {}
-    if len(cands) > 1 and _env_int("VIDLORE_CLIPSTUDIO_SELFHEAL_VERIFY_WORKERS", 4) > 1:
+
+    def _warm_wave(batch):
+        """Warm one wave; True when it contains a keep (so no later wave is worth paying for)."""
+        if len(batch) < 2 or _nw <= 1:
+            return False
         try:
             import concurrent.futures as _cf
-            _nw = min(_env_int("VIDLORE_CLIPSTUDIO_SELFHEAL_VERIFY_WORKERS", 4), 6)
             with _cf.ThreadPoolExecutor(max_workers=_nw) as _ex:
                 _fs = {_ex.submit(_venue_verify, sh.keyframe_path, seg,
-                                  getattr(sh, "face_ids", []), eng_cfg): sh.keyframe_path
-                       for _rel, _sid, sh in cands}
+                                  getattr(sh, "face_ids", []), eng_cfg,
+                                  proj=proj, cache=_vv_cache): sh.keyframe_path
+                       for _rel, _sid, sh in batch}
                 for _f in _cf.as_completed(_fs):
                     try:
                         verdicts[_fs[_f]] = _f.result()
                     except Exception:                    # noqa: BLE001
                         pass                             # serial re-ask below
         except Exception:                                # noqa: BLE001
-            verdicts = {}
+            return False
+        return any(isinstance(verdicts.get(sh.keyframe_path), dict)
+                   and verdicts[sh.keyframe_path].get("verdict") == "keep"
+                   for _r, _s, sh in batch)
+
+    for _i in range(0, len(cands), _wave):
+        if _warm_wave(cands[_i:_i + _wave]):
+            break
     for rel, sid, sh in cands:
         v = verdicts.get(sh.keyframe_path)
         if v is None:
-            v = _venue_verify(sh.keyframe_path, seg, getattr(sh, "face_ids", []), eng_cfg)
+            v = _venue_verify(sh.keyframe_path, seg, getattr(sh, "face_ids", []), eng_cfg,
+                              proj=proj, cache=_vv_cache)
         if isinstance(v, dict) and v.get("verdict") == "keep":
             _install_still(sel, sh.keyframe_path, sid, int(getattr(sh, "index", -1)), rel)
             used_paths.add(sh.keyframe_path)
@@ -278,7 +401,7 @@ def _region_frames_recover(proj, seg, sel, src, eng_cfg, *, log=print, n: int = 
     for luma, fp in cands[:4]:
         if _frame_text_dirty(fp):
             continue                                     # burned subs/meme text/watermark card
-        v = _venue_verify(fp, seg, [], eng_cfg)
+        v = _venue_verify(fp, seg, [], eng_cfg, proj=proj, cache=_venue_cache(proj))
         if isinstance(v, dict) and v.get("verdict") == "keep":
             _install_still(sel, fp, src.id, -1, 0.8)
             log(f"self-heal: beat {seg.index} — region-frame still installed from {src.id[:38]}")
@@ -457,6 +580,9 @@ def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
                     continue
                 continue
         log(f"self-heal: beat {bidx} unresolved this pass")
+    # persist this pass's venue verdicts so the NEXT round (and the review-draft retry, which
+    # re-runs the whole heal) replays them instead of re-buying identical answers
+    _venue_cache_save(proj)
     return resolved
 
 

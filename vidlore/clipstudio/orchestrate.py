@@ -1553,14 +1553,73 @@ def produce_auto_resilient(project_dir, **kw):
                  f"(intervention {used + 1}/{_max})")
 
 
-def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = None,
-                 script_text: Optional[str] = None, movie_hint: str = "",
-                 policy: str = "block", max_sources: int = 6, cfg: Optional[ClipConfig] = None,
-                 theme: str = "history", voice: str = "", title: str = "",
-                 captions: Optional[bool] = None, caption_style: str = "",
-                 voiceover: Optional[str] = None, voice_provider: str = "", voice_preset: str = "",
-                 use_tts: bool = True, verify: bool = True, do_build: bool = True,
-                 force_index: bool = False, resume: bool = False, progress=None) -> dict:
+def _persist_cost(project_dir, *, partial: bool, log=None) -> dict:
+    """Write this job's spend to output/cost_report.json. Best-effort and NEVER raises: it runs
+    from a finally, so an accounting hiccup must not replace the render's real exception.
+
+    `partial=True` marks a run that ended on a raise (gate block, vision outage, crash). Those runs
+    used to record NOTHING — the whole cost block sat after build — so the most expensive failure
+    mode in the pipeline (verify + self-heal, then abort) was invisible in every cost report."""
+    from pathlib import Path as _P
+    try:
+        from . import llm as _llm_c
+        cost = _llm_c.usage_summary()
+        if not cost.get("calls"):
+            return cost
+        cost["partial"] = bool(partial)
+        out = _P(project_dir) / "output"
+        out.mkdir(parents=True, exist_ok=True)
+        import json as _json_c
+        (out / "cost_report.json").write_text(_json_c.dumps(cost, indent=1), encoding="utf-8")
+        from . import perf_metrics as _pm_c
+        _pm_c.write_report(out / "perf_report.json")     # un-gated: the counters are free to dump
+        if partial and log:
+            log(f"cost: ~${cost['usd']:.2f} over {cost['calls']} call(s) spent before this render "
+                f"stopped — recorded to cost_report.json (partial)")
+        return cost
+    except Exception:                                    # noqa: BLE001 — never mask the real error
+        return {}
+
+
+_LAST_ACCOUNTED = [""]      # project dir whose spend is currently accumulating in llm._USAGE
+
+
+def produce_auto(project_dir, **kw) -> dict:
+    """Per-job accounting scope around the pipeline.
+
+    The portal is a long-lived process and `_USAGE` is module state, so without a reset every
+    job's cost_report also contained every previous job's spend. And because the cost dump lived
+    at the very END of the pipeline, any raise (release-block, vision outage) threw away the
+    record of everything already spent. Both are fixed here, in a wrapper, so no raise path can
+    skip accounting — and the finally never masks the original exception.
+
+    The reset is deliberately NOT unconditional: a resume of the SAME project (the incident
+    advisor's checkpoint retry, the portal's /retry button) must keep accumulating, because the
+    true price of a render includes the attempt that failed — that abort→retry cycle is the
+    single most expensive pattern the cost audit found. A different project always resets."""
+    _same_job = (str(project_dir) == _LAST_ACCOUNTED[0]) and bool(kw.get("resume"))
+    from . import llm as _llm_w
+    if not _same_job:
+        _llm_w.reset_usage()
+    _LAST_ACCOUNTED[0] = str(project_dir)
+    _ok = False
+    try:
+        r = _produce_auto(project_dir, **kw)
+        _ok = True
+        return r
+    finally:
+        if not _ok:                                      # the success path records it itself
+            _persist_cost(project_dir, partial=True, log=kw.get("progress"))
+
+
+def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = None,
+                  script_text: Optional[str] = None, movie_hint: str = "",
+                  policy: str = "block", max_sources: int = 6, cfg: Optional[ClipConfig] = None,
+                  theme: str = "history", voice: str = "", title: str = "",
+                  captions: Optional[bool] = None, caption_style: str = "",
+                  voiceover: Optional[str] = None, voice_provider: str = "", voice_preset: str = "",
+                  use_tts: bool = True, verify: bool = True, do_build: bool = True,
+                  force_index: bool = False, resume: bool = False, progress=None) -> dict:
     """FULL AUTO: topic + script in → finished video out. Discovers + downloads its own sources.
     analyze → discover → download(policy) → Face-ID refs → deep index → match → cut → AI verify
     → ledger + QC report → assemble.
@@ -1588,7 +1647,12 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
         try:
             _s = str(m)
             if "·" in _s and _s.split("/")[0].strip().rstrip("ab").isdigit():
-                _pm_stage.stage(_s.split("·", 1)[1].strip()[:48])
+                _stage_name = _s.split("·", 1)[1].strip()[:48]
+                _pm_stage.stage(_stage_name)
+                # cost attribution rides the SAME stage marks — this is what makes
+                # cost_report's per-stage breakdown real instead of an empty {}
+                from . import llm as _llm_stage
+                _llm_stage.set_stage(_stage_name)
         except Exception:
             pass
         if progress:
@@ -2069,8 +2133,7 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
             else:
                 raise
 
-    if _pm_stage.enabled():
-        _pm_stage.write_report(proj.output_dir / "perf_report.json")
+    _pm_stage.write_report(proj.output_dir / "perf_report.json")
 
     # What this render actually spent. Hundreds of vision calls go into verify alone and none of it
     # used to be recorded, so cost was unanswerable and "run verify twice" was an unpriced decision.
@@ -2104,3 +2167,9 @@ def produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = N
         "review_queue": str(proj.review_queue_path),
         "review_html": str(review_path),
     }
+
+
+# `produce_auto` is a thin (project_dir, **kw) accounting wrapper, which would otherwise hide
+# the pipeline's real, documented signature from `inspect.signature` — callers, IDEs and the
+# resume contract test all read it. Point introspection at the implementation.
+produce_auto.__wrapped__ = _produce_auto

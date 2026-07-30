@@ -248,7 +248,9 @@ def _llm_analyze(script_text: str, topic: str, movie_hint: str, beats: list[Scri
     return {"analysis": analysis, "beats": beat_out}
 
 
-_ANCHOR_STOP = _STOPQ if False else set(
+_ANCHOR_STOP = set(          # (was `_STOPQ if False else set(...)` — the dead branch never ran,
+                             # but it left the package's only undefined-name warning, which is the
+                             # exact signal that catches bugs like the recovery NameError)
     "the a an of to in on at for and or but with from into as it is are was were be scene clip "
     "game thrones got movie show season episode hd official part full his her their he she they "
     "video this that what why how when where who which".split())

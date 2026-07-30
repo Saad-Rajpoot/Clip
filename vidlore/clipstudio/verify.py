@@ -1159,7 +1159,15 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 not in ("0", "false", "no"):
             _aff_on2 = _os_pf.environ.get("VIDLORE_CLIPSTUDIO_SCENE_AFFINITY", "1").strip() \
                 not in ("0", "false", "no", "")
-            _alt_jobs, _len_jobs = [], []
+            # STAGED, not eager. The serial loop stops at its first ACCEPTED alternate, so warming
+            # all max_replacements up front bought verdicts nobody reads (measured: 13 of 15
+            # lenient warms unread on one render). Depth is therefore paid one WAVE at a time —
+            # alternate #1 for every beat concurrently, #2 only for the beats whose #1 came back
+            # 'replace', and so on — which keeps essentially all of the wall-clock win (the
+            # non-accepting majority still ends up fully warmed) while not buying the tail.
+            # Warming FEWER questions can never change a decision: anything unwarmed is simply
+            # asked fresh by the serial loop, exactly as it behaves today.
+            _beat_alts, _len_jobs = [], []
             for (_fpP, selP, segP, shotP, kfP, fidsP, _exP) in _prim_items:
                 _v0 = _vcache.get(_fpP)
                 if not (_v0 is not None and _verdict_schema_ok(_v0)
@@ -1174,7 +1182,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                                                        selP.source_id)
                     except Exception:                    # noqa: BLE001
                         _altsP = selP.alternates
-                _t2 = 0
+                _t2, _chain = 0, []
                 for _altP in _altsP:
                     if _t2 >= max_replacements:
                         break
@@ -1182,19 +1190,31 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     _ashP = get_shot(_altP.source_id, _altP.shot_index)
                     if _ashP is None:
                         continue
-                    _alt_jobs.append((_ashP, segP))
-                # lenient re-ask fires serially only when the downgrade + filler rungs are
-                # enabled — mirror those envs so the warm never asks a question the serial
-                # loop provably won't
-                if (_os_pf.environ.get("VIDLORE_CLIPSTUDIO_EXACT_CONTEXTUAL_DOWNGRADE",
-                                       "1").strip() not in ("0", "false", "no")
-                        and _os_pf.environ.get("VIDLORE_CLIPSTUDIO_GENERIC_FILLER_DOWNGRADE",
-                                               "1").strip() not in ("0", "false", "no")):
-                    _len_jobs.append((kfP, shotP, segP, fidsP))
-            if _alt_jobs or _len_jobs:
-                log(f"verify: rung prefetch — warming {len(_alt_jobs)} promotion + "
-                    f"{len(_len_jobs)} lenient question(s) ({_pf_workers} workers; the serial "
-                    f"repair loop and every gate stay unchanged)")
+                    _chain.append((_ashP, segP))
+                _bi_here = len(_beat_alts)
+                if _chain:
+                    _beat_alts.append(_chain)
+                # The lenient re-ask fires serially ONLY at the generic-filler rung, which is
+                # reached only when nothing swapped. A primary verdict that satisfies
+                # _contextual_subject_ok routes the beat to a keep-contextual downgrade (both
+                # branches set swapped=True), so that question is provably never asked — and it
+                # is the single largest unread-warm bucket. Env gates mirrored so the warm never
+                # asks a question the serial loop cannot reach.
+                if (_contextual_subject_ok(_v0)
+                        or _os_pf.environ.get("VIDLORE_CLIPSTUDIO_EXACT_CONTEXTUAL_DOWNGRADE",
+                                              "1").strip() in ("0", "false", "no")
+                        or _os_pf.environ.get("VIDLORE_CLIPSTUDIO_GENERIC_FILLER_DOWNGRADE",
+                                              "1").strip() in ("0", "false", "no")):
+                    continue
+                _len_jobs.append((_bi_here if _chain else -1, (kfP, shotP, segP, fidsP)))
+            _alt_waves = []
+            for _d in range(max_replacements):           # wave d = every beat's alternate #d
+                _alt_waves.append([(c[_d], i) for i, c in enumerate(_beat_alts) if _d < len(c)])
+            if _beat_alts or _len_jobs:
+                log(f"verify: rung prefetch — {len(_beat_alts)} beat(s) staged (wave 1 = "
+                    f"{len(_alt_waves[0]) if _alt_waves else 0} promotion) + {len(_len_jobs)} "
+                    f"lenient question(s) ({_pf_workers} workers; the serial repair loop and "
+                    f"every gate stay unchanged)")
                 import concurrent.futures as _cf2
                 _rp_fail = 0
 
@@ -1219,10 +1239,17 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                                     return False
                     return True
 
+                _alt_done = {}                           # beat idx -> True once a warm said 'keep'
+
                 def _warm_alt(j):
-                    _a, _s = j
+                    (_a, _s), _bi = j
                     _v_w, _ = _cached_verify_ctx(_a.keyframe_path, _a, _s, True,
                                                  _a.face_ids or [], rung="strict_promote")
+                    if _v_w is not None and str(_v_w.get("verdict")) == "keep":
+                        # the serial loop may still refuse this alternate on the reuse cap or
+                        # window-QC and walk on — then the next alternate is simply unwarmed and
+                        # asked fresh, which is today's behaviour for anything not prefetched
+                        _alt_done[_bi] = True
                     return _v_w is not None
 
                 def _warm_len(j):
@@ -1231,13 +1258,28 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                                                  rung="lenient_filler")
                     return _v_w is not None
 
+                _go_on = True
                 _look_scope["on"] = False                # alternates: no look question
                 try:
-                    _go_on = _warm(_warm_alt, _alt_jobs)
+                    for _wi, _wave in enumerate(_alt_waves):
+                        _todo = [j for j in _wave if not _alt_done.get(j[1])]
+                        if not _todo:
+                            break                        # every staged beat already has a keep
+                        if _wi:
+                            from . import perf_metrics as _pm_pf
+                            _pm_pf.incr(f"verify.rung.wave{_wi + 1}", len(_todo))
+                        _go_on = _warm(_warm_alt, _todo)
+                        if not _go_on:
+                            break
                 finally:
                     _look_scope["on"] = True
                 if _go_on:
-                    _warm(_warm_len, _len_jobs)          # original shots: look scope ON
+                    # The lenient rung is reached ONLY when nothing swapped, so a beat whose
+                    # strict warm already came back 'keep' will (barring a reuse-cap/window-QC
+                    # refusal, which simply leaves the question unwarmed and asked fresh) never
+                    # get there. Drop those — measured 6 of 6 unread on the parity fixture.
+                    _len_todo = [j for _bi, j in _len_jobs if not _alt_done.get(_bi)]
+                    _warm(_warm_len, _len_todo)          # original shots: look scope ON
                 _save_verdict_cache(proj, _vcache)
 
     for sel in proj.selections:
