@@ -444,14 +444,21 @@ def _yt_search_candidates(queries: list[str], *, per_query: int = 6, log=print) 
     (title gates applied), 1-15 min long. Returns SourceCandidate-compatible objects."""
     from .discover import SourceCandidate, is_unwanted_source_title
     from . import hd_download as _hd
-    ytdlp = str(Path(_hd.HD_PY).parent / "yt-dlp") if getattr(_hd, "HD_PY", "") else ""
-    if not ytdlp or not Path(ytdlp).exists():
+    # Invoke yt-dlp as a MODULE, the way every other call site does (hd_download, discover):
+    # probing for a console-script FILE named `yt-dlp` next to the interpreter found nothing on
+    # Windows (it is `yt-dlp.exe` in Scripts\), so footage rescue silently returned no candidates
+    # there — and the `return []` was indistinguishable from "the search found nothing".
+    hd_py = str(getattr(_hd, "HD_PY", "") or "")
+    if not hd_py or not Path(hd_py).exists():
+        log("self-heal: yt-search unavailable — no HD python (.hdvenv) found; "
+            "footage rescue cannot search YouTube")
         return []
     out = []
     for q in queries[:2]:
         try:
             r = subprocess.run(
-                [ytdlp, f"ytsearch{per_query}:{q}", "--flat-playlist", "--no-warnings",
+                [hd_py, "-m", "yt_dlp",
+                 f"ytsearch{per_query}:{q}", "--flat-playlist", "--no-warnings",
                  "--print", "%(id)s\t%(duration)s\t%(title)s"],
                 capture_output=True, text=True, timeout=90)
             for line in (r.stdout or "").splitlines():

@@ -1905,6 +1905,15 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
             faceid_obj = _faceid.FaceID()
             refs = _faceid.build_references(analysis.reference_identities(), proj.index_dir,
                                             faceid_obj, progress=progress)
+        else:
+            # NOT silent. Without Face-ID the pipeline still renders, but identity recognition is
+            # gone: no wrong-character rejection, no actor↔character roster matching, and the
+            # rejected-footage gate loses its strongest evidence. On a fresh machine the cause is
+            # always the same — the model files were never copied (they are gitignored, ~39 MB).
+            log(f"⚠ 4/9 · Face-ID UNAVAILABLE — yunet.onnx / sface.onnx not found in "
+                f"{_faceid.MODELS_DIR}. Identity recognition is OFF for this render: "
+                f"wrong-character footage can no longer be rejected. Copy both models there "
+                f"(or set VIDLORE_CLIPSTUDIO_MODELS) to restore it.")
     else:
         log("4/9 · Face-ID references — ↻ skipped (resume, all footage stages cached)")
 

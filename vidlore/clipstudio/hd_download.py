@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import shutil
 import signal
@@ -161,20 +162,70 @@ def _restart_pot_server(progress=None) -> bool:
                     _POT_PROC.kill()
                 _POT_PROC = None
             else:
-                # server started by a previous run/portal — find its pid on our port
-                p = subprocess.run(["lsof", "-ti", f"tcp:{POT_PORT}"],
-                                   capture_output=True, text=True, timeout=10)
-                for pid in (p.stdout or "").split():
-                    try:
-                        os.kill(int(pid), signal.SIGTERM)
-                    except (OSError, ValueError):
-                        pass
+                # server started by a previous run/portal — find its pid on our port.
+                # `lsof` does not exist on Windows; netstat+taskkill is the equivalent there
+                # (the same idiom run-windows.bat already uses for the portal port).
+                for pid in _pids_on_port(POT_PORT):
+                    _kill_pid(pid)
                 time.sleep(1.5)
         except Exception:                                    # noqa: BLE001
             pass
     if progress:
         progress("hd: 403 on data URLs — restarting PO-token server (stale-token remedy)")
     return ensure_pot_server(progress=progress)
+
+
+def _pids_on_port(port: int) -> list:
+    """PIDs listening on `port`. `lsof` is POSIX-only, so Windows uses netstat. [] on any failure —
+    a failed reclaim just means the restart falls through to the liveness check."""
+    out = []
+    try:
+        if platform.system() == "Windows":
+            p = subprocess.run(["netstat", "-ano", "-p", "tcp"],
+                               capture_output=True, text=True, timeout=15)
+            for line in (p.stdout or "").splitlines():
+                parts = line.split()
+                # PROTO  LOCAL            FOREIGN          STATE       PID
+                if len(parts) >= 5 and parts[0].lower().startswith("tcp") \
+                        and parts[1].endswith(f":{port}") and "LISTEN" in parts[3].upper():
+                    out.append(parts[4])
+        else:
+            p = subprocess.run(["lsof", "-ti", f"tcp:{port}"],
+                               capture_output=True, text=True, timeout=10)
+            out = (p.stdout or "").split()
+    except Exception:                                        # noqa: BLE001
+        return []
+    return [x for x in out if x.strip().isdigit()]
+
+
+def _kill_pid(pid) -> None:
+    """Terminate one pid. os.kill+SIGTERM has no useful meaning on Windows, where SIGTERM is
+    emulated as an unconditional TerminateProcess for the CURRENT process only — taskkill is the
+    portable way to stop another process there."""
+    try:
+        if platform.system() == "Windows":
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                           capture_output=True, timeout=15)
+        else:
+            os.kill(int(pid), signal.SIGTERM)
+    except Exception:                                        # noqa: BLE001
+        pass
+
+
+#  Win32 process-creation flags, spelled out rather than read off `subprocess`: those attributes
+#  only EXIST on Windows, so `getattr(subprocess, ...)` collapses to 0 whenever this branch is
+#  reviewed or unit-tested from macOS — i.e. the one place the value could be checked before
+#  shipping is the one place it silently read as "no flags".
+_WIN_DETACHED_PROCESS = 0x00000008
+_WIN_CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+
+def _detach_kwargs() -> dict:
+    """Popen kwargs that detach a long-lived helper so it survives this process.
+    `start_new_session` is POSIX-only (setsid); Windows needs creation flags instead."""
+    if platform.system() == "Windows":
+        return {"creationflags": _WIN_DETACHED_PROCESS | _WIN_CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
 
 
 def is_youtube(url: str) -> bool:
@@ -212,7 +263,7 @@ def ensure_pot_server(progress=None) -> bool:
             _POT_PROC = subprocess.Popen(
                 [DENO_BIN, "run", "-A", "--node-modules-dir=auto", "src/main.ts", "--port", str(POT_PORT)],
                 cwd=POT_SERVER_DIR, stdout=logf, stderr=logf,
-                start_new_session=True,                      # detach; survive our process
+                **_detach_kwargs(),                          # detach; survive our process
             )
         except Exception as e:                               # noqa: BLE001
             if progress:
@@ -286,40 +337,67 @@ def probe_max_height(url: str, *, max_height: int = 1080, timeout: int = 60) -> 
     return 0
 
 
+def _exe_suffix() -> str:
+    """'.exe' on Windows, '' elsewhere. yt-dlp joins the ffmpeg_location directory with the LITERAL
+    names 'ffmpeg'/'ffprobe' and appends '.exe' on Windows, so every name we synthesise for it must
+    carry the platform suffix."""
+    return ".exe" if platform.system() == "Windows" else ""
+
+
 def _merge_ffmpeg_dir(hint: str = "") -> str:
-    """A directory that contains an executable literally named `ffmpeg` — required for yt-dlp to MERGE
-    the separate DASH video+audio streams into one file. CRITICAL: imageio-ffmpeg ships its binary as
-    `ffmpeg-macos-aarch64-v7.1` (a VERSIONED name), so `--ffmpeg-location <imageio dir>` finds nothing
-    named `ffmpeg` and yt-dlp silently SKIPS the merge → a video-only file with NO audio → ASR gets 0
-    words → dialogue-lock (the strongest scene signal) is dead. We resolve a properly-named ffmpeg:
-    a system one if present, else a one-time symlink of the imageio binary as `ffmpeg`."""
+    """A directory that contains an executable literally named `ffmpeg` (`ffmpeg.exe` on Windows) —
+    required for yt-dlp to MERGE the separate DASH video+audio streams into one file.
+
+    CRITICAL: imageio-ffmpeg ships its binary under a VERSIONED name
+    (`ffmpeg-macos-aarch64-v7.1`, `ffmpeg-win-x86_64-v7.1.exe`), so `--ffmpeg-location <imageio
+    dir>` matches NOTHING and yt-dlp silently SKIPS the merge → a video-only file with NO audio →
+    ASR gets 0 words → dialogue-lock (the strongest scene signal) is dead.
+
+    The engine already solves this correctly for BOTH platforms in `ffmpeg_tool.ytdlp_ffmpeg_dir()`
+    (suffix-aware names, symlink with a copy fallback for Windows' privilege rules, and the PATH
+    prepend yt-dlp's FFmpegFD.available() needs). This used to be a second, macOS-only
+    implementation of the same idea — it hardcoded the bare name `ffmpeg` and POSIX install dirs,
+    so on Windows it returned a directory with no `ffmpeg.exe` in it and every HD download arrived
+    mute. Delegate instead of diverging."""
     import shutil
-    # 1) the hint dir already has a real `ffmpeg`?
-    for d in [hint]:
-        if d and os.path.exists(os.path.join(d, "ffmpeg")):
-            return d
-    # 2) a system ffmpeg on PATH or in common install dirs
+    _x = _exe_suffix()
+    # 1) the hint dir already has a correctly-named ffmpeg?
+    if hint and os.path.exists(os.path.join(hint, f"ffmpeg{_x}")):
+        return hint
+    # 2) the engine's shared, platform-correct resolver (also fixes ffprobe + PATH)
+    try:
+        from ..ffmpeg_tool import ytdlp_ffmpeg_dir as _yfd
+        d = _yfd()
+        if d and os.path.exists(os.path.join(str(d), f"ffmpeg{_x}")):
+            return str(d)
+    except Exception:                                       # noqa: BLE001 — fall through
+        pass
+    # 3) a system ffmpeg on PATH or in a common install dir (POSIX paths are skipped on Windows
+    #    because they cannot exist there; `which` already covers the Windows install locations)
     cands = [shutil.which("ffmpeg"), "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg",
              os.path.expanduser("~/pinokio/bin/miniconda/bin/ffmpeg")]
     for c in cands:
         if c and os.path.exists(c):
             return os.path.dirname(c)
-    # 3) symlink the engine's (versioned) imageio binary as `ffmpeg` in a stable cache dir
+    # 4) last resort: link/copy the engine's (versioned) binary under the exact name in a cache dir
     try:
         from .config import ffmpeg_exe as _fexe
         real = _fexe()
         if real and os.path.exists(real):
             cache = os.path.join(os.path.expanduser("~"), ".cache", "clipstudio_ffmpeg")
             os.makedirs(cache, exist_ok=True)
-            link = os.path.join(cache, "ffmpeg")
+            link = os.path.join(cache, f"ffmpeg{_x}")
             if not os.path.exists(link):
                 try:
                     os.symlink(real, link)
                 except FileExistsError:
                     pass
-                except OSError:
+                except OSError:                             # Windows without Developer Mode
                     shutil.copy2(real, link)
-                    os.chmod(link, 0o755)
+                    try:
+                        os.chmod(link, 0o755)
+                    except OSError:
+                        pass
             if os.path.exists(link):
                 return cache
     except Exception:                                       # noqa: BLE001
