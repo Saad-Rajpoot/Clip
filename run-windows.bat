@@ -14,6 +14,15 @@ REM  this launcher (models\clip), point the tool at them so it never falls back 
 REM  (empty cache = filter OFF = cartoon/game footage leaks in; the pipeline now refuses in that case).
 if exist "%~dp0models\clip\clip_vision.onnx" set "VIDLORE_CLIP_DIR=%~dp0models\clip"
 
+REM  Face-ID models = identity recognition (wrong-character rejection + actor/character roster).
+REM  Missing = the render still completes but that whole gate is OFF, so wire them the same way.
+if exist "%~dp0models\faceid\yunet.onnx" set "VIDLORE_CLIPSTUDIO_MODELS=%~dp0models\faceid"
+
+REM  PO-token server for HD (720-1080p) YouTube downloads. Without it every source falls back to
+REM  ~360p, silently. The bundled copy ships without node_modules (they are per-OS native builds);
+REM  Deno re-fetches the right ones on first run via --node-modules-dir=auto.
+if exist "%~dp0.pot\server\src\main.ts" set "VIDLORE_HD_POT_DIR=%~dp0.pot\server"
+
 echo ==================================================
 echo   ClipStudio - Windows launcher
 echo   (pehli baar setup karega, phir portal chalega)
