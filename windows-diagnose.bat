@@ -15,6 +15,10 @@ if not defined PYEXE (
 
 echo  Diagnostic chala raha hoon ...
 echo.
+REM  ClipStudio ke apne assets (music / CLIP / Face-ID / HD / ffmpeg / keys) — vidlore.diagnose
+REM  in mein se kuch bhi nahi dekhta, aur yehi cheezein render torti hain.
+%PYEXE% "%~dp0tools\clipstudio_preflight.py"
+echo.
 %PYEXE% -m vidlore.diagnose
 
 echo.

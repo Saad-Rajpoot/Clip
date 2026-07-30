@@ -238,3 +238,34 @@ class TestHdAvailabilityDoesNotRequireNode(unittest.TestCase):
         self.assertIn("deno.land/install.ps1", bat)
         self.assertIn("VIDLORE_HD_SETUP", bat)               # kill switch
         self.assertNotIn("nodejs.org", bat)                  # node is NOT installed
+
+
+class TestPreflightRunsOnLaunch(unittest.TestCase):
+    """The health-check the owner used to type by hand now runs on every click."""
+
+    def test_launcher_and_diagnose_both_invoke_it(self):
+        bat = (ROOT / "run-windows.bat").read_text()
+        diag = (ROOT / "windows-diagnose.bat").read_text()
+        self.assertIn("clipstudio_preflight.py", bat)
+        self.assertIn("clipstudio_preflight.py", diag)
+        self.assertIn("VIDLORE_PREFLIGHT", bat)                     # kill switch
+        # informational only — it must run BEFORE the portal, and must not gate it
+        self.assertLess(bat.find("clipstudio_preflight"), bat.find("vidlore.clipstudio.web"))
+
+    def test_preflight_reports_every_asset_that_breaks_a_render(self):
+        import subprocess as sp
+        env = dict(os.environ, VIDLORE_CLIP_DIR="/nope", VIDLORE_CLIPSTUDIO_MODELS="/nope",
+                   VIDLORE_MUSIC_DIR="/nope", VIDLORE_HD_DOWNLOAD="0")
+        r = sp.run([sys.executable, str(ROOT / "tools" / "clipstudio_preflight.py")],
+                   capture_output=True, text=True, env=env, timeout=300)
+        out = r.stdout
+        for label in ("music", "CLIP models", "Face-ID", "HD download", "ffmpeg", "API keys"):
+            self.assertIn(label, out, f"{label} row missing")
+        self.assertIn("XX", out, "a missing blocker must be marked, not glossed over")
+        self.assertEqual(r.returncode, 0, "must never block the launcher")
+
+    def test_preflight_is_cheap_enough_to_run_every_launch(self):
+        """It checks that model FILES exist rather than loading them — loading CLIP is ~600 MB."""
+        src = (ROOT / "tools" / "clipstudio_preflight.py").read_text()
+        self.assertNotIn("clip_available()", src)
+        self.assertNotIn("_try_load", src)

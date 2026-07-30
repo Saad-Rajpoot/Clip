@@ -127,6 +127,15 @@ REM --- 5) environment ---------------------------------------------------------
 set "PYTHONPATH=%CD%;%PYTHONPATH%"
 if not defined VIDLORE_CLIPSTUDIO_PORT set "VIDLORE_CLIPSTUDIO_PORT=5151"
 
+REM --- 5b) PRE-FLIGHT: kya is machine par acchi video ban sakti hai? -------------------------
+REM  Har item yahan ek asli render tor chuka hai, aur teen chup-chaap tootte hain (music =
+REM  build error, CLIP = render shuru hi nahi hota, HD = sab 360p). Isliye har launch par
+REM  saaf-saaf dikha do, taake user ko commands yaad rakhne/type karne na parein.
+REM  Sirf batata hai — launch rokta NAHI. Band karna ho: VIDLORE_PREFLIGHT=0
+if not "%VIDLORE_PREFLIGHT%"=="0" (
+  "%VENV_PY%" "%~dp0tools\clipstudio_preflight.py"
+)
+
 REM --- 6) us port par pehle se chalu portal band karo (address-in-use se bachne ke liye) -------
 for /f "tokens=5" %%P in ('netstat -ano -p tcp ^| findstr "LISTENING" ^| findstr ":%VIDLORE_CLIPSTUDIO_PORT% "') do taskkill /F /PID %%P >nul 2>nul
 
