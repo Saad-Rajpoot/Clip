@@ -48,10 +48,18 @@ def _firstpath(*cands: str) -> str:
 HD_PY = os.environ.get("VIDLORE_HD_PYTHON", "") or _firstpath(
     str(_ROOT / ".hdvenv/bin/python"), str(_ROOT / ".hdvenv/bin/python3"),
     str(_ROOT / ".hdvenv/Scripts/python.exe"))          # Windows venv layout
+#  Both runtimes are optional-to-locate here; only DENO is actually required (see available()).
+#  The Windows candidates matter: the official Deno installer drops `%USERPROFILE%\.deno\bin\
+#  deno.exe`, so a POSIX-only candidate list found nothing and HD silently degraded to 360p even
+#  right after a successful install.
 NODE_BIN = os.environ.get("VIDLORE_HD_NODE", "") or _firstpath(
-    str(Path.home() / ".local-node/bin/node"), shutil.which("node") or "")
+    str(Path.home() / ".local-node/bin/node"),
+    str(Path.home() / ".local-node/bin/node.exe"),
+    shutil.which("node") or "")
 DENO_BIN = os.environ.get("VIDLORE_HD_DENO", "") or _firstpath(
-    str(Path.home() / ".deno/bin/deno"), shutil.which("deno") or "")
+    str(Path.home() / ".deno/bin/deno"),
+    str(Path.home() / ".deno/bin/deno.exe"),
+    shutil.which("deno") or "")
 POT_SERVER_DIR = os.environ.get("VIDLORE_HD_POT_DIR", "") or _firstpath(
     str(_ROOT / ".pot/server"))
 try:
@@ -234,8 +242,16 @@ def is_youtube(url: str) -> bool:
 
 
 def available() -> bool:
-    """Is the HD path even possible on this machine?"""
-    return bool(HD_ENABLED and HD_PY and NODE_BIN and DENO_BIN and POT_SERVER_DIR)
+    """Is the HD path even possible on this machine?
+
+    Node is deliberately NOT required. Nothing here runs it: the PO-token server is started with
+    DENO (`deno run --node-modules-dir=auto`, which manages node_modules itself), yt-dlp is given
+    only the `youtubepot-bgutilhttp` HTTP endpoint, and yt-dlp-ejs's JS challenges are served by
+    the same Deno runtime. Node appeared only in this gate and in the PATH we hand the subprocess
+    — so on a machine with Deno but no Node the whole HD path reported "unavailable" and EVERY
+    source silently fell back to ~360p for a dependency that was never used. Its directory is
+    still added to PATH when it happens to exist (see _env_with_runtimes)."""
+    return bool(HD_ENABLED and HD_PY and DENO_BIN and POT_SERVER_DIR)
 
 
 def _pot_alive() -> bool:

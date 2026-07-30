@@ -65,15 +65,15 @@ PEHLI BAAR SETUP (one time)
     Warna A/V-sync check har render ko aakhri step par abort karega.)
    NVIDIA GPU ho to:  python tools\fetch_windows_nvenc_ffmpeg.py --dest <folder>\ffmpeg
 
-4. HD (720-1080p) DOWNLOADS ke liye — yeh na karein to sab footage 360p aayegi:
-   a) py -3.11 -m venv .hdvenv
-      .hdvenv\Scripts\python -m pip install -U yt-dlp yt-dlp-ejs bgutil-ytdlp-pot-provider
-   b) Node LTS + Deno install karein (dono PATH par), ya VIDLORE_HD_NODE /
-      VIDLORE_HD_DENO env set karein.
-   c) Mac se ".pot" folder copy karein (PO-token server), ya bgutil-ytdlp-pot-provider
-      clone kar ke VIDLORE_HD_POT_DIR us par set karein.
+4. HD (720-1080p) DOWNLOADS — launcher YEH KHUD KAR LETA HAI (koi qadam nahi)
+   Pehli baar chalane par run-windows.bat khud:
+     - ".hdvenv" banata hai + yt-dlp / yt-dlp-ejs / bgutil-ytdlp-pot-provider install karta hai
+     - Deno install karta hai (agar PATH par na ho) — sirf is user ke liye, admin nahi chahiye
+     - bundle ka ".pot" server khud dhoond leta hai
+   Node ki ZAROORAT NAHI: usay koi cheez run nahi karti (PO-token server Deno par chalta hai).
+   Band karna ho to:  set VIDLORE_HD_SETUP=0
    Check:  python -c "from vidlore.clipstudio import hd_download as h;print(h.available())"
-           -> True aana chahiye. False = sab kuch 360p par gir jayega.
+           -> True aana chahiye. False = sab footage 360p aayegi.
 
 5. Yeh file double-click karein:  windows\Start-ClipStudio.bat
    (ya root mein:  run-windows.bat)

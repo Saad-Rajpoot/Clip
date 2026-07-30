@@ -85,6 +85,44 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM --- 4b) HD (720-1080p) downloads: .hdvenv + Deno ------------------------------------------
+REM  Without this the pipeline still renders, but EVERY YouTube source silently falls back to
+REM  ~360p — the single biggest quality regression there is, and it produces no error. So it is
+REM  provisioned automatically here instead of being a manual step nobody remembers.
+REM  Node is deliberately NOT installed: nothing runs it (Deno runs the PO-token server and
+REM  serves yt-dlp-ejs's JS challenges), it was only ever a false requirement in available().
+REM  Skip entirely with VIDLORE_HD_SETUP=0.
+if "%VIDLORE_HD_SETUP%"=="0" goto :hdskip
+
+if not exist "%~dp0.hdvenv\Scripts\python.exe" (
+  echo  [*] HD downloader ka alag venv bana raha hoon ^(.hdvenv^) ...
+  REM  PYLAUNCH can be a MULTI-WORD command ("py -3.12"), so it must stay unquoted — exactly
+  REM  how the .venv step above invokes it.
+  !PYLAUNCH! -m venv "%~dp0.hdvenv" >nul 2>nul
+)
+if exist "%~dp0.hdvenv\Scripts\python.exe" (
+  "%~dp0.hdvenv\Scripts\python.exe" -c "import yt_dlp" >nul 2>nul
+  if errorlevel 1 (
+    echo  [*] yt-dlp ^+ PO-token provider install kar raha hoon ^(HD ke liye^) ...
+    "%~dp0.hdvenv\Scripts\python.exe" -m pip install --upgrade pip >nul 2>nul
+    "%~dp0.hdvenv\Scripts\python.exe" -m pip install -U yt-dlp yt-dlp-ejs bgutil-ytdlp-pot-provider
+    if errorlevel 1 echo  [!] HD venv install fail hua - footage 360p par aayegi ^(baad mein dobara chalayein^).
+  )
+) else (
+  echo  [!] .hdvenv nahi ban saka - HD downloads band rahengi ^(footage 360p^).
+)
+
+REM  Deno: PO-token server ISI se chalta hai. PATH par na ho to user-local install kar do
+REM  (official installer, sirf is user ke liye - admin ki zaroorat nahi).
+where deno >nul 2>nul
+if errorlevel 1 if not exist "%USERPROFILE%\.deno\bin\deno.exe" (
+  echo  [*] Deno install kar raha hoon ^(HD PO-token server iske baghair nahi chalta^) ...
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://deno.land/install.ps1 | iex" >nul 2>nul
+  if errorlevel 1 echo  [!] Deno install fail hua - HD band rahega. Manually: irm https://deno.land/install.ps1 ^| iex
+)
+if exist "%USERPROFILE%\.deno\bin\deno.exe" set "PATH=%USERPROFILE%\.deno\bin;%PATH%"
+:hdskip
+
 REM --- 5) environment -------------------------------------------------------------------------
 set "PYTHONPATH=%CD%;%PYTHONPATH%"
 if not defined VIDLORE_CLIPSTUDIO_PORT set "VIDLORE_CLIPSTUDIO_PORT=5151"

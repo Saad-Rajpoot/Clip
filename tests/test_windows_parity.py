@@ -192,3 +192,49 @@ class TestFaceIdMissingIsLoud(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestHdAvailabilityDoesNotRequireNode(unittest.TestCase):
+    """Node was a FALSE hard requirement: nothing runs it. Deno starts the PO-token server and
+    serves yt-dlp-ejs's JS challenges; yt-dlp only gets the youtubepot-bgutilhttp endpoint. On a
+    box with Deno but no Node, available() returned False and EVERY source silently fell back to
+    ~360p — the biggest quality regression in the pipeline, for a dependency never used."""
+
+    def _with(self, *, node, deno, hd_py="py", pot="/pot", enabled=True):
+        return mock.patch.multiple(HD, NODE_BIN=node, DENO_BIN=deno, HD_PY=hd_py,
+                                   POT_SERVER_DIR=pot, HD_ENABLED=enabled)
+
+    def test_available_without_node(self):
+        with self._with(node="", deno="/usr/local/bin/deno"):
+            self.assertTrue(HD.available(), "Deno alone must be enough")
+
+    def test_unavailable_without_deno(self):
+        with self._with(node="/usr/bin/node", deno=""):
+            self.assertFalse(HD.available(), "Deno genuinely runs the PO server")
+
+    def test_still_needs_hd_python_and_pot_dir_and_the_kill_switch(self):
+        with self._with(node="", deno="/d", hd_py=""):
+            self.assertFalse(HD.available())
+        with self._with(node="", deno="/d", pot=""):
+            self.assertFalse(HD.available())
+        with self._with(node="", deno="/d", enabled=False):
+            self.assertFalse(HD.available())
+
+    def test_path_extension_tolerates_a_missing_node(self):
+        with self._with(node="", deno="/usr/local/bin/deno"):
+            env = HD._env_with_runtimes()
+        self.assertIn("PATH", env)
+        self.assertIn("/usr/local/bin", env["PATH"])
+
+    def test_windows_runtime_candidates_include_exe(self):
+        src = (SRC / "hd_download.py").read_text()
+        self.assertIn('".deno/bin/deno.exe"', src)
+        self.assertIn('".local-node/bin/node.exe"', src)
+
+    def test_launcher_provisions_hd_and_skips_node(self):
+        bat = (ROOT / "run-windows.bat").read_text()
+        self.assertIn(".hdvenv\\Scripts\\python.exe", bat)
+        self.assertIn("yt-dlp yt-dlp-ejs bgutil-ytdlp-pot-provider", bat)
+        self.assertIn("deno.land/install.ps1", bat)
+        self.assertIn("VIDLORE_HD_SETUP", bat)               # kill switch
+        self.assertNotIn("nodejs.org", bat)                  # node is NOT installed
