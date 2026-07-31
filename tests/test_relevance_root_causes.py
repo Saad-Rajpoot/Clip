@@ -105,9 +105,16 @@ class TestPoTokenRejectionIsTransient(unittest.TestCase):
         self.assertEqual(HD._classify_dl_err("ERROR: unable to rename file"), "other")
 
     def test_sweep_keys_on_the_class_not_the_literal_403(self):
+        """The sweep must ask "is this fallback RECOVERABLE", never match a literal error string.
+
+        Widened after the Windows render: unreadable browser cookies strand sources at 360p for a
+        reason that no longer exists by the time the sweep runs, so they belong in it too — see
+        is_recoverable_hd_failure."""
         src = (SRC / "download.py").read_text()
-        self.assertIn("_hd.is_po_token_failure((s.extra or {}).get(\"hd_fallback\") or \"\")", src)
+        self.assertIn("_hd.is_recoverable_hd_failure((s.extra or {}).get(\"hd_fallback\") or \"\")",
+                      src)
         self.assertIn("hd_po_token_fallbacks", src, "the audit must count this class separately")
+        self.assertIn("hd_cookie_fallbacks", src, "and the cookie class separately from it")
 
     def test_machine_wide_collapse_widens_the_sweep(self):
         """A 24-source cap suits a few flaky videos; 110/110 failing has ONE shared cause."""

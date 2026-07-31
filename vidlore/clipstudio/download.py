@@ -268,7 +268,7 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
     if os.environ.get("VIDLORE_HD_403_SWEEP", "1").lower() not in ("0", "false", "no"):
         _fell403 = [s for s in proj.sources
                     if s.status == SOURCE_OK and s.url and _hd.is_youtube(s.url)
-                    and _hd.is_po_token_failure((s.extra or {}).get("hd_fallback") or "")
+                    and _hd.is_recoverable_hd_failure((s.extra or {}).get("hd_fallback") or "")
                     and 0 < int(s.height or 0) < cfg.discover_prefer_height]
         _cap = max(0, int(os.environ.get("VIDLORE_HD_403_SWEEP_MAX", "24") or 24))
         # MACHINE-WIDE COLLAPSE gets a bigger sweep. The default cap suits a few flaky videos, but
@@ -425,6 +425,11 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
             "hd_po_token_fallbacks": sum(
                 1 for s in _fell
                 if _hd_cls.is_po_token_failure((s.extra or {}).get("hd_fallback") or "")),
+            # counted separately because the remedy is different: a cookie failure is OUR flag
+            # failing, not YouTube pushing back. 42/42 on the owner's first Windows render.
+            "hd_cookie_fallbacks": sum(
+                1 for s in _fell
+                if _hd_cls.is_cookie_failure((s.extra or {}).get("hd_fallback") or "")),
             "sub_480p_sources": len(_sd),
             "top_fallback_reason": (sorted(
                 ((s.extra or {}).get("hd_fallback", "") for s in _fell))[0][:160] if _fell else ""),

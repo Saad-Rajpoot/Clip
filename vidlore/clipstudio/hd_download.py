@@ -67,6 +67,11 @@ try:
 except (TypeError, ValueError):
     POT_PORT = 4416
 COOKIES_BROWSER = os.environ.get("VIDLORE_HD_COOKIES_BROWSER", "chrome").strip()
+# Cookies are an OPTIMISATION (logged-in access), never a requirement: the PO-token path fetches
+# public videos perfectly well without them. Once the profile proves unreadable it will stay
+# unreadable for the whole run — the browser does not release its lock mid-render — so the first
+# failure disables them process-wide instead of re-failing once per source.
+_COOKIES_OFF = False
 # turn the whole HD path off with VIDLORE_HD_DOWNLOAD=0 (case-insensitive; unset/empty = ON)
 _HD_ENV = os.environ.get("VIDLORE_HD_DOWNLOAD", "").strip().lower()
 HD_ENABLED = (_HD_ENV not in ("0", "false", "no", "off")) if _HD_ENV else True
@@ -75,6 +80,41 @@ import threading as _threading
 
 _POT_PROC = None  # bgutil server we started (if any)
 _POT_LOCK = _threading.Lock()
+_COOKIES_LOCK = _threading.Lock()
+
+
+def _cookie_args() -> list:
+    """The cookie flags for a yt-dlp call — one definition for every call site.
+
+    A cookies FILE (exported once from a private window) is the wiki-endorsed stable method; live
+    browser profiles get their cookies ROTATED by YouTube mid-run, and on Windows cannot usually be
+    read at all. Returns [] once cookies have been disabled for this process."""
+    if _COOKIES_OFF:
+        return []
+    cfile = os.environ.get("VIDLORE_HD_COOKIES_FILE", "").strip()
+    if cfile and Path(cfile).expanduser().exists():
+        return ["--cookies", str(Path(cfile).expanduser())]
+    if COOKIES_BROWSER:
+        return ["--cookies-from-browser", COOKIES_BROWSER]
+    return []
+
+
+def _disable_cookies(reason: str = "", progress=None) -> bool:
+    """Drop cookies for the rest of the run. True if this call is the one that turned them off.
+
+    yt-dlp aborts the whole download when it cannot read the browser profile, so without this a
+    soft dependency takes the render down to the legacy 360p path — which is exactly what happened
+    on the owner's Windows machine, 42 sources in a row."""
+    global _COOKIES_OFF
+    with _COOKIES_LOCK:
+        if _COOKIES_OFF:
+            return False
+        _COOKIES_OFF = True
+    if progress:
+        progress("hd: browser cookies unreadable — continuing WITHOUT them (public videos do not "
+                 f"need them; export a cookies.txt and set VIDLORE_HD_COOKIES_FILE if a source is "
+                 f"age-restricted). Reason: {(reason or '').strip()[:160]}")
+    return True
 
 # Concurrency cap for ACTIVE HD yt-dlp subprocesses. A render fires download workers per core;
 # dozens of simultaneous SABR/HD data fetches from one IP+session is exactly the burst profile
@@ -140,12 +180,30 @@ def maybe_update_ytdlp(log=None, *, force: bool = False) -> bool:
 #  this and the whole 22-minute video shipped at 360p upscaled to 1080p. It has to be treated like
 #  a stale token (restart the PO server, sweep, retry), never as "this video does not exist".
 _PO_REJECT_RX = re.compile(r"error code:\s*152\b", re.I)
+# COOKIE-EXTRACTION failure — yt-dlp aborts the whole download when it cannot READ the browser
+# profile, which has nothing to do with the video. Windows is where this bites: Chrome holds an
+# exclusive lock on its cookie DB while running (yt-dlp issue 7271), and since Chrome 127 App-Bound
+# Encryption puts the values out of reach anyway. Measured on the owner's Windows render: 42/42
+# YouTube sources fell back to the legacy 360p downloader on this error alone.
+_COOKIE_FAIL = (r"(?:could not|couldn'?t|cannot|can'?t|unable|fail(?:ed|s)?|denied|permission"
+                r"|locked|no such|missing)")
+_COOKIE_ERR_RX = re.compile(
+    # the failure word sits on either side of the noun, so match both ways round
+    rf"cookie\w*.{{0,60}}?{_COOKIE_FAIL}|{_COOKIE_FAIL}.{{0,60}}?cookie"
+    # Chrome >=127 App-Bound Encryption: yt-dlp reports a DPAPI decrypt failure that never says
+    # "cookie". Both Windows cookie failures cite the same tracking issue, so match that too.
+    rf"|\bdpapi\b|yt-dlp/issues/7271", re.I | re.S)
+# NOT a marker: the bare flag name. yt-dlp ADVISES "Use --cookies-from-browser" in its bot-check
+# message, and reading that as a cookie failure would switch cookies OFF at the one moment they are
+# the actual remedy. The sign-in/bot patterns below are also tested BEFORE this class for the same
+# reason.
 
 
 def _classify_dl_err(text: str) -> str:
-    """'throttle_403' (transient: throttle, stale PO token, or a SABR/PO rejection), 'unavailable'
-    (permanent — do not retry), or 'other'. Classification drives retry/backoff AND the recovery
-    sweep; NEVER treat a token rejection as unavailability."""
+    """'throttle_403' (transient: throttle, stale PO token, or a SABR/PO rejection), 'cookies'
+    (the browser profile is unreadable — retry WITHOUT them), 'unavailable' (permanent — do not
+    retry), or 'other'. Classification drives retry/backoff AND the recovery sweep; NEVER treat a
+    token rejection as unavailability."""
     t = (text or "").lower()
     if "403" in t and "forbidden" in t:
         return "throttle_403"
@@ -157,6 +215,8 @@ def _classify_dl_err(text: str) -> str:
                 "geo restricted", "not available in your country"):
         if pat in t:
             return "unavailable"
+    if _COOKIE_ERR_RX.search(t):
+        return "cookies"                           # our own optional flag, not the video's fault
     return "other"
 
 
@@ -166,6 +226,21 @@ def is_po_token_failure(text: str) -> bool:
     on the literal string '403' and so never fired for error 152."""
     t = (text or "").lower()
     return bool(("403" in t and "forbidden" in t) or _PO_REJECT_RX.search(t))
+
+
+def is_cookie_failure(text: str) -> bool:
+    """Did this fallback come from an unreadable browser profile rather than the video?"""
+    return _classify_dl_err(text or "") == "cookies"
+
+
+def is_recoverable_hd_failure(text: str) -> bool:
+    """Should the download stage's sweep re-attempt HD for a source that fell back with this?
+
+    Downloads run in PARALLEL, so on a machine where cookies are unreadable a burst of sources can
+    fail together before the first one flips the process-wide switch. Those are stranded at 360p by
+    a condition that no longer exists — exactly what the sweep is for. Only genuine unavailability
+    may leave a source SD."""
+    return is_po_token_failure(text) or is_cookie_failure(text)
 
 
 def _restart_pot_server(progress=None) -> bool:
@@ -354,15 +429,24 @@ def probe_max_height(url: str, *, max_height: int = 1080, timeout: int = 60) -> 
         return 0
     if not ensure_pot_server():
         return 0
-    cmd = [
-        HD_PY, "-m", "yt_dlp", "--cookies-from-browser", COOKIES_BROWSER,
-        "--extractor-args", f"youtubepot-bgutilhttp:base_url=http://127.0.0.1:{POT_PORT}",
-        "-f", f"bv*[height<={max_height}]/b[height<={max_height}]/bv*/b",
-        "-S", _format_sort(max_height),
-        "--no-warnings", "--quiet", "--skip-download", "--print", "%(height)s", url,
-    ]
+    # the probe shares _cookie_args() with the downloader — it used to hardcode
+    # --cookies-from-browser, so on Windows it died on the locked profile and returned 0, and
+    # discovery then rated every 1080p upload as SD before a single byte was fetched.
+    def _probe_cmd() -> list:
+        return [
+            HD_PY, "-m", "yt_dlp", *_cookie_args(),
+            "--extractor-args", f"youtubepot-bgutilhttp:base_url=http://127.0.0.1:{POT_PORT}",
+            "-f", f"bv*[height<={max_height}]/b[height<={max_height}]/bv*/b",
+            "-S", _format_sort(max_height),
+            "--no-warnings", "--quiet", "--skip-download", "--print", "%(height)s", url,
+        ]
     try:
-        p = subprocess.run(cmd, env=_env_with_runtimes(), capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(_probe_cmd(), env=_env_with_runtimes(), capture_output=True,
+                           text=True, timeout=timeout)
+        if p.returncode != 0 and _classify_dl_err(p.stderr or "") == "cookies":
+            _disable_cookies(p.stderr or "")
+            p = subprocess.run(_probe_cmd(), env=_env_with_runtimes(), capture_output=True,
+                               text=True, timeout=timeout)
         for line in (p.stdout or "").splitlines():
             line = line.strip()
             if line.isdigit():
@@ -483,13 +567,7 @@ def download_hd(url: str, out_stem: str, *, max_height: int = 1080, ffmpeg_dir: 
             "--write-info-json",
             "-o", out_tmpl,
         ]
-        # cookies: a cookies FILE (exported once from a private window) is the wiki-endorsed
-        # stable method — live browser profiles get their cookies ROTATED by YouTube mid-run.
-        _cfile = os.environ.get("VIDLORE_HD_COOKIES_FILE", "").strip()
-        if _cfile and Path(_cfile).expanduser().exists():
-            c += ["--cookies", str(Path(_cfile).expanduser())]
-        elif COOKIES_BROWSER:
-            c += ["--cookies-from-browser", COOKIES_BROWSER]
+        c += _cookie_args()
         if client_args:
             c += ["--extractor-args", f"youtube:player_client={client_args}"]
         return c
@@ -503,8 +581,8 @@ def download_hd(url: str, out_stem: str, *, max_height: int = 1080, ffmpeg_dir: 
     # video-only file and dialogue-lock dies). _merge_ffmpeg_dir guarantees a usable `ffmpeg`.
     mdir = _merge_ffmpeg_dir(ffmpeg_dir)
 
-    def _cmd_for(attempt: int) -> list:
-        client = _LADDER[min(attempt - 1, len(_LADDER) - 1)]
+    def _cmd_for(rung: int) -> list:
+        client = _LADDER[min(rung, len(_LADDER) - 1)]
         c = _base_cmd(client)
         if mdir:
             c += ["--ffmpeg-location", mdir]
@@ -515,9 +593,13 @@ def download_hd(url: str, out_stem: str, *, max_height: int = 1080, ffmpeg_dir: 
     last = ""
     last_class = "other"
     ok = False
+    # The client rung is tracked SEPARATELY from the attempt counter: the ladder exists to answer
+    # 403s, and a retry forced by our own broken flag (unreadable cookies) must not consume a rung
+    # that a real throttle will need.
+    rung = 0
     for attempt in range(1, retries + 2):
         try:
-            cmd = _cmd_for(attempt)
+            cmd = _cmd_for(rung)
             _pace_hd_start()   # global inter-start gap: stay far under the ~300 videos/hour
                                # guest ceiling the Extractors wiki documents
             with _HD_SEM:      # pace ACTIVE HD fetches — parallel bursts trip the 403 throttle
@@ -533,6 +615,18 @@ def download_hd(url: str, out_stem: str, *, max_height: int = 1080, ffmpeg_dir: 
         except Exception as e:                               # noqa: BLE001
             last = str(e)[:300]
         last_class = _classify_dl_err(last)
+        if last_class == "cookies":
+            # NOT the video's fault — yt-dlp could not read the browser profile and aborted before
+            # it ever reached YouTube. Cookies are optional, so drop them and retry the SAME rung.
+            # Windows is where this happens (Chrome locks its cookie DB; App-Bound Encryption since
+            # v127) and it took a whole render to 360p, because every retry re-sent the dead flag
+            # and the fallback then read a tooling failure as "no HD available".
+            # only the call that actually FLIPS the switch earns a free retry; if another thread
+            # already turned cookies off, the next attempt is cookie-free regardless, so let the
+            # rung advance normally rather than spending every attempt on one rung.
+            if _disable_cookies(last, progress=progress) and attempt <= retries:
+                continue                           # rung unchanged — retry without cookies
+        rung = min(rung + 1, len(_LADDER) - 1)
         if last_class == "unavailable":
             # permanent (private/removed/sign-in) — retrying is pure waste
             break

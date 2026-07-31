@@ -106,6 +106,18 @@ KUCH CHAL NA RAHA HO TO
 - Pre-flight mein "HD download OFF (Deno nahi)" aaye  ->  windows\Fix-Deno.bat
     double-click karein, phir Start-ClipStudio.bat dobara chalayein.
     (Iske baghair sab chalega magar SAARI footage ~360p aayegi.)
+- build.log mein "Could not copy Chrome cookie database" -> AB KHUD HANDLE HOTA HAI.
+    Windows par Chrome khula ho to woh apni cookie file LOCK kar leta hai (aur Chrome
+    127+ mein cookies encrypted hain), isliye yt-dlp unhe parh nahi pata. Pehle iss se
+    poora download HD se gir kar 360p par chala jata tha -- 42/42 sources tak. Ab tool
+    pehli baar par cookies chhor kar bina unke dobara koshish karta hai; public videos
+    ko cookies chahiye hi nahi. Log mein yeh line aayegi:
+        "hd: browser cookies unreadable - continuing WITHOUT them"
+    Sirf agar koi source AGE-RESTRICTED ho tab cookies chahiye. Uske liye:
+      1. Chrome mein koi cookies.txt exporter extension se cookies.txt export karein
+      2. .env mein likhein:  VIDLORE_HD_COOKIES_FILE=C:\path\to\cookies.txt
+    (Cookie FILE behtar hai -- live browser profile ki cookies YouTube beech render
+     mein rotate kar deta hai.)
 - GPU/encode check ke liye (optional) "tools" folder mein:
     check_windows_gpu_acceleration.bat   (GPU encode kaam kar raha hai?)
     fetch_windows_nvenc_ffmpeg.py        (NVENC wala ffmpeg dobara laana ho to)
