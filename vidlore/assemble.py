@@ -242,6 +242,61 @@ def _probe_duration(p) -> float:
     return d
 
 
+def _audio_frame_anomalies(p) -> dict:
+    """Does the delivered audio track tell the truth about its own timeline?
+
+    The duration check below reads the container's declared `stream=duration`, which is exactly the
+    number a broken timeline inflates. Job 957f56f925 shipped 106.688s of actual audio under a
+    106.800s video — 124 ms truncated — and passed `delivered A/V sync OK` because ONE AAC frame
+    declared 5488 samples instead of 1024, and that 93 ms phantom gap padded the declared duration
+    back inside the 33 ms tolerance. The two defects hid each other. A macOS render carries the same
+    class at 47 ms, so this is not a Windows quirk; it is simply invisible to a duration check.
+
+    Every AAC frame holds a fixed number of samples, so ANY non-terminal frame whose declared
+    duration differs from the modal one is a lie about the timeline. (The last frame is exempt: a
+    short tail is normal padding.) Returns the evidence; the caller decides severity."""
+    import collections as _c
+    import json as _json
+    import subprocess as _sp
+    from .clipstudio.config import ffprobe_exe as _ffprobe_exe
+    try:
+        raw = _sp.check_output(
+            [str(_ffprobe_exe()), "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "packet=duration,pts_time", "-of", "json", str(p)],
+            stderr=_sp.DEVNULL)
+        pkts = _json.loads(raw.decode()).get("packets") or []
+    except Exception:
+        return {}                       # unreadable → say nothing; the duration gate still runs
+    durs = []
+    for k in pkts:
+        try:
+            durs.append((int(k.get("duration")), float(k.get("pts_time") or 0.0)))
+        except (TypeError, ValueError):
+            continue
+    if len(durs) < 8:
+        return {}
+    modal = _c.Counter(d for d, _ in durs).most_common(1)[0][0]
+    if modal <= 0:
+        return {}
+    odd = [(t, d) for i, (d, t) in enumerate(durs)
+           if d != modal and i < len(durs) - 1]
+    sr = 48000.0
+    try:
+        raw2 = _sp.check_output(
+            [str(_ffprobe_exe()), "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=sample_rate", "-of", "json", str(p)], stderr=_sp.DEVNULL)
+        sr = float((_json.loads(raw2.decode()).get("streams") or [{}])[0].get("sample_rate") or sr)
+    except Exception:
+        pass
+    gap_s = sum(d - modal for _, d in odd) / sr
+    return {"frames": len(durs), "modal_samples": modal, "anomalies": len(odd),
+            "gap_s": round(gap_s, 4),
+            "worst": ([{"at_s": round(t, 3), "samples": d,
+                        "gap_ms": round((d - modal) / sr * 1000.0, 1)}
+                       for t, d in sorted(odd, key=lambda x: -x[1])[:3]] if odd else []),
+            "true_media_s": round(sum(d for d, _ in durs) / sr, 4)}
+
+
 def _stream_times(p) -> dict:
     """{stream_type: (duration, first_pts, last_pts)} for the delivered file. Raises on anything
     unreadable — same reason as above."""
@@ -381,7 +436,33 @@ def assert_delivered_av_sync(out_path, *, tol_frames: float = 1.0) -> dict:
         raise TimelineSyncError(
             f"DELIVERED last-PTS skew {v1 - a1:+.3f}s > {tol:.3f}s: video ends {v1:.3f}s, "
             f"audio ends {a1:.3f}s in {out_path} — one stream was truncated")
-    return {"video": [vd, v0, v1], "audio": [ad, a0, a1], "tol_s": tol}
+    res = {"video": [vd, v0, v1], "audio": [ad, a0, a1], "tol_s": tol}
+    # …and the check the three above cannot make: is that audio duration even real? See
+    # _audio_frame_anomalies. Reported ALWAYS (it is the evidence), fatal only once the invented
+    # gap is long enough to be heard, because renders on both platforms have been carrying small
+    # ones for months and failing a four-hour render over 3 ms would be the wrong trade.
+    try:
+        anom = _audio_frame_anomalies(out_path)
+    except Exception:
+        anom = {}
+    if anom:
+        res["audio_frames"] = anom
+        if anom.get("anomalies"):
+            _gap_ms = abs(anom.get("gap_s") or 0.0) * 1000.0
+            _msg = (f"DELIVERED audio timeline is INVENTED: {anom['anomalies']} non-terminal AAC "
+                    f"frame(s) declare a duration other than {anom['modal_samples']} samples, "
+                    f"adding {_gap_ms:.0f}ms of timeline that holds no audio "
+                    f"(worst: {anom.get('worst')}). The container's duration is inflated by exactly "
+                    f"this much, which is how it slipped past the A/V duration check.")
+            try:
+                _fatal_ms = float(os.environ.get(
+                    "VIDLORE_AUDIO_GAP_FATAL_MS", "64") or 64)
+            except (TypeError, ValueError):
+                _fatal_ms = 64.0
+            if _gap_ms >= _fatal_ms:
+                raise TimelineSyncError(f"{_msg} — over the {_fatal_ms:.0f}ms audible floor.")
+            res["audio_frames"]["warning"] = _msg
+    return res
 
 
 _TRANSITIONS = {
@@ -10009,13 +10090,26 @@ def assemble(
         _atvol = _ATMOS_VOL * getattr(_sty, "atmos_scale", 1.0)
         legs.append(f"[{atmos_i}:a]volume={_atvol:.3f}[atm]")
         mix += "[atm]"
+    # TIMESTAMPS FOLLOW SAMPLES. `asetpts=N/SR/TB` rebuilds the audio PTS from the running sample
+    # count just before the encoder, so every AAC frame lands exactly one frame-length after the
+    # last one. Without it the graph can hand the encoder a PTS jump, and the muxer faithfully
+    # records it: measured on two delivered renders, one non-terminal frame declared 5488 samples
+    # (Windows, 93 ms, mid-speech) and 3280 (macOS, 47 ms) instead of 1024. No samples are missing
+    # — the container simply lies about its own timeline — but any consumer that honours timestamps
+    # materialises the gap as silence, and it survives a stream copy all the way to an upload.
+    # PROVEN on the pipeline, not in a lab: the exact trigger resisted synthetic reproduction (an
+    # amix with a short bed and the same dropout_transition emits a clean timeline), so this was
+    # first written as prevention aimed at the class. A/B on the SAME job and beats then settled
+    # it — 1 anomaly of 47 ms at 66.347s before, 0 after. `_audio_frame_anomalies` remains the
+    # backstop: it catches the defect whatever introduces it next.
+    _APTS = "asetpts=N/SR/TB"
     if mix == "[n]":                       # voice only
-        achain = f"[1:a]{_VOXNORM},{_LIMIT}[a]"
+        achain = f"[1:a]{_VOXNORM},{_LIMIT},{_APTS}[a]"
     else:
         k = mix.count("[")
         achain = ";".join(legs) + (
             f";{mix}amix=inputs={k}:duration=first:"
-            f"normalize=0:dropout_transition=3,{_LIMIT}[a]"
+            f"normalize=0:dropout_transition=3,{_LIMIT},{_APTS}[a]"
         )
     amap = "[a]"
 

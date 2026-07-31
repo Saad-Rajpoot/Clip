@@ -5457,6 +5457,14 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             progress(m)
 
     eng = load_config()
+    # WHY a review draft must be visible ON THE FILE. In warn mode a release-BLOCKED render is
+    # still written out so it can be watched and audited — but it was written to `final.mp4`, the
+    # same name a passing render uses, with no marker anywhere in the picture. The only signals
+    # were build.log, review.html's badges and the portal's job status, none of which travel with
+    # the mp4. One duly reached another machine on a USB stick and was read as a finished render
+    # (job 957f56f925: 7 unresolved beats, ~46% relevance). Each warn-mode gate appends its reason
+    # here; the file is renamed at the end, and the caller is handed the new path.
+    _review_draft: list = []
     import os
     os.environ.setdefault("VIDLORE_MUSIC_VOLUME", "1.15")   # present cinematic bed under the VO
     work = proj.output_dir / "work"
@@ -6036,6 +6044,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                       f"(early gate, before assembly) — scene(s) "
                       f"{[b['seg_index'] for b in _blk_e[:8]]}.")
             if _mode_e == "warn":
+                _review_draft.append(_msg_e)
                 log(f"build: ⚠ EARLY RELEASE-BLOCK (mode=warn, REVIEW BUILD) — {_msg_e} "
                     f"Continuing; the authoritative gate reports after assembly.")
             else:
@@ -6620,6 +6629,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                     f"{_rf_block[0]['seg_index']}: {_rf_block[0]['reason']}) — scene(s) "
                     f"{[b['seg_index'] for b in _rf_block[:8]]}. See rejected_footage_audit.json.")
             if _blk_mode == "warn":
+                _review_draft.append(_msg)
                 log(f"build: ⚠ RELEASE-BLOCK (mode=warn, REVIEW BUILD — not for publication) — {_msg}")
             else:
                 _quar = out_path.with_name(out_path.stem + ".FAILED_REJECTED_FOOTAGE" + out_path.suffix)
@@ -6918,5 +6928,30 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     log(f"build: delivered A/V sync OK — video {_sync['video'][0]:.3f}s "
         f"[{_sync['video'][1]:.3f}→{_sync['video'][2]:.3f}] · audio {_sync['audio'][0]:.3f}s "
         f"[{_sync['audio'][1]:.3f}→{_sync['audio'][2]:.3f}] (tol {_sync['tol_s']*1000:.0f}ms)")
+    _af = (_sync.get("audio_frames") or {})
+    if _af.get("warning"):
+        log(f"build: ⚠ {_af['warning']}")
+    elif _af:
+        log(f"build: audio timeline clean — {_af.get('frames')} frame(s), "
+            f"{_af.get('anomalies', 0)} anomal(y/ies), true media {_af.get('true_media_s')}s")
+
+    # REVIEW DRAFT — rename so the FILE itself says what it is. Done after the A/V gate so that
+    # gate still measures the artifact it was written to measure, and the new path is returned so
+    # the portal's download link (which follows res["output"]) keeps working.
+    if _review_draft:
+        try:
+            _draft = result.with_name(result.stem + ".REVIEW_DRAFT" + result.suffix)
+            result.replace(_draft)
+            for _side in (".srt",):                      # keep the sidecar next to its video
+                _s_old = result.with_suffix(_side)
+                if _s_old.exists():
+                    _s_old.replace(_draft.with_suffix(_side))
+            result = _draft
+            log(f"build: ⚠ REVIEW DRAFT — NOT FOR PUBLICATION. Renamed → {result.name} "
+                f"({len(_review_draft)} release-block report(s); see rejected_footage_audit.json). "
+                f"Rerun after rediscovery before publishing.")
+        except Exception as _e_rd:                       # a rename must never lose a finished render
+            log(f"build: ⚠ REVIEW DRAFT (could not rename: {type(_e_rd).__name__}) — "
+                f"{result.name} is NOT for publication")
     log(f"build: done → {result}")
     return result
