@@ -159,7 +159,25 @@ _NONSHOW_TITLE = re.compile(
     r"sora|runway|kling|stable diffusion|"
     r"all battles|every battle|battle simulator|cinematic battle|"
     r"\(\d{3,4}\s?ac\)|\d{3,4}\s?ac\b|house \w+ vs\.? house \w+|"
-    r"\bvs\.?\b.{0,30}\bbattle\b|\bbattle\b.{0,30}\bvs\.?\b)", re.I)
+    r"\bvs\.?\b.{0,30}\bbattle\b|\bbattle\b.{0,30}\bvs\.?\b|"
+    # CROSSOVER MASHUPS. A title that stages this show against ANOTHER franchise is a fan edit whose
+    # footage is composited or borrowed wholesale. One leaked in as a stylised still from "Jon Snow
+    # vs The Night's King Army Lightsaber Battle - Game Of Thrones + Star Wars", which every existing
+    # arm missed: not animated, not a game, not AI, and the vs...battle arm above spans 34 characters
+    # where that one allows 30.
+    #
+    # A franchise NAME alone is not evidence — measured on this project's own pools, a bare
+    # `avengers` arm flagged "Game of Thrones | The Long Night | Arya Battle Scene | Forge from
+    # Avengers: Endgame", a genuine Long Night upload that merely CREDITS ITS MUSIC. Dropping that
+    # would starve exactly the footage the video needs. So a franchise name only counts next to a
+    # crossover connector; only props/places that cannot appear in this show stand alone.
+    r"lightsaber|jedi|sith|\bhogwarts\b|\bcrossover\b|\bmash.?up\b|"
+    r"(?:\bvs\.?|\bversus\b|\bx\b|\+|\bmeets\b)\s*(?:the\s+)?"
+    r"(?:star wars|marvel|avengers|dc comics|harry potter|lord of the rings|"
+    r"middle.earth|witcher|walking dead|breaking bad)\b|"
+    r"\b(?:star wars|marvel|avengers|dc comics|harry potter|lord of the rings|"
+    r"middle.earth|witcher|walking dead|breaking bad)\s*(?:\bvs\.?|\bversus\b|\bx\b|\+|\bmeets\b))",
+    re.I)
 _TYPE_BONUS = re.compile(r"\b(scene|clip|fight|battle|death|kills?|moment|confronts?|speech)\b", re.I)
 
 # uploads that announce APPENDED NON-SCENE content ('... + BONUS Scene'): the main footage is

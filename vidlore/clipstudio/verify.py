@@ -144,7 +144,12 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         "unnaturally 'cinematic' sepia AI grade, impossible costumes/weapons;\n"
         "• footage from a DIFFERENT PRODUCTION — a fan film, a fan-made recreation, another "
         "movie/series, or a re-enactment — i.e. the location, costumes, or actors are clearly NOT "
-        "the real show's (amateur or mismatched production values, unfamiliar faces in the role).\n"
+        "the real show's (amateur or mismatched production values, unfamiliar faces in the role);\n"
+        "• BEHIND-THE-SCENES / production footage — the film crew, a camera, dolly, boom, lighting "
+        "rig, monitors, marks or equipment cases in frame; crew in modern clothing (jackets, "
+        "baseball caps, trainers, hi-vis) on or beside the set; a rehearsal, stunt practice, a "
+        "blooper, or an actor out of character. This is REAL footage OF the production, which is "
+        "why it slips the tests above — but the essay is about the STORY, so it must never air.\n"
         "This is about AUTHENTICITY, not resolution: genuine show footage that is merely low-res, "
         "dark, blurry, or heavily colour-graded is FINE. Real props, maps and documents FILMED "
         "WITHIN a live-action scene are fine. When the frame looks AI-generated OR like a different "
@@ -202,7 +207,12 @@ _SEASON_RX = re.compile(
 
 # Bump whenever the verifier PROMPT or its JSON contract changes: a verdict is only reusable if it
 # was produced by the same question. Part of the fingerprint below.
-PROMPT_VERSION = "v7-2026-07"          # v7: + non-show/illustration hard rule; v6: venue-fallback
+# BUMPED with the behind-the-scenes clause. The verdict cache keys on this string, so a prompt
+# change that did NOT bump it would serve answers to a different question — the whole point of the
+# fingerprint. The cost is one cold verify pass on the next render (~$1); the alternative is a
+# silently stale cache, which is worse.
+PROMPT_VERSION = "v8-2026-07"          # v8: + behind-the-scenes/production clause; v7: non-show
+                                       # illustration hard rule; v6: venue-fallback
 # Bump when the contact-sheet SAMPLING changes (frame count/positions/layout). The sheet is the
 # image the verifier judges, so a different sampling is a different question even for the same shot.
 SHEET_VERSION = "sheet-v1-startmidend"
