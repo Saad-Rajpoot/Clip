@@ -99,6 +99,22 @@ def _cookie_args() -> list:
     return []
 
 
+def _remote_components() -> list:
+    """`--remote-components ejs:github` — the JS-challenge solver script distribution.
+
+    YouTube's "n challenge" must be solved before the real media formats are offered at all. Deno
+    executes the solver, but the SCRIPT it runs (yt-dlp-ejs) is no longer bundled: yt-dlp now skips
+    it unless remote components are enabled, warns `n challenge solving failed: Some formats may be
+    missing`, and then lists ONLY storyboard images. Every format selector misses, the probe reads
+    0p, and the download falls back to the legacy 360p path — a total HD collapse that reports
+    itself as "Requested format is not available", i.e. as if the video had no HD copy.
+
+    MEASURED 2026-07-31 on this machine: six pool URLs probed 0p; with this flag the first probed
+    1080p. Set VIDLORE_HD_REMOTE_COMPONENTS="" to disable, or to `ejs:npm` for the NPM mirror."""
+    spec = os.environ.get("VIDLORE_HD_REMOTE_COMPONENTS", "ejs:github").strip()
+    return ["--remote-components", spec] if spec else []
+
+
 def _disable_cookies(reason: str = "", progress=None) -> bool:
     """Drop cookies for the rest of the run. True if this call is the one that turned them off.
 
@@ -193,6 +209,12 @@ _COOKIE_ERR_RX = re.compile(
     # Chrome >=127 App-Bound Encryption: yt-dlp reports a DPAPI decrypt failure that never says
     # "cookie". Both Windows cookie failures cite the same tracking issue, so match that too.
     rf"|\bdpapi\b|yt-dlp/issues/7271", re.I | re.S)
+# JS-CHALLENGE failure — YouTube offers no media formats at all until the "n challenge" is solved,
+# so this presents as "Requested format is not available", i.e. as if the video had no HD copy.
+# Matched on the CAUSE lines rather than that symptom, which has innocent explanations too.
+_JS_CHALLENGE_RX = re.compile(
+    r"n challenge solving failed|only images are available|challenge solver script"
+    r"|\bejs\b.{0,40}(skipped|missing|distribution)", re.I | re.S)
 # NOT a marker: the bare flag name. yt-dlp ADVISES "Use --cookies-from-browser" in its bot-check
 # message, and reading that as a cookie failure would switch cookies OFF at the one moment they are
 # the actual remedy. The sign-in/bot patterns below are also tested BEFORE this class for the same
@@ -217,6 +239,8 @@ def _classify_dl_err(text: str) -> str:
             return "unavailable"
     if _COOKIE_ERR_RX.search(t):
         return "cookies"                           # our own optional flag, not the video's fault
+    if _JS_CHALLENGE_RX.search(t):
+        return "jschallenge"                       # solver script missing — see _remote_components
     return "other"
 
 
@@ -240,7 +264,8 @@ def is_recoverable_hd_failure(text: str) -> bool:
     fail together before the first one flips the process-wide switch. Those are stranded at 360p by
     a condition that no longer exists — exactly what the sweep is for. Only genuine unavailability
     may leave a source SD."""
-    return is_po_token_failure(text) or is_cookie_failure(text)
+    return (is_po_token_failure(text) or is_cookie_failure(text)
+            or _classify_dl_err(text or "") == "jschallenge")
 
 
 def _restart_pot_server(progress=None) -> bool:
@@ -434,7 +459,7 @@ def probe_max_height(url: str, *, max_height: int = 1080, timeout: int = 60) -> 
     # discovery then rated every 1080p upload as SD before a single byte was fetched.
     def _probe_cmd() -> list:
         return [
-            HD_PY, "-m", "yt_dlp", *_cookie_args(),
+            HD_PY, "-m", "yt_dlp", *_cookie_args(), *_remote_components(),
             "--extractor-args", f"youtubepot-bgutilhttp:base_url=http://127.0.0.1:{POT_PORT}",
             "-f", f"bv*[height<={max_height}]/b[height<={max_height}]/bv*/b",
             "-S", _format_sort(max_height),
@@ -556,6 +581,7 @@ def download_hd(url: str, out_stem: str, *, max_height: int = 1080, ffmpeg_dir: 
         #  --retry-sleep     : exponential backoff on http errors instead of hammering.
         c = [
             HD_PY, "-m", "yt_dlp", "-4",
+            *_remote_components(),
             "--sleep-requests", "0.75",
             "--retry-sleep", "http:exp=1:120",
             "--extractor-args", f"youtubepot-bgutilhttp:base_url=http://127.0.0.1:{POT_PORT}",
