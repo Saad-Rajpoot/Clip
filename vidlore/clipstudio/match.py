@@ -1197,6 +1197,23 @@ def _shot_subtitle_band(shot) -> bool:
         return False
 
 
+def _luma(shot, name: str) -> float:
+    """A shot's luma field, with a genuine 0.0 kept DISTINCT from "not computed".
+
+    `float(getattr(shot, name, -1.0) or -1.0)` reads a real 0.0 as the -1 sentinel, so a literally
+    black shot took the fail-open path out of every luma gate. Measured across 10,013 indexed
+    shots: 50 (0.50%) escape `_shot_unreadable` for this reason alone, and 25 of those are black
+    outright (luma_hi <= 2) — including one whose whole frame is black (0.0 / 1.0 / 0.0, black
+    fraction 1.0). This is the one change here that RAISES rejection; all of it is pure black."""
+    v = getattr(shot, name, None)
+    if v is None:
+        return -1.0
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return -1.0
+
+
 def _shot_featureless(shot) -> bool:
     """FLAT shot — bright enough that detail SHOULD be visible, yet carrying almost none.
 
@@ -1219,9 +1236,9 @@ def _shot_featureless(shot) -> bool:
     import os as _os_f
     if _os_f.environ.get("VIDLORE_CLIPSTUDIO_FLAT_GATE", "1").strip() in ("0", "false", "no"):
         return False
-    la = float(getattr(shot, "luma_avg", -1.0) or -1.0)
-    lh = float(getattr(shot, "luma_hi", -1.0) or -1.0)
-    lm = float(getattr(shot, "luma_min", -1.0) or -1.0)
+    la = _luma(shot, "luma_avg")
+    lh = _luma(shot, "luma_hi")
+    lm = _luma(shot, "luma_min")
     if la < 0 or lh < 0 or lm < 0:
         return False                                   # not computed (old index) → fail open
     try:
@@ -1242,8 +1259,8 @@ def _shot_unreadable(shot) -> bool:
     import os as _os_u
     if _os_u.environ.get("VIDLORE_CLIPSTUDIO_UNREADABLE_GATE", "1").strip() in ("0", "false", "no"):
         return False
-    la = float(getattr(shot, "luma_avg", -1.0) or -1.0)
-    lh = float(getattr(shot, "luma_hi", -1.0) or -1.0)
+    la = _luma(shot, "luma_avg")
+    lh = _luma(shot, "luma_hi")
     if la < 0 or lh < 0:
         return False                                   # not computed (old index) → fail open
     # CONSERVATIVE by design (measured on real GoT footage): the readable dark privy/crossbow
@@ -1268,7 +1285,7 @@ def _shot_unreadable(shot) -> bool:
     # 100% of pixels under 16. luma_min is that shot's DARKEST sample, and black_frac says how much
     # of it is genuinely black — together they separate a low-key lit frame from an unusable one.
     # Sentinel -1 (old index, not recomputed) fails open, exactly like the arms above.
-    lmin = float(getattr(shot, "luma_min", -1.0) or -1.0)
+    lmin = _luma(shot, "luma_min")
     lbf = float(getattr(shot, "luma_min_black_frac", -1.0) or -1.0)
     if lmin >= 0.0 and lbf >= 0.0:
         try:

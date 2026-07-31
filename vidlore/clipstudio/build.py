@@ -4807,6 +4807,61 @@ def _frame_luma_hi(img_path):
         return None                                    # explicit failure → unverified
 
 
+_SRCDARK_MEMO: dict = {}
+
+
+def _source_window_too_dark(src_path, start: float, need: float,
+                            floor: float = 50.0, min_dark_run: float = 0.8) -> bool:
+    """`_clip_too_dark`'s question, asked of a SOURCE window BEFORE anything is cut.
+
+    Same crop, stride, statistic and thresholds — deliberately not a new rule. It exists so the
+    answer can change WHICH already-approved window a beat uses, instead of arriving after the cut,
+    when the only remedy left is a freeze.
+
+    WHY THIS AND NOT A SLIDE INSIDE THE SHOT, which is the obvious idea: 175 of 272 beats (64%) air
+    LONGER than their selected shot (median 1.03s beyond it), so there is usually no room to slide.
+    Replaying an honest slide — the real wqc_render_window with illegibility spans injected, anchor
+    overlap and moment-preserve untouched — rescued 1 beat and regressed 1. Net zero, measured.
+    Choosing a different window from the beat's OWN relevance-ranked list works instead: of the 28
+    beats whose first choice probes dark, 27 have a legible alternate already in that list.
+
+    A source-side probe predicts the encoded-clip verdict: 48 windows stratified across index
+    luma_avg 3-95, cut with the production chain (Ken-Burns zoom -> CAS -> libx264 CRF18), gave
+    48/48 verdict agreement against `_clip_too_dark` on the resulting clip.
+
+    Unmeasurable -> False, exactly as `_clip_too_dark` does: the final black gate is the backstop."""
+    import shutil as _shutil
+    import tempfile as _tempfile
+    key = (str(src_path), round(float(start), 2), round(float(need), 2))
+    if key in _SRCDARK_MEMO:
+        return _SRCDARK_MEMO[key]
+    ff = ffmpeg_exe()
+    _d = Path(_tempfile.mkdtemp(prefix="srcdark_"))
+    out = False
+    try:
+        subprocess.run([ff, "-y", "-loglevel", "error", "-ss", f"{max(0.0, float(start)):.3f}",
+                        "-i", str(src_path), "-t", f"{max(0.2, float(need)):.3f}",
+                        "-vf", "crop=iw*0.9:ih*0.84:iw*0.05:ih*0.08,fps=2,scale=320:-1",
+                        "-q:v", "5", str(_d / "f_%05d.jpg")], capture_output=True, timeout=60)
+        his = [v for v in (_frame_luma_hi(f) for f in sorted(_d.glob("f_*.jpg"))) if v is not None]
+        if his:
+            if max(his) < floor:
+                out = True                     # unreadable THROUGHOUT
+            else:
+                _run = 0                       # frames are 0.5s apart (fps=2)
+                for _h in his:
+                    _run = _run + 1 if _h < floor else 0
+                    if _run * 0.5 >= min_dark_run:
+                        out = True             # a SUSTAINED dark patch the final gate would flag
+                        break
+    except Exception:
+        out = False
+    finally:
+        _shutil.rmtree(_d, ignore_errors=True)
+    _SRCDARK_MEMO[key] = out
+    return out
+
+
 def _clip_too_dark(clip_path, floor: float = 50.0, min_dark_run: float = 0.8) -> bool:
     """True when a CUT clip is unusable: EITHER unreadable throughout, OR it contains a SUSTAINED
     dark RUN of at least `min_dark_run` seconds — the SAME run-based rule _final_video_black_gate
@@ -5823,11 +5878,18 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 pass
         return n
 
-    def _next_distinct_shot(sid, after_t):
+    def _next_distinct_shot(sid, after_t, need: float = 0.0):
         # SHOT-AWARE walk: the next detected shot boundary at/after `after_t` whose LOOK is not
         # a near-term repeat — raw seconds-walking inside one static take produced visually
         # identical consecutive beats (a council room doesn't change in 3 seconds; the camera
         # CUT does). Returns a start time, falling back to after_t.
+        #
+        # `need` (the beat's cut length) enables the live legibility probe below. Of the freeze
+        # replacements in the measured render, roughly 38% came through this walk rather than
+        # through a chosen beat_window, so the window-level check alone leaves them uncovered.
+        _lg_walk = os.environ.get("VIDLORE_CLIPSTUDIO_WINDOW_LEGIBILITY", "1").strip() \
+            not in ("0", "false", "no")
+        _lg_left = 6                    # bounded: 6 live probes, then today's behaviour verbatim
         try:
             src_obj = proj.source(sid)
             sp = src_obj.local_path if src_obj else None
@@ -5851,6 +5913,14 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                         or _frame_has_burned_text(
                             sp, min(sh.start + 2.2, max(sh.start, sh.end - 0.4)))):
                     continue                           # air-time probe (keyframe can miss)
+                # LIVE darkness probe of the span this walk would actually air. `_dark_b` above
+                # reads the persisted SHOT AGGREGATE (3 samples over up to 18s), so it is blind by
+                # construction to a sustained dark run inside an otherwise-bright shot — which is
+                # the run the post-cut sweep then freezes over.
+                if _lg_walk and sp and need > 0 and _lg_left > 0:
+                    _lg_left -= 1
+                    if _source_window_too_dark(sp, max(after_t, sh.start), need):
+                        continue
                 return max(after_t, sh.start)
         except Exception:
             pass
@@ -6160,22 +6230,53 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                         1 if _near_recent(_win_embed(wh[0][0], float(wh[0][1]))) else 0,
                         used_at.get(_wkey(wh[0][0], wh[0][1]), -1)))
                     _fresh = _pool
-                    for _wh in _fresh:
-                        # AIR-TIME text probe: OCR the frames that will actually air — the
-                        # indexed keyframe can miss mid-shot overlay text (tweet cards,
-                        # word-by-word animated captions). Probe across the WHOLE cut span.
-                        _wsp = proj.source(_wh[0][0])
-                        _wsp = _wsp.local_path if _wsp else None
-                        _probe_ts, _pt = [], 0.8
-                        while _pt < min(per_beat - 0.2, 4.6):
-                            _probe_ts.append(_pt)
-                            _pt += 1.2
-                        if _TGATE and _wsp and any(
-                                _frame_has_burned_text(_wsp, float(_wh[0][1]) + _q9)
-                                for _q9 in (_probe_ts or [0.8])):
-                            continue
-                        chosen_w, _ch_hash = _wh
-                        break
+                    # AIRED-WINDOW LEGIBILITY (pass 1). Ask, BEFORE cutting, whether the window a
+                    # beat is about to use is legible — and if it is not, take the next window from
+                    # this beat's OWN relevance-ranked list. Measured on a 272-beat render: 28
+                    # first-choice windows probe dark, and 27 of them have a legible alternate
+                    # already in their list (depth 1 for 20 of them). The other 244 beats issue one
+                    # probe and change nothing.
+                    #
+                    # Why it matters more than it sounds: today that darkness is discovered AFTER
+                    # the cut, when the only remedy left is a freeze — and that render froze 31
+                    # clips, 30 of them onto a donor from a DIFFERENT SCENE. The frames the audit
+                    # called "an unreadable blue burst" and "a murky interior with a blob" were not
+                    # dark cuts at all; they were those donors.
+                    #
+                    # Pass 2 is the old loop verbatim, so the option set is a STRICT SUPERSET of
+                    # today's: nothing leaves any pool, and a beat whose every window is dark keeps
+                    # exactly the window it has now.
+                    _legib_on = os.environ.get(
+                        "VIDLORE_CLIPSTUDIO_WINDOW_LEGIBILITY", "1").strip() \
+                        not in ("0", "false", "no")
+                    for _lpass in (1, 2):
+                        for _wh in _fresh:
+                            # AIR-TIME text probe: OCR the frames that will actually air — the
+                            # indexed keyframe can miss mid-shot overlay text (tweet cards,
+                            # word-by-word animated captions). Probe across the WHOLE cut span.
+                            _wsp = proj.source(_wh[0][0])
+                            _wsp = _wsp.local_path if _wsp else None
+                            _probe_ts, _pt = [], 0.8
+                            while _pt < min(per_beat - 0.2, 4.6):
+                                _probe_ts.append(_pt)
+                                _pt += 1.2
+                            if _TGATE and _wsp and any(
+                                    _frame_has_burned_text(_wsp, float(_wh[0][1]) + _q9)
+                                    for _q9 in (_probe_ts or [0.8])):
+                                continue
+                            if (_lpass == 1 and _legib_on and _wsp
+                                    and _source_window_too_dark(_wsp, float(_wh[0][1]), per_beat)):
+                                continue
+                            chosen_w, _ch_hash = _wh
+                            break
+                        if chosen_w is not None:
+                            if _lpass == 2 and _legib_on:
+                                log(f"build: beat {seg.index} clip {m} — every candidate window "
+                                    f"probes dark; keeping the ranked first choice (the "
+                                    f"black-repair sweep remains the backstop)")
+                            break
+                        if not _legib_on:
+                            break                # pass 2 would be identical — do not repeat it
                     if chosen_w is not None:
                         windows_avail.remove(chosen_w)
                 # else: every window aired/looks recent → fall through to the shot-aware walk
@@ -6210,7 +6311,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 src = proj.source(sel.source_id)
                 sid = sel.source_id
                 start = _next_distinct_shot(sid, max(_playhead.get(sid, 0.0),
-                                                     sel.in_point - 0.2))
+                                                     sel.in_point - 0.2), need=per_beat)
                 if src:
                     used_at[_wkey(sid, start)] = gbeat
                     # count this airing too — the walk used to write only `used_at`, so a
