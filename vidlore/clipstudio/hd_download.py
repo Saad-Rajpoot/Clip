@@ -134,12 +134,23 @@ def maybe_update_ytdlp(log=None, *, force: bool = False) -> bool:
         return False
 
 
+#  YouTube's SABR/PO-token rejection. It arrives dressed as unavailability — "This video is
+#  unavailable. Error code: 152" — but it is NOT: the very same ids download fine on the legacy
+#  (non-SABR) path, which is exactly what happened on a measured render where 110/110 sources hit
+#  this and the whole 22-minute video shipped at 360p upscaled to 1080p. It has to be treated like
+#  a stale token (restart the PO server, sweep, retry), never as "this video does not exist".
+_PO_REJECT_RX = re.compile(r"error code:\s*152\b", re.I)
+
+
 def _classify_dl_err(text: str) -> str:
-    """'throttle_403' (transient: throttle or stale PO token), 'unavailable' (permanent — do not
-    retry), or 'other'. Classification drives retry/backoff; NEVER treat 403 as unavailability."""
+    """'throttle_403' (transient: throttle, stale PO token, or a SABR/PO rejection), 'unavailable'
+    (permanent — do not retry), or 'other'. Classification drives retry/backoff AND the recovery
+    sweep; NEVER treat a token rejection as unavailability."""
     t = (text or "").lower()
     if "403" in t and "forbidden" in t:
         return "throttle_403"
+    if _PO_REJECT_RX.search(t):
+        return "throttle_403"                      # PO-token rejection, not a missing video
     for pat in ("video unavailable", "private video", "sign in to confirm",
                 "members-only", "this video is not available", "account associated",
                 "has been removed", "video is no longer available", "age-restricted",
@@ -147,6 +158,14 @@ def _classify_dl_err(text: str) -> str:
         if pat in t:
             return "unavailable"
     return "other"
+
+
+def is_po_token_failure(text: str) -> bool:
+    """Did this fallback reason come from a PO-token/SABR rejection (recoverable) rather than the
+    video genuinely being gone? Used by the download-stage recovery sweep, which previously keyed
+    on the literal string '403' and so never fired for error 152."""
+    t = (text or "").lower()
+    return bool(("403" in t and "forbidden" in t) or _PO_REJECT_RX.search(t))
 
 
 def _restart_pot_server(progress=None) -> bool:

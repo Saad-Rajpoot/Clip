@@ -65,6 +65,29 @@ def parse_season(text: str):
     return int(m.group(1)) if m else None
 
 
+def script_seasons(text: str) -> set:
+    """EVERY season the narration names, not just the first one.
+
+    `parse_season` returns the FIRST hit, which is the right answer for a source title but the
+    wrong one for a whole SCRIPT: an arc essay legitimately walks across the series ("season one
+    ... season three, episode six ... season eight, episode three"). Reading only the first
+    mention makes a multi-era script look like a single-era one — see verified_episode_hint."""
+    t = text or ""
+    out: set = set()
+    for m in _SXXEYY_RX.finditer(t):
+        out.add(int(m.group(1)))
+    for m in _NXNN_RX.finditer(t):
+        out.add(int(m.group(1)))
+    for m in _SEASON_ONLY_RX.finditer(t):
+        try:
+            out.add(int(m.group(1)) if m.group(1) else _WORD_NUM[m.group(2).lower()])
+        except (KeyError, TypeError, ValueError):
+            continue
+    for m in _BARE_S_RX.finditer(t):
+        out.add(int(m.group(1)))
+    return {n for n in out if 0 < n <= 20}
+
+
 def as_era(text: str) -> str:
     """Canonical era string for a beat constraint: 'season N', or '' when nothing is named."""
     n = parse_season(text)
@@ -98,6 +121,20 @@ def verified_episode_hint(analysis, script_text: str = "") -> tuple[str, bool, s
     hs = parse_season(hint)
     if hs is None:
         return hint, False, "unparseable hint"
+
+    # A SPAN script can never corroborate a single episode. Measured on an Arya arc essay whose
+    # climax is S08E03: the script names seasons 1, 3, 7 AND 8 out loud ("Eight seasons of
+    # prophecy", "Season three, episode six", "Season seven, episode four", "Season eight,
+    # episode three"), but parse_season returns only the FIRST mention — season 1 — which matched
+    # the S01E01 hint, so the hint was stamped VERIFIED and gained hard gating power over a video
+    # that spans the whole series. 79 breakout candidates were then pre-filtered as
+    # "later-era-source" for being S7/S8 in an S1-constrained render. A hint may only be verified
+    # when the script's era claim is UNAMBIGUOUS.
+    seasons = script_seasons(script_text or "")
+    if len(seasons) > 1:
+        return hint, False, ("script spans seasons "
+                             f"{', '.join(str(s) for s in sorted(seasons))} — no single episode "
+                             f"hint can be corroborated for a multi-era video")
 
     script_season = parse_season(script_text or "")
     if script_season is not None:

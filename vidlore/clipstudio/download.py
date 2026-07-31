@@ -268,14 +268,25 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
     if os.environ.get("VIDLORE_HD_403_SWEEP", "1").lower() not in ("0", "false", "no"):
         _fell403 = [s for s in proj.sources
                     if s.status == SOURCE_OK and s.url and _hd.is_youtube(s.url)
-                    and "403" in ((s.extra or {}).get("hd_fallback") or "")
+                    and _hd.is_po_token_failure((s.extra or {}).get("hd_fallback") or "")
                     and 0 < int(s.height or 0) < cfg.discover_prefer_height]
         _cap = max(0, int(os.environ.get("VIDLORE_HD_403_SWEEP_MAX", "24") or 24))
+        # MACHINE-WIDE COLLAPSE gets a bigger sweep. The default cap suits a few flaky videos, but
+        # when essentially EVERY YouTube source fell back the cause is one shared thing (a stale
+        # PO token / a SABR change), the restart inside the sweep fixes it for all of them, and a
+        # 24-source cap would leave the rest of the render in SD for no reason. Measured: a
+        # 22-minute video shipped 110/110 sources at 360p upscaled to a 1080p canvas.
+        _yt_all = [s for s in proj.sources
+                   if s.status == SOURCE_OK and s.url and _hd.is_youtube(s.url)]
+        if _yt_all and len(_fell403) >= 0.8 * len(_yt_all):
+            _cap = max(_cap, int(os.environ.get("VIDLORE_HD_403_SWEEP_MAX_WIDE", "120") or 120))
+            log(f"download: HD collapse — {len(_fell403)}/{len(_yt_all)} YouTube source(s) fell "
+                f"back; sweeping up to {_cap} instead of the usual cap (one shared cause)")
         _fell403 = _fell403[:_cap]
         if _fell403 and _hd.available():
             _wait = max(0, int(os.environ.get("VIDLORE_HD_403_SWEEP_WAIT", "45") or 45))
-            log(f"download: 403 sweep — {len(_fell403)} source(s) fell back on HTTP 403; "
-                f"cooling down {_wait}s then retrying the HD path serially")
+            log(f"download: HD recovery sweep — {len(_fell403)} source(s) fell back on a "
+                f"PO-token/403 rejection; cooling down {_wait}s then retrying the HD path serially")
             time.sleep(_wait)
             _rec = 0
             for sv in _fell403:
@@ -393,6 +404,7 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
     # 'HTTP Error 403: Forbidden' (the PO-token server was not up), leaving 95% of the footage
     # sub-480p on a 1080p canvas. Both renders were then audited as murky/low-res/illegible and
     # the cause was invisible in the build log. One loud line, and the numbers on the project.
+    from . import hd_download as _hd_cls
     _yt = [s for s in proj.sources if s.status == SOURCE_OK
            and ((s.extra or {}).get("hd_path") or (s.extra or {}).get("hd_fallback"))]
     if _yt:
@@ -408,6 +420,11 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
             "hd_recovered": sum(1 for s in _yt if (s.extra or {}).get("hd_recovered")),
             "hd_403_fallbacks": sum(1 for s in _fell
                                     if "403" in ((s.extra or {}).get("hd_fallback") or "")),
+            # PO-token/SABR rejections arrive as "unavailable ... Error code: 152"; counting only
+            # the literal 403 reported 0 on a render where all 110 sources died of exactly this
+            "hd_po_token_fallbacks": sum(
+                1 for s in _fell
+                if _hd_cls.is_po_token_failure((s.extra or {}).get("hd_fallback") or "")),
             "sub_480p_sources": len(_sd),
             "top_fallback_reason": (sorted(
                 ((s.extra or {}).get("hd_fallback", "") for s in _fell))[0][:160] if _fell else ""),
