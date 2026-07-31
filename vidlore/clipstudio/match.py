@@ -1038,6 +1038,23 @@ def _slideshow_source_verdict(shots) -> bool:
 
 _NUMERAL_RX = re.compile(r"^\s*#?\d{1,2}\s*[.):]?\s*$")
 _EPCODE_CACHE: dict = {}                # sid -> parsed title episode code (per-process memo)
+
+# EDITORIAL-ESSAY / COMPILATION TITLES. Hoisted verbatim from the single-scene purity filter so the
+# scene-title affinity can discount them too: an essay ABOUT a scene matches the beat's query as
+# well as the scene upload does, but its footage is interleaved with talking heads, text cards and
+# cross-era B-roll. Purity (which excludes) and affinity (which merely halves a bonus) read the
+# same definition — one pattern, two strictnesses.
+_ESSAY_TITLE_RX = re.compile(
+    r"psycholog|toxic|best scenes|supercut|\banalysis\b|breakdown|explained|video essay|"
+    r"all .{0,20}scenes|every .{0,20}scene|do you want to know|the truth (about|behind)|"
+    # editorial-essay HOOK titles: phrased as a thesis/claim, not a scene label. These
+    # narrate over MULTI-ERA / MULTI-SHOW cutaways (an essay on the S1 chamber scene splices
+    # in S6 short-hair Cersei and even House of the Dragon B-roll), which is exactly the
+    # within-source contamination the title season-filter can't see.
+    r"the scene that|that (changed|defined|broke|made)|"
+    r"changed (game of thrones|the show|everything)|"
+    r"\bwhy [a-z]+(?:'s)?\b.{0,40}\b(scene|moment|matters|works|is|was)\b|"
+    r"the (real )?(meaning|genius|brilliance) of|here'?s (why|what|how)", re.I)
 _SENTINEL = object()
 
 
@@ -1178,6 +1195,41 @@ def _shot_subtitle_band(shot) -> bool:
         return bool(ok)
     except Exception:
         return False
+
+
+def _shot_featureless(shot) -> bool:
+    """FLAT shot — bright enough that detail SHOULD be visible, yet carrying almost none.
+
+    The dark gates below cannot see this class, and it aired: the intro A/B judged one beat 0/10
+    on a mid-grey wall (luma_avg 61.4, quality 0.32 — squarely mid-pool, so the quality floor had
+    no opinion either). The same rule also catches the white "SUBSCRIBED" end-cards, a channel
+    banner card, and washed-out blizzard frames.
+
+    The discriminator is LUMA RANGE, not brightness: a real frame has highlights somewhere, so
+    `luma_hi` sits well above `luma_avg`; a flat card's histogram is a spike. It is deliberately
+    conjoined with a BRIGHTNESS floor, because a dark frame legitimately has a narrow range — the
+    Long Night measures avg ~10-20 / hi 36-53, a spread as narrow as the grey card's. Requiring
+    luma_avg >= 45 exempts every night scene, which matters more here than anywhere: the video
+    this was found on is about the Long Night.
+
+    The third arm asks the same question across TIME (`luma_min`, the darkest sample's mean): a
+    card does not change over its span. MEASURED on this job's 4840 indexed shots: 17 flagged
+    (0.35%), 16 of them plainly unusable on inspection and the 17th a near-white blizzard wide.
+    Env: VIDLORE_CLIPSTUDIO_FLAT_GATE=0 disables."""
+    import os as _os_f
+    if _os_f.environ.get("VIDLORE_CLIPSTUDIO_FLAT_GATE", "1").strip() in ("0", "false", "no"):
+        return False
+    la = float(getattr(shot, "luma_avg", -1.0) or -1.0)
+    lh = float(getattr(shot, "luma_hi", -1.0) or -1.0)
+    lm = float(getattr(shot, "luma_min", -1.0) or -1.0)
+    if la < 0 or lh < 0 or lm < 0:
+        return False                                   # not computed (old index) → fail open
+    try:
+        t_lit = float(_os_f.environ.get("VIDLORE_CLIPSTUDIO_FLAT_LIT", "45") or 45)
+        t_span = float(_os_f.environ.get("VIDLORE_CLIPSTUDIO_FLAT_SPAN", "35") or 35)
+    except (TypeError, ValueError):
+        t_lit, t_span = 45.0, 35.0
+    return la >= t_lit and (lh - la) < t_span and abs(lm - la) <= 0.10 * la
 
 
 def _shot_unreadable(shot) -> bool:
@@ -1649,6 +1701,27 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
                     _era_conf_sids.add(_sid)
             except Exception:
                 pass
+    # ERA AGREEMENT — the positive half of the test above, which until now was one-sided: a title
+    # declaring the WRONG season was punished while one declaring the RIGHT season earned nothing.
+    # MEASURED on beat 15 ("The show wrote this ending in season one"): the correct upload, titled
+    # "Game of Thrones S01E01 White Walkers Attack", lost to a season-less compilation, "Game of
+    # Thrones || The White Walkers". Scene-title affinity could not save it because a beat's era is
+    # INVISIBLE to token matching — titles have their digits stripped and 'season'/'episode' are
+    # stopwords, so "season one" can never match "S01E01" as text however hard the tokens are
+    # weighted. Exact_scene beats only, and only for a title naming EXACTLY that season: a
+    # "Seasons 1-8" compilation that merely includes it is not evidence of anything.
+    _era_match_sids: set = set()
+    _era_bonus_w = _f_env("VIDLORE_CLIPSTUDIO_ERA_MATCH_BONUS", 0.12)
+    if _era_bonus_w > 0 and beat_era and src_titles and not beat_era_soft:
+        from . import era as _era_mt
+        _bs = _era_mt.parse_season(beat_era or "")
+        if _bs:
+            for _sid, _t in src_titles.items():
+                try:
+                    if _era_mt.title_seasons(_t) == {_bs}:
+                        _era_match_sids.add(_sid)
+                except Exception:
+                    pass
     # SCENE-TITLE AFFINITY (ranking-only, the same decoupling as the anchor-continuity bonus).
     # CLIP + transcript are blind to MICRO-moments: a beat about plucking a tiny stone off a
     # necklace has no distinctive thumbnail (the action is 1-2s and the object centimetres wide)
@@ -1659,11 +1732,42 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
     # >=2 scene-specific query tokens get a small ranking bonus (kept OUT of `base`, so reported
     # confidence is undistorted). Specific/exact beats only; env VIDLORE_CLIPSTUDIO_TITLE_AFFINITY=0
     # disables.
+    #
+    # MAGNITUDE (measured, job 5cab63d801 beat 0 — "a hand closes around Arya Stark's throat and
+    # lifts her off the ground", scene_query naming the Night King, policy exact_scene). The pool
+    # held 25 Night-King-titled sources. The correct one ranked #1 and LOST by 0.0084 to an S7E4
+    # "Arya returns to Winterfell" shot. The decomposition is the whole story:
+    #   CLIP could not discriminate  — clip_cos 0.3351 (wrong) vs 0.3354 (right); the right scene
+    #                                  was fractionally BETTER on CLIP and it changed nothing.
+    #   faceid gave both 0.30        — Arya is in most of the pool, so it ranks nothing.
+    #   transcript gave the wrong    — 0.5 x w_trans = +0.10, earned purely by the clip SPEAKING
+    #     shot the margin              "Arya Stark" (entities count double in _text_sim), i.e. the
+    #                                  same character-presence evidence faceid already scored.
+    #   title affinity, the ONLY     — capped at 0.12, and awarded 0.09.
+    #     scene-identity evidence
+    # So character presence was worth 0.50 and scene identity 0.12. On an exact_scene beat that
+    # ordering is backwards: every candidate shares the subject, only one shares the SCENE.
+    #
+    # Two changes, both ranking-only (no gate, no rejection — the pool is never narrowed):
+    #  1. INFORMATION-WEIGHTED hits. A raw count treats 'arya' (41% of this pool's titles) as equal
+    #     evidence to 'throat' (0%). Weight each hit by its inverse title-frequency over THIS pool,
+    #     so the measure self-calibrates per video instead of needing a hand-tuned constant.
+    #  2. A ceiling worth having on exact_scene beats, where naming the scene is the entire job.
+    #     is_specific_claim beats keep the old modest cap — they assert a fact, not a shot.
     _aff = _f_env("VIDLORE_CLIPSTUDIO_TITLE_AFFINITY", 0.12)
+    _aff_exact = _f_env("VIDLORE_CLIPSTUDIO_TITLE_AFFINITY_EXACT", 0.34)
+    _ta_full = _f_env("VIDLORE_CLIPSTUDIO_TITLE_AFFINITY_FULL", 0.90)
+    # ONE switch back to the pre-fix behaviour (raw hit count, single 0.12 cap) — it is what the
+    # A/B's OFF arm runs, and it stays as the production escape hatch.
+    _aff_itf = os.environ.get("VIDLORE_CLIPSTUDIO_TITLE_AFFINITY_ITF", "1").strip() \
+        not in ("0", "false", "no")
+    _ta_damp = os.environ.get("VIDLORE_CLIPSTUDIO_TITLE_AFFINITY_DAMP", "hard").strip().lower()
+    _exact_beat = (getattr(seg, "visual_policy", "") or "") == "exact_scene"
+    _aff_cap = _aff_exact if (_exact_beat and _aff_itf) else _aff
     _sq_toks: set = set()
+    _sq_itf: dict = {}
     if _aff > 0 and title_toks and (
-            (getattr(seg, "visual_policy", "") or "") == "exact_scene"
-            or bool(getattr(seg, "is_specific_claim", False))):
+            _exact_beat or bool(getattr(seg, "is_specific_claim", False))):
         import re as _re_ta
         try:
             from .discover import _STOPQ as _TA_STOP
@@ -1672,6 +1776,16 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
         _sq_toks = {w for w in _re_ta.findall(
                         r"[a-z']+", (getattr(seg, "scene_query", "") or "").lower())
                     if len(w) > 2 and w not in (mv_toks or set()) and w not in _TA_STOP}
+        if _sq_toks and src_titles and _aff_itf:
+            import math as _m_ta
+            _df_ta: dict = {}
+            for _t_ta in src_titles.values():
+                for _w_ta in set(_re_ta.findall(r"[a-z']+", (_t_ta or "").lower())):
+                    _df_ta[_w_ta] = _df_ta.get(_w_ta, 0) + 1
+            _n_ta = max(1, len(src_titles))
+            _ln_ta = _m_ta.log(_n_ta + 1) or 1.0
+            _sq_itf = {w: _m_ta.log((_n_ta + 1) / (_df_ta.get(w, 0) + 1)) / _ln_ta
+                       for w in _sq_toks}
     gate_on = os.environ.get("VIDLORE_CLIPSTUDIO_OCR_GATE", "1").strip() not in ("0", "false", "no", "")
     tgate_on = os.environ.get("VIDLORE_CLIPSTUDIO_TEXT_GATE", "1").strip() not in ("0", "false", "no", "")
     # MOMENT-LOCK: resolve the beat to a dialogue line ONCE per beat (not per candidate shot).
@@ -1721,6 +1835,9 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
         if _shot_unreadable(ps.shot):
             continue                                      # near-black across the WHOLE shot span
                                                           # (multi-frame luma; keeps candlelit scenes)
+        if _shot_featureless(ps.shot):
+            continue                                      # lit but empty: grey/white card, CTA
+                                                          # end-slate, washed-out fog
         clip_cos = 0.0
         clip01 = 0.0
         if text_vec is not None and ps.embed is not None:
@@ -1775,6 +1892,10 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
         # out of `base` so a zero-signal anchor shot can't report 0.45 confidence and dodge the
         # low-confidence review flag.
         bonus = anchor_bonus if (anchor_bonus and anchor_sids and ps.sid in anchor_sids) else 0.0
+        _ebonus = 0.0
+        if _exact_beat and ps.sid in _era_match_sids:
+            _ebonus = _era_bonus_w
+            bonus += _ebonus
         # MOMENT-LOCK is EVIDENCE, not similarity: the words are demonstrably spoken here, in this
         # source, at this second. CLIP is a guess whose whole discriminative range on this material
         # is ~0.02 cosine (measured across 4301 shots) yet whose weight is 0.80 — so without a
@@ -1800,11 +1921,47 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
         _tbonus = 0.0
         if _sq_toks:
             _tw = (title_toks or {}).get(ps.sid) or set()
-            _thits = sum(1 for w in _sq_toks
-                         if any(t == w or (t.startswith(w) and len(t) - len(w) <= 2)
-                                for t in _tw))
-            if _thits >= 2:
-                _tbonus = _aff * min(_thits, 4) / 4.0
+            _thit_w = [w for w in _sq_toks
+                       if any(t == w or (t.startswith(w) and len(t) - len(w) <= 2)
+                              for t in _tw)]
+            if len(_thit_w) >= 2:
+                if _sq_itf:
+                    _tbonus = _aff_cap * min(
+                        1.0, sum(_sq_itf.get(w, 0.0) for w in _thit_w) / max(1e-6, _ta_full))
+                else:
+                    _tbonus = _aff_cap * min(len(_thit_w), 4) / 4.0
+                # A VIDEO ESSAY ABOUT the scene is not the scene. Titles like "Why Arya Killing the
+                # Night King is Perfect" match the query as well as the scene upload does, but their
+                # footage is interleaved with talking heads, text cards and cross-era B-roll — on
+                # this very job an essay source outranked "GoT S08E03 - Arya kills the Night King".
+                # Halved, not excluded: essays often hold the only copy of a moment, and dropping
+                # them would narrow the pool, which is exactly what we must not do.
+                if _aff_itf and _ESSAY_TITLE_RX.search((src_titles or {}).get(ps.sid, "") or ""):
+                    _tbonus *= 0.5
+                # LEGIBILITY DAMPER — naming the scene is not the same as showing it, so a title
+                # match must not buy an UNWATCHABLE copy over a legible one of the same moment.
+                # MEASURED (intro A/B, job 5cab63d801) in two strengths:
+                #   "full" (unreadable -> 0, dim -> scaled, the moment-lock damper verbatim) fixed
+                #         the blurry beat 6 but BROKE beat 18: "Arya kills the Night King in the
+                #         godswood" is a NIGHT BATTLE, so the correct S08E03 source was dim by
+                #         nature, lost its bonus, and a bright S08E01 reunion won instead (10->5).
+                #   "hard" damps only what the pipeline already calls unreadable, leaving
+                #         legitimately dark scenes their evidence.
+                # Dark is not the same as illegible, and the Long Night punishes any rule that
+                # confuses them.
+                if _aff_itf and _ta_damp != "off":
+                    _la_ta = float(getattr(ps.shot, "luma_avg", -1.0) or -1.0)
+                    if _shot_unreadable(ps.shot):
+                        _tbonus = 0.0
+                    elif _ta_damp == "full" and 0.0 <= _la_ta < _MOMENT_LUMA_OK:
+                        _tbonus *= max(0.25, _la_ta / _MOMENT_LUMA_OK)
+                    # TRIED AND REJECTED — scaling the bonus by the shot's own quality
+                    # (`_tbonus *= 0.55 + 0.45*quality`) to steer WITHIN a title-matched source
+                    # toward its watchable shots. It fixed the beat it was designed for (6: 5->9)
+                    # and cost more than it earned: 8 beats moved instead of 5 and the changed-beat
+                    # mean fell 7.25 -> 6.50, with beat 1 collapsing 9 -> 0 onto "dark silhouettes
+                    # in a fiery haze". Quality is already in `base` via w_clip's own inputs; a
+                    # second helping of it here just re-ranks on brightness.
                 bonus += _tbonus
         # DEICTIC-TARGET signal — "watch the chalice": the CLIP probe's per-shot visibility rank
         # is RECORDED (sig['target_vis'] below) for the verifier's deep-bench ordering and the
@@ -1877,6 +2034,8 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
             sig["anchor_bonus"] = round(bonus, 3)
         if _tbonus:
             sig["title_affinity"] = round(_tbonus, 3)
+        if _ebonus:
+            sig["era_match"] = round(_ebonus, 3)
         if _tgvis > 0.0:
             sig["target_vis"] = round(_tgvis, 3)
         if _era_conf:
@@ -2113,17 +2272,7 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
     _purity = _os.environ.get("VIDLORE_CLIPSTUDIO_SINGLE_SCENE_PURITY", "1").strip() \
         not in ("0", "false", "no")
     if single_scene and _purity:
-        _essay_comp = re.compile(
-            r"psycholog|toxic|best scenes|supercut|\banalysis\b|breakdown|explained|video essay|"
-            r"all .{0,20}scenes|every .{0,20}scene|do you want to know|the truth (about|behind)|"
-            # editorial-essay HOOK titles: phrased as a thesis/claim, not a scene label. These
-            # narrate over MULTI-ERA / MULTI-SHOW cutaways (an essay on the S1 chamber scene splices
-            # in S6 short-hair Cersei and even House of the Dragon B-roll), which is exactly the
-            # within-source contamination the title season-filter can't see.
-            r"the scene that|that (changed|defined|broke|made)|"
-            r"changed (game of thrones|the show|everything)|"
-            r"\bwhy [a-z]+(?:'s)?\b.{0,40}\b(scene|moment|matters|works|is|was)\b|"
-            r"the (real )?(meaning|genius|brilliance) of|here'?s (why|what|how)", re.I)
+        _essay_comp = _ESSAY_TITLE_RX
         _title = {s.id: (s.title or "") for s in proj.sources}
         _clean = [ps for ps in pool if not _essay_comp.search(_title.get(ps.sid, ""))]
         _clean_src = {ps.sid for ps in _clean}
