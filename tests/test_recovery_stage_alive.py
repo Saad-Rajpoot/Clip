@@ -116,10 +116,22 @@ class TestRecoveryRuns(unittest.TestCase):
 
 
 class TestNoUnboundOsAnywhere(unittest.TestCase):
-    """Static guard: the same class of bug must never come back silently in this module."""
+    """Static guard: the same class of bug must never come back silently.
+
+    WIDENED 2026-08-02 to the whole package. It covered orchestrate.py only, and the identical
+    bug then landed in match.match_segments — a bare `os.environ` in a module whose functions all
+    use local aliases — and took a render's match stage down with NameError on the first call.
+    Three occurrences of one bug class is a guard that was scoped too narrowly, not bad luck."""
 
     def test_every_os_reference_resolves(self):
-        src = ORCH.read_text()
+        bad = []
+        for mod in sorted((ROOT / "vidlore" / "clipstudio").glob("*.py")):
+            bad += self._unbound_in(mod)
+        self.assertEqual(bad, [], "unbound `os` — a module with no module-level `import os` "
+                                  "needs a local alias in every function that uses it")
+
+    def _unbound_in(self, path):
+        src = path.read_text()
         tree = ast.parse(src)
         lines = src.splitlines()
 
@@ -178,8 +190,7 @@ class TestNoUnboundOsAnywhere(unittest.TestCase):
                     continue
                 unbound.append(f"{fn.name}() line {node.lineno}: "
                                f"{lines[node.lineno - 1].strip()[:80]}")
-        self.assertEqual(unbound, [], "unbound `os` — every function must use its own alias "
-                                      "(orchestrate.py has NO module-level `import os`)")
+        return [f"{path.name}: {u}" for u in unbound]
 
 
 class TestFailOpenCatchIsLoudOnBugs(unittest.TestCase):

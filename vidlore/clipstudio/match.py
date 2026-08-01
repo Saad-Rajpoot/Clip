@@ -2452,7 +2452,8 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
     #  beats in job 409e284b60 chose a shot carrying the RIGHT actor (faceid 1.0, 'Joseph Mawle'
     #  for a Benjen beat, 'Kit Harington' for a Jon Snow beat) and still aired seconds showing
     #  someone else. Shorten-only by construction — see clean_cut_window's face_guard.
-    _wf_win_gate = os.environ.get("VIDLORE_CLIPSTUDIO_WRONGFACE_WINDOW_GATE", "1").strip() \
+    import os as _os_wf          # this module has no module-level `os`; a bare one is a NameError
+    _wf_win_gate = _os_wf.environ.get("VIDLORE_CLIPSTUDIO_WRONGFACE_WINDOW_GATE", "1").strip() \
         not in ("0", "false", "no")
     char2actor = analysis.char_to_actor() if analysis is not None else {}
     # the full set of MAIN-character + actor names (lowercased) — a shot confidently showing
