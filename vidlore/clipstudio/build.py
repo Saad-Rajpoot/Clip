@@ -5551,6 +5551,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # (job 957f56f925: 7 unresolved beats, ~46% relevance). Each warn-mode gate appends its reason
     # here; the file is renamed at the end, and the caller is handed the new path.
     _review_draft: list = []
+    _aired_windows: list = []      # what each beat ACTUALLY cut — see the note at the append
     import os
     os.environ.setdefault("VIDLORE_MUSIC_VOLUME", "1.15")   # present cinematic bed under the VO
     work = proj.output_dir / "work"
@@ -6348,7 +6349,12 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 # else: every window aired/looks recent → fall through to the shot-aware walk
                 # below, which finds the next DIFFERENT-looking shot instead of a replay
             _wqc_moment = None       # the ORIGINALLY SELECTED range this beat must keep airing
+            _aired_via = "walk"
             if chosen_w is not None:
+                _aired_via = ("window[0]" if (windows_avail
+                              and chosen_w[0] == windows_avail[0][0]
+                              and abs(float(chosen_w[1]) - float(windows_avail[0][1])) < 0.01)
+                              else "window[alt]")
                 sid, in_p = chosen_w[0], float(chosen_w[1])
                 src = proj.source(sid)
                 # lead-in must NOT cross the shot boundary backwards: 0.2s of the PREVIOUS
@@ -6408,6 +6414,18 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             _sw = int(getattr(src, "width", 0) or 0)
             rc = _recut_to_duration(src.local_path, start, src_need, src.duration, dest,
                                     crop_filter=_cf, zoom=_zoom, src_w=_sw)
+            # WHAT ACTUALLY AIRED. `ledger.jsonl` records the MATCH stage's pick; build then
+            # re-selects (a window airs once, look-variety reorders, probes skip candidates, the
+            # shot-walk fills) and nothing recorded the outcome. An audit of the delivered video
+            # therefore read the ledger, named a source, and described a scene that is not on
+            # screen at that timecode — twice, on different beats. This is the record that makes
+            # the next audit trustworthy: source, in-point, length, and where it came from.
+            _aired_windows.append({
+                "beat": seg.index, "clip": m, "file": Path(dest).name,
+                "source_id": src.id, "source_title": (src.title or "")[:120],
+                "in": round(float(start), 3), "need": round(float(src_need), 3),
+                "via": _aired_via, "ok": bool(rc),
+            })
             if rc and factor != 1.0:
                 sm = _apply_slow_motion(Path(rc), factor,
                                         proj.clips_dir / f"beat_{seg.index:03d}_{m}_sm.mp4")
@@ -7090,6 +7108,20 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # The pre-mux check in assemble() proves the concat matched the composed audio; it cannot speak
     # for what any of those later passes did. Checks per-stream duration AND first/last PTS —
     # two streams can share a duration and still not start together, which is silent lip-sync error.
+    # persist the aired-window record before the final gates, so it survives even a gate raise
+    try:
+        import json as _json_aw
+        (proj.output_dir / "aired_windows.json").write_text(
+            _json_aw.dumps({"schema": "aired_windows/1", "clips": _aired_windows}, indent=1),
+            encoding="utf-8")
+        _n_alt = sum(1 for a in _aired_windows if a.get("via") == "window[alt]")
+        _n_walk = sum(1 for a in _aired_windows if a.get("via") == "walk")
+        log(f"build: aired-window record — {len(_aired_windows)} clip(s) "
+            f"({_n_alt} from an alternate window, {_n_walk} from the shot walk) "
+            f"→ aired_windows.json")
+    except Exception as _e_aw:                            # noqa: BLE001
+        log(f"build: aired-window record skipped ({type(_e_aw).__name__})")
+
     from ..assemble import assert_delivered_av_sync as _avsync
     _sync = _avsync(result)
     log(f"build: delivered A/V sync OK — video {_sync['video'][0]:.3f}s "
