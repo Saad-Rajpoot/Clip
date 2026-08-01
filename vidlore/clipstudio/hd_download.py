@@ -110,9 +110,79 @@ def _remote_components() -> list:
     itself as "Requested format is not available", i.e. as if the video had no HD copy.
 
     MEASURED 2026-07-31 on this machine: six pool URLs probed 0p; with this flag the first probed
-    1080p. Set VIDLORE_HD_REMOTE_COMPONENTS="" to disable, or to `ejs:npm` for the NPM mirror."""
+    1080p. Set VIDLORE_HD_REMOTE_COMPONENTS="" to disable, or to `ejs:npm` for the NPM mirror.
+
+    GATED ON SUPPORT since 2026-08-02. An ENHANCEMENT flag that the resolved yt-dlp does not know
+    is not a degraded download — it is a dead one: yt-dlp exits during argument parsing, before it
+    ever reaches YouTube, so EVERY source falls back. That is not hypothetical; it took a finished
+    12-minute render to `hd_path_ok 0/72`, 1% of sources at >=720p, with nothing louder than one
+    log line per source. The flag now has to be advertised by `--help` before it is sent."""
     spec = os.environ.get("VIDLORE_HD_REMOTE_COMPONENTS", "ejs:github").strip()
-    return ["--remote-components", spec] if spec else []
+    if not spec or _RC_OFF or not _flag_supported("--remote-components"):
+        return []
+    return ["--remote-components", spec]
+
+
+# --- capability probe ---------------------------------------------------------------------
+# Which optional flags does the RESOLVED interpreter's yt-dlp actually accept? Probed once per
+# process from `--help` (~0.4s) and cached. `HD_PY` is a moving target — a venv, a system python,
+# a Windows Scripts dir, whatever `_firstpath` finds — and versions differ across all of them, so
+# no flag added after some baseline can be assumed present.
+_FLAG_SUPPORT: dict = {}
+_FLAG_LOCK = _threading.Lock()      # module-local alias — a bare `threading` is a NameError here
+_RC_OFF = False                     # remote-components rejected at runtime → off for the run
+
+
+def _flag_supported(flag: str) -> bool:
+    """True if `HD_PY -m yt_dlp --help` advertises `flag`.
+
+    Fail-open (True) when the probe itself cannot run: every yt-dlp on record accepts the flags we
+    send, so a probe that fails to execute is evidence about the PROBE, not about support — and
+    `_disable_unsupported_flag` still catches a real rejection on the first download."""
+    with _FLAG_LOCK:
+        if flag in _FLAG_SUPPORT:
+            return _FLAG_SUPPORT[flag]
+    ok = True
+    try:
+        p = subprocess.run([HD_PY, "-m", "yt_dlp", "--help"],
+                           capture_output=True, text=True, timeout=60)
+        out = (p.stdout or "") + (p.stderr or "")
+        if out.strip():
+            ok = flag in out
+    except Exception:                                    # noqa: BLE001
+        ok = True
+    with _FLAG_LOCK:
+        _FLAG_SUPPORT[flag] = ok
+    return ok
+
+
+def _disable_unsupported_flag(flag: str, reason: str = "", progress=None) -> bool:
+    """yt-dlp rejected one of OUR flags. Drop it for the rest of the run if it is optional.
+
+    True only when this call actually changed something and the caller has earned a retry. An
+    essential flag (format selection, output template) cannot be dropped — say so loudly instead
+    of retrying identically until the source is written off as HD-less."""
+    global _RC_OFF
+    f = (flag or "").strip()
+    if f in ("--cookies", "--cookies-from-browser"):
+        return _disable_cookies(reason, progress=progress)
+    #  An unnamed rejection is treated as remote-components: it is the only OPTIONAL non-cookie
+    #  flag we send, so it is both the likely culprit and the only safe thing to drop.
+    if f in ("--remote-components", ""):
+        with _FLAG_LOCK:
+            if _RC_OFF:
+                return False
+            _RC_OFF = True
+            _FLAG_SUPPORT["--remote-components"] = False
+        if progress:
+            progress("hd: this yt-dlp rejects --remote-components — dropping it for the rest of "
+                     "the run and retrying (upgrade the HD venv's yt-dlp to restore the JS-"
+                     f"challenge solver). Reason: {(reason or '').strip()[:160]}")
+        return True
+    if progress:
+        progress(f"hd: yt-dlp rejected {f or 'a flag'} and it is not optional — HD cannot run on "
+                 f"this yt-dlp build. Reason: {(reason or '').strip()[:160]}")
+    return False
 
 
 def _disable_cookies(reason: str = "", progress=None) -> bool:
@@ -181,10 +251,17 @@ def maybe_update_ytdlp(log=None, *, force: bool = False) -> bool:
                             "yt-dlp", "yt-dlp-ejs", "bgutil-ytdlp-pot-provider"],
                            capture_output=True, text=True, timeout=240)
         marker.touch()
-        if p.returncode == 0 and log:
-            v = subprocess.run([HD_PY, "-m", "yt_dlp", "--version"],
-                               capture_output=True, text=True, timeout=30)
-            log(f"hd: yt-dlp stack updated (now {(v.stdout or '').strip()})")
+        if log:
+            if p.returncode == 0:
+                v = subprocess.run([HD_PY, "-m", "yt_dlp", "--version"],
+                                   capture_output=True, text=True, timeout=30)
+                log(f"hd: yt-dlp stack updated (now {(v.stdout or '').strip()})")
+            else:
+                # A FAILED update used to be completely silent AND still stamped the marker, so
+                # the next seven days of renders inherited a stale yt-dlp with no way to tell.
+                log(f"hd: ⚠ yt-dlp self-update FAILED (exit {p.returncode}) — the HD stack is "
+                    f"whatever was already installed. "
+                    f"{((p.stderr or p.stdout or '').strip().splitlines() or ['?'])[-1][:160]}")
         return p.returncode == 0
     except Exception:                                    # noqa: BLE001
         return False
@@ -221,12 +298,30 @@ _JS_CHALLENGE_RX = re.compile(
 # reason.
 
 
+#  OUR OWN command line was rejected — argparse never got as far as a request. The three spellings
+#  are optparse's ("no such option: --x"), argparse's ("unrecognized arguments: --x") and the
+#  ambiguous-prefix case. Captured group = the offending flag, so the retry can drop the RIGHT one.
+_BAD_FLAG_RX = re.compile(
+    r"(?:no such option|unrecognized arguments?|ambiguous option)\s*:?\s*(-{1,2}[\w][\w-]*)", re.I)
+
+
+def _bad_flag_name(text: str) -> str:
+    """The flag yt-dlp refused, or '' when the message names none."""
+    m = _BAD_FLAG_RX.search(text or "")
+    return (m.group(1) if m else "").strip()
+
+
 def _classify_dl_err(text: str) -> str:
     """'throttle_403' (transient: throttle, stale PO token, or a SABR/PO rejection), 'cookies'
     (the browser profile is unreadable — retry WITHOUT them), 'unavailable' (permanent — do not
     retry), or 'other'. Classification drives retry/backoff AND the recovery sweep; NEVER treat a
     token rejection as unavailability."""
     t = (text or "").lower()
+    #  FIRST, because it cannot coexist with anything else: yt-dlp exits while PARSING ARGUMENTS,
+    #  so there is no network response to classify. Every source fails identically and instantly,
+    #  which reads exactly like "no HD copy exists" unless it is named.
+    if _BAD_FLAG_RX.search(t):
+        return "badflag"
     if "403" in t and "forbidden" in t:
         return "throttle_403"
     if _PO_REJECT_RX.search(t):
@@ -265,7 +360,7 @@ def is_recoverable_hd_failure(text: str) -> bool:
     a condition that no longer exists — exactly what the sweep is for. Only genuine unavailability
     may leave a source SD."""
     return (is_po_token_failure(text) or is_cookie_failure(text)
-            or _classify_dl_err(text or "") == "jschallenge")
+            or _classify_dl_err(text or "") in ("jschallenge", "badflag"))
 
 
 def _restart_pot_server(progress=None) -> bool:
@@ -641,6 +736,16 @@ def download_hd(url: str, out_stem: str, *, max_height: int = 1080, ffmpeg_dir: 
         except Exception as e:                               # noqa: BLE001
             last = str(e)[:300]
         last_class = _classify_dl_err(last)
+        if last_class == "badflag":
+            # yt-dlp refused one of OUR flags, so it never contacted YouTube. Retrying the same
+            # command — or advancing the client rung — cannot help: every rung sends the same
+            # flag. Drop the flag (if it is optional) and retry the SAME rung. Without this a
+            # single unknown flag reports itself, source by source, as "no HD available", which
+            # is how a finished render came out with 0 of 72 sources on the HD path.
+            if _disable_unsupported_flag(_bad_flag_name(last), last, progress=progress) \
+                    and attempt <= retries:
+                continue                           # rung unchanged — retry without the flag
+            break                                  # not optional: HD is impossible on this build
         if last_class == "cookies":
             # NOT the video's fault — yt-dlp could not read the browser profile and aborted before
             # it ever reached YouTube. Cookies are optional, so drop them and retry the SAME rung.

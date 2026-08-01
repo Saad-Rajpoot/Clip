@@ -7238,6 +7238,25 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         log(f"build: audio timeline clean — {_af.get('frames')} frame(s), "
             f"{_af.get('anomalies', 0)} anomal(y/ies), true media {_af.get('true_media_s')}s")
 
+    # A TOTAL HD COLLAPSE is a release block of its own. Every beat is legitimate and every gate
+    # passes — the footage is simply 360p upscaled onto a 1080p canvas for the whole runtime, which
+    # no per-beat check can see. MEASURED 2026-08-02: a 12-minute render shipped with hd_path_ok
+    # 0/72 and 1% of sources at >=720p; the download stage said so, and the file still called
+    # itself final. The threshold is total collapse, not degradation, so a render that merely lost
+    # some sources to genuinely-HD-less uploads is never held back.
+    try:
+        _da = (proj.meta or {}).get("download_audit") or {}
+        _yt_n = int(_da.get("youtube_sources") or 0)
+        if _yt_n >= 5 and int(_da.get("hd_path_ok") or 0) == 0:
+            _msg_hd = (f"HD path collapsed: 0 of {_yt_n} YouTube source(s) downloaded via the HD "
+                       f"path — the entire video is built from legacy ~360p footage upscaled to "
+                       f"the 1080p canvas. Reason: "
+                       f"{str(_da.get('top_fallback_reason') or '?')[:160]}")
+            _review_draft.append(_msg_hd)
+            log(f"build: ⚠ {_msg_hd}")
+    except Exception as _e_hd:                           # noqa: BLE001 — never block on the check
+        log(f"build: hd-collapse check skipped ({type(_e_hd).__name__}: {_e_hd})")
+
     # REVIEW DRAFT — rename so the FILE itself says what it is. Done after the A/V gate so that
     # gate still measures the artifact it was written to measure, and the new path is returned so
     # the portal's download link (which follows res["output"]) keeps working.
