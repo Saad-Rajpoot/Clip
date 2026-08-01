@@ -6283,6 +6283,34 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                     _legib_on = os.environ.get(
                         "VIDLORE_CLIPSTUDIO_WINDOW_LEGIBILITY", "1").strip() \
                         not in ("0", "false", "no")
+                    # ENTITY MUST SURVIVE A SUBSTITUTION. Only beat_windows[0] is the window the
+                    # verifier confirmed; the rest are match-ranked alternates. A beat gets pushed
+                    # off [0] more often than it looks — 31% of windows appear in more than one
+                    # beat's list and a window airs only ONCE, so on a measured render 22 of 181
+                    # beats (12%) were forced onto an alternate before the look-variety sort even
+                    # ran. Usually that is harmless: 14 of those 22 substitutes still came from a
+                    # source whose title names the beat's required entity (often the same scene from
+                    # a different upload, which is exactly what the pool is for).
+                    #
+                    # The damage is the other kind: a beat requiring "Qyburn" landing on a Gregor
+                    # Clegane character study, or one requiring "The Mountain" on the Sept
+                    # explosion. Measured, that is 3 of 181 beats — narrow, and worth catching,
+                    # because the caption names the person the picture does not show.
+                    #
+                    # Keyed on the source TITLE, not on Face-ID: the identities of these very
+                    # windows are empty ([], [''], ['','']), so an identity test would fail open on
+                    # exactly the beats that need it. Pass 2 ignores this, so nothing is lost.
+                    _req_ent = (getattr(seg, "required_entity", "") or "").strip()
+                    _ent_toks = {t for t in re.findall(r"[a-z']+", _req_ent.lower())
+                                 if len(t) > 2 and t not in ("the", "of", "and")}
+
+                    def _title_toks(_sid):
+                        _s0 = proj.source(_sid)
+                        return {t for t in re.findall(
+                            r"[a-z']+", ((_s0.title if _s0 else "") or "").lower()) if len(t) > 2}
+                    # only defend an entity the VERIFIED window actually carried
+                    _w0_holds = bool(_ent_toks) and bool(
+                        _ent_toks & _title_toks(windows_avail[0][0])) if windows_avail else False
                     for _lpass in (1, 2):
                         for _wh in _fresh:
                             # AIR-TIME text probe: OCR the frames that will actually air — the
@@ -6301,6 +6329,10 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                             if (_lpass == 1 and _legib_on and _wsp
                                     and _source_window_too_dark(_wsp, float(_wh[0][1]), per_beat)):
                                 continue
+                            if (_lpass == 1 and _w0_holds
+                                    and _wh[0][0] != windows_avail[0][0]
+                                    and not (_ent_toks & _title_toks(_wh[0][0]))):
+                                continue           # substitute drops the beat's named subject
                             chosen_w, _ch_hash = _wh
                             break
                         if chosen_w is not None:
