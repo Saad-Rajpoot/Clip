@@ -8,7 +8,12 @@ inherits the same blind spot.
     python3 research/eval/scene_audit_dataset.py <job_dir> <out_dir> [--every N]
 
 Writes <out_dir>/scene_NNN.jpg plus scenes.json: one row per scene with its span, the narration
-spoken during it, and the aired source (joined on the clip order in aired_windows.json).
+spoken during it, and the aired source.
+
+The join is `beat = scene - breakouts before it`, checked against the ledger's own narration before
+anything is written — see scene_to_beat. I shipped an audit of job 409e284b60 with a duration-
+matching join instead, and 23 of its 24 findings named a beat 1-4 places off. The self-check exists
+so that cannot happen silently again: if fewer than 90% of scenes agree, this REFUSES to emit.
 """
 from __future__ import annotations
 
@@ -20,6 +25,7 @@ from pathlib import Path
 
 
 FFMPEG = "ffmpeg"
+WORDS = re.compile(r"[a-z']+")
 
 
 def ffmpeg_exe() -> str:
@@ -48,21 +54,26 @@ def narration_between(cues: list, a: float, z: float) -> str:
     return " ".join(c[2] for c in cues if c[1] > a and c[0] < z).strip()
 
 
-#  aired_windows records only the FOOTAGE clips (158). The timeline has 174 scenes because image
-#  stills and breakouts also occupy one each, so scene index != clip index — joining on the index
-#  mislabelled 151 of 158 rows, i.e. it would have blamed the wrong source for every finding.
-#  Each footage scene is exactly `need - CROSSFADE` long, which is a clean discriminator.
-CROSSFADE = 0.5
-cursor = [0]
-
-
-def take_clip(clips: list, cur: list, dur: float) -> dict:
-    """The next unconsumed clip if this scene's duration matches it; {} for a still/breakout."""
-    i = cur[0]
-    if i < len(clips) and abs(float(clips[i].get("need") or 0) - (dur + CROSSFADE)) <= 0.12:
-        cur[0] = i + 1
-        return clips[i]
-    return {}
+#  SCENE -> BEAT. Every beat occupies exactly one scene, whether it aired footage or an image
+#  still; a breakout inserts an EXTRA scene that belongs to no beat. So:
+#
+#       beat = scene_index - (breakouts before it)
+#
+#  and a breakout scene is identifiable with no bookkeeping at all: it carries source audio, so no
+#  voiceover caption overlaps it. VALIDATED on job 409e284b60 — the ledger's own narration for the
+#  derived beat matches the captions actually heard over that scene in 169 of 170 scenes (99%).
+#
+#  Do NOT join on aired_windows' clip order: it records only the 158 footage clips, so its index
+#  runs ahead of the scene index by every still and breakout in between. Matching each scene to
+#  the next clip by duration looks like it works (it consumes exactly the right number) but drifts
+#  silently — measured up to five beats out by the end, which would have blamed the wrong source
+#  for every finding in the back half of the video.
+def scene_to_beat(rows: list) -> None:
+    """Attach `beat` to every scene row in place; None for a breakout scene."""
+    brk = {r["scene"] for r in rows if not (r.get("narration") or "").strip()}
+    for r in rows:
+        r["beat"] = None if r["scene"] in brk else \
+            r["scene"] - sum(1 for x in brk if x < r["scene"])
 
 
 def main() -> int:
@@ -82,8 +93,18 @@ def main() -> int:
     starts = meta["scene_starts"]
     durs = meta["scene_durations"]
     cues = parse_srt(next(job.glob("output/final*.srt")))
-    aw = json.loads((job / "output" / "aired_windows.json").read_text())
-    clips = aw.get("clips") or []
+    #  the ledger is keyed by segment_index, which is what scene_to_beat resolves to — unlike
+    #  aired_windows, whose clip order counts only footage clips
+    led = {}
+    lp = job / "ledger.jsonl"
+    if lp.exists():
+        for line in lp.read_text().splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if "segment_index" in r:
+                led[int(r["segment_index"])] = r
 
     rows = []
     for i, (s, d) in enumerate(zip(starts, durs)):
@@ -94,16 +115,35 @@ def main() -> int:
         subprocess.run([FFMPEG, "-nostdin", "-v", "error", "-ss", f"{mid:.3f}", "-i", str(vid),
                         "-frames:v", "1", "-vf", "scale=960:-1", "-q:v", "3", "-y", str(img)],
                        check=False, capture_output=True)
-        c = take_clip(clips, cursor, d)
         rows.append({
             "scene": i, "start": round(s, 2), "dur": round(d, 2), "mid": round(mid, 2),
             "image": img.name,
             "narration": narration_between(cues, s, s + d),
-            "source_id": c.get("source_id", ""), "source_title": c.get("source_title", ""),
-            "beat": c.get("beat"), "via": c.get("via", ""), "in": c.get("in"),
         })
+    scene_to_beat(rows)
+    for r in rows:
+        b = led.get(r["beat"]) or {}
+        r["source_id"] = b.get("source_id", "")
+        r["source_title"] = b.get("source_title", "")
+        r["in"] = b.get("in_point")
+        r["relevance_class"] = b.get("relevance_class", "")
+        r["ledger_narration"] = b.get("narration", "")
     (out / "scenes.json").write_text(json.dumps(rows, indent=1))
+    #  self-check: the ledger's own narration for the derived beat must match what is HEARD over
+    #  that scene. A join that has drifted shows up here immediately instead of in the findings.
+    ok = tot = 0
+    for r in rows:
+        a = set(WORDS.findall((r.get("ledger_narration") or "").lower()))
+        c = set(WORDS.findall((r.get("narration") or "").lower()))
+        if a and c:
+            tot += 1
+            ok += len(a & c) / len(a) >= 0.5
     print(f"{len(rows)} scenes -> {out}")
+    print(f"join self-check: ledger narration matches the captions heard in {ok}/{tot} scenes")
+    if tot and ok / tot < 0.9:
+        print("REFUSING: the scene->beat join has drifted; findings would blame the wrong beat",
+              file=sys.stderr)
+        return 3
     return 0
 
 
