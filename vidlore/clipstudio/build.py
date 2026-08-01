@@ -1259,6 +1259,7 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     # many candidates were found and why each was rejected (commentary / recap-wrong-era /
     # wrong-character / dark / dedup / later-era source).
     _rej = {"later_era_source": 0, "commentary": 0, "recap": 0, "wrong_char": 0,
+            "unidentified": 0,
             "dark": 0, "burned_text": 0, "dedup": 0, "spacing": 0, "window_commentary": 0,
             "qa_excluded": 0}
     # lines a PRIOR render's post-render QA proved un-airable (audio masked / black window) —
@@ -1506,6 +1507,11 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         # main cast (character + actor names) — a breakout SHOULD feature one of them; a wrong-
         # character shot (e.g. a bearded man on a boat over a Tyrion/Tywin scene) must not air.
         _main_faces9 = set()
+        _char2actor9 = {}                      # canonical character name -> actor, for the
+        for _ch9 in (_ana9.get("characters") or []):   # three-state identity test below
+            _n9 = (_ch9.get("name") or "").strip()
+            if _n9:
+                _char2actor9[_n9.lower()] = (_ch9.get("actor") or "").strip()
         for _ch9 in (_ana9.get("characters") or []):
             for _k9 in ("name", "actor"):
                 _v9 = (_ch9.get(_k9) or "").strip().lower()
@@ -1639,8 +1645,20 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         _len = min(10.0, max(3.0, float(cc[3].end) - _s0))
         return _s0, _s0 + _len
 
+    # RESERVE. The render picked 8 and aired 3: five died AFTER extraction (dialogue classifier,
+    # narration echo, coverage floor) and nothing replaced them, because selection stops at n_max
+    # while 32 candidates were never even evaluated. Picking deeper changes WHICH are tried, never
+    # how many air — the extract loop still stops at n_max. Spacing and dedup are evaluated in score
+    # order against the full picked list, so a reserve candidate is already >=2 beats from every
+    # pick including ones that later die: conservative, never wrong.
+    import os as _os_bk          # this function has no module-level `os` — a bare one raises
+    try:                         # NameError inside a fail-open catch, which is how a whole stage
+        _bk_reserve = max(0, int(  # once died silently for months in this project
+            _os_bk.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_RESERVE", "6") or 6))
+    except (TypeError, ValueError):
+        _bk_reserve = 6
     for c in cands:
-        if len(picked) >= n_max:
+        if len(picked) >= n_max + _bk_reserve:
             break
         if any(abs(c[1] - p[1]) < 2 for p in picked):
             _rej["spacing"] += 1
@@ -1713,16 +1731,42 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         # a Tyrion/Tywin scene) must not air. Active only when the cast is known; a breakout is optional
         # polish, so a missed Face-ID just means no breakout there (safe), never a wrong one.
         _verbatim_ok = (c[1], c[2].id, round(float(c[3].start), 1)) in _verbatim_strong
-        if _main_faces9 and not _verbatim_ok:
-            _fids9 = {f.lower() for f in (getattr(c[3], "face_ids", None) or [])}
-            if not (_fids9 & _main_faces9):
+        # IDENTITY: three states, never conflated. The old test was `face_ids & main_cast`, which
+        # sounds like a wrong-character check and is not one — MEASURED on a real render, 0 of 625
+        # Face-ID name instances fall outside the main cast, because `match()` is an argmax over a
+        # roster that contains only main cast. So the test was `bool(face_ids)` in disguise:
+        #   - it rejected 25 candidates, EVERY ONE of them merely unidentified. Looking at all 18
+        #     distinct shots: 10 plainly show main cast (including Tommen on the Iron Throne
+        #     abolishing trial by combat — the video's central scene, wanted by 7 beats), 5 are the
+        #     right scene but too wide/dark for anyone to be identifiable, and only 3 are genuinely
+        #     off-cast. Precision at the job it claims to do: 3/18 = 17%.
+        #   - and it PASSED the real thing: 7 of 15 named candidates carried a main-cast face that
+        #     is NOT the beat's required person, all 7 passed, and 2 aired.
+        # Face-ID names only 13.4% of shots here, so "no name" is overwhelmingly *unknown*.
+        _conf9 = {f.lower() for f in (getattr(c[3], "face_ids", None) or []) if str(f).strip()}
+        _seg9 = next((x for x in segments if getattr(x, "index", None) == c[1]), None)
+        _tgt9, _full9 = set(), False
+        if _seg9 is not None and getattr(_seg9, "required_kind", "") in ("actor", "character"):
+            from .match import resolve_face_targets as _rft9
+            _tgt9, _full9 = _rft9(getattr(_seg9, "required_entity", ""), _char2actor9)
+        # a source proven to BE this scene is evidence no face crop can give
+        _scene_proof9 = _verbatim_ok or (c[2].id in _tier1) or (c[2].id in _tier2)
+        if _main_faces9:
+            if _conf9 and _tgt9 and _full9 and not (_conf9 & _tgt9):
+                # CONFIRMED WRONG — a named main-cast face that is not who this beat is about.
+                # This branch never fired before; it is the rejection the gate was supposed to make.
                 _rej["wrong_char"] += 1
-                log(f"build: breakout skipped before scene {c[1]} — shot shows no confirmed main "
-                    f"character (wrong-character/scene guard)")
+                log(f"build: breakout skipped before scene {c[1]} — shot shows "
+                    f"{sorted(_conf9)[:2]}, beat needs {sorted(_tgt9)[:2]} (wrong character)")
                 continue
-        elif _verbatim_ok and _main_faces9:
-            _fids9b = {f.lower() for f in (getattr(c[3], "face_ids", None) or [])}
-            if not (_fids9b & _main_faces9):
+            if not _conf9 and not _scene_proof9:
+                # UNKNOWN, and nothing else vouches for the scene. Named honestly so the audit
+                # line stops reading as "wrong character" for what is really a Face-ID miss.
+                _rej["unidentified"] += 1
+                log(f"build: breakout skipped before scene {c[1]} — no confident Face-ID and no "
+                    f"scene proof (unidentified, not wrong)")
+                continue
+            if not _conf9 and _verbatim_ok:
                 log(f"build: breakout before scene {c[1]} — Face-ID unconfirmed but EXACT scripted "
                     f"line is spoken verbatim in this shot (audio-match overrides face guard)")
         if _tgate9 and getattr(c[2], "local_path", None) and (
@@ -1809,7 +1853,8 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     # Grep: `grep BREAKOUT-AUDIT <log>` for the summary; `grep BREAKOUT-OK <log>` for accepted ones. ──
     log(f"[BREAKOUT-AUDIT] candidates={len(cands)} pre_extract_accepted={len(picked)} | "
         f"rejected commentary={_rej['commentary']} recap/wrong-era={_rej['recap']} "
-        f"wrong-character={_rej['wrong_char']} dark={_rej['dark']} burned-text={_rej['burned_text']} "
+        f"wrong-character={_rej['wrong_char']} unidentified={_rej['unidentified']} "
+        f"dark={_rej['dark']} burned-text={_rej['burned_text']} "
         f"dedup={_rej['dedup']} spacing={_rej['spacing']} | pre-filtered "
         f"later-era-source={_rej['later_era_source']} essay/foreign-source={_src_excluded}")
     # SELF-DIAGNOSTIC: surface WHY when too few breakouts were accepted, so we can decide (per the
@@ -1833,6 +1878,8 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         _re_ns.findall(r"[a-z']+", " ".join((getattr(s, "text", "") or "") for s in segments).lower())
     ) + " "
     for score, idx, src, sh, _q in sorted(picked, key=lambda p: p[1]):
+        if len(out) >= n_max:
+            break                     # the reserve exists to REPLACE deaths, not to add breakouts
         # pass the 10s MAX cap — _extract_breakout finds the real length that ends on a
         # complete spoken line (3-10s), so an iconic quote is never chopped mid-word
         dur = 10.0
@@ -6263,6 +6310,9 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 log(f"build: 🖼 image-still beat {seg.index} ({(sel.image_meta or {}).get('source','web')})")
                 continue
         windows_avail = list(getattr(sel, "beat_windows", []) or [])
+        # snapshot the VERIFIED first choice: windows_avail is consumed as windows air, so by the
+        # time provenance is recorded its [0] is no longer the beat's top-ranked window
+        _w0_ref = list(windows_avail[0]) if windows_avail else None
         clips_for_scene = []
         for m in range(k):
             per_beat = max(cfg.min_clip_sec, _lens[m]) + 0.5
@@ -6396,9 +6446,9 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             _wqc_moment = None       # the ORIGINALLY SELECTED range this beat must keep airing
             _aired_via = "walk"
             if chosen_w is not None:
-                _aired_via = ("window[0]" if (windows_avail
-                              and chosen_w[0] == windows_avail[0][0]
-                              and abs(float(chosen_w[1]) - float(windows_avail[0][1])) < 0.01)
+                _aired_via = ("window[0]" if (_w0_ref
+                              and chosen_w[0] == _w0_ref[0]
+                              and abs(float(chosen_w[1]) - float(_w0_ref[1])) < 0.01)
                               else "window[alt]")
                 sid, in_p = chosen_w[0], float(chosen_w[1])
                 src = proj.source(sid)

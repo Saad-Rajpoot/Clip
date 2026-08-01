@@ -911,15 +911,91 @@ def _trim_window(shot: Shot, seg: ScriptSegment, cfg: ClipConfig,
     return round(a, 3), round(b, 3)
 
 
+# NB: 'high' and 'septon' are NOT here. 'High Sparrow' IS a roster name, and stripping 'high'
+# turned it into 'sparrow', which resolves to nothing. 'the High Septon' is kept out by the
+# contiguous-run rule instead ('high sparrow' is not a run inside 'high septon').
+_HONORIFICS = ("ser", "king", "queen", "lord", "lady", "prince", "princess",
+               "maester", "grand", "the")
+_ENT_SPLIT = re.compile(r"\s*(?:,|;|/|&|\band\b|\bwith\b|\bvs\.?\b|\bversus\b)\s*", re.I)
+
+
+def _strip_honorifics(part: str) -> str:
+    """Drop leading titles from BOTH the query and the roster alias, so 'Ser Gregor Clegane' can
+    meet a roster entry stored as 'Ser Gregor Clegane / The Mountain'."""
+    toks = [t for t in (part or "").split() if t]
+    while toks and toks[0] in _HONORIFICS:
+        toks = toks[1:]
+    return " ".join(toks)
+
+
+def resolve_face_targets(required_entity: str, char2actor: dict) -> tuple:
+    """(actor/character names to look for, did EVERY named part resolve?).
+
+    The old version was an exact dict lookup, so a beat saying "Cersei" or "Ser Gregor Clegane" or
+    "Tommen" matched nothing — `char2actor` is keyed on the full canonical name. Measured on a real
+    render: 27 of 107 character-beats (25%) could never match a Face-ID result, which contains ACTOR
+    names only. On those beats the +0.30 face bonus never fired AND the -0.50 wrongface penalty fired
+    on every named shot INCLUDING shots of the correct person — 1,293 (beat, shot) pairs took a 0.80
+    swing in the wrong direction, on the protagonist.
+
+    Resolution is deliberately CONSERVATIVE, because a false target is what lets a wrong character
+    through. A part matches a roster name when it equals an alias, contains the full alias as a
+    contiguous run of tokens, or is a single token equal to a roster GIVEN name that is unique across
+    the roster. That last rule is why 'Cersei' resolves and 'Tyrell' (a surname shared by three
+    characters) and 'the High Septon' (a prefix of no alias) both correctly resolve to nothing.
+
+    The second return value matters for the wrong-character decision: when a beat names someone the
+    roster does not know ("Missandei, Jon, Olenna"), we cannot conclude a shot shows the WRONG
+    person, only that we do not know. Callers must not claim 'wrong' on a partial resolution."""
+    ent = (required_entity or "").strip().lower()
+    if not ent:
+        return set(), False
+    # roster alias -> actor, plus the unique-given-name index
+    alias2actor: dict = {}
+    for ch, ac in (char2actor or {}).items():
+        for alias in str(ch or "").lower().split("/"):
+            alias = _strip_honorifics(alias.strip())
+            if alias:
+                alias2actor[alias] = str(ac or "").lower()
+    given: dict = {}
+    for alias in alias2actor:
+        toks = alias.split()
+        if toks:
+            given.setdefault(toks[0], set()).add(alias)
+
+    out: set = set()
+    parts = [p for p in (_strip_honorifics(x.strip()) for x in _ENT_SPLIT.split(ent)) if p]
+    if not parts:
+        return set(), False
+    full = True
+    for p in parts:
+        hit = None
+        if p in alias2actor:
+            hit = p
+        else:
+            ptoks = p.split()
+            for alias in alias2actor:                    # contiguous-run containment
+                a = alias.split()
+                if len(a) <= len(ptoks) and any(
+                        ptoks[i:i + len(a)] == a for i in range(len(ptoks) - len(a) + 1)):
+                    hit = alias
+                    break
+            if hit is None and len(ptoks) == 1 and len(given.get(p, ())) == 1:
+                hit = next(iter(given[p]))               # unique given name, e.g. 'cersei'
+        if hit is None:
+            full = False
+            continue
+        out.add(hit)
+        if alias2actor.get(hit):
+            out.add(alias2actor[hit])
+    return out, (full and bool(out))
+
+
 def _face_targets(seg: ScriptSegment, char2actor: dict) -> set:
     """Lowercased names to look for in a shot's Face-ID / OCR when this beat needs a person."""
     if seg.required_kind not in ("actor", "character") or not seg.required_entity:
         return set()
-    t = seg.required_entity.strip().lower()
-    targets = {t}
-    if t in char2actor:
-        targets.add(char2actor[t].lower())
-    return targets
+    return resolve_face_targets(seg.required_entity, char2actor)[0]
 
 
 # On-frame text that marks a shot as an AD / NEWS-banner / CTA-card / channel-WATERMARK — NOT clean

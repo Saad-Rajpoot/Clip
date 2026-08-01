@@ -3207,8 +3207,17 @@ def test_breakout_era_scene_gate():
           "min(_ss9b) > _core_max9" in bsrc and "_core_max9 and not _allow_compare9" in bsrc)
     check("recap-line gate wired in the breakout picker (wrong-season in-character dialogue)",
           '_is_recap_line(getattr(c[3]' in bsrc)
-    check("wrong-character (Face-ID) gate: breakout shot must show a confirmed MAIN character",
-          "_main_faces9" in bsrc and "_fids9 & _main_faces9" in bsrc)
+    # CONTRACT CHANGED, deliberately. `_fids9 & _main_faces9` READ like a wrong-character test and
+    # was not one: measured on a real render, 0 of 625 Face-ID name instances fall outside the main
+    # cast (match() is an argmax over a roster of main cast only), so the expression was
+    # `bool(face_ids)` in disguise. It rejected 25 candidates that were merely UNIDENTIFIED — 10 of
+    # the 18 distinct shots plainly show main cast — while PASSING 7 candidates whose confident face
+    # is a main-cast member the beat is not about, 2 of which aired. Three states now, never
+    # conflated: right / wrong / unknown.
+    check("identity gate separates WRONG from UNKNOWN (not `bool(face_ids)` in disguise)",
+          "_conf9 and _tgt9 and _full9 and not (_conf9 & _tgt9)" in bsrc
+          and '_rej["unidentified"]' in bsrc
+          and "_fids9 & _main_faces9" not in bsrc)
     check("EXACT episode / anchor-verified source PREFERRED (tier1 mined before tier2)",
           "anchor_verified" in bsrc
           and "_mine_tier([s for s in srcs if s.id in _tier1], _min_ov9)" in bsrc
