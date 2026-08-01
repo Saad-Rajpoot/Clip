@@ -448,6 +448,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     _safe_w = max(200.0, float(play_w) - _ml - _mr)
     lines = [header]
     cues = _group(words)
+    # NEXT-EVENT START, across cue boundaries. The aligner can hand back words whose spans OVERLAP
+    # (measured on a delivered render: word 797 starts at 251.260 while word 796 still ends at
+    # 251.280). At a cue's last word there is no in-cue successor to bridge to, so that overlap
+    # reaches the ASS — and libass, given two live events, stacks the newer one ABOVE the older,
+    # displacing the caption a full line height. On this render it did that for 0.87s on a static
+    # shot, preceded by a frame of the same sentence printed twice.
+    # Used only to CLAMP an end down, never to extend one, so the deliberate gaps between cues
+    # (sentence pauses) are untouched.
+    _flat = [w for c in cues for w in c]
+    _next_start = {}
+    for _i, _w in enumerate(_flat[:-1]):
+        _next_start[id(_w)] = _flat[_i + 1].start
     for cue in cues:
         toks = [_esc(w.word) for w in cue]
         n = len(cue)
@@ -472,9 +484,28 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         _prefix = "{%s}" % _cue if _cue else ""
         for k, w in enumerate(cue):
             ws = w.start
-            we = max(w.end, ws + 0.06)
-            if k == n - 1:                       # hold last word to cue end
-                we = max(we, cue[-1].end)
+            # BRIDGE TO THE NEXT WORD. One Dialogue event is emitted per word, each carrying the
+            # WHOLE line with that word highlighted — so when an event ends at its own word's end,
+            # the entire caption disappears until the next word begins. Measured on a 12-minute
+            # render: 246 mid-sentence blackouts, 108.7s (15% of runtime), a hard caption pop every
+            # ~2.9s. It reads as a broken render rather than a style.
+            #
+            # Ending each event where the NEXT word starts makes the line continuous through the
+            # word's own trailing silence. Gaps BETWEEN cues survive untouched — those are the
+            # sentence pauses (57 of them here, 29.9s) where the band is supposed to be empty.
+            #
+            # This also supersedes the old `ws + 0.06` minimum: that floor pushed an event's end
+            # PAST the next event's start and produced 4 overlapping pairs, one of which displaced
+            # the caption a full line height for 0.87s and printed the same sentence twice.
+            we = max(w.end, cue[k + 1].start) if k < n - 1 else max(w.end, cue[-1].end)
+            _nxt = _next_start.get(id(w))
+            if _nxt is not None:
+                we = min(we, _nxt)           # never outlive the next event — see the note above
+            if we <= ws + 1e-4:
+                # degenerate alignment — the aligner gave two tokens the same start (seen on an
+                # em-dash followed by a word). A zero-length event renders as a flash; drop it and
+                # let the previous event's bridge cover the span.
+                continue
             parts = []
             for ci, tk in enumerate(cells):
                 j = imap[ci]                     # source word index of this cell

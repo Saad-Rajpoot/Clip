@@ -3408,7 +3408,7 @@ def _align_words_to_hyp(flat: list, hyp: list):
     return [t if t is not None else (0.0, 0.0) for t in times]
 
 
-def _canonicalize_caption_names(narration, proj, log) -> int:
+def _canonicalize_caption_names(narration, proj, log, script_text: str = "") -> int:
     """Fix ASR-spelled character names in the caption word stream ('Alina Tyrell', 'Owina',
     'James'' for Jaime) against the analysis' canonical cast list. The narration script IS a
     voiceover transcript, so proper nouns arrive with whisper spellings and burn into every
@@ -3439,6 +3439,27 @@ def _canonicalize_caption_names(narration, proj, log) -> int:
             surname_first[toks[-1].lower()] = toks[0][0].upper() + toks[0][1:]
     if not canon:
         return 0
+    # THE AUTHOR'S OWN WORDS ARE NEVER ASR ERRORS. This pass assumes the narration is a Whisper
+    # transcript — true on the TTS/hypothesis path, FALSE when the owner uploads a written script
+    # and the captions are word-synced from it (measured on one render: 2173 caption tokens for
+    # 2173 script tokens, i.e. not one word came from ASR). On that path every rewrite is damage,
+    # and it did damage: a caption read "killed Margaery Tyrell, the head of" over a clear shot of
+    # MACE Tyrell, three cues after another card had already said Margaery was killed — two
+    # falsehoods, burned in, and shipped in the .srt as the subtitle track too. Margaery is the
+    # roster's only Tyrell, so the bigram rule turned ANY word before "Tyrell" into her name
+    # ('mace' → 'margaery' scores exactly 0.500 against a 0.40 bar).
+    #
+    # Keying on the script makes the pass correct on BOTH paths without a mode flag: a token the
+    # author typed is skipped, while a Whisper misspelling — which by construction is NOT in the
+    # script — is still fixed.
+    _script_words = {w.lower() for w in _re_cn.findall(r"[A-Za-z']+", script_text or "")}
+
+    def _inflection(a: str, b: str) -> bool:
+        """Is `a` just a plural/possessive of `b` (or vice versa)? 'Tyrells' vs 'Tyrell' scores
+        ~0.92 similar, so every plural surname otherwise reads as a misspelling of the singular."""
+        x, y = a.lower().rstrip("'"), b.lower().rstrip("'")
+        return x != y and (x.rstrip("s") == y.rstrip("s"))
+
     def _parse(raw):
         m = _re_cn.match(r"^(\W*)([A-Za-z']+)(\W*)$", raw.strip())
         if not m:
@@ -3466,6 +3487,8 @@ def _canonicalize_caption_names(narration, proj, log) -> int:
             low = base.lower()
             if low in canon:
                 continue                                  # already canonical
+            if low in _script_words:
+                continue                                  # the author typed it — not an ASR error
             target, target_r = None, 0.0
             # bigram rule: the NEXT token is (or canonicalizes to) a cast surname
             if i + 1 < len(ws):
@@ -3476,7 +3499,13 @@ def _canonicalize_caption_names(narration, proj, log) -> int:
                         (canon.get(low2) or "").lower())
                     if sname:
                         r = _dl.SequenceMatcher(None, low, sname.lower()).ratio()
-                        if r >= 0.40:
+                        # MEASURED, and the margin is thin: the false positive this pass shipped,
+                        # 'mace' → 'margaery', scores 0.500; the true positives the rule exists for,
+                        # 'alina'/'owina' → 'olenna', score 0.545. 0.52 is the only bar between
+                        # them, so it is deliberately NOT the main defence — the script guard above
+                        # is. This floor only matters when script_text is unavailable, and it is
+                        # tuned on two data points; do not read more into it than that.
+                        if r >= 0.52:
                             target, target_r = sname, r
             if target is None:
                 best, best_r = None, 0.0
@@ -3486,6 +3515,8 @@ def _canonicalize_caption_names(narration, proj, log) -> int:
                         best_r, best = r, v
                 if best is not None and best_r >= 0.75:
                     target, target_r = best, best_r
+            if target is not None and _inflection(base, target):
+                target = None            # 'Tyrells' is not a misspelling of 'Tyrell'
             if target is not None:
                 lead = raw[:len(raw) - len(raw.lstrip())]
                 trail = raw[len(raw.rstrip()):]
@@ -5634,7 +5665,10 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     if os.environ.get("VIDLORE_CLIPSTUDIO_CAPTION_NAME_FIX", "1").strip() \
             not in ("0", "false", "no"):
         try:
-            _canonicalize_caption_names(narration, proj, log)
+            _canonicalize_caption_names(
+                narration, proj, log,
+                script_text=" ".join((getattr(s, "narration", "") or "")
+                                     for s in (getattr(script, "scenes", []) or [])))
         except Exception as _e_cn:                        # noqa: BLE001
             log(f"build: caption name canonicalization skipped ({str(_e_cn)[:60]})")
 
