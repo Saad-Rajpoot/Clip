@@ -280,6 +280,90 @@ def _source_corner_logo(shots, *, samples: int = 16, min_kf: int = 6) -> str:
     return best
 
 
+_EDGE_LOGO_CACHE: dict = {}
+
+
+def _source_edge_logo(shots, *, samples: int = 16, min_kf: int = 8) -> str:
+    """Persistent overlay in a vertical EDGE BAND rather than a corner. Returns 'l' | 'r' | ''.
+
+    MEASURED on portal job 409e284b60. A media-player badge — an orange rounded square with a
+    white 'm' and a running timer ('53:5…', '54:0…', '54:4…') — aired on four beats, burned into
+    four different re-uploads of the same screen recording. `_source_corner_logo` could not see it
+    for two independent reasons, and both are geometric rather than statistical:
+
+      * it sits at MID-HEIGHT on the right border (y 46-56% of frame), so no corner patch — the
+        outer 18%x12% boxes — contains a single pixel of it;
+      * its digits change every second, so any test that asks the whole patch to be static fails
+        even where the patch does overlap.
+
+    Same statistic as the corner detector, different geometry: threshold each keyframe's edge map
+    inside the outer 9% of width over the FULL height, and look for a footprint that is present on
+    nearly every keyframe (pf), lands on the same pixels (IoU vs the majority mask), and is a
+    COMPACT blob rather than a full-height line — the last one is what separates a badge from a
+    pillarbox seam, which is otherwise a perfect static edge.
+
+    Calibrated on that render's 74 indexed sources: fires on 5, and all 5 carry a real burned-in
+    overlay ('SPHINX TV', 'FAVORITE FLASHBACKS FRENZY', a bottom-edge channel mark, and the two
+    player-badge re-uploads) — 0 false positives. The remaining two badge sources show it only
+    intermittently (pf 0.25), so a source-level detector cannot reach them; that is a per-shot
+    question and is left to the per-shot overlay rule.
+
+    Kill switch: VIDLORE_CLIPSTUDIO_EDGE_LOGO_GATE=0 (checked by callers)."""
+    import numpy as np
+    from PIL import Image
+    kfs = [k for k in ((getattr(sh, "keyframe_path", "") or "") for sh in shots) if k]
+    if len(kfs) < min_kf:
+        return ""
+    ck = (kfs[0], len(kfs))
+    if ck in _EDGE_LOGO_CACHE:
+        return _EDGE_LOGO_CACHE[ck]
+    while len(_EDGE_LOGO_CACHE) >= 256:
+        _EDGE_LOGO_CACHE.pop(next(iter(_EDGE_LOGO_CACHE)))
+    _EDGE_LOGO_CACHE[ck] = ""
+    if _source_is_static(shots):
+        return ""                                   # a static card's edges persist everywhere
+    kfs = [k for k in kfs if Path(k).exists()]
+    if len(kfs) < min_kf:
+        return ""
+    W, H, BAND = 640, 360, 0.09
+    step = max(1, len(kfs) // samples)
+    frames = []
+    for k in kfs[::step][:samples]:
+        try:
+            frames.append(np.asarray(Image.open(k).convert("L").resize((W, H)), dtype="float32"))
+        except Exception:                            # noqa: BLE001, PERF203
+            continue
+    if len(frames) < min_kf:
+        return ""
+    bw = int(W * BAND)
+    best, best_score = "", 0.0
+    for side in ("l", "r"):
+        masks = []
+        for f in frames:
+            band = f[:, W - bw:] if side == "r" else f[:, :bw]
+            gx = np.abs(np.diff(band, axis=1, prepend=band[:, :1]))
+            gy = np.abs(np.diff(band, axis=0, prepend=band[:1, :]))
+            e = np.maximum(gx, gy)
+            masks.append(e >= max(18.0, float(np.percentile(e, 96))))
+        present = [m for m in masks if m.mean() > 0.004]
+        pf = len(present) / max(1, len(masks))
+        if len(present) < 4 or pf < 0.90:
+            continue
+        maj = np.stack(present).mean(axis=0) >= 0.5
+        if maj.sum() < 40 or maj.mean() > 0.5:
+            continue
+        ys, xs = np.nonzero(maj)
+        if (ys.max() - ys.min()) > 0.25 * H:
+            continue                                 # full-height seam = pillarbox, not a badge
+        iou = float(np.mean([float((m & maj).sum()) / max(1.0, float((m | maj).sum()))
+                             for m in present]))
+        score = pf * iou
+        if iou >= 0.55 and score > best_score:
+            best, best_score = side, score
+    _EDGE_LOGO_CACHE[ck] = best
+    return best
+
+
 def _source_is_static(shots, *, min_shots: int = 4) -> bool:
     """A still-image / lyric source — almost every shot is a phash near-duplicate of the others (a
     static portrait + audio, e.g. a 'X sings Rains of Castamere' card). It's not scene footage and,

@@ -101,9 +101,14 @@ def _watermarked_source_corners(proj, ocr_engine, progress=None) -> dict:
     garbage and slipped the keyword path entirely (observed: 'BLACK TRVLLS' aired on 16 beats)."""
     import os as _os2
     from . import index as _index
-    from .match import _source_is_watermarked, _source_corner_logo
+    from .match import _source_is_watermarked, _source_corner_logo, _source_edge_logo
     pixel_on = _os2.environ.get("VIDLORE_CLIPSTUDIO_CORNER_LOGO_GATE", "1").strip() \
         not in ("0", "false", "no")
+    edge_on = _os2.environ.get("VIDLORE_CLIPSTUDIO_EDGE_LOGO_GATE", "1").strip() \
+        not in ("0", "false", "no")
+    #  A side badge is removed by the WIDTH half of the punch-in crop, so the vertical half of the
+    #  code is free; 'b*' keeps the top, which is where faces sit far more often than feet.
+    _EDGE2CORNER = {"l": "bl", "r": "br"}
     out: dict = {}
     for src in proj.sources:
         if getattr(src, "status", "") != "ok" or not src.local_path or not Path(src.local_path).exists():
@@ -123,6 +128,16 @@ def _watermarked_source_corners(proj, ocr_engine, progress=None) -> dict:
                 out[src.id] = corner
                 if progress:
                     progress(f"build: watermark-crop source {src.id} (corner={corner}, pixel-static)")
+                continue
+        if edge_on:
+            #  Only after the corner detector has passed: a badge on the side border at mid-height
+            #  is invisible to it by construction (see match._source_edge_logo).
+            side = _source_edge_logo(shots)
+            if side:
+                out[src.id] = _EDGE2CORNER[side]
+                if progress:
+                    progress(f"build: watermark-crop source {src.id} "
+                             f"(edge={side} → crop {out[src.id]}, pixel-static)")
     return out
 
 
