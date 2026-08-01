@@ -1569,9 +1569,40 @@ def _moment_kept(nt0: float, nt1: float, moment: tuple) -> bool:
     return ov >= _f_env("VIDLORE_CLIPSTUDIO_WQC_MOMENT_OVERLAP", 0.6) * pdur
 
 
+def _wrong_face_spans(shots, t0: float, t1: float, face_guard) -> list:
+    """Spans inside [t0, t1] where a CONFIDENTLY-NAMED main-cast face is not the beat's person.
+
+    MEASURED on portal job 409e284b60: two beats whose chosen shot carried the RIGHT actor —
+    faceid 1.0, identity 'Joseph Mawle' for a Benjen beat, 'Kit Harington' for a Jon Snow beat —
+    still aired seconds showing somebody else. The shot was right and the WINDOW was wrong, which
+    no shot-level score can see: by the time the window is cut, the scoring is over.
+
+    `face_guard` is (targets, all_faces, fully_resolved) from resolve_face_targets. The three
+    states are kept strictly apart, as everywhere else: a span is wrong only when the shot names
+    someone CONFIDENTLY, that name is main cast, the beat's entity resolves FULLY, and the named
+    person is not the target. An unnamed face is unknown, never wrong."""
+    targets, all_faces, full = face_guard
+    if not (targets and all_faces and full):
+        return []
+    out = []
+    for sh in shots:
+        if not (sh.end > t0 and sh.start < t1):
+            continue
+        conf = {(d.get("name", "") or "").lower()
+                for d in (getattr(sh, "identities", None) or []) if d.get("confident")}
+        conf = {c for c in conf if c}
+        if not conf or (conf & targets):
+            continue
+        if conf & all_faces:
+            ds, de = max(t0, float(sh.start)), min(t1, float(sh.end))
+            if de - ds > 0.01:
+                out.append((ds, de, f"wrong-face(shot {getattr(sh, 'index', '?')})"))
+    return out
+
+
 def clean_cut_window(shots, t0: float, t1: float, min_len: float,
                      anchor: tuple | None = None, partial_corner: dict | None = None,
-                     preserve: tuple | None = None):
+                     preserve: tuple | None = None, face_guard: tuple | None = None):
     """Validate the FINAL render window [t0, t1] against all overlapping indexed shots.
     Returns (nt0, nt1, action, reason):
       action 'ok'        — window clean as-is
@@ -1583,8 +1614,28 @@ def clean_cut_window(shots, t0: float, t1: float, min_len: float,
     moment's midpoint at the default threshold); a clean span elsewhere in the same shot is
     'rejected' with a 'moment-lost:' reason so the caller falls back to relevance-ranked
     alternates instead of silently airing a DIFFERENT moment of the same shot.
+    `face_guard` — (targets, all_faces, fully_resolved) for a beat that names a person. Seconds
+    showing a confidently-named DIFFERENT main-cast member are treated as dirty, so the cut moves
+    off them. STRICT SHORTEN-ONLY: the whole window is computed twice, once with those spans and
+    once exactly as before, and the identity pass is used only when it does not reject. It can
+    therefore move a cut but can never lose a shot — footage is never starved by it.
     Old indexes (no flags) report every shot clean → 'ok' (fail-open, keyframe gates still ran)."""
     anchor = anchor or (t0, t1)
+    if face_guard:
+        extra = _wrong_face_spans(shots, t0, t1, face_guard)
+        if extra:
+            r0, r1, act, why = _clean_cut_window_inner(
+                shots, t0, t1, min_len, anchor, partial_corner, preserve, extra)
+            if act != "rejected":
+                return r0, r1, act, why
+            #  fall through to the identical call WITHOUT the identity spans: a wrong face is a
+            #  reason to prefer other seconds, never a reason to have no footage.
+    return _clean_cut_window_inner(shots, t0, t1, min_len, anchor, partial_corner, preserve, [])
+
+
+def _clean_cut_window_inner(shots, t0: float, t1: float, min_len: float,
+                            anchor: tuple, partial_corner, preserve, extra_dirty: list):
+    """The window algorithm, unchanged. `extra_dirty` is empty on the legacy path."""
     # A designed on-screen TEXT card — a channel/CTA/outro slate or a promo card — routinely FADES
     # in a few frames BEFORE its indexed shot boundary, so a window cleared to end exactly at that
     # boundary still airs a frame or two of the card (the Max/WarnerMedia outro aired from a ~0.15s
@@ -1614,6 +1665,7 @@ def clean_cut_window(shots, t0: float, t1: float, min_len: float,
             ds, de = max(t0, ds), min(t1, de)
             if de - ds > 0.01:                        # skip clamped-empty spans (shot fully outside)
                 dirty.append((ds, de, f"{r}(shot {getattr(sh, 'index', '?')})"))
+    dirty.extend(extra_dirty)
     if not dirty:
         return t0, t1, "ok", ""
     dirty.sort()
@@ -1663,7 +1715,18 @@ def wqc_moment_policy(seg) -> str:
     return "generic"
 
 
-def validate_candidate_window(cand, shot, shots, cfg, seg=None):
+def face_guard_for(seg, char2actor: dict, all_faces: set) -> tuple | None:
+    """(targets, all_faces, fully_resolved) for a beat that names a person, else None.
+
+    One builder so every window-QC call site applies the same three-state rule, and so a beat
+    whose entity does not fully resolve can never be used to call a face WRONG."""
+    if not (seg is not None and char2actor and all_faces):
+        return None
+    tgt, full = resolve_face_targets(getattr(seg, "required_entity", "") or "", char2actor)
+    return (tgt, set(all_faces), bool(full)) if (tgt and full) else None
+
+
+def validate_candidate_window(cand, shot, shots, cfg, seg=None, face_guard=None):
     """PRODUCTION candidate window-QC — the single path behind match selections, beat windows
     AND the verifier's promotion repair. Validates cand's PADDED render window (cut_selection
     pads short shots to min_clip_sec) against the source's indexed `shots`; mutates cand
@@ -1689,7 +1752,8 @@ def validate_candidate_window(cand, shot, shots, cfg, seg=None):
         anchor = (float(_ss), float(_se)) if _ss is not None and _se is not None else None
         preserve = None
     nt0, nt1, act, why = clean_cut_window(shots, cand.in_point, pad_end, cfg.min_clip_sec,
-                                          anchor=anchor, preserve=preserve)
+                                          anchor=anchor, preserve=preserve,
+                                          face_guard=face_guard)
     if act == "shortened":
         cand.in_point, cand.out_point = nt0, nt1
         meta["final"] = (nt0, nt1)
@@ -1706,7 +1770,8 @@ def _wqc_log_line(act: str, meta: dict, why: str) -> str:
 
 
 def wqc_arbitrate_selection(best, alternates, by_src_shots, ps_by_key, cfg, seg,
-                            stats=None, progress=None, shot_uses=None, shot_cap=None):
+                            stats=None, progress=None, shot_uses=None, shot_cap=None,
+                            face_guard=None):
     """PRODUCTION selection-level window-QC arbitration, one beat at a time (module-level so
     tests drive the real path). Validates the winning candidate's final window; on 'rejected'
     scans the relevance-ranked `alternates` for the first whose window validates (fallback);
@@ -1715,7 +1780,8 @@ def wqc_arbitrate_selection(best, alternates, by_src_shots, ps_by_key, cfg, seg,
     stats = stats if stats is not None else {}
     _adjq, _baseq, _psq, _candq = best
     shs = by_src_shots.get(_candq.source_id) or []
-    act, why, meta = validate_candidate_window(_candq, _psq.shot, shs, cfg, seg)
+    act, why, meta = validate_candidate_window(_candq, _psq.shot, shs, cfg, seg,
+                                               face_guard=face_guard)
     seg_i = getattr(seg, "index", _candq.segment_index)
     if act == "shortened":
         stats["shortened"] = stats.get("shortened", 0) + 1
@@ -1738,7 +1804,8 @@ def wqc_arbitrate_selection(best, alternates, by_src_shots, ps_by_key, cfg, seg,
             if _aps is None:
                 continue
             _a_shs = by_src_shots.get(_alt.source_id) or []
-            _a_act, _a_why, _a_meta = validate_candidate_window(_alt, _aps.shot, _a_shs, cfg, seg)
+            _a_act, _a_why, _a_meta = validate_candidate_window(_alt, _aps.shot, _a_shs, cfg, seg,
+                                                                face_guard=face_guard)
             if _a_act != "rejected":
                 stats["fallback"] = stats.get("fallback", 0) + 1
                 if progress:
@@ -2381,6 +2448,12 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         return proj.selections
 
     vr = _index._vr() if _index.clip_available() else None
+    #  WINDOW-level wrong-character guard. The shot-level wrongface penalty cannot see this: two
+    #  beats in job 409e284b60 chose a shot carrying the RIGHT actor (faceid 1.0, 'Joseph Mawle'
+    #  for a Benjen beat, 'Kit Harington' for a Jon Snow beat) and still aired seconds showing
+    #  someone else. Shorten-only by construction — see clean_cut_window's face_guard.
+    _wf_win_gate = os.environ.get("VIDLORE_CLIPSTUDIO_WRONGFACE_WINDOW_GATE", "1").strip() \
+        not in ("0", "false", "no")
     char2actor = analysis.char_to_actor() if analysis is not None else {}
     # the full set of MAIN-character + actor names (lowercased) — a shot confidently showing
     # one of these that ISN'T the beat's target is a wrong-character mismatch
@@ -2909,7 +2982,9 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
             best, alternates = wqc_arbitrate_selection(
                 best, alternates, _by_src_shots, _ps_by_key, cfg, seg,
                 stats=_wqc_stats, progress=progress,
-                shot_uses=shot_uses, shot_cap=cfg.max_reuse_per_shot)
+                shot_uses=shot_uses, shot_cap=cfg.max_reuse_per_shot,
+                face_guard=(face_guard_for(seg, char2actor, all_faces)
+                            if _wf_win_gate else None))
 
         if best is None:
             sel = ClipSelection(segment_index=seg.index, source_id="", shot_index=-1,
