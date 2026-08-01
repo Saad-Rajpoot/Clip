@@ -5276,8 +5276,15 @@ def test_release_gate_recovery_alignment():
     check("gate wires the Ken-Burns motion hold for duration-only blocks",
           "_kenburns_hold(Path(_last_clean_r)" in bsrc2
           and "same-scene Ken-Burns MOTION hold" in bsrc2)
-    check("motion holds don't count against the FROZEN-seconds caps",
-          "if not _motion_hold:" in bsrc2)
+    # CONTRACT CHANGED, deliberately. Motion holds used to be exempt from the frozen-seconds caps
+    # on the theory that a Ken-Burns push-in is not really a freeze. A frame audit priced that: a
+    # 6.68s hold shipped while rejected_footage_audit.json reported total_hold_seconds 2.38, and
+    # two adjacent beats spent 10.7 CONSECUTIVE seconds on one web JPEG — 2.8x the median beat and
+    # longer than any real shot in the film. The push-in did not make it stop being a held frame;
+    # it only made the caps blind to it. Every held second now counts.
+    check("EVERY held second counts against the caps, motion or frozen",
+          "_hold_total += _beat_hold_dur" in bsrc2
+          and "if not _motion_hold:                      # only FROZEN" not in bsrc2)
 
     # (10) cast-interview / press-junket recap sources never enter any pool ('Richard Madden
     # Relives the Red Wedding' matched a Tyrion beat and release-blocked it)

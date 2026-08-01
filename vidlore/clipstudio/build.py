@@ -4838,6 +4838,42 @@ def _frame_luma_hi(img_path):
         return None                                    # explicit failure → unverified
 
 
+def _rescue_still_fullres(proj, sel, img_path: str, log) -> str:
+    """Re-extract an aired still at the SOURCE's own resolution instead of the CLIP thumbnail.
+
+    Only applies to a source-frame still (one taken from footage we already have). A web image has
+    no source file and is returned untouched. Returns "" when nothing better is available, so the
+    caller keeps today's file — this can only improve a still, never lose one."""
+    try:
+        meta = (getattr(sel, "image_meta", None) or {})
+        sid = meta.get("source_id") or getattr(sel, "source_id", "") or ""
+        if not sid or "source-frame" not in str(meta.get("source", "")):
+            return ""
+        src = proj.source(sid)
+        if not src or not src.local_path or not Path(src.local_path).exists():
+            return ""
+        # the keyframe's instant: the still pass records it, else the selection's own in-point
+        try:
+            t = float(meta.get("t", meta.get("time", getattr(sel, "in_point", 0.0))) or 0.0)
+        except (TypeError, ValueError):
+            t = float(getattr(sel, "in_point", 0.0) or 0.0)
+        sw = int(getattr(src, "width", 0) or 0)
+        if sw and sw <= 640:
+            return ""                    # the upload is not sharper than the thumbnail
+        dest = Path(img_path).with_name(Path(img_path).stem + "_fullres.jpg")
+        if not dest.exists():
+            subprocess.run([ffmpeg_exe(), "-y", "-loglevel", "error",
+                            "-ss", f"{max(0.0, t):.3f}", "-i", str(src.local_path),
+                            "-frames:v", "1", "-q:v", "2", str(dest)],
+                           capture_output=True, timeout=60)
+        if not dest.exists() or dest.stat().st_size < 4096:
+            return ""
+        log(f"build: still re-extracted at source resolution ({sw or '?'}px wide) — {dest.name}")
+        return str(dest)
+    except Exception:
+        return ""                        # a still that cannot be improved is not a failure
+
+
 _SRCDARK_MEMO: dict = {}
 
 
@@ -6199,7 +6235,16 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         # IMAGE FALLBACK scene: no relevant YouTube clip existed, so a verified exact-scene
         # still was fetched — render it as a Ken-Burns motion still across the beat's k slots
         _img = getattr(sel, "image_path", "") if sel else ""
+        # A CLIP KEYFRAME IS A THUMBNAIL, NOT A FRAME. index.py writes every keyframe at
+        # `scale=512:-2` for the embedding model, and the still passes hand that same 512x288 file
+        # to Ken-Burns, which upscales it 3.75x to 1080p and then zooms a further 1.08-1.10x on top.
+        # Measured against a full-res re-extract of the identical instant, the shipped version loses
+        # ~8.7x power at 0.30 Nyquist and ~29x at 0.42 — 18 of 21 aired stills on one render.
+        # The source file and the timestamp are both still on disk, so the fix is one ffmpeg call
+        # per still: no re-download, no API spend, and it silently no-ops when the re-extract is not
+        # actually sharper (two of those 18 came from 854x478 and 640x360 uploads).
         if _img and Path(_img).exists():
+            _img = _rescue_still_fullres(proj, sel, _img, log) or _img
             clips_for_scene = []
             for m in range(k):
                 per_beat = max(cfg.min_clip_sec, _lens[m]) + 0.5
@@ -6616,7 +6661,12 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             # cross-scene propagation this pass exists to stop — while logging "same-scene".
             def _is_synth(_p):
                 _s = Path(_p).stem
-                return "_nobrand" in _s or "_nodark" in _s or "placeholder" in _s
+                # `_img` is a Ken-Burns STILL, not footage. The comment on the donor rule says the
+                # donor "must be REAL footage" but nothing checked it, so a beat could freeze onto
+                # an image that is itself already a held frame — on one render two adjacent beats
+                # then spent 10.7 consecutive seconds on a single web JPEG.
+                return ("_nobrand" in _s or "_nodark" in _s or "placeholder" in _s
+                        or _s.endswith("_img"))
             # (probe served from the staged-replay parallel precompute when available — the
             # verdict is a pure function of the clip file + fixed floor, so this changes
             # nothing about the donor selection below)
@@ -6780,8 +6830,12 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                     break
             if _held_ok:
                 _consec_holds += 1
-                if not _motion_hold:                      # only FROZEN seconds count against the caps
-                    _hold_total += _beat_hold_dur
+                # EVERY held second counts. Exempting the Ken-Burns variant let 6.68s of hold ship
+                # while the audit reported total_hold_seconds 2.38, and two adjacent beats spent
+                # 10.7 CONSECUTIVE seconds on one web JPEG — 2.8x the median beat and 25% longer
+                # than the longest real shot in the film. A gentle push-in does not make a held
+                # frame stop being a held frame; it only makes the caps blind to it.
+                _hold_total += _beat_hold_dur
                 beat_clips[seg.index] = clips
                 if clips:
                     for _fi in footage:
