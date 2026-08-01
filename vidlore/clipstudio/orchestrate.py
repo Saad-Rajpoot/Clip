@@ -826,6 +826,31 @@ def _purge_unwanted_sources(proj, log) -> int:
     return n
 
 
+def recovery_pick(unresolved: list, seg_by_idx: dict, policy_mod, tried: set,
+                  max_beats: int) -> list:
+    """Which unresolved beats get this bounded recovery round's slots.
+
+    Module level so the rotation is testable without a project — the ordering IS the fix (see the
+    call site for the measurement).
+
+      1. Beats with no query material at all cannot be rediscovered; they must not burn a slot.
+      2. Gate-vulnerable classes first: CHARACTER, then FILLER/ABSTRACT, then EXACT.
+      3. Within a class, a beat that has never been searched outranks one already tried and not
+         recovered. Re-attempts are kept, just last: a later round has a larger pool.
+      4. Script order breaks the remaining ties, so the result is still fully deterministic.
+    """
+    def _rank(i):
+        s = seg_by_idx.get(i)
+        p = policy_mod.policy_of(s) if s is not None else policy_mod.FILLER
+        return ({policy_mod.CHARACTER: 0, policy_mod.FILLER: 1, policy_mod.ABSTRACT: 1,
+                 policy_mod.EXACT: 2}.get(p, 1), 1 if i in (tried or set()) else 0, i)
+
+    have_query = [i for i in unresolved
+                  if ((getattr(seg_by_idx.get(i), "scene_query", "") or "").strip()
+                      or (getattr(seg_by_idx.get(i), "required_entity", "") or "").strip())]
+    return sorted(have_query, key=_rank)[:max_beats]
+
+
 def _write_recovery_audit(proj, audit: dict) -> None:
     import json as _json
     try:
@@ -1333,16 +1358,18 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
     # character first, then filler/abstract, exact last; script order within each class. Beats
     # with NO query material (no scene_query/required_entity — e.g. an abstract outro line)
     # can't be rediscovered and must not burn a slot; stills cover them.
-    def _rec_rank(i):
-        s = seg_by_idx.get(i)
-        p = _policy.policy_of(s) if s is not None else _policy.FILLER
-        return ({_policy.CHARACTER: 0, _policy.FILLER: 1, _policy.ABSTRACT: 1,
-                 _policy.EXACT: 2}.get(p, 1), i)
-    unresolved = [i for i in unresolved
-                  if ((getattr(seg_by_idx.get(i), "scene_query", "") or "").strip()
-                      or (getattr(seg_by_idx.get(i), "required_entity", "") or "").strip())]
-    unresolved.sort(key=_rec_rank)
-    unresolved = unresolved[:max_beats]
+    # ROTATION. The rank below is deterministic, so every round re-selected the SAME head of the
+    # same list. MEASURED on job 409e284b60: 32 beats unresolved, cap 8; round 1 took
+    # [90,110,166,76,89,91,12,13] and round 2 took [90,110,76,79,89,12,13,19] — six of eight were
+    # re-attempts, and round 2 reported `candidates_found 21, new_candidates 0` because re-issuing
+    # a query YouTube already answered returns the sources we already downloaded. Meanwhile beats
+    # 22/60/75/94/115/122/140/144/168 — "Arya kills the Night King", "the Children make the Night
+    # King", "the wight torso in the Dragonpit" — were never searched for even once.
+    # A beat already tried and not recovered therefore goes LAST within its class rather than
+    # being dropped: a later round has a bigger pool, so it may still be worth a retry, but only
+    # after every beat that has had no turn at all. Same cap, same cost, strictly wider coverage.
+    _tried = {int(i) for i in (proj.meta.get("recovery_attempted") or []) if str(i).lstrip("-").isdigit()}
+    unresolved = recovery_pick(unresolved, seg_by_idx, _policy, _tried, max_beats)
     # LOOK-MISS ACQUISITION — "watch the chalice" beats whose target nothing on disk shows are
     # KEPT (usable footage, never gambled) but flagged; when the recovery round has spare slots,
     # spend up to 3 on fetching footage that actually shows the named thing ("the footage exists
@@ -1369,7 +1396,14 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
     if not unresolved:
         _write_recovery_audit(proj, audit)
         return 0
-    log(f"recovery: {len(unresolved)} unresolved beat(s) → bounded rediscovery {unresolved}")
+    #  Recorded BEFORE the attempt: a round that dies mid-way must still count as this beat's
+    #  turn, otherwise a beat whose search reliably crashes monopolises the cap forever.
+    _fresh = [i for i in unresolved if i not in _tried]
+    proj.meta["recovery_attempted"] = sorted(_tried | set(unresolved))
+    audit["attempted_before"] = sorted(_tried)
+    audit["first_attempt_this_round"] = _fresh
+    log(f"recovery: {len(unresolved)} unresolved beat(s) → bounded rediscovery {unresolved} "
+        f"({len(_fresh)} never searched before)")
 
     # Snapshot EVERY current selection; the final selection list is snapshot ∪ (recovered new picks).
     snapshot = {s.segment_index: _copy.deepcopy(s) for s in proj.selections}
