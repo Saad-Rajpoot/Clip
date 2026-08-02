@@ -91,6 +91,35 @@ def _is_rhetorical_connector(seg) -> bool:
     return t.endswith("?") and len(t.split()) <= 10
 
 
+# The analyzer prompt promises required_kind ∈ {actor, character, object, scene, event, location}
+# and analyze.py stores whatever the model actually replied. A kind outside the set is a value no
+# downstream gate understands, so it silently becomes an unsatisfiable demand rather than a no-op.
+_KNOWN_KINDS = frozenset({"actor", "character", "object", "scene", "event", "location", ""})
+
+
+def _requires_many_subjects(seg) -> bool:
+    """Does this beat demand something NO SINGLE WINDOW can be — a montage?
+
+    Measured, job 6a26707939 beat 114: text "and she makes that identification three separate times
+    about three separate people", required_kind="montage" (not in the documented enum),
+    required_entity="Melisandre, Stannis, Jon Snow, Daenerys Targaryen", visual_policy=exact_scene.
+    Four people in four different scenes across five seasons is not an exact scene, so every
+    candidate failed the verifier, the fallback ladder found nothing, and it was one of the four
+    beats that release-blocked the render.
+
+    Two names are NOT a montage — "Melisandre, Jon Snow" and "Melisandre and Stannis" are ordinary
+    two-handers that really do occur in one shot, and they keep their exact label. Measured on the
+    same job: 3 two-entity beats (all genuine), 1 four-entity beat (the montage)."""
+    kind = (getattr(seg, "required_kind", "") or "").strip().lower()
+    if kind and kind not in _KNOWN_KINDS:
+        return True
+    ent = (getattr(seg, "required_entity", "") or "").strip()
+    if not ent:
+        return False
+    parts = [p.strip() for p in re.split(r",|\band\b|/|\+|;", ent) if p.strip()]
+    return len(parts) >= 3
+
+
 def is_deictic(seg) -> bool:
     """True when the beat POINTS at the anchor scene instead of naming it. Such a beat inherits the
     exact_scene treatment: 'that table' can only ever be satisfied by THAT table."""
@@ -251,6 +280,13 @@ def policy_of(seg) -> str:
     # work. Genuinely specific beats are untouched (any quote or entity keeps the label).
     if p in (EXACT, CHARACTER) and _is_rhetorical_connector(seg):
         return ABSTRACT
+    # MONTAGE GUARD — the same lesson as the connector guard, one step up: a beat can name plenty of
+    # concrete subjects and still be impossible, because it names FOUR of them across four scenes.
+    # Demote to CHARACTER, not ABSTRACT: any one of the named people is a perfectly honest visual
+    # for "she makes that identification three separate times", so the beat stays specific and
+    # simply stops demanding a single frame that shows all of them at once.
+    if p == EXACT and _requires_many_subjects(seg):
+        return CHARACTER
     return p if p in POLICIES else classify(seg)
 
 
