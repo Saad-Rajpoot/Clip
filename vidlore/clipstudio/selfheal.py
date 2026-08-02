@@ -601,11 +601,21 @@ def _soften_and_retry(proj, seg, sel, eng, pool, used, log) -> bool:
     asking for something retrieval cannot return. The candidate depth is raised because a
     character-policy still only has to show the right subject, so it is worth looking past the
     handful of frames that already failed the exact test."""
-    if not _soften_to_character(seg, log):
-        return False
+    _n = _env_int("VIDLORE_CLIPSTUDIO_SELFHEAL_SOFT_CANDS", 16)
+    if _soften_to_character(seg, log) and still_recover(
+            proj, seg, sel, eng, pool=pool, used_paths=used, cand_n=_n, log=log):
+        return True
+    # SECOND AND FINAL RUNG. Dropping the requirement is not enough when the NARRATION itself names
+    # the unfindable thing: beat 24 reads "The flayed man banners brought down to the ground", and
+    # the still verifier judges candidates against that sentence, so no frame in the pool can pass
+    # however loose the policy is. Measured — beat 24 stayed unresolved through the character rung
+    # and blocked the render a third time.
+    # `_soften_to_abstract` is the pipeline's own designed escape for a beat nothing can satisfy: it
+    # rewrites the beat as visual rest and takes era-appropriate atmosphere. Reached only after the
+    # character rung has also failed, on a beat that would otherwise cost the whole video.
+    _soften_to_abstract(seg, log)
     return bool(still_recover(
-        proj, seg, sel, eng, pool=pool, used_paths=used,
-        cand_n=_env_int("VIDLORE_CLIPSTUDIO_SELFHEAL_SOFT_CANDS", 16), log=log))
+        proj, seg, sel, eng, pool=pool, used_paths=used, cand_n=_n, log=log))
 
 
 def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,

@@ -135,3 +135,24 @@ def test_the_still_is_labelled_a_contextual_fallback_not_an_exact_hit():
     src = inspect.getsource(S._soften_to_character)
     assert "contextual_fallback" in src, \
         "the docstring must state the class so nobody later mistakes this for an exact match"
+
+
+# ------------------------------------------------------------------ the second rung
+def test_the_ladder_falls_through_to_abstract_when_the_narration_itself_is_unfillable():
+    """Dropping the requirement is not enough when the NARRATION names the unfindable thing. The
+    still verifier judges candidates against the beat's sentence, so beat 24 — "The flayed man
+    banners brought down to the ground" — cannot be satisfied by any frame in the pool however loose
+    the policy is. Measured: it stayed unresolved through the character rung and blocked the render
+    a third time. `_soften_to_abstract` is the pipeline's own designed escape for that case."""
+    src = inspect.getsource(S._soften_and_retry)
+    i_char = src.index("_soften_to_character")
+    i_abs = src.index("_soften_to_abstract")
+    assert i_abs > i_char, "abstract is the LAST rung, never the first"
+    assert src.count("still_recover") == 2, "each rung must actually search again"
+
+
+def test_the_abstract_rung_is_only_reached_after_the_character_rung_fails():
+    """`and` short-circuits: a beat the character rung fills must never be rewritten as visual rest."""
+    src = inspect.getsource(S._soften_and_retry)
+    head = src[:src.index("_soften_to_abstract")]
+    assert "return True" in head, "a successful character rung must return before the abstract one"
