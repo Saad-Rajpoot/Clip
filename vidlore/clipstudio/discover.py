@@ -43,6 +43,12 @@ _REJECT_TITLE = re.compile(
     r"handmade|for sale|\betsy\b|\bamazon\b|aliexpress|collectibles?|official merchandise|"
     r"product (video|review|showcase)s?|"
     r"everything wrong|cinemasins|recaps?|recap(ped|ping)?|explained|breakdowns?|easter eggs|"
+    # ...and the OTHER names a recap show goes by. Measured, job 6a26707939: "Game of Thrones
+    # Season 5 REWIND - Episode 9" aired a presenter talking to camera over a CGI Meereen backdrop
+    # in the delivered cut, with our own caption burned over her face. The near-identical "Season 5
+    # Episode 9 REVIEW" from the same search was banned on its title in the same render — 'review'
+    # was in this list and 'rewind' was not. Plural-safe per the trailing-\b note above.
+    r"rewinds?|wrap ?ups?|after ?shows?|rundowns?|season in review|"
     r"spoiler talk|let'?s play|live ?stream|full movie|whole movie|"
     # talking-head / press / cast content — NOT scene footage:
     r"interviews?|interviewed|interviewing|talks? about|talk show|jimmy kimmel|jimmy fallon|colbert|"
