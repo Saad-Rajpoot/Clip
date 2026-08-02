@@ -309,3 +309,59 @@ def test_unmeasurable_yield_is_given_the_benefit_of_the_doubt(monkeypatch):
     proj = _Proj([_Src("t", "The Trial of Petyr Baelish")], ["t"])
     assert _run(proj) == 1
     assert "odd" not in (proj.meta.get("banned_sources") or [])
+
+
+# ---------------------------------------------------------------- what a replacement may BE
+
+def _title_filter(title):
+    """Exercise the real predicate through a one-source backfill run."""
+    import re, inspect
+    from vidlore.clipstudio import orchestrate as O
+    src = inspect.getsource(O._backfill_rejected_sources)
+    assert "_title_ok" in src, "the pass must screen replacement TITLES, not just shot yield"
+    return src
+
+
+@pytest.mark.parametrize("title,blocked", [
+    # measured on job benjen_v2 — every one of these was ADMITTED into a Benjen Stark essay
+    ("Cersei and Jaime Lannister - Game of Thrones - All Scenes Part 3/8", True),
+    ("Cersei and Jaime Lannister - Game of Thrones - All Scenes Part 4/8", True),
+    ("Games of Thrones - S07E07 - Behind the Scene - Dragon Pit Meeting", True),
+    ("A tale of Benjen Stark -  A Game of Thrones fanfiction - Winter", True),
+    # ...and these must still get through
+    ("Game of Thrones 7x06 - Benjen Saves Jon Snow", False),
+    ("Game of Thrones S7E6 - Beyond The Wall | Wight Bear attack", False),
+    ("Night King Destroys The Wall - Game of Thrones S07E07", False),
+])
+def test_a_replacement_must_be_scene_footage_not_an_anthology(monkeypatch, title, blocked):
+    """A usable shot yield proves a source CAN air, never that it SHOULD.
+
+    The 13-minute "All Scenes Part 3/8" compilation cleared every per-shot gate with 162 usable
+    shots and then fed the breakout miner a Season-1 Cersei/Ned conversation. The pass had searched
+    with the REJECTED upload's own title — which is only a good query when that upload was genuinely
+    wanted; this one was already marginal, so asking for a cleaner copy of it bought an anthology of
+    a different story."""
+    monkeypatch.delenv("VIDLORE_CLIPSTUDIO_BACKFILL_REJECTED", raising=False)
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_BACKFILL_ROUNDS", "1")
+    new = _Src("cand", title, url="https://y/cand")
+    _wire(monkeypatch,
+          cands=[types.SimpleNamespace(url="https://y/cand", title=title)],
+          downloads=[new])
+    from vidlore.clipstudio import match as M
+    monkeypatch.setattr(M, "usable_shot_yield", lambda proj, sid, cfg=None: (162, 178))
+    proj = _Proj([_Src("t", "The Trial of Petyr Baelish")], ["t"])
+    msgs = []
+    n = _run(proj, log=msgs.append)
+    if blocked:
+        assert n == 0, f"{title!r} must never be admitted"
+        assert any("rejected" in m for m in msgs)
+    else:
+        assert n == 1, f"{title!r} is legitimate scene footage and must pass"
+
+
+def test_the_title_screen_runs_before_the_expensive_yield_probe():
+    """No point decoding shots for a source we already know we will not use."""
+    import inspect
+    from vidlore.clipstudio import orchestrate as O
+    src = inspect.getsource(O._backfill_rejected_sources)
+    assert src.index("_why_bad = _title_ok(") < src.index("usable_shot_yield(proj, s.id, cfg)")

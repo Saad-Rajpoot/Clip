@@ -368,6 +368,142 @@ def _is_narration(text: str) -> bool:
     return bool(_NARRATION_RX.search(text or ""))
 
 
+def _breakout_window_admissible(aired_text: str, movie_title: str, *, beat_text: str = "",
+                                beat_subject: str = "", promised_quote: str = "",
+                                quote_authored: bool = False, eng_cfg=None) -> tuple:
+    """May this window air as a breakout AT THIS BEAT? Returns (ok, reason, verdicts).
+
+    Answers TWO questions in one call, sampled N times, and requires the samples to be UNANIMOUS:
+      speaker  — the character saying these words, or the literal "narrator" (an essayist ABOUT it)
+      belongs  — is this line the narration's OWN evidence at this beat?
+
+    The second question is the one this project kept getting wrong. Every earlier breakout gate
+    judged a PROXY and every proxy was defeated by an input that satisfies it without satisfying the
+    intent: title tokens ('scene' matched inside "All Scenes"), an overlap COUNT (min_ov=2), a
+    stoplist that still let pronouns through, ±2-char prefix fuzz ("children's"≈"children"), season
+    strings, face crops. Measured on job benjen_v2 — a Benjen Stark essay aired FOUR breakouts of a
+    Season-1 Cersei/Ned conversation about Robert drinking, Jaime and the Iron Throne. Beat 112 won
+    its Cersei line on exactly two fuzzy tokens: "children's"↔children (Children of the Forest vs
+    Cersei's children) and "heart"↔heart (a dragonglass shard in the heart vs "with all my heart").
+
+    So judge the two artifacts the viewer actually judges — the words that will be HEARD and the
+    words the NARRATION says — and there is no proxy left to game. Mis-tier the source, collide on
+    2 or 20 words, mis-locate a quote: every path still ends in a (beat, aired-text) pair, and every
+    pair is judged here.
+
+    RELEVANCE IS EXEMPT ONLY WHEN `quote_authored` — i.e. the beat's own scripted quote was LOCATED
+    by find_quote_span in THIS source's word stream. Then a human author chose this line for this
+    beat and there is nothing to re-litigate; only a CONFIDENT 'narrator' verdict can still veto.
+    The exemption keys on the located span, never on `seg.quote` being non-empty — beat 112 carried
+    a perfectly good quote ("They drove a dragonglass dagger into my heart") that locates in ZERO of
+    the job's 102 word streams, and it must not buy its way out.
+
+    FAILS CLOSED (no breakout) on: a narration verdict, a not-belongs verdict, low confidence, an
+    unparseable reply, a missing sample, no LLM. A breakout is optional polish — refusing one costs
+    nothing, while airing an unrelated conversation is the most damaging thing this feature can do.
+    A CODE fault (NameError/AttributeError/TypeError) is logged loudly and re-raised: it must never
+    hide inside the fail-closed catch (cf. `recovery: skipped (NameError)`, dead for months).
+
+    Env: VIDLORE_CLIPSTUDIO_BREAKOUT_ADMIT_SAMPLES (N, default 3 — do NOT run at 1 or 2; measured,
+    beat 156 admitted on 2 of 6 single samples and unanimity is what caught it),
+    VIDLORE_CLIPSTUDIO_BREAKOUT_ADMIT_MIN_CONF (default 0.70),
+    VIDLORE_CLIPSTUDIO_BREAKOUT_ADMIT_CHECK=0 disables the RELEVANCE half only."""
+    import os as _os_ad
+    txt = (aired_text or "").strip()
+    if len(txt.split()) < 3:
+        return False, "too short to classify", []
+    try:
+        _n = max(1, min(5, int(_os_ad.environ.get(
+            "VIDLORE_CLIPSTUDIO_BREAKOUT_ADMIT_SAMPLES", "3") or 3)))
+    except (TypeError, ValueError):
+        _n = 3
+    try:
+        _min_conf = float(_os_ad.environ.get(
+            "VIDLORE_CLIPSTUDIO_BREAKOUT_ADMIT_MIN_CONF", "0.70") or 0.70)
+    except (TypeError, ValueError):
+        _min_conf = 0.70
+
+    from . import llm as _llm_d
+    if eng_cfg is None:                                    # self-serve: build_video carries no cfg
+        try:
+            from .config import engine_config as _ec_d
+            eng_cfg = _ec_d()
+        except Exception:                                  # noqa: BLE001
+            eng_cfg = None
+    if not _llm_d.has_llm(eng_cfg):
+        return False, "no LLM available to judge the window (fail-closed)", []
+
+    _sys = (
+        "A video essay about " + (movie_title or "a film/TV show") + " is about to cut to a clip and "
+        "let the clip's OWN audio play, so the scene speaks for itself. Decide whether that cut is "
+        "honest at this exact moment.\n"
+        "The transcript is automatic speech recognition of the CLIP's soundtrack. Garbled words, "
+        "wrong homophones and fragments are TRANSCRIPTION artefacts and are NOT evidence about who "
+        "is speaking. Judge the underlying spoken line.\n"
+        "  speaker - name the character speaking INSIDE the story; the exact string \"narrator\" "
+        "ONLY if these words are a video-essay author narrating ABOUT the show from outside it.\n"
+        "  scene   - one short clause naming the scene the words come from.\n"
+        "  belongs - true if the narration and this line are about the SAME SPECIFIC thing: the "
+        "line is spoken in the scene the narration describes, OR the narration reports or "
+        "paraphrases what this line says, OR it is the exact line the narration promised. A line "
+        "that merely MENTIONS the same noun as the narration (a throne, children, a heart, killing, "
+        "a walker) does NOT belong. A different scene, different characters or a different point in "
+        "the story does NOT belong. If you would have to explain the connection to a viewer, it "
+        "does NOT belong.\n"
+        "When unsure, answer belongs=false. An off-topic cut is far worse than no cut.\n"
+        'Reply ONLY: {"speaker":"...","scene":"...","in_story":true|false,'
+        '"belongs":true|false,"confidence":0.0-1.0}')
+    _usr = (f"NARRATION AT THIS MOMENT: {(beat_text or '(none)')[:400]}\n"
+            + (f"NARRATION SUBJECT: {beat_subject[:120]}\n" if beat_subject else "")
+            + (f"LINE THE NARRATION PROMISED: {promised_quote[:200]}\n" if promised_quote else "")
+            + f"CLIP AUDIO (ASR): {txt[:600]}")
+
+    def _one(_i):
+        import json as _json_d
+        import re as _re_d
+        out = _llm_d.complete(system=_sys, max_tokens=160,
+                              messages=[{"role": "user", "content": _usr}], eng_cfg=eng_cfg)
+        m = _re_d.search(r"\{.*\}", out or "", _re_d.S)
+        if not m:
+            return None
+        v = _json_d.loads(m.group(0))
+        return {"speaker": str(v.get("speaker", "")).strip(),
+                "scene": str(v.get("scene", "")).strip(),
+                "in_story": bool(v.get("in_story")),
+                "belongs": bool(v.get("belongs")),
+                "confidence": float(v.get("confidence", 0) or 0)}
+
+    try:
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        with _TPE(max_workers=_n) as _ex:                  # N samples cost one call of wall time
+            samples = list(_ex.map(_one, range(_n)))
+    except (NameError, AttributeError, TypeError):         # a CODE fault must never fail closed
+        raise
+    except Exception as e:                                 # noqa: BLE001 — provider/parse failures
+        return False, f"judge error ({type(e).__name__}) — fail-closed", []
+
+    good = [s for s in samples if s]
+    if len(good) != _n:                                    # a missing sample is a NO, not a maybe
+        return False, f"only {len(good)}/{_n} verdicts parsed — fail-closed", good
+
+    def _ok(s):
+        in_story = bool(s["in_story"]) and s["speaker"].strip().lower() != "narrator"
+        if quote_authored:
+            # the author chose this line for this beat; only a CONFIDENT narrator call can veto
+            return not ((not in_story) and s["confidence"] >= _min_conf)
+        return in_story and s["belongs"] and s["confidence"] >= _min_conf
+
+    votes = [_ok(s) for s in good]
+    if all(votes):
+        _sp = good[0]["speaker"] or "in-character"
+        return True, (f"{_sp} — belongs at this beat "
+                      f"({'quote-anchored' if quote_authored else 'judged'}, {_n}/{_n})"), good
+    _bad = next(s for s, v in zip(good, votes) if not v)
+    return False, (f"off-topic for this beat — speaker={_bad['speaker']!r} "
+                   f"scene={_bad['scene'][:60]!r} belongs={_bad['belongs']} "
+                   f"conf={_bad['confidence']:.2f} ({sum(votes)}/{_n} would admit)"), good
+
+
 def _breakout_line_is_dialogue(aired_text: str, movie_title: str, eng_cfg=None) -> tuple:
     """SEMANTIC authority on 'is this the movie speaking, or a YouTuber speaking ABOUT the movie?'
 
@@ -1276,7 +1412,10 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     _rej = {"later_era_source": 0, "commentary": 0, "recap": 0, "wrong_char": 0,
             "unidentified": 0,
             "dark": 0, "burned_text": 0, "dedup": 0, "spacing": 0, "window_commentary": 0,
-            "qa_excluded": 0}
+            "qa_excluded": 0, "off_topic": 0}
+    # per-beat admission verdicts, persisted into breakout_audit.json so a render's breakout
+    # decisions can be re-read offline without calling the judge again
+    _bk_admit_verdicts: dict = {}
     # lines a PRIOR render's post-render QA proved un-airable (audio masked / black window) —
     # see _persist_breakout_qa_exclusions; the beat gets a different candidate or none
     _qa_excl: set = set()
@@ -1927,6 +2066,18 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
             log(f"build: breakout scene {idx} — quote-anchored window "
                 f"[{_bk_start:.2f}→{_bk_start + _bk_min:.2f}] (shot starts {float(sh.start):.2f}, "
                 f"phrase match {_qr})")
+        elif _qtext:
+            # The beat PROMISED a line and the chosen source does not speak it. Until now this fell
+            # through in total silence — no log, no counter — and the mined window served the quoted
+            # beat as if nothing had happened. That silence is why job benjen_v2 could air a Cersei
+            # conversation under Benjen's own "They drove a dragonglass dagger into my heart": the
+            # quote locates in ZERO of its 102 word streams, and nothing said so. The admission gate
+            # below now refuses these, but the CAUSE has to be visible in the log of every render —
+            # "the line this beat promised is in no footage we have" is a script/footage gap the
+            # owner can act on, not a mystery.
+            log(f"build: breakout scene {idx} — the beat's promised line is NOT spoken in "
+                f"{(src.title or src.id)[:44]!r} ({_qtext[:60]!r}); the window is evidence-mined, "
+                f"so it must earn its place on relevance alone")
         real = _extract_breakout(src.local_path, _bk_start, dur, v, a,
                                  int(getattr(src, "width", 0) or 0), crop_corner=_bk_corner,
                                  min_dur=_bk_min)
@@ -1972,13 +2123,35 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         # (narration / low confidence / no LLM / error → reject): a breakout is optional polish, so
         # refusing one costs nothing while airing a rival's voice-over is the worst possible outcome.
         # env VIDLORE_CLIPSTUDIO_BREAKOUT_DIALOGUE_CHECK=0 disables (back to keyword-only).
+        # ...and it must belong AT THIS BEAT. "Is this the show speaking?" was never the whole
+        # question: on job benjen_v2 four Season-1 Cersei/Ned lines (Robert drinking, Jaime, the
+        # Iron Throne) were in-character dialogue and passed this gate cleanly, then aired inside a
+        # Benjen Stark essay. Beat 112 bound its Cersei line on two fuzzy tokens — "children's"↔
+        # children and "heart"↔heart — while its own quote located in ZERO of 102 word streams. So
+        # the judge now also sees the NARRATION and answers "is this line the narration's own
+        # evidence here?", N times, unanimously. A beat whose scripted quote was actually LOCATED in
+        # this source (_span) is exempt from the relevance half — an author chose that line — but
+        # never on `seg.quote` merely being non-empty.
         if _os9b.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_DIALOGUE_CHECK", "1").strip() \
                 not in ("0", "false", "no", "") and _wtxt:
-            _dlg_ok, _dlg_why = _breakout_line_is_dialogue(_wtxt, _bk_show9)
+            _sg9 = _seg_by_idx.get(idx)
+            _relevance_on = _os9b.environ.get(
+                "VIDLORE_CLIPSTUDIO_BREAKOUT_ADMIT_CHECK", "1").strip() not in ("0", "false", "no")
+            _dlg_ok, _dlg_why, _verdicts9 = _breakout_window_admissible(
+                _wtxt, _bk_show9,
+                beat_text=(getattr(_sg9, "text", "") or ""),
+                beat_subject=(f"{getattr(_sg9, 'required_kind', '')}: "
+                              f"{getattr(_sg9, 'required_entity', '')}"
+                              if getattr(_sg9, "required_entity", "") else ""),
+                promised_quote=_qtext,
+                # ADMIT_CHECK=0 → exempt everything → reverts to the old dialogue-only behaviour
+                quote_authored=(bool(_span) or not _relevance_on))
+            _bk_admit_verdicts[idx] = {"ok": _dlg_ok, "why": _dlg_why,
+                                       "quote_anchored": bool(_span), "verdicts": _verdicts9}
             if not _dlg_ok:
-                _rej["window_commentary"] += 1
-                log(f"build: breakout REJECTED post-extract before scene {idx} — dialogue check: "
-                    f"{_dlg_why} (src={(src.title or src.id)[:40]!r})")
+                _rej["off_topic"] += 1
+                log(f"build: breakout REJECTED post-extract before scene {idx} — {_dlg_why} "
+                    f"(src={(src.title or src.id)[:40]!r})")
                 continue
         # CUT-WINDOW FLAG VALIDATION on the aired breakout window — _extract_breakout extends
         # the cut to a full spoken line, which can cross into an adjacent shot carrying burned
@@ -2097,7 +2270,8 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     # above can shrink here when an aired window is rejected as commentary) — so the audit is never
     # ambiguous about how many breakouts actually aired.
     log(f"[BREAKOUT-AUDIT] final accepted={len(out)} (post-extract; "
-        f"window_commentary rejections={_rej['window_commentary']})")
+        f"window_commentary rejections={_rej['window_commentary']}, "
+        f"off_topic rejections={_rej['off_topic']})")
     try:
         import json as _json9
         (work / "breakout_audit.json").write_text(_json9.dumps({
@@ -2105,6 +2279,9 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
             "rejected_counts": dict(_rej),
             "pre_filtered_essay_or_foreign_sources": _src_excluded,
             "accepted": [e["_audit"] for e in out],
+            # every admission verdict, kept or rejected — so "why did THAT breakout air?" is
+            # answerable offline, without re-calling the judge
+            "admission_verdicts": {str(k): v for k, v in _bk_admit_verdicts.items()},
             "log_lines": _audit_lines,
         }, indent=1), encoding="utf-8")
     except Exception:

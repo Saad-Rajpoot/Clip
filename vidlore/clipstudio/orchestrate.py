@@ -1283,8 +1283,53 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
         # enough: a fetched copy of the exact scene we lost came back as another screener with
         # "FOR INTERNAL VIEWING ONLY" burned in, cleared every source gate, and then lost all 11 of
         # its shots to the shot-level text gate. Measure the yield and say so.
+        # A usable yield proves a source CAN air, never that it SHOULD. Measured on job benjen_v2,
+        # where this pass admitted 26 sources into a BENJEN STARK essay and among them:
+        #   "Cersei and Jaime Lannister - All Scenes Part 3/8"   162 usable shots
+        #   "Cersei and Jaime Lannister - All Scenes Part 4/8"   150 usable shots
+        #   "S07E07 - Behind the Scene - Dragon Pit Meeting"     182 usable shots  (BTS!)
+        #   "A tale of Benjen Stark - A Game of Thrones fanfiction"
+        # The Lannister compilations then fed the breakout miner and one of them aired a Season-1
+        # Cersei/Ned conversation inside the essay. The pass had searched with the REJECTED source's
+        # own title ("Cersei and Jaime Lannister - The Sept Scene"), which is only a good query when
+        # the rejected upload was genuinely wanted — that one was already marginal, so asking for a
+        # cleaner copy of it bought a 13-minute compilation of a different story.
+        #
+        # So apply discovery's OWN title rules to what comes back. They already encode "not scene
+        # footage": behind-the-scenes, fanfiction, reaction, talking-head, non-show.
+        from .discover import _REJECT_TITLE, _NONSHOW_TITLE, _REACTION_TITLE
+        import re as _re_bf
+
+        def _title_ok(title: str) -> str:
+            t = title or ""
+            if _REJECT_TITLE.search(t):
+                return "making-of / talking-head / promo title"
+            if _NONSHOW_TITLE.search(t):
+                return "non-show title"
+            if _REACTION_TITLE.search(t):
+                return "reaction title"
+            # a multi-part "All Scenes Part n/N" character compilation is an anthology of a DIFFERENT
+            # story; it passes every per-shot gate and hands the breakout miner hours of off-topic
+            # dialogue. The original discovery rules do not cover it because it is genuine footage.
+            if _re_bf.search(r"\ball\s+scenes?\b|\bpart\s*\d+\s*/\s*\d+", t, _re_bf.I):
+                return "multi-part character compilation"
+            if _re_bf.search(r"\bfan\s*fiction\b|\bfanfic", t, _re_bf.I):
+                return "fanfiction"
+            # _REJECT_TITLE covers "how it was filmed" and stunt rehearsals but not the plain
+            # "Behind the Scene(s)" phrasing — measured: "S07E07 - Behind the Scene - Dragon Pit
+            # Meeting" was admitted with 182 usable shots and aired on a beat.
+            if _re_bf.search(r"behind[\s\-]+the[\s\-]+scenes?\b|\bb-?roll\b|\bbloopers?\b|"
+                             r"\bgag\s*reel\b", t, _re_bf.I):
+                return "behind-the-scenes"
+            return ""
+
         kept, dead = [], []
         for s in newly:
+            _why_bad = _title_ok(s.title or "")
+            if _why_bad:
+                dead.append((s, 0, 0))
+                log(f"5b/9 · backfill: rejected {(s.title or s.id)[:44]!r} — {_why_bad}")
+                continue
             try:
                 ok, tot = _M.usable_shot_yield(proj, s.id, cfg)
             except Exception:                                    # noqa: BLE001

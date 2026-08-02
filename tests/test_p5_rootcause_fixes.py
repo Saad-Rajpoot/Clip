@@ -756,7 +756,11 @@ def test_breakout_dialogue_classifier_is_the_semantic_authority():
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "vidlore", "clipstudio", "build.py"), encoding="utf-8").read()
     assert "VIDLORE_CLIPSTUDIO_BREAKOUT_DIALOGUE_CHECK" in src
-    assert "_breakout_line_is_dialogue(_wtxt, _bk_show9)" in src, "must judge the AIRED window"
+    # the post-extract authority now judges the aired window AND whether it belongs at this beat
+    # (see test_breakout_relevance.py) — `_breakout_line_is_dialogue` is kept as the pure
+    # dialogue-vs-narration classifier this test exercises.
+    assert "_breakout_window_admissible(" in src, "must judge the AIRED window"
+    assert "_wtxt, _bk_show9," in src, "the aired window text is what gets judged"
 
 
 TESTS = [

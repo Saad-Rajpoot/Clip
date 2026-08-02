@@ -2825,8 +2825,14 @@ def test_intro_coldopen_breakout():
                     quote=(quote if i == 0 else "")) for i in range(n_segs)]
         _orig_ls = _idxmod.load_shots
         _orig = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
-                 B._asr_wav_words)
+                 B._asr_wav_words, B._breakout_window_admissible)
         _idxmod.load_shots = lambda p, sid: shots
+        # These cases exercise COLD-OPEN mechanics (quote coverage, hook stitching, audit
+        # provenance) on synthetic beats whose narration is deliberately nonsense filler. The
+        # post-extract admission judge is a separate concern with its own suite
+        # (tests/test_breakout_relevance.py) and would correctly refuse this fixture, so stub it
+        # here exactly as the extraction pipeline above is stubbed.
+        B._breakout_window_admissible = lambda *a, **k: (True, "stubbed for the cold-open cases", [])
         B._extract_breakout = lambda *a, **k: 5.0
         B._breakout_window_luma = lambda *a, **k: luma
         B._frame_has_burned_text = lambda *a, **k: burned
@@ -2841,7 +2847,7 @@ def test_intro_coldopen_breakout():
         finally:
             _idxmod.load_shots = _orig_ls
             (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
-             B._asr_wav_words) = _orig
+             B._asr_wav_words, B._breakout_window_admissible) = _orig
         return out, "\n".join(logs)
 
     def _has0(out):
@@ -2929,8 +2935,11 @@ def test_intro_coldopen_breakout():
         segs = [fr[0], fr[1], fr[2], fr[3]] + [types.SimpleNamespace(
             index=i, quote="", text=f"narration filler beat {i} words here") for i in range(4, 9)]
         _ls = _idxmod.load_shots
-        _o = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text, B._asr_wav_words)
+        _o = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
+              B._asr_wav_words, B._breakout_window_admissible)
         _idxmod.load_shots = lambda p, sid: shots
+        # same reasoning as _run above: this case is about HOOK STITCHING, not relevance
+        B._breakout_window_admissible = lambda *a, **k: (True, "stubbed for the hook case", [])
         B._extract_breakout = lambda *a, **k: 6.0
         B._breakout_window_luma = lambda *a, **k: 80.0
         B._frame_has_burned_text = lambda *a, **k: False
@@ -2942,7 +2951,7 @@ def test_intro_coldopen_breakout():
         finally:
             _idxmod.load_shots = _ls
             (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
-             B._asr_wav_words) = _o
+             B._asr_wav_words, B._breakout_window_admissible) = _o
         return o, "\n".join(lg)
     of, lf = _run_frag()
     check("fragmented hook airs as a scene-0 COLD-OPEN breakout",

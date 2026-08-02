@@ -570,7 +570,10 @@ def test_breakout_in_point_is_the_quote_not_the_shot():
         encoding="utf-8")
     assert "QUOTE-ANCHORED WINDOW" in s
     i = s.index("QUOTE-ANCHORED WINDOW")
-    blk = s[i:i + 1800]
+    # slice to the END of the anchoring block (the extract call) rather than a fixed character
+    # count — the block legitimately grew when the "promised line is not spoken here" branch was
+    # added, and a fixed window silently pushed `min_dur=_bk_min` out of view.
+    blk = s[i:s.index("real = _extract_breakout(", i) + 400]
     assert "find_quote_span" in blk, "the in-point must come from the quote's audio span"
     assert "_bk_start = max(0.0, _qs - _BK_LEAD_S)" in blk
     assert "min_dur=_bk_min" in blk, "the window must be forbidden from ending before the line does"
