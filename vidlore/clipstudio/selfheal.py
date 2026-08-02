@@ -90,6 +90,43 @@ def _soften_to_abstract(seg, log) -> None:
                            "atmospheric shot as visual rest under a meta line.")
 
 
+def _soften_to_character(seg, log) -> bool:
+    """LAST RESORT for an exact beat whose moment is simply not in reach. Returns True if softened.
+
+    The owner's standing rule for this pipeline: if the exact scene is not available, do not insist
+    on it — settle for a similar one. This is where "do not insist" has to be implemented, because
+    everything upstream has already been tried and the only remaining outcomes are a related shot or
+    no video at all.
+
+    Measured, job 6a26707939. Four beats survived acquisition and release-blocked the render; three
+    of them (24, 82, 149) describe the Bolton flayed-man banner coming down at Winterfell. The frame
+    exists — game_of_thrones_jon_sn_123ebf87 shot 64 is the banners lying in the snow — and CLIP
+    cannot see it: it ranks 48/67, 33/67 and 40/67 WITHIN ITS OWN FILE on those three queries, while
+    the Stark-banner shot beside it ranks 1/67 on all three. No bench of any sane depth reaches rank
+    48, so demanding the exact moment on those beats is demanding something retrieval cannot deliver.
+
+    Softening EXACT to CHARACTER keeps the beat pointed at the right subject and era and lets a
+    related frame satisfy it. The still is then labelled `contextual_fallback` by the existing
+    honest-class logic, so the audit still says plainly that the exact moment was never found.
+
+    Only ever reached by a beat that would otherwise release-block the whole video, so it cannot
+    change any beat that is already working. env VIDLORE_CLIPSTUDIO_SELFHEAL_SOFTEN=0 to disable."""
+    if not _env_on("VIDLORE_CLIPSTUDIO_SELFHEAL_SOFTEN", "1"):
+        return False
+    from . import policy as _P
+    if _P.policy_of(seg) != _P.EXACT:
+        return False
+    log(f"self-heal: beat {seg.index} — the exact moment is not in reach after acquisition; "
+        f"settling for the right subject instead of failing the video "
+        f"(exact_scene -> character_specific)")
+    seg.visual_policy = _P.CHARACTER
+    try:
+        seg.is_specific_claim = False
+    except Exception:                                    # noqa: BLE001
+        pass
+    return True
+
+
 # ── candidate pool ────────────────────────────────────────────────────────────────────────────
 
 def _clean_pool(proj) -> list[tuple[str, object]]:
@@ -541,6 +578,20 @@ def acquire_for_beat(proj, seg, cfg, *, policy: str, log=print) -> list:
 
 # ── the loop ──────────────────────────────────────────────────────────────────────────────────
 
+def _soften_and_retry(proj, seg, sel, eng, pool, used, log) -> bool:
+    """Soften an unreachable exact beat and search the SAME pool once more under the looser bar.
+
+    Deliberately no re-acquisition and no new pool: the point is not to try harder, it is to stop
+    asking for something retrieval cannot return. The candidate depth is raised because a
+    character-policy still only has to show the right subject, so it is worth looking past the
+    handful of frames that already failed the exact test."""
+    if not _soften_to_character(seg, log):
+        return False
+    return bool(still_recover(
+        proj, seg, sel, eng, pool=pool, used_paths=used,
+        cand_n=_env_int("VIDLORE_CLIPSTUDIO_SELFHEAL_SOFT_CANDS", 16), log=log))
+
+
 def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
                        allow_acquire: bool = True, log=print) -> int:
     """One healing pass over `blocked` beat indexes. Returns beats resolved this pass."""
@@ -583,9 +634,15 @@ def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
                         resolved += 1
                         break
                 else:
+                    if _soften_and_retry(proj, seg, sel, eng, pool, used, log):
+                        resolved += 1
+                        continue
                     log(f"self-heal: beat {bidx} unresolved this pass")
                     continue
                 continue
+        if _soften_and_retry(proj, seg, sel, eng, pool, used, log):
+            resolved += 1
+            continue
         log(f"self-heal: beat {bidx} unresolved this pass")
     # persist this pass's venue verdicts so the NEXT round (and the review-draft retry, which
     # re-runs the whole heal) replays them instead of re-buying identical answers

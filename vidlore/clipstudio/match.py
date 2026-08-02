@@ -2005,11 +2005,41 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
     # A/B's OFF arm runs, and it stays as the production escape hatch.
     _aff_itf = os.environ.get("VIDLORE_CLIPSTUDIO_TITLE_AFFINITY_ITF", "1").strip() \
         not in ("0", "false", "no")
+    # COVERAGE vs ABSOLUTE MASS. `_ta_full` is an absolute ITF mass, and on a 62-title pool almost
+    # every token is "rare": 0 titles -> 1.000, 1 -> 0.833, 2 -> 0.735. So ONE lucky collision very
+    # nearly saturates the 0.90 threshold and buys the whole cap.
+    #
+    # Measured, job 6a26707939 beat 82, "Game of Thrones Bolton banner removed Winterfell Stark
+    # banner raised". The winning source is "GoT 5x2 - Stannis offers Jon Snow to become Jon STARK,
+    # Lord of WINTERFELL" — a legitimisation scene with no banner in it. It hits {stark, winterfell}
+    # for mass 1.254, saturates, and takes the full 0.34. The correct upload, "Jon Snow takes back
+    # Winterfell", whose shot 64 IS the flayed-man banners lying in the snow and which is CLIP rank
+    # 1 of 1497 with base 0.80, hits only {winterfell} and is zeroed outright by the >=2 floor. The
+    # rank-261 shot wins 0.8875 to 0.7944 and the beat release-blocked the render.
+    # 'stark' scored ITF 0.833 because it appears in exactly ONE title in the pool — the wrong one.
+    # Rarity in a 62-title corpus is not evidence about a scene.
+    #
+    # COVERAGE asks the question the bonus is actually for: of everything that makes this scene
+    # identifiable, how much does this title actually name? Normalise by the query's OWN total ITF
+    # mass instead of a constant. Beat 82 then pays the winner 1.254/4.989 = 25% of the cap (0.085)
+    # and the correct source 8% (0.029). It also retires the >=2 count floor: one common token
+    # becomes a small fraction rather than a coin flip between zero and the maximum.
+    #
+    # MEASURED AND NOT SHIPPED (default stays "absolute"). On the offline replay of this job the
+    # coverage arm moved 119 of 167 picks and STILL did not land the banner shot on a single one of
+    # the eight beats it was built for. Damping the bonus only hands the decision to the reuse and
+    # recency penalties, which are just as large as the CLIP range — so the video is re-rolled
+    # wholesale for no gain, which is the exact trade this project keeps making and must stop
+    # making. The real defect on those beats turned out to be the one-shot-per-source bench below.
+    # Kept, documented and measurable, because the reasoning is still right and it may matter once
+    # the penalty stack is bounded. Control arm reproduces 0/167 changed.
+    _ta_mode = os.environ.get("VIDLORE_CLIPSTUDIO_TITLE_AFFINITY_MODE", "absolute").strip().lower()
     _ta_damp = os.environ.get("VIDLORE_CLIPSTUDIO_TITLE_AFFINITY_DAMP", "hard").strip().lower()
     _exact_beat = (getattr(seg, "visual_policy", "") or "") == "exact_scene"
     _aff_cap = _aff_exact if (_exact_beat and _aff_itf) else _aff
     _sq_toks: set = set()
     _sq_itf: dict = {}
+    _sq_itf_total: float = 0.0             # bound unconditionally — never a NameError under a gate
     if _aff > 0 and title_toks and (
             _exact_beat or bool(getattr(seg, "is_specific_claim", False))):
         import re as _re_ta
@@ -2030,6 +2060,10 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
             _ln_ta = _m_ta.log(_n_ta + 1) or 1.0
             _sq_itf = {w: _m_ta.log((_n_ta + 1) / (_df_ta.get(w, 0) + 1)) / _ln_ta
                        for w in _sq_toks}
+            # the query's OWN identifying mass — the denominator coverage mode measures against.
+            # A token no title contains still counts here: failing to name the scene's rarest word
+            # is exactly the evidence coverage is meant to price in.
+            _sq_itf_total = sum(_sq_itf.values())
     gate_on = os.environ.get("VIDLORE_CLIPSTUDIO_OCR_GATE", "1").strip() not in ("0", "false", "no", "")
     tgate_on = os.environ.get("VIDLORE_CLIPSTUDIO_TEXT_GATE", "1").strip() not in ("0", "false", "no", "")
     # MOMENT-LOCK: resolve the beat to a dialogue line ONCE per beat (not per candidate shot).
@@ -2168,8 +2202,14 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
             _thit_w = [w for w in _sq_toks
                        if any(t == w or (t.startswith(w) and len(t) - len(w) <= 2)
                               for t in _tw)]
-            if len(_thit_w) >= 2:
-                if _sq_itf:
+            # COVERAGE mode needs no count floor — see the note at _ta_mode. ABSOLUTE mode keeps it,
+            # because there one rare token saturates and the floor is the only thing stopping it.
+            _coverage = bool(_sq_itf) and _ta_mode == "coverage"
+            if len(_thit_w) >= (1 if _coverage else 2):
+                if _coverage:
+                    _tbonus = _aff_cap * min(
+                        1.0, sum(_sq_itf.get(w, 0.0) for w in _thit_w) / max(1e-6, _sq_itf_total))
+                elif _sq_itf:
                     _tbonus = _aff_cap * min(
                         1.0, sum(_sq_itf.get(w, 0.0) for w in _thit_w) / max(1e-6, _ta_full))
                 else:
@@ -2806,6 +2846,15 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         # Decoupled so anti-reuse/anchor-continuity never distort the reported confidence.
         best = None    # (adj, base, ps, cand)
         alt_best: dict[str, ClipCandidate] = {}    # best candidate per source → alternates
+        # ...and the best candidate per SHOT, for the deep bench only. One-per-source is right for
+        # `alternates` (their job is spread), and structurally unable to find a moment: a 21-strong
+        # bench spans 21 sources × 1 shot each, so the second-best shot of the RIGHT file is
+        # invisible. Measured on job 6a26707939, beats 24 and 82 ("the flayed man banners brought
+        # down to the ground" / "the flayed man comes down off the walls"): the bench carried
+        # game_of_thrones_jon_sn_123ebf87 shot 66 — the STARK banner going UP — so the verifier
+        # correctly refused it and gave up, while shot 64 of the same file, the Bolton banners lying
+        # in the snow, was never a candidate on any beat. Both beats release-blocked the render.
+        shot_best: dict[tuple, ClipCandidate] = {}
         # VISUAL-POLICY variety (req. 2/5): filler/character beats should SPREAD across sources, so
         # their reuse + source-recency penalties are amplified. exact_scene beats keep the multiplier
         # at 1.0 — the precise scene must win even from a recently-used source.
@@ -2915,6 +2964,10 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
             cand = ClipCandidate(segment_index=seg.index, source_id=ps.sid,
                                  shot_index=ps.shot.index, score=qual,
                                  in_point=in_p, out_point=out_p, signals=sig)
+            _sk = (ps.sid, ps.shot.index)
+            _sc = shot_best.get(_sk)
+            if _sc is None or cand.score > _sc.score:
+                shot_best[_sk] = cand
             if best is None or adj > best[0]:
                 if best is not None:
                     prev = best[3]
@@ -2966,12 +3019,42 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
                                   or 20))
             except (TypeError, ValueError):
                 _keep_n = max(cfg.candidates_per_segment, 20)
+            _rank = (lambda c: c.score + float((c.signals or {}).get("anchor_bonus", 0.0)))
             alternates = sorted(
                 (c for c in alt_best.values() if (c.source_id, c.shot_index) != _ckey),
-                key=lambda c: c.score + float((c.signals or {}).get("anchor_bonus", 0.0)),
-                reverse=True)[:_keep_n]
+                key=_rank, reverse=True)[:_keep_n]
+            # SIBLING SHOTS are APPENDED past the one-per-source list. The head of `alternates` —
+            # everything up to candidates_per_segment, which is what every other stage reads — is
+            # untouched and still one-per-source, so the spread the alternates exist to provide is
+            # unchanged. Only the TAIL grows, and the tail is read solely when the verifier is about
+            # to give up on an exact beat and settle for a contextual fallback. At that point
+            # diversity is worth nothing and finding the actual moment is worth everything: the
+            # right file is usually already on the bench, at the wrong second.
+            # Drawn from every source that made the bench, a couple of shots each, rather than a
+            # deep dig into the leading few. Measured on this job's beats 24 and 82: the file that
+            # holds the shot they need ranked 10th, not top-6, so a leading-sources-only rule pulled
+            # nothing for exactly the beats it was written for. Breadth is what finds a moment; the
+            # per-source depth stays small so the bench does not fill with one file's runtime.
+            try:
+                _sib_src = max(0, int(_os_alt.environ.get(
+                    "VIDLORE_CLIPSTUDIO_SIBLING_SOURCES", "20") or 20))
+                _sib_per = max(0, int(_os_alt.environ.get(
+                    "VIDLORE_CLIPSTUDIO_SIBLING_SHOTS", "2") or 2))
+            except (TypeError, ValueError):
+                _sib_src, _sib_per = 20, 2
+            _have = {(c.source_id, c.shot_index) for c in alternates} | {_ckey}
+            _sib: list = []
+            for _lead in alternates[:_sib_src]:
+                _sib += sorted(
+                    (c for k, c in shot_best.items()
+                     if k[0] == _lead.source_id and k not in _have),
+                    key=_rank, reverse=True)[:_sib_per]
+            _sib.sort(key=_rank, reverse=True)
+            alternates += _sib
+            _n_sib = len(_sib)
         else:
             alternates = []
+            _n_sib = 0
 
         # CUT-WINDOW FLAG VALIDATION — the rendered cut pads/extends past shot bounds, so the
         # FULL final window must be clean, not just the chosen shot's own samples. Moment-locked
@@ -3013,8 +3096,10 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
                     "VIDLORE_CLIPSTUDIO_DEEP_ALTERNATES", "20") or 20)
             except (TypeError, ValueError):
                 _deep_n = 20
+            # + the sibling shots appended above: they sit past _deep_n by construction, and the
+            # whole point of adding them is that the verifier can reach them.
             if _deep_n > cfg.candidates_per_segment:
-                sel.deep_alternates = alternates[cfg.candidates_per_segment:_deep_n]
+                sel.deep_alternates = alternates[cfg.candidates_per_segment:_deep_n + _n_sib]
             if ps.shot.face_ids:
                 sel.identity = ps.shot.face_ids[0]
                 if ps.shot.identities:
