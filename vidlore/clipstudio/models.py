@@ -241,6 +241,9 @@ class ClipSelection:
     # Ken-Burns motion still. Empty = normal video footage was used.
     image_path: str = ""
     image_meta: dict = field(default_factory=dict)   # {source, score, clip, face, query}
+    # LEGIBILITY GRADE (cut.py): "" when the window aired as shot, else a note naming the gamma and
+    # the measured luma it was lifted from. Presentation only — it never changes which footage runs.
+    legibility_grade: str = ""
 
     @property
     def duration(self) -> float:
