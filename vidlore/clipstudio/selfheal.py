@@ -116,10 +116,26 @@ def _soften_to_character(seg, log) -> bool:
     from . import policy as _P
     if _P.policy_of(seg) != _P.EXACT:
         return False
+    # A PROP IS NOT A PERSON. Softening the policy alone does nothing when the requirement itself is
+    # the unfindable thing: beats 82 and 149 demand required_entity='flayed man banner' / 'Bolton
+    # banners', and beat 160 a 'tent'. Every still candidate is checked against that entity, so the
+    # beat keeps failing at the looser policy exactly as it did at the strict one — measured, all
+    # three survived the first softening pass and blocked the render anyway.
+    # So on this last resort the OBJECT/LOCATION/SCENE requirement is dropped and the beat falls
+    # back to its narration and era. A CHARACTER requirement is NOT dropped: "any Melisandre shot"
+    # is an honest fallback, "any shot at all" on a beat about a person is how a wrong-character
+    # leak gets in, and that is the one class of error the identity gate exists to stop.
+    _kind = (getattr(seg, "required_kind", "") or "").strip().lower()
+    _drop = _kind not in ("character", "actor")
     log(f"self-heal: beat {seg.index} — the exact moment is not in reach after acquisition; "
         f"settling for the right subject instead of failing the video "
-        f"(exact_scene -> character_specific)")
+        f"(exact_scene -> character_specific"
+        + (f", dropping the {_kind or 'unnamed'} requirement "
+           f"{(getattr(seg, 'required_entity', '') or '')[:40]!r}" if _drop else "") + ")")
     seg.visual_policy = _P.CHARACTER
+    if _drop:
+        seg.required_entity = ""
+        seg.required_kind = ""
     try:
         seg.is_specific_claim = False
     except Exception:                                    # noqa: BLE001

@@ -45,13 +45,33 @@ def test_an_unreachable_exact_beat_is_softened_to_the_right_subject():
     assert P.policy_of(seg) == P.CHARACTER
 
 
-def test_softening_keeps_the_subject_it_still_has_to_show():
-    """CHARACTER, not ABSTRACT: the beat still names a real thing, and throwing that away would
-    licence any footage at all."""
+def test_an_unfindable_PROP_requirement_is_dropped():
+    """Softening the policy alone does nothing when the requirement IS the unfindable thing. Every
+    still candidate is checked against required_entity, so beats 82 and 149 ('flayed man banner',
+    'Bolton banners') and 160 ('tent') kept failing at the looser policy exactly as they had at the
+    strict one — measured, all three survived the first softening pass and blocked the render."""
     seg = Seg()
     S._soften_to_character(seg, lambda *a: None)
-    assert seg.required_entity == "flayed man banner"
-    assert seg.required_kind == "object"
+    assert seg.required_entity == ""
+    assert seg.required_kind == ""
+
+
+@pytest.mark.parametrize("kind", ["character", "actor"])
+def test_a_PERSON_requirement_is_never_dropped(kind):
+    """"Any Melisandre shot" is an honest fallback; "any shot at all" on a beat about a person is
+    how a wrong-character leak gets in, and that is the one class the identity gate exists to stop."""
+    seg = Seg(required_kind=kind, required_entity="Melisandre")
+    S._soften_to_character(seg, lambda *a: None)
+    assert seg.required_entity == "Melisandre"
+    assert seg.required_kind == kind
+
+
+def test_the_beat_keeps_pointing_at_show_footage_not_an_abstract_effect():
+    seg = Seg()
+    S._soften_to_character(seg, lambda *a: None)
+    assert seg.visual_policy == P.CHARACTER
+    assert P.policy_of(seg) != P.ABSTRACT, \
+        "scene-describing narration must still earn a specific label after the requirement is dropped"
 
 
 def test_a_beat_that_is_not_exact_is_left_alone():
