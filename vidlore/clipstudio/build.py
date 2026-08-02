@@ -370,44 +370,61 @@ def _is_narration(text: str) -> bool:
 
 def _breakout_window_admissible(aired_text: str, movie_title: str, *, beat_text: str = "",
                                 beat_subject: str = "", promised_quote: str = "",
-                                quote_authored: bool = False, eng_cfg=None) -> tuple:
+                                quote_authored: bool = False, relevance_required: bool = True,
+                                eng_cfg=None) -> tuple:
     """May this window air as a breakout AT THIS BEAT? Returns (ok, reason, verdicts).
 
-    Answers TWO questions in one call, sampled N times, and requires the samples to be UNANIMOUS:
-      speaker  — the character saying these words, or the literal "narrator" (an essayist ABOUT it)
-      belongs  — is this line the narration's OWN evidence at this beat?
+    TWO STAGES, each sampled N times. The split is the whole design:
 
-    The second question is the one this project kept getting wrong. Every earlier breakout gate
-    judged a PROXY and every proxy was defeated by an input that satisfies it without satisfying the
-    intent: title tokens ('scene' matched inside "All Scenes"), an overlap COUNT (min_ov=2), a
-    stoplist that still let pronouns through, ±2-char prefix fuzz ("children's"≈"children"), season
-    strings, face crops. Measured on job benjen_v2 — a Benjen Stark essay aired FOUR breakouts of a
-    Season-1 Cersei/Ned conversation about Robert drinking, Jaime and the Iron Throne. Beat 112 won
-    its Cersei line on exactly two fuzzy tokens: "children's"↔children (Children of the Forest vs
-    Cersei's children) and "heart"↔heart (a dragonglass shard in the heart vs "with all my heart").
+      STAGE 1 — IDENTIFY, BLIND. Sees the show name and the clip's ASR and NOTHING ELSE. Answers
+        intelligible / speaker / scene / in_story. It cannot be led, because it is never told what
+        the answer should be. Decided by MAJORITY, because real ASR is partly garbled almost every
+        time and one mute vote must not veto a clip the other samples can plainly place — except
+        that a single CONFIDENT "narrator" reading still vetoes, since airing a rival essayist is
+        the one error with no upside.
+      STAGE 2 — BELONG. Sees the narration, the promised line, the ASR *and stage 1's independent
+        scene label*, and answers one question: is this line the narration's own evidence here?
+        Decided by UNANIMITY. This is the half the owner asked never to compromise, and the half a
+        single dissent has repeatedly been right about.
 
-    So judge the two artifacts the viewer actually judges — the words that will be HEARD and the
-    words the NARRATION says — and there is no proxy left to game. Mis-tier the source, collide on
-    2 or 20 words, mis-locate a quote: every path still ends in a (beat, aired-text) pair, and every
-    pair is judged here.
+    Why blind. The single-stage version put "NARRATION AT THIS MOMENT" and "LINE THE NARRATION
+    PROMISED" in the same prompt as the transcript, and a judge handed unintelligible ASR answered
+    from the promise instead of the audio. Measured, job 6a26707939 scene 113: the clip's ASR was
+    "We'll use to hear it, cut some black. I will do us" and all three samples replied "Melisandre
+    declares Jon Snow is the prince that was promised", belongs=true — which is a paraphrase of the
+    beat they had just been shown, not of anything in the audio. Blinding stage 1 removes the leak;
+    `intelligible` makes "I cannot tell what this says" an answer instead of a guess.
 
-    RELEVANCE IS EXEMPT ONLY WHEN `quote_authored` — i.e. the beat's own scripted quote was LOCATED
-    by find_quote_span in THIS source's word stream. Then a human author chose this line for this
-    beat and there is nothing to re-litigate; only a CONFIDENT 'narrator' verdict can still veto.
-    The exemption keys on the located span, never on `seg.quote` being non-empty — beat 112 carried
-    a perfectly good quote ("They drove a dragonglass dagger into my heart") that locates in ZERO of
-    the job's 102 word streams, and it must not buy its way out.
+    Why every earlier gate failed: they judged a PROXY, and each proxy fell to an input that
+    satisfies it without satisfying the intent — title tokens ('scene' matched inside "All Scenes"),
+    an overlap COUNT (min_ov=2), a stoplist that still let pronouns through, ±2-char prefix fuzz
+    ("children's"≈"children"), season strings, face crops. On job benjen_v2 a Benjen Stark essay
+    aired FOUR breakouts of a Season-1 Cersei/Ned conversation; beat 112 won its Cersei line on two
+    fuzzy tokens. Judging the two artifacts the viewer judges — the words HEARD and the words the
+    NARRATION says — leaves no proxy to game.
 
-    FAILS CLOSED (no breakout) on: a narration verdict, a not-belongs verdict, low confidence, an
-    unparseable reply, a missing sample, no LLM. A breakout is optional polish — refusing one costs
-    nothing, while airing an unrelated conversation is the most damaging thing this feature can do.
-    A CODE fault (NameError/AttributeError/TypeError) is logged loudly and re-raised: it must never
-    hide inside the fail-closed catch (cf. `recovery: skipped (NameError)`, dead for months).
+    A LOCATED QUOTE IS NOT AN EXEMPTION. It used to be one: if find_quote_span placed the beat's
+    scripted line in this source, relevance was skipped entirely on the theory that an author had
+    already chosen it. Job 6a26707939 disproved the theory twice in one render. Scene 18 promised
+    "I have seen the future in the flames." and the locator matched, at phrase ratio 0.8, audio that
+    actually says "I don't know, your grace. I CAN'T see the future in the flames" — the negation of
+    the promise, the opposite scene, the opposite meaning. All three judges said belongs=false and
+    the exemption admitted it anyway; only a downstream coverage floor (0.67 < 0.70) kept it off the
+    timeline. Scene 123 was the same shape. A fuzzy locator is not an author, so `quote_authored` is
+    now recorded and reported and decides nothing. A genuine anchor still airs on merit: stage 2 is
+    told in as many words that the exact promised line DOES belong.
+
+    FAILS CLOSED (no breakout) on: unintelligible audio, a narration verdict, a not-belongs verdict,
+    low confidence, an unparseable reply, a missing sample, no LLM. A breakout is optional polish —
+    refusing one costs nothing, while airing an unrelated conversation is the most damaging thing
+    this feature can do. A CODE fault (NameError/AttributeError/TypeError) is logged loudly and
+    re-raised: it must never hide inside the fail-closed catch (cf. `recovery: skipped (NameError)`,
+    dead for months).
 
     Env: VIDLORE_CLIPSTUDIO_BREAKOUT_ADMIT_SAMPLES (N, default 3 — do NOT run at 1 or 2; measured,
     beat 156 admitted on 2 of 6 single samples and unanimity is what caught it),
     VIDLORE_CLIPSTUDIO_BREAKOUT_ADMIT_MIN_CONF (default 0.70),
-    VIDLORE_CLIPSTUDIO_BREAKOUT_ADMIT_CHECK=0 disables the RELEVANCE half only."""
+    VIDLORE_CLIPSTUDIO_BREAKOUT_ADMIT_CHECK=0 drops stage 2 only (identification still runs)."""
     import os as _os_ad
     txt = (aired_text or "").strip()
     if len(txt.split()) < 3:
@@ -433,75 +450,176 @@ def _breakout_window_admissible(aired_text: str, movie_title: str, *, beat_text:
     if not _llm_d.has_llm(eng_cfg):
         return False, "no LLM available to judge the window (fail-closed)", []
 
-    _sys = (
-        "A video essay about " + (movie_title or "a film/TV show") + " is about to cut to a clip and "
-        "let the clip's OWN audio play, so the scene speaks for itself. Decide whether that cut is "
-        "honest at this exact moment.\n"
-        "The transcript is automatic speech recognition of the CLIP's soundtrack. Garbled words, "
-        "wrong homophones and fragments are TRANSCRIPTION artefacts and are NOT evidence about who "
-        "is speaking. Judge the underlying spoken line.\n"
+    _show = movie_title or "a film/TV show"
+
+    # ---------------------------------------------------------------- stage 1: identify, blind
+    _sys1 = (
+        "You are shown an automatic-speech-recognition transcript of the soundtrack of one short "
+        "clip from " + _show + ". Identify it. You are NOT told anything about why the clip was "
+        "chosen, and you must not guess at that.\n"
+        "ASR is noisy: expect wrong words, fused words and nonsense fragments. PARTIAL garble is "
+        "normal and is not a reason to give up — most usable clips contain some.\n"
+        "  line  - copy, VERBATIM FROM THE TRANSCRIPT, the longest stretch you can actually read "
+        "as real dialogue. Copy the words exactly as they appear even where you believe you know "
+        "the real line. Empty string if the transcript is word-salad end to end.\n"
+        "  intelligible - true if `line` is a recoverable line of dialogue and you can say who "
+        "speaks it. False only if there is nothing readable to quote.\n"
         "  speaker - name the character speaking INSIDE the story; the exact string \"narrator\" "
         "ONLY if these words are a video-essay author narrating ABOUT the show from outside it.\n"
-        "  scene   - one short clause naming the scene the words come from.\n"
-        "  belongs - true if the narration and this line are about the SAME SPECIFIC thing: the "
-        "line is spoken in the scene the narration describes, OR the narration reports or "
-        "paraphrases what this line says, OR it is the exact line the narration promised. A line "
-        "that merely MENTIONS the same noun as the narration (a throne, children, a heart, killing, "
-        "a walker) does NOT belong. A different scene, different characters or a different point in "
-        "the story does NOT belong. If you would have to explain the connection to a viewer, it "
-        "does NOT belong.\n"
-        "When unsure, answer belongs=false. An off-topic cut is far worse than no cut.\n"
-        'Reply ONLY: {"speaker":"...","scene":"...","in_story":true|false,'
-        '"belongs":true|false,"confidence":0.0-1.0}')
-    _usr = (f"NARRATION AT THIS MOMENT: {(beat_text or '(none)')[:400]}\n"
-            + (f"NARRATION SUBJECT: {beat_subject[:120]}\n" if beat_subject else "")
-            + (f"LINE THE NARRATION PROMISED: {promised_quote[:200]}\n" if promised_quote else "")
-            + f"CLIP AUDIO (ASR): {txt[:600]}")
+        "  scene   - one short clause naming the scene these words come from, or \"\" if unsure.\n"
+        "  in_story - true if this is the show's own dialogue rather than commentary about it.\n"
+        "  confidence - how sure you are of the identification.\n"
+        'Reply ONLY: {"intelligible":true|false,"line":"...","speaker":"...","scene":"...",'
+        '"in_story":true|false,"confidence":0.0-1.0}')
+    _usr1 = f"CLIP AUDIO (ASR): {txt[:600]}"
 
-    def _one(_i):
+    def _parse(out, keys):
         import json as _json_d
         import re as _re_d
-        out = _llm_d.complete(system=_sys, max_tokens=160,
-                              messages=[{"role": "user", "content": _usr}], eng_cfg=eng_cfg)
         m = _re_d.search(r"\{.*\}", out or "", _re_d.S)
         if not m:
             return None
         v = _json_d.loads(m.group(0))
-        return {"speaker": str(v.get("speaker", "")).strip(),
-                "scene": str(v.get("scene", "")).strip(),
-                "in_story": bool(v.get("in_story")),
-                "belongs": bool(v.get("belongs")),
-                "confidence": float(v.get("confidence", 0) or 0)}
+        return {k: f(v.get(k)) for k, f in keys.items()}
 
-    try:
+    def _grounded(line: str) -> bool:
+        """Is `line` actually READ OFF the transcript, or invented? Deterministic, not a vote.
+
+        This is the anti-confabulation floor. A sample may only claim it can hear something if it
+        can quote it, and the quote has to be in the audio — which no amount of prompt-following
+        guarantees on its own. It is also what makes the blinding hold: even a stage-1 sample that
+        somehow guessed the essay's subject cannot smuggle it in, because those words are not in
+        the transcript to copy."""
+        import re as _re_g
+        lw = [w for w in _re_g.findall(r"[a-z']{3,}", (line or "").lower())]
+        if len(lw) < 3:                                    # too little quoted to verify anything
+            return False
+        tw = set(_re_g.findall(r"[a-z']{3,}", txt.lower()))
+        return sum(1 for w in lw if w in tw) >= max(3, int(0.7 * len(lw)))
+
+    def _ident(_i):
+        out = _llm_d.complete(system=_sys1, max_tokens=200,
+                              messages=[{"role": "user", "content": _usr1}], eng_cfg=eng_cfg)
+        v = _parse(out, {
+            # a reply that simply omits `intelligible` must not silently mean "no"
+            "intelligible": lambda x: True if x is None else bool(x),
+            "line": lambda x: str(x or "").strip(),
+            "speaker": lambda x: str(x or "").strip(),
+            "scene": lambda x: str(x or "").strip(),
+            "in_story": lambda x: bool(x),
+            "confidence": lambda x: float(x or 0)})
+        if v is not None:
+            v["grounded"] = _grounded(v["line"])
+        return v
+
+    def _sample(fn):
         from concurrent.futures import ThreadPoolExecutor as _TPE
         with _TPE(max_workers=_n) as _ex:                  # N samples cost one call of wall time
-            samples = list(_ex.map(_one, range(_n)))
+            return list(_ex.map(fn, range(_n)))
+
+    try:
+        ident = _sample(_ident)
     except (NameError, AttributeError, TypeError):         # a CODE fault must never fail closed
         raise
     except Exception as e:                                 # noqa: BLE001 — provider/parse failures
         return False, f"judge error ({type(e).__name__}) — fail-closed", []
 
-    good = [s for s in samples if s]
+    good = [s for s in ident if s]
     if len(good) != _n:                                    # a missing sample is a NO, not a maybe
         return False, f"only {len(good)}/{_n} verdicts parsed — fail-closed", good
 
-    def _ok(s):
-        in_story = bool(s["in_story"]) and s["speaker"].strip().lower() != "narrator"
-        if quote_authored:
-            # the author chose this line for this beat; only a CONFIDENT narrator call can veto
-            return not ((not in_story) and s["confidence"] >= _min_conf)
-        return in_story and s["belongs"] and s["confidence"] >= _min_conf
+    # MAJORITY, not unanimity, on identification — and only samples that could actually place the
+    # clip get a vote on who is speaking. Measured: job 6a26707939's one genuinely correct breakout
+    # (beat 53, "Stannis says he will risk everything" over "This is the right time, and I will risk
+    # everything ... we march to victory") carries ASR garble in the same window ("we kind of want to
+    # supply line some clears"), and one sample in three called the whole thing unintelligible. Real
+    # ASR is partly garbled almost every time, so a single mute vote cannot be a veto or the gate
+    # only ever says no. RELEVANCE keeps strict unanimity below — that is the half that must not bend.
+    _placed = [s for s in good if s["intelligible"] and s["grounded"]]
+    if len(_placed) * 2 <= _n:                             # a tie is still a refusal
+        _ung = sum(1 for s in good if s["intelligible"] and not s["grounded"])
+        return False, (f"the clip's audio is not intelligible enough to identify "
+                       f"({len(_placed)}/{_n} quoted a line that is actually in it"
+                       + (f", {_ung} quoted words the audio does not contain" if _ung else "")
+                       + ")"), good
+    _narr = [s for s in _placed
+             if (not s["in_story"] or s["speaker"].lower() == "narrator")
+             and s["confidence"] >= _min_conf]
+    if _narr:                                              # ONE confident essayist call vetoes
+        _b = _narr[0]
+        return False, (f"a narrator speaking ABOUT the show, not the show — speaker={_b['speaker']!r} "
+                       f"in_story={_b['in_story']} conf={_b['confidence']:.2f} "
+                       f"({len(_narr)}/{_n} heard commentary)"), good
+    _named = [s for s in _placed
+              if s["in_story"] and s["speaker"].lower() != "narrator"
+              and s["confidence"] >= _min_conf]
+    if len(_named) * 2 <= _n:
+        _b = _placed[0]
+        return False, (f"not identifiable as the show's own dialogue with confidence — "
+                       f"speaker={_b['speaker']!r} conf={_b['confidence']:.2f} "
+                       f"({len(_named)}/{_n} placed it confidently)"), good
 
-    votes = [_ok(s) for s in good]
+    _lead = {id(s) for s in _named}                        # identity, not ==: samples can be equal
+    good = _named + [s for s in good if id(s) not in _lead]  # a confident reading leads the record
+    _sp = good[0]["speaker"] or "in-character"
+    if not relevance_required:                             # env kill-switch → identification only
+        return True, f"{_sp} — the show's own dialogue (identified, {_n}/{_n})", good
+
+    # ---------------------------------------------------------------- stage 2: does it belong here
+    _sys2 = (
+        "A video essay about " + _show + " is about to cut to a clip and let the clip's OWN audio "
+        "play, so the scene speaks for itself. Decide whether that cut is honest at this exact "
+        "moment.\n"
+        "An independent viewer has already identified the clip without being told anything about "
+        "the essay; their reading is given as CLIP IDENTIFIED AS. Trust it over your own reading "
+        "of the raw transcript.\n"
+        "  belongs - true if the narration and this line are about the SAME SPECIFIC thing: the "
+        "line is spoken in the scene the narration describes, OR the narration reports or "
+        "paraphrases what this line says, OR it is the exact line the narration promised. A line "
+        "that merely MENTIONS the same noun as the narration (a throne, children, a heart, killing, "
+        "a walker) does NOT belong. A different scene, different characters or a different point in "
+        "the story does NOT belong. A line that STATES THE OPPOSITE of what the narration promised "
+        "does NOT belong, however many words it shares. If you would have to explain the connection "
+        "to a viewer, it does NOT belong.\n"
+        "When unsure, answer belongs=false. An off-topic cut is far worse than no cut.\n"
+        'Reply ONLY: {"belongs":true|false,"why":"...","confidence":0.0-1.0}')
+    _usr2 = (f"NARRATION AT THIS MOMENT: {(beat_text or '(none)')[:400]}\n"
+             + (f"NARRATION SUBJECT: {beat_subject[:120]}\n" if beat_subject else "")
+             + (f"LINE THE NARRATION PROMISED: {promised_quote[:200]}\n" if promised_quote else "")
+             + f"CLIP IDENTIFIED AS: {good[0]['speaker']} — {good[0]['scene'] or 'unnamed scene'}\n"
+             + (f"CLEAREST LINE IN THE CLIP: {good[0]['line'][:200]}\n"
+                if good[0].get("line") else "")
+             + f"CLIP AUDIO (ASR): {txt[:600]}")
+
+    def _belong(_i):
+        out = _llm_d.complete(system=_sys2, max_tokens=160,
+                              messages=[{"role": "user", "content": _usr2}], eng_cfg=eng_cfg)
+        return _parse(out, {"belongs": lambda x: bool(x),
+                            "why": lambda x: str(x or "").strip(),
+                            "confidence": lambda x: float(x or 0)})
+
+    try:
+        rel = _sample(_belong)
+    except (NameError, AttributeError, TypeError):
+        raise
+    except Exception as e:                                 # noqa: BLE001
+        return False, f"judge error ({type(e).__name__}) — fail-closed", good
+
+    for s, r in zip(good, rel):                            # one merged record per sample
+        s["belongs"] = bool(r and r["belongs"])
+        s["belongs_confidence"] = float(r["confidence"]) if r else 0.0
+        s["belongs_why"] = (r or {}).get("why", "")
+    if len([r for r in rel if r]) != _n:
+        return False, f"only {len([r for r in rel if r])}/{_n} verdicts parsed — fail-closed", good
+
+    votes = [bool(r["belongs"]) and r["confidence"] >= _min_conf for r in rel]
     if all(votes):
-        _sp = good[0]["speaker"] or "in-character"
-        return True, (f"{_sp} — belongs at this beat "
-                      f"({'quote-anchored' if quote_authored else 'judged'}, {_n}/{_n})"), good
+        return True, (f"{_sp} — belongs at this beat (judged blind, {_n}/{_n}"
+                      + (", quote-anchored" if quote_authored else "") + ")"), good
     _bad = next(s for s, v in zip(good, votes) if not v)
     return False, (f"off-topic for this beat — speaker={_bad['speaker']!r} "
                    f"scene={_bad['scene'][:60]!r} belongs={_bad['belongs']} "
-                   f"conf={_bad['confidence']:.2f} ({sum(votes)}/{_n} would admit)"), good
+                   f"conf={_bad['belongs_confidence']:.2f} ({sum(votes)}/{_n} would admit)"), good
 
 
 def _breakout_line_is_dialogue(aired_text: str, movie_title: str, eng_cfg=None) -> tuple:
@@ -2128,26 +2246,36 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         # Iron Throne) were in-character dialogue and passed this gate cleanly, then aired inside a
         # Benjen Stark essay. Beat 112 bound its Cersei line on two fuzzy tokens — "children's"↔
         # children and "heart"↔heart — while its own quote located in ZERO of 102 word streams. So
-        # the judge now also sees the NARRATION and answers "is this line the narration's own
-        # evidence here?", N times, unanimously. A beat whose scripted quote was actually LOCATED in
-        # this source (_span) is exempt from the relevance half — an author chose that line — but
-        # never on `seg.quote` merely being non-empty.
+        # the window is now identified BLIND (no beat in the prompt) and only then judged against
+        # the narration, N times, unanimously.
+        # A LOCATED QUOTE BUYS NOTHING. It used to skip the relevance half outright; job 6a26707939
+        # scene 18 then matched "I have seen the future in the flames." (phrase 0.8) against audio
+        # saying "I CAN'T see the future in the flames" and admitted it 3/3-against. `_span` is
+        # recorded for the audit and decides nothing.
         if _os9b.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_DIALOGUE_CHECK", "1").strip() \
                 not in ("0", "false", "no", "") and _wtxt:
             _sg9 = _seg_by_idx.get(idx)
             _relevance_on = _os9b.environ.get(
                 "VIDLORE_CLIPSTUDIO_BREAKOUT_ADMIT_CHECK", "1").strip() not in ("0", "false", "no")
+            _beat_txt9 = getattr(_sg9, "text", "") or ""
             _dlg_ok, _dlg_why, _verdicts9 = _breakout_window_admissible(
                 _wtxt, _bk_show9,
-                beat_text=(getattr(_sg9, "text", "") or ""),
+                beat_text=_beat_txt9,
                 beat_subject=(f"{getattr(_sg9, 'required_kind', '')}: "
                               f"{getattr(_sg9, 'required_entity', '')}"
                               if getattr(_sg9, "required_entity", "") else ""),
                 promised_quote=_qtext,
-                # ADMIT_CHECK=0 → exempt everything → reverts to the old dialogue-only behaviour
-                quote_authored=(bool(_span) or not _relevance_on))
+                quote_authored=bool(_span),
+                # ADMIT_CHECK=0 → identification only (the old dialogue-vs-narration behaviour)
+                relevance_required=_relevance_on)
+            # persist the whole question, not just the answer: a post-mortem that has to re-read
+            # build.log to learn WHICH window was refused has already lost the evidence
             _bk_admit_verdicts[idx] = {"ok": _dlg_ok, "why": _dlg_why,
-                                       "quote_anchored": bool(_span), "verdicts": _verdicts9}
+                                       "quote_anchored": bool(_span), "verdicts": _verdicts9,
+                                       "source": (src.title or src.id)[:120],
+                                       "beat_text": _beat_txt9[:300],
+                                       "promised_quote": (_qtext or "")[:200],
+                                       "aired_text": (_wtxt or "")[:400]}
             if not _dlg_ok:
                 _rej["off_topic"] += 1
                 log(f"build: breakout REJECTED post-extract before scene {idx} — {_dlg_why} "

@@ -9,12 +9,101 @@ no modification (DESIGN.md §3).
 from __future__ import annotations
 
 import concurrent.futures as cf
+import math
+import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Optional
 
 from .models import ClipProject, ClipSelection
 from .config import ClipConfig, ffmpeg_exe
+
+# ---------------------------------------------------------------- legibility grade
+# Half of this show is shot at night. Measured on job 6a26707939, over the 501 frames the renderer
+# would actually have shown: median beat mean-luma 31.2, a QUARTER of all beats under 20, and the
+# p90 luma (the brightest tenth of pixels) sitting at 63 in the median beat. A frame-by-frame vision
+# audit of the same render flagged 44 beats too_dark and put 22 of them in the <=4/10 bucket with
+# notes like "an essentially empty dark rectangle with a speck in it".
+#
+# REJECTING dark footage has already been tried and measured and does not work: the pool median is
+# what it is, so a luma floor evicts correct, canonical, perfectly-intentional night scenes and the
+# beat falls back to generic filler that scores WORSE. What the pipeline does today is worse still —
+# a near-black cut clip is freeze-REPLACED with a neighbouring beat's frame, so the viewer sees the
+# wrong content rather than dim correct content.
+#
+# So: grade it, do not judge it. This is presentation-only. It runs after the window is chosen, it
+# changes no ranking, no verdict and no selection, and it cannot move a beat to different footage.
+# Because build's own near-black sweep probes the CUT CLIP, a beat that becomes legible here also
+# stops being freeze-replaced — which is a relevance gain paid for with no relevance risk.
+#
+# The trigger reuses build's measured legibility score, max(YAVG, spread): brightness alone rejects
+# candle-lit scenes wholesale, while genuine dead frames fail BOTH mean and contrast. Gamma is the
+# right instrument because its slope is steepest in the shadows, so it opens up crushed blacks
+# instead of flattening the whole picture, and it cannot clip highlights.
+_GRADE_FLOOR = 40.0        # max(YAVG, spread) at or above this is already legible — leave it alone
+_GRADE_TARGET = 46.0       # what a graded frame's mean luma aims for; ~ the low end of "readable"
+_GRADE_MAX_GAMMA = 1.75    # hard cap: beyond this, night footage turns to grey noise
+
+
+def _luma_stats(src_path, start: float, dur: float) -> Optional[tuple]:
+    """(mean luma, 10th->90th percentile spread) over the window, or None if unprobeable."""
+    try:
+        p = subprocess.run(
+            [ffmpeg_exe(), "-y", "-hide_banner", "-nostats",
+             "-ss", f"{max(0.0, float(start)):.3f}", "-i", str(src_path),
+             "-t", f"{max(0.5, float(dur)):.3f}", "-an",
+             "-vf", "scale=128:72,signalstats,"
+                    "metadata=print:key=lavfi.signalstats.YAVG:file=-:direct=1,"
+                    "metadata=print:key=lavfi.signalstats.YLOW:file=-:direct=1,"
+                    "metadata=print:key=lavfi.signalstats.YHIGH:file=-:direct=1",
+             "-f", "null", "-"],
+            capture_output=True, timeout=60)
+        blob = (p.stdout or b"").decode("utf-8", "ignore") \
+            + (p.stderr or b"").decode("utf-8", "ignore")
+        yavg = [float(m) for m in re.findall(r"YAVG=([0-9.]+)", blob)]
+        if not yavg:
+            return None
+        ylow = [float(m) for m in re.findall(r"YLOW=([0-9.]+)", blob)]
+        yhigh = [float(m) for m in re.findall(r"YHIGH=([0-9.]+)", blob)]
+        spread = 0.0
+        if ylow and yhigh and len(ylow) == len(yhigh):
+            spread = sum(h - l for h, l in zip(yhigh, ylow)) / len(yhigh)
+        return sum(yavg) / len(yavg), spread
+    except Exception:                                  # noqa: BLE001 — a grade must never fail a cut
+        return None
+
+
+def legibility_gamma(yavg: float, spread: float) -> float:
+    """The gamma this window needs to become readable, or 1.0 for 'leave it alone'.
+
+    Pure arithmetic so it can be tested without ffmpeg. Gamma g maps a normalised level v to
+    v**(1/g), so to lift a mean of `yavg` to `_GRADE_TARGET` we want
+    (yavg/255)**(1/g) == target/255, i.e. g == ln(yavg/255) / ln(target/255)."""
+    if max(yavg, spread) >= _GRADE_FLOOR:
+        return 1.0
+    v = max(1.0, float(yavg)) / 255.0
+    t = _GRADE_TARGET / 255.0
+    if v >= t:                                         # dark by contrast, not by level — gamma is
+        return 1.0                                     # the wrong tool, and lifting would grey it
+    g = math.log(v) / math.log(t)
+    return round(min(_GRADE_MAX_GAMMA, max(1.0, g)), 3)
+
+
+def legibility_filter(src_path, start: float, dur: float) -> tuple:
+    """(ffmpeg filter string or "", note for the log). Empty string = no grade applied."""
+    if os.environ.get("VIDLORE_CLIPSTUDIO_LEGIBILITY_GRADE", "1").strip() in ("0", "false", "no"):
+        return "", ""
+    st = _luma_stats(src_path, start, dur)
+    if st is None:
+        return "", ""                                  # unknown is never "dark"
+    yavg, spread = st
+    g = legibility_gamma(yavg, spread)
+    if g <= 1.0:
+        return "", ""
+    # a touch of contrast with the gamma: gamma alone on a collapsed histogram reads flat/milky
+    return (f"eq=gamma={g}:contrast=1.06",
+            f"legibility grade gamma={g} (YAVG {yavg:.1f}, spread {spread:.1f})")
 
 
 def cut_selection(proj: ClipProject, sel: ClipSelection, cfg: ClipConfig,
@@ -63,10 +152,18 @@ def cut_selection(proj: ClipProject, sel: ClipSelection, cfg: ClipConfig,
             pass                                   # QC must never break the cut itself
     out = proj.clips_dir / f"seg_{sel.segment_index:03d}.mp4"
     out.parent.mkdir(parents=True, exist_ok=True)
+    # LEGIBILITY GRADE — presentation only, applied to the window already chosen (see the note at
+    # the top of this module). Recorded on the selection so the audit can see which beats were lit.
+    _vf, _note = legibility_filter(src.local_path, in_p, dur)
+    try:
+        sel.legibility_grade = _note
+    except Exception:                                  # noqa: BLE001 — an older model has no slot
+        pass
     cmd = [
         ffmpeg_exe(), "-y",
         "-ss", f"{in_p:.3f}", "-i", str(src.local_path),
         "-t", f"{dur:.3f}", "-an",
+        *(["-vf", _vf] if _vf else []),
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-pix_fmt", "yuv420p", "-movflags", "+faststart",
         str(out),

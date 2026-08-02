@@ -46,8 +46,30 @@ def test_a_project_saved_before_the_deep_bench_still_loads():
 def test_match_fills_the_bench_beyond_the_normal_alternates():
     src = inspect.getsource(M.match_segments)
     assert "deep_alternates" in src, "match must keep a deeper bench for the verifier"
-    assert "alternates[cfg.candidates_per_segment:_deep_n]" in src, \
+    assert "alternates[cfg.candidates_per_segment:" in src, \
         "the bench must start AFTER the normal alternates, not duplicate them"
+
+
+def test_the_bench_can_hold_more_than_one_shot_of_the_same_source():
+    """One-per-source is right for `alternates`, whose job is spread, and structurally unable to
+    find a moment: a 21-strong bench spanning 21 files x 1 shot cannot offer the second-best second
+    of the RIGHT file. Measured on job 6a26707939 beats 24 and 82 — the bench carried
+    game_of_thrones_jon_sn_123ebf87 shot 66 (the Stark banner going up), the verifier correctly
+    refused it, and both beats release-blocked the render."""
+    src = inspect.getsource(M.match_segments)
+    assert "shot_best" in src, "match must track the best candidate per SHOT, not only per source"
+    assert "_n_sib" in src and "alternates += _sib" in src, \
+        "sibling shots must be appended to the bench"
+    i = src.index("alternates += _sib")
+    head = src[:i]
+    assert "alternates=alternates[:cfg.candidates_per_segment]" not in head, \
+        "siblings must be appended before the selection slices its alternates, never into the head"
+
+
+def test_siblings_are_tunable_and_can_be_switched_off():
+    src = inspect.getsource(M.match_segments)
+    for env in ("VIDLORE_CLIPSTUDIO_SIBLING_SOURCES", "VIDLORE_CLIPSTUDIO_SIBLING_SHOTS"):
+        assert env in src, f"{env} must be settable"
 
 
 def test_the_bench_is_tunable_and_can_be_switched_off():
