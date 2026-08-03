@@ -66,3 +66,51 @@ def test_the_new_markers_are_plural_safe():
     for stem in ("Rewind", "Wrap Up", "After Show", "Rundown"):
         assert _REJECT_TITLE.search(f"Game of Thrones {stem}"), stem
         assert _REJECT_TITLE.search(f"Game of Thrones {stem}s"), stem + "s"
+
+
+# ------------------------------------------------------------------ lore / "history of X" essays
+def test_the_lore_essay_that_aired_house_of_the_dragon_is_rejected():
+    """Job b79df3fad5, scene 3 — the OPENING SECONDS of a Littlefinger essay — aired Rhaenyra
+    Targaryen from House of the Dragon. Source: "The Untold History Of The Valyrian Steel / Catspaw
+    Dagger", which served 4 beats and also supplied the render's weakest still (Daenerys and two
+    dragons, relevance 0.475, under "a ship waiting in the bay").
+
+    Nothing else could have caught it. The footage is genuine live action, so the graphics and
+    non-live-action gates pass it; the frames are simply from another property, so no cross-show
+    check on a GoT-titled source fires. A lore video about an OBJECT spans that object's whole
+    in-universe history, which means it spans shows — and the title is where it says so."""
+    assert _REJECT_TITLE.search("The Untold History Of The Valyrian Steel / Catspaw Dagger")
+
+
+@pytest.mark.parametrize("title", [
+    "The Untold History of Valyrian Steel",
+    "The Untold Story of House Bolton",
+    "The History of the Iron Throne - Game of Thrones",
+    "Origins of the White Walkers",
+    "Origin of Valyrian Steel Explained",
+    "Lore of Westeros: the Faith Militant",
+    "Valyrian Steel Lore Explained",
+    "The Complete History of House Targaryen",
+    "Full Timeline of the Dance of the Dragons",
+    "Everything We Know About the Night King",
+])
+def test_the_whole_lore_essay_family_is_rejected(title):
+    assert _REJECT_TITLE.search(title), title
+
+
+def test_the_ban_costs_one_source_in_192():
+    """Measured across both jobs' real pools (69 + 123 sources): exactly one title matches, and it
+    is the one that leaked. A junk vocabulary that starts eating scene uploads costs more than the
+    leak it closes, so this is the number that had to be checked before shipping it."""
+    real_scene_uploads = [
+        "Lysa Arryn Death Scene, Moon Door - Game of Thrones",
+        "Joffrey and Margaery Scene | Game of Thrones",
+        "Littlefinger Against The Three-Eyed Raven",
+        "Bane of Thrones 7x07 - Petyr Baelish Death Scene",
+        "Catelyn Stark calls on her fathers bannermen",
+        "Petyr Baelish & Sansa Stark Scene Game of Thrones 6x10",
+        "Game of Thrones - Sansa Speaks With Lady Olenna (4k)",
+        "Jaime Lannister Trial at Winterfell (FULL SCENE)",
+    ]
+    for t in real_scene_uploads:
+        assert not _REJECT_TITLE.search(t), t

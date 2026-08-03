@@ -49,6 +49,16 @@ _REJECT_TITLE = re.compile(
     # Episode 9 REVIEW" from the same search was banned on its title in the same render — 'review'
     # was in this list and 'rewind' was not. Plural-safe per the trailing-\b note above.
     r"rewinds?|wrap ?ups?|after ?shows?|rundowns?|season in review|"
+    # LORE / "history of X" essays. They are not talking-head videos — they are cut from real
+    # footage, so every content gate passes them — but their subject is an OBJECT across its whole
+    # in-universe history, so they mix SHOWS. Measured, job b79df3fad5: "The Untold History Of The
+    # Valyrian Steel / Catspaw Dagger" served 4 beats of a Littlefinger essay, and scene 3 — the
+    # opening seconds — aired RHAENYRA TARGARYEN from House of the Dragon. The same source also
+    # supplied the render's weakest still (Daenerys and two dragons at 0.475 under "a ship waiting
+    # in the bay"). Cross-show gates cannot catch this: the frames are genuine live action, just
+    # from the wrong property. The TITLE is the only place it announces itself.
+    r"untold (history|story)|the history of|origins? of|lore (of|explained)|"
+    r"complete (history|timeline)|full (history|timeline)|everything (we know|you need)|"
     r"spoiler talk|let'?s play|live ?stream|full movie|whole movie|"
     # talking-head / press / cast content — NOT scene footage:
     r"interviews?|interviewed|interviewing|talks? about|talk show|jimmy kimmel|jimmy fallon|colbert|"
