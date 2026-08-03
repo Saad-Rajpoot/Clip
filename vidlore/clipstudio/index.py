@@ -23,6 +23,7 @@ from typing import Optional
 from .models import Shot, SourceVideo, ClipProject, SOURCE_OK
 from .config import ClipConfig, ffmpeg_exe
 from .ingest import probe
+from .segment import _STOP as _CONTENT_STOP
 
 # Index schema. Bump to invalidate caches whose SHAPE changed (not merely their capabilities).
 #   1 → shots + per-shot transcript only
@@ -188,7 +189,7 @@ def _tok_close(a: str, b: str, thresh: float = 0.8) -> bool:
 
 
 def find_quote_span(words, quote: str, *, min_ratio: float = 0.72,
-                    window_slack: int = 3):
+                    window_slack: int = 3, max_interword_gap: float = 4.0):
     """Locate `quote` in a source's word stream. -> (start_s, end_s, ratio) or None.
 
     Aligns the quote against a sliding window of the word stream and scores the WHOLE PHRASE. A
@@ -199,29 +200,60 @@ def find_quote_span(words, quote: str, *, min_ratio: float = 0.72,
         script quote: "Perhaps some essence of nightshade to help him sleep."
 
     "messence"/"essence" and "a"/"some" differ, yet the phrase is unmistakably the same line. Shot
-    boundaries are irrelevant here by construction — the stream is continuous."""
+    boundaries are irrelevant here by construction — the stream is continuous.
+
+    A word stream is continuous across *shots*, but it is not normally one utterance across an
+    arbitrarily long silence.  Prefer a qualifying compact alignment over one that bridges such a
+    gap: an isolated earlier ``I`` plus ``did warn you not to trust me`` sixteen seconds later must
+    not beat the compact local line.  Keep a qualifying gapped alignment as fallback, though,
+    because a real dramatic pause must remain typed as verbatim.  The phrase floor is unchanged."""
     qt = [t for t in (_norm_tok(w) for w in re.findall(r"[\w']+", quote or "")) if t]
     if len(qt) < 2 or not words:
         return None
+    # A high score made solely from function words is not phrase proof.  Measured false positive:
+    # quote "He was a monster" matched ASR "He was a fighter" at 0.857 because the slack window
+    # was allowed to stop after the common prefix "he was a", omitting the only identifying word.
+    # Require one substantive query token to survive exact/fuzzy alignment when the quote has one;
+    # `_tok_close` retains the existing ASR-garble tolerance.
+    substantive = [t for t in qt if t not in _CONTENT_STOP]
     st = [(_norm_tok(w[2]), w[0], w[1]) for w in words]
     st = [x for x in st if x[0]]
     if not st:
         return None
     n = len(qt)
     best = None
+    gapped_best = None
     for i in range(len(st)):
         if not _tok_close(st[i][0], qt[0]) and not any(_tok_close(st[i][0], q) for q in qt[:2]):
             continue                      # cheap anchor: only start where the head plausibly begins
         for L in range(max(2, n - window_slack), min(len(st) - i, n + window_slack) + 1):
-            win = [x[0] for x in st[i:i + L]]
+            span_words = st[i:i + L]
+            # Prefer a compact local utterance over an apparent phrase assembled across a long
+            # silence.  Do NOT discard the latter outright: a character can genuinely pause for
+            # >4s mid-line, and whole-pool quote typing must still classify that authored quote as
+            # verbatim.  A qualifying gapped alignment is retained as a fallback only when no
+            # qualifying compact alignment exists.
+            gapped = bool(max_interword_gap > 0 and any(
+                float(b[1]) - float(a[2]) > max_interword_gap
+                for a, b in zip(span_words, span_words[1:])))
+            win = [x[0] for x in span_words]
+            if substantive and not any(
+                    _tok_close(actual, wanted)
+                    for actual in win for wanted in substantive):
+                continue
             m = SequenceMatcher(None, win, qt)
             hits = sum(bl.size for bl in m.get_matching_blocks())
             # credit near-miss tokens the block matcher rejected (ASR garble), positionally
             fuzzy = sum(1 for a, b in zip(win, qt) if a != b and _tok_close(a, b))
             ratio = (2.0 * (hits + fuzzy)) / float(L + n)
-            if ratio >= min_ratio and (best is None or ratio > best[2]):
-                best = (st[i][1], st[i + L - 1][2], round(min(1.0, ratio), 3))
-    return best
+            target = gapped_best if gapped else best
+            if ratio >= min_ratio and (target is None or ratio > target[2]):
+                target = (st[i][1], st[i + L - 1][2], round(min(1.0, ratio), 3))
+                if gapped:
+                    gapped_best = target
+                else:
+                    best = target
+    return best or gapped_best
 
 
 # ---------------------------------------------------------------------------

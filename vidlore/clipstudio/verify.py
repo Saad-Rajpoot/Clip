@@ -1084,6 +1084,356 @@ def _venue_candidates(sel, seg, proj, get_shot, beat_era: str, cap: int = 8):
     return out
 
 
+def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
+                                          exclude=None, beat_era: str = "",
+                                          cap: int = 12, radius: int = 6,
+                                          source_cap: int = 4):
+    """Return a small strict-repair pool around already-ranked, scene-affine seeds.
+
+    Match deliberately keeps only a few shots per source in ``alternates``/``deep_alternates``.
+    That is good for global variety, but it creates a verifier blind spot: the right *source* can
+    be on the bench while the exact action is one detected shot beside the retained seed.  Do not
+    re-rank the global matcher to repair that local miss.  Instead, only after the chosen footage
+    has failed strict verification, expand at most ``radius`` shot indexes around the selection's
+    existing seeds, and only inside the most scene-affine eligible sources.
+
+    Source affinity is derived from the beat's scene query + expected visual + required entity and
+    the source title/acquisition query.  A required-entity-only match is intentionally insufficient:
+    every compilation about a lead character would otherwise become a neighborhood source.  Within
+    the top affine sources, persisted CLIP similarity orders unseen shots when available; distance
+    from a retained seed is the deterministic fallback.  The caller still applies the unchanged
+    strict vision, exact-window QC, reuse ledger and materialization transaction.
+    """
+    from .models import ClipCandidate
+
+    try:
+        cap = max(0, min(24, int(cap)))
+        radius = max(1, min(12, int(radius)))
+        source_cap = max(1, min(8, int(source_cap)))
+    except (TypeError, ValueError):
+        return []
+    if cap <= 0:
+        return []
+
+    try:
+        from .discover import _STOPQ as _NSTOP
+    except Exception:
+        _NSTOP = set()
+    ana = (getattr(proj, "meta", None) or {}).get("analysis", {}) or {}
+    movie_tokens = {
+        w for w in re.findall(r"[a-z']+", (ana.get("movie_title", "") or "").lower())
+        if len(w) > 2
+    }
+    # These words describe the *container*, not the scene.  Removing them keeps a source from
+    # qualifying merely because every upload is titled "Game of Thrones scene/episode".
+    generic = {"game", "thrones", "scene", "scenes", "episode", "season", "clip", "clips",
+               "full", "hd", "official", "video", "moment", "moments"}
+
+    def _tokens(text):
+        return {
+            w for w in re.findall(r"[a-z']+", (text or "").lower())
+            if len(w) > 2 and w not in _NSTOP and w not in movie_tokens and w not in generic
+        }
+
+    q_tokens = _tokens(getattr(seg, "scene_query", "") or "")
+    visual_tokens = _tokens(getattr(seg, "expected_visual", "") or "")
+    entity_tokens = _tokens(getattr(seg, "required_entity", "") or "")
+    # No scene/visual description means there is no principled source-affinity decision.  Preserve
+    # the old verifier path instead of widening a generic character beat.
+    if not (q_tokens or visual_tokens):
+        return []
+
+    def _hits(wanted, present):
+        return sum(1 for w in wanted if any(
+            t == w or (t.startswith(w) and len(t) - len(w) <= 2)
+            or (w.startswith(t) and len(w) - len(t) <= 2)
+            for t in present))
+
+    # The retained candidates are evidence about *where* match believed the scene could be.  Keep
+    # their first-seen order as the final deterministic tiebreak, while collecting every seed shot
+    # from a source so a sibling can be near any of them.
+    head_seed_rows = [(getattr(sel, "source_id", ""), getattr(sel, "shot_index", -1))]
+    head_seed_rows += [(getattr(c, "source_id", ""), getattr(c, "shot_index", -1))
+                       for c in (getattr(sel, "alternates", None) or [])]
+    deep_seed_rows = [(getattr(c, "source_id", ""), getattr(c, "shot_index", -1))
+                      for c in (getattr(sel, "deep_alternates", None) or [])]
+    source_seeds: dict[str, list[int]] = {}
+    source_order: dict[str, int] = {}
+    head_source_ids = {str(sid or "") for sid, _shot_index in head_seed_rows if sid}
+
+    def _add_seed(order, sid, shot_index, *, deep=False):
+        sid = str(sid or "")
+        try:
+            shot_index = int(shot_index)
+        except (TypeError, ValueError):
+            return
+        if not sid or shot_index < 0:
+            return
+        # A normal alternate is a stronger location hint than a deep-bench sibling.  Once a source
+        # has a primary/alternate seed, distant deep seeds from the same long upload must not widen
+        # its neighborhood (the measured trial source had head seed 35 but deep seeds 19/23; using
+        # all three crowded the actual +6 kneeling shot out with unrelated earlier material).
+        if deep and sid in source_seeds:
+            return
+        source_order.setdefault(sid, order)
+        if shot_index not in source_seeds.setdefault(sid, []):
+            source_seeds[sid].append(shot_index)
+
+    for order, (sid, shot_index) in enumerate(head_seed_rows):
+        _add_seed(order, sid, shot_index)
+    _deep_base = len(head_seed_rows)
+    for offset, (sid, shot_index) in enumerate(deep_seed_rows):
+        # For a deep-only source, its first retained shot is the bounded anchor. Later sibling
+        # entries from the same source are ranking evidence, not permission to scan many regions.
+        _add_seed(_deep_base + offset, sid, shot_index, deep=True)
+
+    try:
+        from .match import banned_source_ids
+        banned = banned_source_ids(proj, include_auto=True)
+    except Exception:
+        banned = set()
+    affine_sources = []
+    for sid, seeds in source_seeds.items():
+        try:
+            src = proj.source(sid)
+        except Exception:
+            src = None
+        if src is None or str(getattr(src, "status", "") or "") != "ok" or sid in banned:
+            continue
+        title = str(getattr(src, "title", "") or "")
+        extra = getattr(src, "extra", None) or {}
+        source_text = " ".join((title, sid.replace("_", " "), str(extra.get("query", "") or "")))
+        source_tokens = _tokens(source_text)
+        qh = _hits(q_tokens, source_tokens)
+        vh = _hits(visual_tokens, source_tokens)
+        eh = _hits(entity_tokens, source_tokens)
+        anchored = bool(extra.get("anchor_verified"))
+        # Entity agreement improves ordering but cannot qualify a broad character compilation by
+        # itself.  At least one scene/visual token (or explicit anchor proof) is mandatory.
+        if not anchored and qh + vh <= 0:
+            continue
+        if beat_era and _era_conflict(beat_era, title + " " + sid):
+            continue
+        affinity = (100 if anchored else 0) + 5 * qh + 3 * vh + 2 * eh
+        # Source affinity is primary, with a small penalty for how far down the already-ranked seed
+        # list this source appeared. This keeps strong literal sources ahead of generic ones while
+        # preserving the useful matcher fact that an early alternate is more plausible than a late
+        # deep-bench compilation. It puts the measured attack/trial/execution sources in the top 2.
+        priority = affinity - source_order[sid]
+        # Normal alternates are the matcher's stronger source evidence. Deep-only sources remain
+        # available when the head is sparse, but a late character compilation cannot displace the
+        # exact-scene source already present in the normal alternate list merely on noisy CLIP/title
+        # overlap.
+        seed_tier = 0 if sid in head_source_ids else 1
+        affine_sources.append((seed_tier, -priority, source_order[sid], sid, seeds, affinity))
+    affine_sources.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
+    affine_sources = affine_sources[:source_cap]
+    if not affine_sources:
+        return []
+
+    excluded = set(exclude or ())
+    # The selected shot already received a strict primary verdict even when the caller did not pass
+    # an exclusion set.  Never pay to ask the same pixels the same question again.
+    try:
+        selected_shot_index = int(getattr(sel, "shot_index", -1))
+    except (TypeError, ValueError):
+        selected_shot_index = -1
+    excluded.add((str(getattr(sel, "source_id", "") or ""), selected_shot_index))
+
+    from . import image_fallback as _IF_n
+    from . import match as _M_n
+    import os as _os_n
+    try:
+        _black_floor = float(_os_n.environ.get(
+            "VIDLORE_CLIPSTUDIO_BLACK_FLOOR", "0.10") or 0.10)
+    except (TypeError, ValueError):
+        _black_floor = 0.10
+    embed_cache: dict = {}
+    raw_embed_cache: dict = {}
+    graphics_tier_cache: dict = {}
+    rel_memo: dict = {}
+
+    def _embeds_of(sid):
+        if sid not in embed_cache:
+            try:
+                embed_cache[sid] = _index.load_embeds_verified(proj, sid)
+            except Exception:
+                embed_cache[sid] = (None, None)
+        return embed_cache[sid]
+
+    def _graphics_tiers(sid, shots):
+        """Mirror match's per-source graphics context for these sibling shots.
+
+        A tier-1 frame is excluded only when the source also carries at least three hard graphics
+        frames.  Looking at one sibling in isolation would miss that source-level arm of
+        ``_load_pool`` and let a shot which match deliberately removed reach strict promotion.
+        """
+        if sid in graphics_tier_cache:
+            return graphics_tier_cache[sid]
+        try:
+            mat = raw_embed_cache.setdefault(sid, _index.load_embeds(proj, sid))
+        except Exception:
+            mat = None
+            raw_embed_cache[sid] = None
+        tiers = {}
+        for pos, candidate_shot in enumerate(shots):
+            vec = None
+            try:
+                row = getattr(candidate_shot, "embed_row", -1)
+                row = -1 if row is None else int(row)
+                if mat is not None and 0 <= row < len(mat):
+                    vec = mat[row]
+            except Exception:
+                vec = None
+            try:
+                tiers[int(getattr(candidate_shot, "index", pos))] = \
+                    _M_n._shot_graphics_tier(candidate_shot, vec)
+            except Exception:
+                tiers[int(getattr(candidate_shot, "index", pos))] = -1
+        graphics_tier_cache[sid] = (tiers, sum(1 for value in tiers.values() if value >= 2))
+        return graphics_tier_cache[sid]
+
+    query = " ".join(x for x in (
+        getattr(seg, "scene_query", "") or "",
+        getattr(seg, "expected_visual", "") or "",
+        getattr(seg, "required_entity", "") or "",
+    ) if x)
+    moment_cache: dict = {}
+    ranked = []
+    for source_rank, (_seed_tier, _neg_aff, _seed_order, sid, seeds, affinity) \
+            in enumerate(affine_sources):
+        try:
+            shots = sorted(getattr(get_shot, "all_shots", lambda _s: [])(sid) or [],
+                           key=lambda sh: int(getattr(sh, "index", -1)))
+        except Exception:
+            continue
+        _tiers, _hard_graphics = _graphics_tiers(sid, shots)
+        for sh in shots:
+            try:
+                shot_index = int(getattr(sh, "index", -1))
+                distance = min(abs(shot_index - seed) for seed in seeds)
+            except (TypeError, ValueError):
+                continue
+            key = (sid, shot_index)
+            if key in excluded or distance > radius:
+                continue
+            kf = str(getattr(sh, "keyframe_path", "") or "")
+            if not kf or not Path(kf).is_file():
+                continue
+            # Neighbors were not necessarily retained by match, so re-apply the complete
+            # deterministic hard-shot predicate from `_load_pool` + `_score_pool` before they can
+            # consume a vision call.  Strict vision is not permission to resurrect pixels which
+            # match already ruled unairable (featureless cards, sub bands, hard graphics, etc.).
+            try:
+                from .match import (_shot_unreadable, _shot_featureless, _ocr_is_junk,
+                                    _ocr_text_heavy, _shot_overlay_badge,
+                                    _shot_static_collage, _shot_numeral_overlay,
+                                    _shot_subtitle_band)
+                _tier = int(_tiers.get(shot_index, -1))
+                _quality_raw = getattr(sh, "quality", None)
+                _quality = 1.0 if _quality_raw is None else float(_quality_raw)
+                if (_shot_unreadable(sh) or _shot_featureless(sh)
+                        or _ocr_is_junk(sh) or _ocr_text_heavy(sh)
+                        or _shot_overlay_badge(sh) or _shot_static_collage(sh)
+                        or _shot_numeral_overlay(sh) or _shot_subtitle_band(sh)
+                        or _tier >= 2 or (_tier == 1 and _hard_graphics >= 3)
+                        or int((getattr(sh, "scores", None) or {}).get(
+                            "bonus_tail", 0) or 0)
+                        or (_black_floor > 0 and _quality < _black_floor)):
+                    continue
+            except Exception:
+                continue
+            try:
+                rel = _IF_n._shot_relevance(
+                    sh, Path(kf), query, embeds_of=_embeds_of, rel_memo=rel_memo)
+            except Exception:
+                rel = -1.0
+            if sid not in moment_cache:
+                try:
+                    moment_cache[sid] = _M_n.locate_beat_moment(proj, sid, seg)
+                except Exception:
+                    moment_cache[sid] = None
+            _moment = moment_cache.get(sid)
+            try:
+                in_point, out_point = _M_n._trim_window(
+                    sh, seg, cfg, _moment)
+            except Exception:
+                in_point, out_point = float(sh.start), float(sh.end)
+            # Promotion replaces the selection's signals wholesale.  Reconstruct the same dialogue
+            # / moment evidence match would have attached; otherwise a genuinely quote-containing
+            # neighborhood rescue passes strict vision and then deterministically fails the final
+            # verbatim contract merely because this new rung erased its proof.
+            try:
+                dialogue = float(_M_n._dialogue_match(
+                    seg, getattr(sh, "transcript", "") or ""))
+            except Exception:
+                dialogue = 0.0
+            try:
+                moment_lock = float(_M_n._moment_proximity(sh, _moment)) if _moment else 0.0
+            except Exception:
+                moment_lock = 0.0
+            dialogue = max(dialogue, moment_lock)
+            score = max(0.0, min(1.0, float(rel))) if rel is not None and rel >= 0 else 0.0
+            signals = {"strict_scene_neighborhood": True,
+                       "scene_affinity": int(affinity),
+                       "neighbor_distance": int(distance),
+                       "visual_relevance": round(float(rel), 4) if rel is not None else -1.0,
+                       "dialogue": round(dialogue, 3),
+                       "quality": round(float(getattr(sh, "quality", 0.0) or 0.0), 3)}
+            if _moment and moment_lock > 0.0:
+                signals["moment_lock"] = round(moment_lock, 3)
+                try:
+                    signals["moment_ratio"] = round(float(_moment[2]), 3)
+                except Exception:
+                    pass
+            cand = ClipCandidate(
+                segment_index=int(getattr(sel, "segment_index", -1)), source_id=sid,
+                shot_index=shot_index, score=round(score, 4),
+                in_point=round(float(in_point), 3), out_point=round(float(out_point), 3),
+                signals=signals)
+            # Real persisted/live CLIP scores lead. If CLIP is unavailable, source affinity then
+            # nearest-shot distance provides a fully deterministic fallback.
+            order_key = ((0, -float(rel), distance, shot_index)
+                         if rel is not None and rel >= 0 else
+                         (1, 0.0, distance, shot_index))
+            ranked.append((source_rank, order_key, cand))
+
+    # Source identity is stronger than cross-source CLIP noise for this rung: the whole reason it
+    # exists is that match already found the right file but retained the neighboring second. Rank by
+    # persisted CLIP *within* each top affine source, and reserve six slots apiece for the top two
+    # sources (default cap 12). A global CLIP sort let high-scoring wrong-source faces crowd the
+    # measured +6 kneeling shot out of the pool before strict vision could judge it.
+    by_source: dict[int, list] = {}
+    for source_rank, order_key, cand in ranked:
+        by_source.setdefault(source_rank, []).append((order_key, cand))
+    for rows in by_source.values():
+        rows.sort(key=lambda row: row[0])
+    chosen = []
+    chosen_keys = set()
+    quota = max(1, min(6, (cap + 1) // 2))
+    for source_rank in sorted(by_source)[:2]:
+        for _key, cand in by_source[source_rank][:quota]:
+            if len(chosen) >= cap:
+                break
+            chosen.append(cand)
+            chosen_keys.add((cand.source_id, cand.shot_index))
+    # Sparse top sources must not waste the bound. Fill remaining slots source-first, preserving
+    # each source's persisted-CLIP/distance order and excluding the reserved candidates.
+    if len(chosen) < cap:
+        for source_rank in sorted(by_source):
+            for _key, cand in by_source[source_rank]:
+                ck = (cand.source_id, cand.shot_index)
+                if ck in chosen_keys:
+                    continue
+                chosen.append(cand)
+                chosen_keys.add(ck)
+                if len(chosen) >= cap:
+                    break
+            if len(chosen) >= cap:
+                break
+    return chosen
+
+
 def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfig,
                       eng_cfg, *, max_replacements: int = 3, only_indices=None, progress=None,
                       materialize_promotions: bool = True,
@@ -1493,8 +1843,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         # min: 146/202 beats entered repair). For every beat whose warmed PRIMARY verdict is
         # 'replace' and that is EXACT, warm the questions the serial loop will provably ask:
         #   (a) the strict-promotion rung over the first max_replacements alternates in the
-        #       exact serial order (_scene_affinity_order when enabled), judged WITHOUT the
-        #       look question (_look_scope off — same as _try_promote); a slot-consuming
+        #       exact serial order (_scene_affinity_order when enabled), including the SAME
+        #       named-look-target question the serial strict promotion asks; a slot-consuming
         #       shotless alternate is skipped exactly like the serial walk;
         #   (b) the lenient generic-filler re-ask of the ORIGINAL shot (look scope ON).
         # All warms flow through _cached_verify_ctx — identical fingerprints, store-on-
@@ -1596,7 +1946,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     _v_w, _ = _cached_verify_ctx(_a.keyframe_path, _a, _s, True,
                                                  _a.face_ids or [], _win_a,
                                                  rung="strict_promote")
-                    if _v_w is not None and str(_v_w.get("verdict")) == "keep":
+                    _look_w = _must_see(_s)
+                    if (_v_w is not None and str(_v_w.get("verdict")) == "keep"
+                            and (not _look_w or _v_w.get("target_visible") is True)):
                         # the serial loop may still refuse this alternate on the reuse cap or
                         # window-QC and walk on — then the next alternate is simply unwarmed and
                         # asked fresh, which is today's behaviour for anything not prefetched
@@ -1611,20 +1963,20 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     return _v_w is not None
 
                 _go_on = True
-                _look_scope["on"] = False                # alternates: no look question
-                try:
-                    for _wi, _wave in enumerate(_alt_waves):
-                        _todo = [j for j in _wave if not _alt_done.get(j[1])]
-                        if not _todo:
-                            break                        # every staged beat already has a keep
-                        if _wi:
-                            from . import perf_metrics as _pm_pf
-                            _pm_pf.incr(f"verify.rung.wave{_wi + 1}", len(_todo))
-                        _go_on = _warm(_warm_alt, _todo)
-                        if not _go_on:
-                            break
-                finally:
-                    _look_scope["on"] = True
+                # Strict alternates must answer the named-target question too.  Keeping the scope
+                # on here makes these warms byte-identical to the serial path; otherwise every
+                # deictic candidate misses cache and is paid for twice.
+                _look_scope["on"] = True
+                for _wi, _wave in enumerate(_alt_waves):
+                    _todo = [j for j in _wave if not _alt_done.get(j[1])]
+                    if not _todo:
+                        break                        # every staged beat already has a valid keep
+                    if _wi:
+                        from . import perf_metrics as _pm_pf
+                        _pm_pf.incr(f"verify.rung.wave{_wi + 1}", len(_todo))
+                    _go_on = _warm(_warm_alt, _todo)
+                    if not _go_on:
+                        break
                 if _go_on:
                     # The lenient rung is reached ONLY when nothing swapped, so a beat whose
                     # strict warm already came back 'keep' will (barring a reuse-cap/window-QC
@@ -1792,6 +2144,11 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         if v.get("verdict") == "replace":
             swapped = False
             failed_wins: list = []      # alternates the verifier explicitly REJECTED on the way
+            # Primary pixels already received the strict verdict above.  Promotion adds every
+            # strict candidate it actually considers so the bounded neighborhood rung never asks
+            # the same source/shot twice.
+            strict_tried = {(str(getattr(sel, "source_id", "") or ""),
+                             int(getattr(sel, "shot_index", -1)))}
             # Promotion changes many coupled fields (source/window/signals/verifier/beat windows) and
             # overwrites a deterministic clip filename.  Keep one pre-promotion state for the whole
             # ladder so a cut failure restores the actual rejected selection, including alternate
@@ -1799,7 +2156,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             _promotion_base_state = copy.deepcopy(vars(sel))
             _promotion_materialization_error = {"detail": ""}
 
-            def _try_promote(downgrade: bool, pool=None, label: str = "") -> bool:
+            def _try_promote(downgrade: bool, pool=None, label: str = "",
+                             attempt_cap: int | None = None) -> bool:
                 """Scan the beat's relevance-ranked alternates and promote the first acceptable one.
                 downgrade=False → the ORIGINAL strict promotion (verify at the beat's own strictness,
                 accept only an explicit verdict==keep). downgrade=True → the EXACT→CONTEXTUAL rung:
@@ -1810,15 +2168,22 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 the production safeguards (reuse-ledger cap, Window-QC, beat_windows rewrite,
                 re-cut) are shared by all modes."""
                 nonlocal swapped, replaced
-                _look_scope["on"] = False        # alternates are judged WITHOUT the look question
+                _prior_look_scope = _look_scope["on"]
+                # A strict replacement must satisfy every promise the primary was asked, including
+                # "look at the dagger".  Contextual downgrade deliberately remains the softer rung
+                # and keeps that question off; a missed primary target is routed to exact search /
+                # still fallback below rather than silently declared satisfied.
+                _look_scope["on"] = not downgrade
                 try:
-                    return _try_promote_inner(downgrade, pool, label)
+                    return _try_promote_inner(downgrade, pool, label, attempt_cap)
                 finally:
-                    _look_scope["on"] = True
+                    _look_scope["on"] = _prior_look_scope
 
-            def _try_promote_inner(downgrade: bool, pool=None, label: str = "") -> bool:
+            def _try_promote_inner(downgrade: bool, pool=None, label: str = "",
+                                   attempt_cap: int | None = None) -> bool:
                 nonlocal swapped, replaced, _errored, _materialization_errors
                 tried = 0
+                _attempt_cap = max_replacements if attempt_cap is None else max(0, int(attempt_cap))
                 # SCENE-AFFINITY ordering for exact beats — try same-scene sources first (see
                 # _scene_affinity_order). Ordering only; every gate below still applies.
                 import os as _os_aff
@@ -1831,9 +2196,12 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     except Exception:
                         _alts = sel.alternates
                 for alt in _alts:
-                    if tried >= max_replacements:
+                    if tried >= _attempt_cap:
                         break
                     tried += 1
+                    if not downgrade:
+                        strict_tried.add((str(getattr(alt, "source_id", "") or ""),
+                                          int(getattr(alt, "shot_index", -1))))
                     ashot = get_shot(alt.source_id, alt.shot_index)
                     if ashot is None:
                         continue
@@ -1860,11 +2228,14 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     if _breaker_open:
                         break                           # backend is down — promotion cannot verify
                     _alt_strict = False if downgrade else _exact
+                    _alt_must_see = _must_see(seg)
                     av, _av_used_sheet = _cached_verify_ctx(
                         ashot.keyframe_path, ashot, seg, _alt_strict, anames,
                         (alt.in_point, alt.out_point),
-                        rung=("venue" if pool is not None else
-                              ("contextual" if downgrade else "strict_promote")))
+                        rung=("strict_scene_neighborhood"
+                              if label == "strict_scene_neighborhood" and not downgrade else
+                              ("venue" if pool is not None else
+                              ("contextual" if downgrade else "strict_promote"))))
                     if av is None:
                         continue                        # transport error, NOT a judgment
                     _asrc = proj.source(alt.source_id)
@@ -1880,7 +2251,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         _accept = (av.get("verdict") == "keep" and not _aconflict
                                    and not (_exact and (
                                        av.get("matches_narration") is False
-                                       or av.get("specific_enough") is False)))
+                                       or av.get("specific_enough") is False))
+                                   and (not _alt_must_see
+                                        or av.get("target_visible") is True))
                     if not _accept:
                         # an explicit non-keep judgment (av None = transport error, handled above)
                         failed_wins.append((alt.source_id, float(alt.in_point)))
@@ -1933,10 +2306,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                             av["verdict"] = "keep"
                             av["downgraded"] = label or "exact→contextual"
                             av["relevance_class"] = "contextual_fallback"
-                        # _look_scope is intentionally off for alternates, so the actual prompt
-                        # carried no look-target clause. Record that question honestly.
                         _bind_evidence(av, sel, seg, ashot, _alt_strict, anames,
-                                       _av_used_sheet, "")
+                                       _av_used_sheet, _alt_must_see)
                         sel.verifier = av
                         if materialize_promotions:
                             made = _cut.cut_selection(proj, sel, cfg)
@@ -1998,6 +2369,47 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 # write a semantic rejection; the summary's errored/materialization counts make
                 # every scoped/full caller retry this beat.
                 continue
+
+            # STRICT SCENE-NEIGHBORHOOD EXPANSION. Match may retain the correct source but only a
+            # neighboring shot from it; global variety/de-dup ranking should not be changed to fix
+            # that local verifier miss. Search a bounded ±6 neighborhood around the selection,
+            # alternates and deep-bench seeds from scene-affine sources, ordered by persisted CLIP
+            # when available. Crucially this reuses `_try_promote`: strict vision, exact selected-
+            # window sheets, Window-QC, reuse cap and clip transaction are byte-for-byte the same.
+            # The rung owns a cap independent of `max_replacements=3`; inheriting that shallow cap
+            # would stop before measured exact moments at ranks 5-6.
+            _neighborhood_on = _os_ms.environ.get(
+                "VIDLORE_CLIPSTUDIO_STRICT_NEIGHBORHOOD", "1").strip() \
+                not in ("0", "false", "no", "")
+            if not swapped and _exact and _neighborhood_on:
+                try:
+                    _n_cap = max(0, min(24, int(_os_ms.environ.get(
+                        "VIDLORE_CLIPSTUDIO_STRICT_NEIGHBORHOOD_CANDS", "12") or 12)))
+                    _n_radius = max(1, min(12, int(_os_ms.environ.get(
+                        "VIDLORE_CLIPSTUDIO_STRICT_NEIGHBORHOOD_RADIUS", "6") or 6)))
+                    _n_sources = max(1, min(8, int(_os_ms.environ.get(
+                        "VIDLORE_CLIPSTUDIO_STRICT_NEIGHBORHOOD_SOURCES", "4") or 4)))
+                except (TypeError, ValueError):
+                    _n_cap, _n_radius, _n_sources = 12, 6, 4
+                try:
+                    _npool = _strict_scene_neighborhood_candidates(
+                        sel, seg, proj, get_shot, cfg, exclude=strict_tried,
+                        beat_era=_era_of(seg), cap=_n_cap, radius=_n_radius,
+                        source_cap=_n_sources)
+                except Exception as _n_exc:              # fail closed; old ladder remains intact
+                    _npool = []
+                    log(f"verify: seg{sel.segment_index} strict scene-neighborhood unavailable "
+                        f"({type(_n_exc).__name__})")
+                if _npool:
+                    log(f"verify: seg{sel.segment_index} strict scene-neighborhood — trying "
+                        f"{len(_npool)} unseen candidate(s) within ±{_n_radius} shots")
+                    if _try_promote(downgrade=False, pool=_npool,
+                                    label="strict_scene_neighborhood",
+                                    attempt_cap=_n_cap):
+                        log(f"verify: seg{sel.segment_index} rescued by strict scene-neighborhood "
+                            "— exact scene found, no contextual downgrade")
+                if _promotion_materialization_error["detail"]:
+                    continue
 
             # EXACT→CONTEXTUAL DOWNGRADE (relevance hierarchy: exact → contextual_fallback → filler).
             # The strict verifier rejected every candidate for not being the EXACT moment — but a clip

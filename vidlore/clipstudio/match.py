@@ -122,15 +122,21 @@ _PROMO_OVERLAY_RX = re.compile(
 
 
 def _source_has_promo_overlay(shots, *, min_hits: int = 1) -> bool:
-    """True when a source burns channel-promo furniture into its BODY (not just its outro).
+    """True when a source burns channel-promo furniture into its BODY (not intro/outro cards).
 
-    The tail exclusion is the whole point. Nearly every clean scene rip ends on a subscribe
-    end-card — measured across two finished jobs, 4 of the 5 promo-bearing sources had their ONLY
-    promo shot in the last seconds (e.g. 'SIGN UP FOR MAX ... SUBSCRIBE' at 268s of a 278s upload),
-    and one of those supplied a flawless real-audio breakout. Banning on an outro card would throw
-    away good footage. A promo overlay in the BODY is different: it means the upload is packaged
-    content (quiz/listicle/compilation) that also carries numbered titles and lower-thirds — that is
-    the class that put another channel's '2. NEEDLE' title on screen.
+    The boundary exclusion is the whole point. Nearly every clean scene rip begins or ends with a
+    dedicated channel card. Measured across two finished jobs, 4 of the 5 promo-bearing sources had
+    their ONLY promo shot in the last seconds; the 101-beat incident also had an otherwise-usable
+    170.9s 1080p scene rip whose sole ``LIKE / COMMENT / SUBSCRIBE`` card occupied 8.22-15.06s,
+    wholly inside its first 10%. The source-level verdict discarded the exact Catspaw scene at
+    95-108s even though the existing per-shot text gate already excludes the intro card itself.
+
+    A promo overlay in the BODY is different: it means the upload is packaged content
+    (quiz/listicle/compilation) that also carries numbered titles and lower-thirds — that is the
+    class that put another channel's '2. NEEDLE' title on screen. The intro exemption is therefore
+    deliberately narrow: at most the first 10% and never more than 20 seconds, and the entire promo
+    shot must end inside that zone. An overlay which starts near the boundary but continues into the
+    programme remains a body hit. Per-shot text gates still reject every exempt card's own pixels.
 
     Per-shot text gates still handle the outro shots themselves; this is only the source verdict."""
     if not shots:
@@ -139,6 +145,9 @@ def _source_has_promo_overlay(shots, *, min_hits: int = 1) -> bool:
         end = max(float(getattr(s, "end", 0.0) or 0.0) for s in shots)
     except ValueError:
         return False
+    # intro = first 10%, capped at 20s.  Require the WHOLE shot to fit: a persistent overlay that
+    # starts during the intro but continues over footage is body furniture, not an intro card.
+    intro_end = min(end * 0.10, 20.0) if end > 0 else 0.0
     # tail = last 20% or last 30s, whichever starts earlier (long uploads get the seconds rule)
     tail_start = min(end * 0.80, end - 30.0) if end > 0 else 0.0
     hits = 0
@@ -146,6 +155,8 @@ def _source_has_promo_overlay(shots, *, min_hits: int = 1) -> bool:
         t = (getattr(sh, "ocr_text", "") or "")
         if not t or not _PROMO_OVERLAY_RX.search(t):
             continue
+        if float(getattr(sh, "end", 0.0) or 0.0) <= intro_end:
+            continue                                   # dedicated intro card — shot gate owns it
         if float(getattr(sh, "start", 0.0) or 0.0) >= tail_start:
             continue                                   # outro end-card — not a packaging signal
         hits += 1
@@ -2429,8 +2440,55 @@ def _clean_copy_swap(seg, best, scored, src_dirty: dict, src_height: dict, cfg,
     # sharp 720p copy can still win the arbitration below.
     if key_b[0] == 0 and key_b[1] == 0 and key_b[2] <= -1.0 and key_b[3] == -3:
         return best, None                          # already a clean, pristine 1080-class copy
+    # A clean-copy substitution promises the SAME MOMENT in a cleaner source.  If a located quote
+    # contributed any material moment-lock evidence to the current winner, remember both its
+    # proximity and its stronger containment category: direct quote footage may not degrade into a
+    # pre-roll-only copy, and a pre-roll/reaction winner may not jump to a far-away similar frame.
+    _orig_mom = locate_beat_moment(proj, ps_b.sid, seg, anchor_lines) \
+        if (proj and beat_quote) else None
+    _orig_moment_proximity = (_moment_proximity(ps_b.shot, _orig_mom) if _orig_mom else 0.0)
+    try:
+        _recorded_moment = float((getattr(cand_b, "signals", None) or {}).get(
+            "moment_lock", _orig_moment_proximity) or 0.0)
+        _recorded_ratio = float((getattr(cand_b, "signals", None) or {}).get(
+            "moment_ratio", (_orig_mom[2] if _orig_mom else 0.0)) or 0.0)
+    except (TypeError, ValueError):
+        _recorded_moment, _recorded_ratio = _orig_moment_proximity, 0.0
+    _orig_moment_proximity = max(_orig_moment_proximity, _recorded_moment)
+    _preserve_quote_moment = bool(
+        _orig_mom and min(float(_orig_mom[2]), _recorded_ratio) >= _MOMENT_MIN_RATIO
+        and _orig_moment_proximity > 0.0
+    )
+    try:
+        from .relevance_contract import QUOTE_WINDOW_TOLERANCE_SEC as _quote_window_tol
+        _quote_window_tol = float(_quote_window_tol)
+    except Exception:
+        _quote_window_tol = 0.75
+
+    def _contract_contains(window, moment) -> bool:
+        """Use the publication contract's exact tolerated-containment rule.
+
+        A clean-copy swap must not turn a window which currently satisfies the quote contract into
+        one which only overlaps the dialogue shot.  Strict geometric containment is not enough as
+        the comparison predicate because publication deliberately permits 0.75s of ASR/editorial
+        boundary tolerance.
+        """
+        if not moment or not window:
+            return False
+        try:
+            w0, w1 = float(window[0]), float(window[1])
+            q0, q1 = float(moment[0]), float(moment[1])
+            return (w1 > w0 >= 0.0 and q1 >= q0 >= 0.0
+                    and q0 >= w0 - _quote_window_tol
+                    and q1 <= w1 + _quote_window_tol)
+        except (TypeError, ValueError, IndexError):
+            return False
+
+    _orig_direct = bool(_orig_mom and float(ps_b.shot.end) >= float(_orig_mom[0])
+                        and float(ps_b.shot.start) <= float(_orig_mom[1]))
+    _orig_contains = _contract_contains((cand_b.in_point, cand_b.out_point), _orig_mom)
     tb = (getattr(ps_b.shot, "transcript", "") or "").lower().split()
-    alt, alt_key, alt_base = None, key_b, 0.0
+    alt, alt_key, alt_base, alt_moment = None, key_b, 0.0, None
     for base, bonus, sig, ps in scored:
         if ps.sid == ps_b.sid:
             continue                               # a different SOURCE = a different copy
@@ -2448,6 +2506,24 @@ def _clean_copy_swap(seg, best, scored, src_dirty: dict, src_height: dict, cfg,
                 same = len(sa & sb) / max(1, min(len(sa), len(sb))) >= 0.6
         if not same:
             continue
+        _copy_mom = None
+        if _preserve_quote_moment:
+            _copy_mom = locate_beat_moment(proj, ps.sid, seg, anchor_lines)
+            # The target source may contain the same scene more than once.  It is only a valid
+            # clean copy for this quote-locked winner when THIS candidate has at least the same
+            # moment proximity in its own source.  Otherwise _trim_window ignores the far-away
+            # moment and silently cuts the shot midpoint — the beat-85 failure this guard closes.
+            _copy_proximity = _moment_proximity(ps.shot, _copy_mom) if _copy_mom else 0.0
+            _copy_direct = bool(_copy_mom and float(ps.shot.end) >= float(_copy_mom[0])
+                                and float(ps.shot.start) <= float(_copy_mom[1]))
+            _copy_window = (_trim_window(ps.shot, seg, cfg, _copy_mom)
+                            if _copy_mom else (0.0, 0.0))
+            _copy_contains = _contract_contains(_copy_window, _copy_mom)
+            if not (_copy_mom and float(_copy_mom[2]) >= _MOMENT_MIN_RATIO
+                    and _copy_proximity >= _orig_moment_proximity - 1e-6
+                    and (not _orig_direct or _copy_direct)
+                    and (not _orig_contains or _copy_contains)):
+                continue
         # REUSE-AWARE: this swap runs AFTER the greedy loop that owns the reuse ledger, so without
         # this check it happily funnels many beats onto one "cleanest copy" and silently defeats the
         # per-shot cap (measured: one window won 6 beats against a cap of 2).
@@ -2456,15 +2532,15 @@ def _clean_copy_swap(seg, best, scored, src_dirty: dict, src_height: dict, cfg,
             continue
         k = _cleanliness_key(ps.sid, ps.shot, src_dirty, src_height)
         if k < alt_key or (k == alt_key and alt is not None and base > alt_base):
-            alt, alt_key, alt_base = (base, bonus, sig, ps), k, base
+            alt, alt_key, alt_base, alt_moment = (base, bonus, sig, ps), k, base, _copy_mom
     if alt is None:
         return best, None
     base, bonus, sig, ps = alt
     # the swap moves to a DIFFERENT copy of the scene, where the line sits at a different
     # timestamp — re-locate it in the new source, or the window falls back to the shot midpoint
     # and can miss the very words the beat is about.
-    _sw_mom = locate_beat_moment(proj, ps.sid, seg, anchor_lines) \
-        if (proj and beat_quote) else None
+    _sw_mom = alt_moment if _preserve_quote_moment else (       # already located in guarded path
+        locate_beat_moment(proj, ps.sid, seg, anchor_lines) if (proj and beat_quote) else None)
     in_p, out_p = _trim_window(ps.shot, seg, cfg, _sw_mom)
     cand = ClipCandidate(segment_index=seg.index, source_id=ps.sid, shot_index=ps.shot.index,
                          score=round(max(0.0, min(1.0, base)), 4),

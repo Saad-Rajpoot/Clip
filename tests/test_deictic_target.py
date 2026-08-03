@@ -212,11 +212,11 @@ def test_no_blanket_luma_floor_was_added():
         "a blanket luma floor would cost more relevance than it buys on this material"
 
 
-def test_the_look_question_is_scoped_to_the_current_pick_only():
-    """Asking "does this show the dagger?" while judging ALTERNATES changes which alternate the
-    strict promotion accepts — and measured that swap at -4.00 (beats scoring 8/9/9 fell to 4/2/3).
-    The pool simply has no footage showing these targets, so asking harder only finds a worse clip.
-    The gate's value is routing the beat to a STILL of the moment, not replacing footage."""
+def test_the_look_question_is_preserved_for_strict_replacements_only():
+    """A strict replacement inherits "show the dagger" or it can stop on a generic keep and leave
+    a later publication blocker even when a subsequent candidate contains the target.  The softer
+    contextual rung still disables the question; if strict search finds nothing, the existing
+    usable-pick/still path remains the no-footage fallback instead of gambling on a replacement."""
     import inspect
     from vidlore.clipstudio import verify as V
     src = inspect.getsource(V.verify_and_repair)
@@ -225,5 +225,7 @@ def test_the_look_question_is_scoped_to_the_current_pick_only():
     i = src.index("def _try_promote(")
     j = src.index("def _try_promote_inner(")
     wrapper = src[i:j]
-    assert '_look_scope["on"] = False' in wrapper and "finally:" in wrapper, \
-        "the promotion scan must disable the look question and always restore it"
+    assert '_look_scope["on"] = not downgrade' in wrapper and "finally:" in wrapper, \
+        "strict promotion must keep the look question; contextual promotion may soften it"
+    assert 'av.get("target_visible") is True' in src[i:], \
+        "a malformed keep without affirmative target evidence must not stop strict search"

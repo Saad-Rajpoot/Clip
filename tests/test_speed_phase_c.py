@@ -172,9 +172,10 @@ class TestRungPrefetch(unittest.TestCase):
         self.assertIn("_scene_affinity_order(selP.alternates, segP, proj,", seg)
         self.assertIn('rung="strict_promote"', seg)
         self.assertIn('rung="lenient_filler"', seg)
-        # look scope: off for alternates, restored for lenient — two separate sub-passes
-        self.assertIn('_look_scope["on"] = False', seg)
+        # strict alternates ask the same named-target question as the serial path, so cache keys
+        # match and a generic keep cannot pre-empt a later target-visible candidate
         self.assertIn('_look_scope["on"] = True', seg)
+        self.assertIn('_v_w.get("target_visible") is True', seg)
         # its own kill-switch + abort on repeated transport failures
         self.assertIn("VIDLORE_CLIPSTUDIO_VERIFY_PREFETCH_RUNGS", seg)
         self.assertIn("VERIFIER_BREAKER_TRIP", seg)
