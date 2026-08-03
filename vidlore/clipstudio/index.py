@@ -13,6 +13,7 @@ cheap. Re-indexing is skipped when shots.json already exists (resume), unless fo
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -114,16 +115,100 @@ def _whisper(cfg: ClipConfig):
     return _WHISPER[key]
 
 
-def transcribe_words(path: Path, cfg: ClipConfig) -> list[tuple[float, float, str]]:
+_ASR_EOF_WINDOW_SEC = 30.0
+_ASR_EOF_RESCUE_GAP_SEC = 4.0
+
+
+def _timed_words(segments, *, lo: float = 0.0, hi: float = float("inf")) \
+        -> list[tuple[float, float, str]]:
+    """Materialise only real, finite Whisper word intervals.
+
+    A no-VAD pass can emit an otherwise plausible sentence whose words are all pinned to EOF with
+    zero duration.  Those are decoder hallucinations, not timed audio evidence, and must never enter
+    the quote index.
+    """
+    out: list[tuple[float, float, str]] = []
+    for seg in segments:
+        for w in (seg.words or []):
+            try:
+                start, end = float(w.start), float(w.end)
+            except (TypeError, ValueError):
+                continue
+            text = str(w.word or "").strip()
+            if (text and math.isfinite(start) and math.isfinite(end)
+                    and end > start + 0.005 and start >= lo - 0.25 and end <= hi + 0.25):
+                out.append((max(lo, start), min(hi, end), text))
+    return out
+
+
+def _merge_eof_words(primary: list[tuple[float, float, str]],
+                     rescue: list[tuple[float, float, str]]) \
+        -> list[tuple[float, float, str]]:
+    """Add independently observed EOF words without duplicating the overlapping prefix."""
+    out = list(primary)
+    for start, end, word in rescue:
+        norm = _norm_tok(word)
+        mid = (start + end) / 2.0
+        duplicate = any(
+            norm and norm == _norm_tok(old_word)
+            and abs(mid - ((old_start + old_end) / 2.0)) <= 0.8
+            for old_start, old_end, old_word in out
+        )
+        if not duplicate:
+            out.append((start, end, word))
+    out.sort(key=lambda row: (row[0], row[1]))
+    return out
+
+
+def _rescue_eof_words(path: Path, model, primary: list[tuple[float, float, str]],
+                      duration: float) -> list[tuple[float, float, str]]:
+    """Recover trailing dialogue that whole-source Silero VAD can omit.
+
+    The independent pass is narrowly EOF-anchored and disables VAD/previous-text conditioning.  It
+    is attempted only when the primary stream leaves a real tail gap, and accepted only when at
+    least two newly timed words form a coherent utterance.  This avoids promoting a one-token outro
+    hallucination into quote evidence.
+    """
+    duration = float(duration or 0.0)
+    if duration <= 2.0:
+        return primary
+    last_end = max((float(row[1]) for row in primary), default=0.0)
+    if duration - last_end < _ASR_EOF_RESCUE_GAP_SEC:
+        return primary
+    tail_start = max(0.0, duration - _ASR_EOF_WINDOW_SEC)
+    try:
+        segments, _info = model.transcribe(
+            str(path), word_timestamps=True, vad_filter=False,
+            condition_on_previous_text=False,
+            clip_timestamps=[tail_start, duration],
+        )
+        rescue = _timed_words(segments, lo=tail_start, hi=duration)
+    except Exception:
+        return primary
+
+    # Require a coherent multi-word observation strictly after the persisted stream.  Existing
+    # overlap words are still merged below, but cannot by themselves authorize the rescue.
+    new = [row for row in rescue if row[0] >= last_end + 0.25]
+    coherent = 1 if new else 0
+    best = coherent
+    for prev, cur in zip(new, new[1:]):
+        coherent = coherent + 1 if cur[0] - prev[1] <= 4.0 else 1
+        best = max(best, coherent)
+    if best < 2:
+        return primary
+    return _merge_eof_words(primary, rescue)
+
+
+def transcribe_words(path: Path, cfg: ClipConfig, *, duration: float = 0.0) \
+        -> list[tuple[float, float, str]]:
     """Return [(start,end,word)] for the whole source. Empty list if ASR unavailable."""
     try:
         model = _whisper(cfg)
         segments, _info = model.transcribe(str(path), word_timestamps=True, vad_filter=True)
-        words: list[tuple[float, float, str]] = []
-        for seg in segments:
-            for w in (seg.words or []):
-                words.append((float(w.start), float(w.end), w.word.strip()))
-        return words
+        words = _timed_words(segments)
+        if not duration:
+            duration = float(probe(path).get("duration", 0.0) or 0.0)
+        return _rescue_eof_words(path, model, words, duration)
     except Exception:
         return []
 
@@ -237,10 +322,18 @@ def find_quote_span(words, quote: str, *, min_ratio: float = 0.72,
                 float(b[1]) - float(a[2]) > max_interword_gap
                 for a, b in zip(span_words, span_words[1:])))
             win = [x[0] for x in span_words]
-            if substantive and not any(
-                    _tok_close(actual, wanted)
-                    for actual in win for wanted in substantive):
-                continue
+            if substantive:
+                # One shared name is not enough to identify a content-rich line.  Measured false
+                # positive: "Lady Stark is here in King's Landing" scored 0.727 against "Lord
+                # Edward Stark is here ... Protector of the Realm" because the function-word
+                # skeleton and ``Stark`` aligned.  Conversely the EOF-rescued real Olenna quote
+                # has three independent content hits despite base-ASR garbling Cersei.  Require
+                # two distinct substantive query terms once a quote supplies at least three;
+                # short quotes retain the prior one-term requirement.
+                content_hits = sum(1 for wanted in dict.fromkeys(substantive)
+                                   if any(_tok_close(actual, wanted) for actual in win))
+                if content_hits < (2 if len(set(substantive)) >= 3 else 1):
+                    continue
             m = SequenceMatcher(None, win, qt)
             hits = sum(bl.size for bl in m.get_matching_blocks())
             # credit near-miss tokens the block matcher rejected (ASR garble), positionally
@@ -867,7 +960,7 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
     log(f"index: {source.id} {len(bounds)} shots detected")
 
     # 2) transcript
-    words = transcribe_words(path, cfg)
+    words = transcribe_words(path, cfg, duration=source.duration)
     log(f"index: {source.id} transcript words={len(words)}")
 
     # 3) keyframes + CLIP embeds + faces + Face-ID + OCR + quality + phash
@@ -1025,6 +1118,38 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
                                  "schema": INDEX_SCHEMA}), encoding="utf-8")
     _mtmp.replace(meta_file)
     log(f"index: {source.id} done — {len(shots)} shots, {len(embeds)} embeds, clip={use_clip}")
+    return shots
+
+
+def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
+                         *, progress=None) -> list[Shot]:
+    """Refresh one source's ASR words and shot transcripts without rebuilding visual indexes.
+
+    This is the safe repair path for an otherwise-valid cached source whose transcript is known to
+    be incomplete: keyframes, embeddings, OCR, face IDs, and shot boundaries remain byte-for-byte
+    untouched.  Both dependent JSON files are atomically replaced only after ASR succeeds.
+    """
+    if source.status != SOURCE_OK or not source.local_path:
+        return []
+    shots_file = proj.shots_path(source.id)
+    if not shots_file.exists():
+        return []
+    try:
+        shots = load_shots(proj, source.id)
+    except Exception:
+        return []
+    words = transcribe_words(Path(source.local_path), cfg, duration=source.duration)
+    if not words:
+        if progress:
+            progress(f"index: ⚠ {source.id} word refresh produced no ASR; cache preserved")
+        return []
+    _assign_transcript(shots, words)
+    save_words(proj, source.id, words)
+    tmp = shots_file.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps([shot.to_dict() for shot in shots], indent=1), encoding="utf-8")
+    tmp.replace(shots_file)
+    if progress:
+        progress(f"index: {source.id} refreshed {len(words)} words across {len(shots)} shots")
     return shots
 
 

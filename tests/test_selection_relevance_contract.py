@@ -298,16 +298,35 @@ def test_commentary_pool_hit_does_not_turn_a_paraphrase_into_verbatim(tmp_path):
     assert ev["commentary_sources_excluded"] == 1
 
 
-def test_pool_quote_scan_uses_point78_not_find_quote_span_default(tmp_path):
+def test_pool_quote_scan_rejects_one_name_function_word_false_match(tmp_path):
     quote = "Lady Stark is here in King's Landing."
     proj, seg, _sel = _fixture(
         tmp_path, text="Varys learns she is in the city.", quote=quote,
         signals={"dialogue": 0.0})
-    # This measured ASR phrase scores 0.727 at find_quote_span's permissive default.
+    # This measured ASR phrase used to score 0.727 from one shared name plus a function-word
+    # skeleton.  The whole-pool locator runs at its 0.72 discovery bar, but substantive phrase
+    # evidence must still keep this paraphrase from becoming a verbatim promise.
     words = [[i * .1, (i + 1) * .1, w] for i, w in enumerate(
         "Lord Edward Stark is here in named Protector of the Realm".split())]
     (proj.index_dir / "s1.words.json").write_text(json.dumps(words))
     assert R._quote_pool_branches(proj, [seg])[0]["branch"] == "paraphrase"
+
+
+def test_pool_locator_can_type_real_garbled_quote_without_lowering_window_floor(tmp_path):
+    quote = "Tell Cersei. I want her to know it was me."
+    proj, seg, _sel = _fixture(
+        tmp_path, text="Olenna confesses before dying.", quote=quote,
+        signals={"dialogue": 0.737})
+    words = [[i * .1, (i + 1) * .1, w] for i, w in enumerate(
+        "Tell Susie I wanted to know he was me".split())]
+    (proj.index_dir / "s1.words.json").write_text(json.dumps(words))
+
+    entry = R.evaluate_selection_relevance(proj, [seg])["blockers"][0]
+    ev = entry["quote_evidence"]
+    assert ev["branch"] == "verbatim"
+    assert ev["scan_ratio_floor"] == 0.72
+    assert ev["selected_window_ratio_floor"] == 0.78
+    assert "exact_quote_dialogue_signal_below_floor" in entry["reasons"]
 
 
 def test_no_dialogue_eligible_index_is_indeterminate_and_fails_closed(tmp_path):

@@ -19,6 +19,7 @@ from .verify import _contradiction_reason, selection_verifier_evidence_reason
 SCHEMA_VERSION = 5
 AUDIT_FILENAME = "selection_relevance_audit.json"
 QUOTE_DIALOGUE_FLOOR = 0.78
+QUOTE_POOL_LOCATOR_FLOOR = 0.72
 QUOTE_WINDOW_TOLERANCE_SEC = 0.75
 
 
@@ -171,8 +172,11 @@ def _quote_pool_branches(proj, segments) -> dict[int, dict]:
             best = None
             for src, words in streams:
                 try:
+                    # Typing and publication are deliberately separate bars.  The whole-pool
+                    # locator answers only whether this is real show dialogue; if found, the
+                    # selected window must still satisfy the unchanged 0.78 publication floor.
                     span = _index.find_quote_span(
-                        words, quote, min_ratio=QUOTE_DIALOGUE_FLOOR)
+                        words, quote, min_ratio=QUOTE_POOL_LOCATOR_FLOOR)
                 except Exception:
                     span = None
                 if span and (best is None or float(span[2]) > float(best[1][2])):
@@ -194,7 +198,8 @@ def _quote_pool_branches(proj, segments) -> dict[int, dict]:
                 "authored_quote": quote,
                 "branch": kind,
                 "verbatim_required": kind != "paraphrase",
-                "scan_ratio_floor": QUOTE_DIALOGUE_FLOOR,
+                "scan_ratio_floor": QUOTE_POOL_LOCATOR_FLOOR,
+                "selected_window_ratio_floor": QUOTE_DIALOGUE_FLOOR,
                 "pool_sources_indexed": indexed,
                 "dialogue_eligible_sources_scanned": len(streams),
                 "commentary_sources_excluded": rejected_commentary,
