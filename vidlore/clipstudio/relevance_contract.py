@@ -16,7 +16,7 @@ from pathlib import Path
 from . import policy as _policy
 from .verify import _contradiction_reason, selection_verifier_evidence_reason
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 AUDIT_FILENAME = "selection_relevance_audit.json"
 QUOTE_DIALOGUE_FLOOR = 0.78
 QUOTE_WINDOW_TOLERANCE_SEC = 0.75
@@ -113,7 +113,102 @@ def _selection_source_title(proj, sel) -> str:
             (getattr(sel, "source_id", "") or ""))
 
 
-def exact_quote_dialogue_evidence(proj, sel, seg) -> tuple[bool, str, dict]:
+def _quote_pool_branches(proj, segments) -> dict[int, dict]:
+    """Classify authored exact-beat quotes against the complete usable dialogue index.
+
+    The analyzer's ``quote`` field is not a type guarantee: it contains real show dialogue,
+    paraphrases, and sometimes the essayist's own narration.  A selected-window ASR floor is only
+    meaningful for the first class.  Search every indexed source that is eligible to supply the
+    show's own audio *before* applying that floor.  ``_breakout_src_ok`` is the existing audio-trust
+    boundary: it excludes reaction/essay narration and wall-to-wall commentary, which otherwise
+    makes a fuzzy phrase hit (observed on beat 8's Season-7 News source) look like show dialogue.
+
+    The map is recomputed once per contract evaluation.  Recovery can add sources between
+    evaluations, so a process-global cache would make an old ``paraphrase`` decision stale.
+    """
+    quoted = [s for s in (segments or [])
+              if _policy.policy_of(s) == _policy.EXACT
+              and str(getattr(s, "quote", "") or "").strip()]
+    if not quoted:
+        return {}
+
+    from . import index as _index
+    # Lazy import avoids a module-initialisation cycle: build imports this contract only at runtime.
+    from .build import _breakout_src_ok
+
+    streams: list[tuple[object, list]] = []
+    indexed = 0
+    rejected_commentary = 0
+    for src in (getattr(proj, "sources", None) or []):
+        sid = str(getattr(src, "id", "") or "")
+        if not sid:
+            continue
+        try:
+            words = _index.load_words(proj, sid)
+        except Exception:
+            words = []
+        if not words:
+            continue
+        indexed += 1
+        try:
+            shots = _index.load_shots(proj, sid)
+            dialogue_eligible = bool(_breakout_src_ok(src, shots))
+        except Exception:
+            # Quote typing must fail closed when source-audio eligibility cannot be established.
+            dialogue_eligible = False
+        if not dialogue_eligible:
+            rejected_commentary += 1
+            continue
+        streams.append((src, words))
+
+    by_quote: dict[str, dict] = {}
+    out: dict[int, dict] = {}
+    for seg in quoted:
+        quote = str(getattr(seg, "quote", "") or "").strip()
+        key = " ".join(quote.lower().split())
+        branch = by_quote.get(key)
+        if branch is None:
+            best = None
+            for src, words in streams:
+                try:
+                    span = _index.find_quote_span(
+                        words, quote, min_ratio=QUOTE_DIALOGUE_FLOOR)
+                except Exception:
+                    span = None
+                if span and (best is None or float(span[2]) > float(best[1][2])):
+                    best = (src, span)
+            if not streams:
+                kind = "indeterminate"
+            else:
+                kind = "verbatim" if best is not None else "paraphrase"
+            match = None
+            if best is not None:
+                src, span = best
+                match = {
+                    "source_id": str(getattr(src, "id", "") or ""),
+                    "source_title": str(getattr(src, "title", "") or ""),
+                    "timed_asr_span": [round(float(span[0]), 3), round(float(span[1]), 3)],
+                    "timed_asr_ratio": round(float(span[2]), 3),
+                }
+            branch = {
+                "authored_quote": quote,
+                "branch": kind,
+                "verbatim_required": kind != "paraphrase",
+                "scan_ratio_floor": QUOTE_DIALOGUE_FLOOR,
+                "pool_sources_indexed": indexed,
+                "dialogue_eligible_sources_scanned": len(streams),
+                "commentary_sources_excluded": rejected_commentary,
+                "pool_match": match,
+            }
+            by_quote[key] = branch
+        # Each entry owns its dict so selected-window evidence can be appended without leaking to a
+        # neighbouring beat that happens to carry the same authored phrase.
+        out[int(getattr(seg, "index", -1))] = json.loads(json.dumps(branch))
+    return out
+
+
+def exact_quote_dialogue_evidence(proj, sel, seg, *, quote_contract=None) \
+        -> tuple[bool, str, dict]:
     """Prove an authored quote is spoken at the selected source window.
 
     Face-ID or a visually plausible close-up cannot identify a dialogue moment.  Require both the
@@ -129,7 +224,20 @@ def exact_quote_dialogue_evidence(proj, sel, seg) -> tuple[bool, str, dict]:
         dialogue = float(signals.get("dialogue", 0.0) or 0.0)
     except (TypeError, ValueError):
         dialogue = 0.0
-    detail = {"authored_quote": quote, "dialogue_signal": round(dialogue, 3)}
+    detail = dict(quote_contract or {})
+    detail.setdefault("authored_quote", quote)
+    detail["dialogue_signal"] = round(dialogue, 3)
+    # No source in the complete usable dialogue pool contains this authored phrase.  It is an
+    # analyzer paraphrase/narration hint, not a promise that a character says those words.  Only the
+    # verbatim floor is skipped; the ordinary strict visual verifier below remains authoritative.
+    if detail.get("branch") == "paraphrase":
+        return True, "", detail
+    # A selected source/window is not allowed to type its own authored quote.  When the complete
+    # usable dialogue pool could not be classified, trusting that same selected ASR would recreate
+    # the original circular contract and could even admit commentary audio excluded by the pool
+    # gate.  Unknown therefore remains a hard, separately-auditable failure.
+    if detail.get("branch") != "verbatim":
+        return False, "exact_quote_pool_classification_indeterminate", detail
     if dialogue < QUOTE_DIALOGUE_FLOOR:
         return False, "exact_quote_dialogue_signal_below_floor", detail
     try:
@@ -164,6 +272,7 @@ def evaluate_selection_relevance(proj, segments) -> dict:
         for c in (analysis.get("characters") or [])
         if isinstance(c, dict) and c.get("name") and c.get("actor")
     }
+    quote_contracts = _quote_pool_branches(proj, segments)
     checked, blockers = [], []
     skipped_generic = 0
 
@@ -176,7 +285,7 @@ def evaluate_selection_relevance(proj, segments) -> dict:
         sel = by_idx.get(idx)
         reasons: list[str] = []
         coverage = "moving_video"
-        quote_evidence: dict = {}
+        quote_evidence: dict = dict(quote_contracts.get(idx) or {})
 
         if sel is None:
             reasons.append("selection_absent")
@@ -219,7 +328,7 @@ def evaluate_selection_relevance(proj, segments) -> dict:
                     if str(verifier.get("relevance_class", "") or "") == "contextual_fallback":
                         reasons.append("exact_moving_relevance_is_contextual")
                     quote_ok, quote_why, quote_evidence = exact_quote_dialogue_evidence(
-                        proj, sel, seg)
+                        proj, sel, seg, quote_contract=quote_evidence)
                     if not quote_ok:
                         reasons.append(quote_why)
 
@@ -283,6 +392,12 @@ def evaluate_selection_relevance(proj, segments) -> dict:
         if reasons:
             blockers.append(entry)
 
+    quote_branch_counts = {"verbatim": 0, "paraphrase": 0, "indeterminate": 0}
+    for detail in quote_contracts.values():
+        branch = str(detail.get("branch", "") or "")
+        if branch in quote_branch_counts:
+            quote_branch_counts[branch] += 1
+
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "blocked" if blockers else "pass",
@@ -291,6 +406,7 @@ def evaluate_selection_relevance(proj, segments) -> dict:
         "strict_checked": len(checked),
         "generic_or_abstract_skipped": skipped_generic,
         "blocked_count": len(blockers),
+        "quote_branch_counts": quote_branch_counts,
         "checked": checked,
         "blockers": blockers,
     }

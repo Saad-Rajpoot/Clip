@@ -50,6 +50,24 @@ def _fixture(tmp_path, *, policy=P.EXACT, verifier=None, text="Jaime rides Ned d
     return proj, seg, sel
 
 
+def _add_indexed_source(proj, root, sid, *, title, words, transcripts=None):
+    """Add one tiny indexed source whose ASR/source-audio eligibility is controlled by the test."""
+    media = root / f"{sid}.mp4"
+    media.write_bytes(b"video")
+    proj.sources.append(SourceVideo(
+        id=sid, url=f"u-{sid}", title=title, permission="owner",
+        status="ok", local_path=str(media)))
+    rows = []
+    for i, transcript in enumerate(transcripts or [""]):
+        frame = root / f"{sid}_{i}.jpg"
+        frame.write_bytes(f"frame-{sid}-{i}".encode())
+        rows.append(Shot(
+            source_id=sid, index=i, start=float(i), end=float(i + 1),
+            keyframe_path=str(frame), transcript=transcript).to_dict())
+    proj.shots_path(sid).write_text(json.dumps(rows))
+    (proj.index_dir / f"{sid}.words.json").write_text(json.dumps(words))
+
+
 def _block_reasons(proj, seg):
     return R.evaluate_selection_relevance(proj, [seg])["blockers"][0]["reasons"]
 
@@ -134,6 +152,10 @@ def test_exact_authored_quote_requires_strong_timed_asr_at_selected_window(tmp_p
     audit = R.evaluate_selection_relevance(proj, [seg])
     assert audit["status"] == "pass"
     assert audit["checked"][0]["quote_evidence"]["dialogue_signal"] == 0.965
+    assert audit["checked"][0]["quote_evidence"]["branch"] == "verbatim"
+    assert audit["checked"][0]["quote_evidence"]["verbatim_required"] is True
+    assert audit["quote_branch_counts"] == {
+        "verbatim": 1, "paraphrase": 0, "indeterminate": 0}
 
     # The audited false pass: right face, wrong season/scene, and no authored dialogue evidence.
     sel.signals["dialogue"] = 0.0
@@ -146,6 +168,96 @@ def test_exact_authored_quote_requires_strong_timed_asr_at_selected_window(tmp_p
         for i, w in enumerate("You don't think I'd let you marry that beast do you".split())
     ]))
     assert "exact_quote_timed_asr_outside_selected_window" in _block_reasons(proj, seg)
+
+
+def test_pool_absent_quote_is_paraphrase_and_skips_only_verbatim_floor(tmp_path):
+    quote = "Who does this belong to?"
+    proj, seg, _sel = _fixture(
+        tmp_path, text=quote, quote=quote, signals={"dialogue": 0.0})
+    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+        [0.1, 0.2, "A"], [0.2, 0.3, "different"], [0.3, 0.4, "line"],
+    ]))
+    audit = R.evaluate_selection_relevance(proj, [seg])
+    assert audit["status"] == "pass", "ordinary positive semantic evidence still decides the beat"
+    ev = audit["checked"][0]["quote_evidence"]
+    assert ev["branch"] == "paraphrase" and ev["verbatim_required"] is False
+    assert ev["pool_match"] is None
+    assert ev["dialogue_signal"] == 0.0
+
+
+def test_quote_found_elsewhere_in_eligible_pool_retains_verbatim_floor(tmp_path):
+    quote = "I did warn you not to trust me."
+    proj, seg, _sel = _fixture(
+        tmp_path, text="The betrayal lands.", quote=quote, signals={"dialogue": 0.0})
+    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+        [0.1, 0.2, "unrelated"], [0.2, 0.3, "selected"], [0.3, 0.4, "audio"],
+    ]))
+    words = [[2.0 + i * .1, 2.1 + i * .1, w]
+             for i, w in enumerate("I did warn you not to trust me".split())]
+    _add_indexed_source(
+        proj, tmp_path, "s2", title="Game of Thrones betrayal scene", words=words)
+    audit = R.evaluate_selection_relevance(proj, [seg])
+    entry = audit["blockers"][0]
+    assert "exact_quote_dialogue_signal_below_floor" in entry["reasons"]
+    assert entry["quote_evidence"]["branch"] == "verbatim"
+    assert entry["quote_evidence"]["pool_match"]["source_id"] == "s2"
+
+
+def test_commentary_pool_hit_does_not_turn_a_paraphrase_into_verbatim(tmp_path):
+    """Beat-8 regression: wall-to-wall Season-7 News narration fuzzy-matched the authored hint."""
+    quote = "It belongs to Tyrion Lannister."
+    proj, seg, _sel = _fixture(
+        tmp_path, text="That name is Tyrion Lannister.", quote=quote,
+        signals={"dialogue": 0.0})
+    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+        [0.1, 0.2, "unrelated"], [0.2, 0.3, "selected"], [0.3, 0.4, "audio"],
+    ]))
+    words = [[2.0 + i * .1, 2.1 + i * .1, w]
+             for i, w in enumerate("It belongs to Tyrion Lannister".split())]
+    rich = ["the narrator keeps explaining this story every single second"] * 8
+    _add_indexed_source(
+        proj, tmp_path, "news", title="Game of Thrones Season 7 News", words=words,
+        transcripts=rich)
+    audit = R.evaluate_selection_relevance(proj, [seg])
+    assert audit["status"] == "pass"
+    ev = audit["checked"][0]["quote_evidence"]
+    assert ev["branch"] == "paraphrase"
+    assert ev["commentary_sources_excluded"] == 1
+
+
+def test_pool_quote_scan_uses_point78_not_find_quote_span_default(tmp_path):
+    quote = "Lady Stark is here in King's Landing."
+    proj, seg, _sel = _fixture(
+        tmp_path, text="Varys learns she is in the city.", quote=quote,
+        signals={"dialogue": 0.0})
+    # This measured ASR phrase scores 0.727 at find_quote_span's permissive default.
+    words = [[i * .1, (i + 1) * .1, w] for i, w in enumerate(
+        "Lord Edward Stark is here in named Protector of the Realm".split())]
+    (proj.index_dir / "s1.words.json").write_text(json.dumps(words))
+    assert R._quote_pool_branches(proj, [seg])[0]["branch"] == "paraphrase"
+
+
+def test_no_dialogue_eligible_index_is_indeterminate_and_fails_closed(tmp_path):
+    quote = "I did warn you not to trust me."
+    proj, seg, _sel = _fixture(
+        tmp_path, text="The betrayal lands.", quote=quote, signals={"dialogue": 0.0})
+    audit = R.evaluate_selection_relevance(proj, [seg])
+    entry = audit["blockers"][0]
+    assert entry["quote_evidence"]["branch"] == "indeterminate"
+    assert "exact_quote_pool_classification_indeterminate" in entry["reasons"]
+    assert audit["quote_branch_counts"]["indeterminate"] == 1
+
+    # Even a strong selected-source ASR hit cannot type its own quote after the pool has declared
+    # that source ineligible/unknown.  Indeterminate is a contract failure, not a fallback path.
+    _sel = proj.selections[0]
+    _sel.signals["dialogue"] = 0.99
+    proj.sources[0].title = "Why Game of Thrones betrayal was secretly genius — analysis"
+    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+        [0.1 + i * .1, 0.2 + i * .1, w]
+        for i, w in enumerate("I did warn you not to trust me".split())
+    ]))
+    audit = R.evaluate_selection_relevance(proj, [seg])
+    assert "exact_quote_pool_classification_indeterminate" in audit["blockers"][0]["reasons"]
 
 
 def test_strict_exact_still_is_allowed_when_authored_quote_has_no_moving_asr(tmp_path):

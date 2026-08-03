@@ -156,3 +156,35 @@ def test_the_abstract_rung_is_only_reached_after_the_character_rung_fails():
     src = inspect.getsource(S._soften_and_retry)
     head = src[:src.index("_soften_to_abstract")]
     assert "return True" in head, "a successful character rung must return before the abstract one"
+
+
+def test_invalid_existing_still_cannot_short_circuit_recovery(monkeypatch, tmp_path):
+    from types import SimpleNamespace as NS
+
+    stale = tmp_path / "stale.jpg"
+    stale.write_bytes(b"contextual pixels")
+    sel = NS(segment_index=24, image_path=str(stale), image_meta={
+        "source": "source-frame-recovery", "relevance_class": "contextual_fallback",
+        "still_verified": True})
+    seg = Seg()
+    proj = NS()
+    monkeypatch.setattr(S, "_clean_pool", lambda _p: [])
+    # With no candidates, success is impossible; the point is that the legacy path is detached
+    # instead of being treated as a resolved exact beat merely because the file exists.
+    assert S.still_recover(
+        proj, seg, sel, NS(), pool=[], used_paths=set(), log=lambda _m: None) is False
+    assert sel.image_path == "" and sel.image_meta == {}
+
+
+def test_failed_abstract_search_restores_the_original_strict_request(monkeypatch):
+    from types import SimpleNamespace as NS
+
+    seg = Seg()
+    sel = NS(segment_index=24, image_path="", image_meta={})
+    monkeypatch.setattr(S, "still_recover", lambda *a, **k: False)
+    before = (seg.visual_policy, seg.required_entity, seg.required_kind,
+              seg.expected_visual, seg.scene_query, seg.quote)
+    assert S._soften_and_retry(NS(), seg, sel, NS(), [], set(), lambda _m: None) is False
+    after = (seg.visual_policy, seg.required_entity, seg.required_kind,
+             seg.expected_visual, seg.scene_query, seg.quote)
+    assert after == before

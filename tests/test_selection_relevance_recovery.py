@@ -1,10 +1,13 @@
 """Scoped final recovery for the mandatory semantic publication contract."""
 from __future__ import annotations
 
+import copy
 import inspect
 import json
 from types import SimpleNamespace
 from unittest import mock
+
+import pytest
 
 from vidlore.clipstudio import orchestrate as O
 from vidlore.clipstudio import policy as P
@@ -146,19 +149,91 @@ def test_failed_retry_stays_blocked_and_unchanged_resume_does_not_repeat(tmp_pat
     assert marker["post_fingerprint"]
 
 
-def test_orchestrate_routes_typed_gate_to_strict_retry_not_policy_selfheal():
+def test_orchestrate_runs_strict_recovery_then_confirmed_gap_ladder_then_asserts():
     src = inspect.getsource(O.produce_auto)
     branch = src[src.index('== "selection_relevance"'):src.index(
         '== "rejected_footage"')]
     assert "_retry_selection_relevance(" in branch
     assert "_assert_sr(" in branch
-    assert "_selfheal" not in branch
+
+    retry = inspect.getsource(O._retry_selection_relevance)
+    strict_recover = retry.index("_recover_unresolved_beats(")
+    strict_images = retry.index("_fill_image_fallbacks(")
+    gap_ladder = retry.index("heal_selection_relevance_gaps(")
+    final_contract = retry.index("final = _R_sr.evaluate_selection_relevance", gap_ladder)
+    assert strict_recover < gap_ladder and strict_images < gap_ladder < final_contract
 
     fallback = inspect.getsource(O._fill_image_fallbacks)
     assert '"still_semantic_verified"' in fallback
     assert '"still_verifier"' in fallback
     assert '"still_image_sha256"' in fallback
     assert "is_specific=True" in fallback
+
+
+def test_semantic_gap_ladder_requires_actual_frame_confirmation(tmp_path):
+    from vidlore.clipstudio import selfheal as S
+    proj, segs, _sel = _fixture(
+        tmp_path, {**GOOD, "verdict": "replace", "matches_narration": False,
+                   "specific_enough": False, "correct_subject_visible": False})
+    audit = {
+        "blockers": [{"segment_index": 0,
+                      "reasons": ["verdict_replace", "matches_narration_false"],
+                      "quote_evidence": {"branch": "paraphrase"}}]}
+    assert S.semantic_gap_candidates(proj, audit) == (
+        [], "no_confirmed_actual_frame_gap_audit")
+
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, segs, [0], method="actual_frame_and_pool_audit")
+    assert S.semantic_gap_candidates(proj, audit) == ([0], "confirmed_actual_frame_audit")
+
+    # Either half of the evidence changing makes the authorization stale and leaves the strict
+    # publication blocker in place.
+    segs[0].required_entity = "A different promised subject"
+    assert S.semantic_gap_candidates(proj, audit)[1] == "stale_gap_review_beat_changed"
+    segs[0].required_entity = "Jaime Lannister"
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, segs, [0], method="actual_frame_and_pool_audit")
+    proj.sources[0].checksum = "pool changed"
+    assert S.semantic_gap_candidates(proj, audit)[1] == "stale_gap_review_source_pool_changed"
+
+
+def test_real_quote_and_technical_fault_never_buy_a_gap_downgrade(tmp_path):
+    from vidlore.clipstudio import selfheal as S
+    proj, _segs, _sel = _fixture(tmp_path, GOOD)
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, proj.segments, [0], method="actual_frame_and_pool_audit")
+    audit = {"blockers": [
+        {"segment_index": 0, "reasons": ["exact_quote_dialogue_signal_below_floor"],
+         "quote_evidence": {"branch": "verbatim"}},
+        {"segment_index": 1, "reasons": ["verifier_evidence_mismatch", "verdict_replace"],
+         "quote_evidence": {"branch": "paraphrase"}},
+    ]}
+    assert S.semantic_gap_candidates(proj, audit)[0] == []
+
+
+def test_gap_ladder_exception_rolls_back_abstract_mutation(monkeypatch, tmp_path):
+    from vidlore.clipstudio import selfheal as S
+    proj, segs, sel = _fixture(
+        tmp_path, {**GOOD, "verdict": "replace", "matches_narration": False,
+                   "specific_enough": False, "correct_subject_visible": False})
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, segs, [0], method="actual_frame_and_pool_audit")
+    audit = {"blockers": [{
+        "segment_index": 0, "reasons": ["verdict_replace", "matches_narration_false"],
+        "quote_evidence": {"branch": "paraphrase"}}]}
+    before_seg, before_sel = copy.deepcopy(vars(segs[0])), copy.deepcopy(vars(sel))
+
+    def explode_after_mutation(_proj, seg, _sel, *_a, **_kw):
+        seg.visual_policy = "abstract_effect"
+        seg.required_entity = ""
+        raise RuntimeError("vision transport failed")
+
+    monkeypatch.setattr(S, "_soften_and_retry", explode_after_mutation)
+    with pytest.raises(RuntimeError, match="vision transport"):
+        S.heal_selection_relevance_gaps(
+            proj, segs, None, audit, policy="approved_testing", eng=SimpleNamespace())
+    assert vars(segs[0]) == before_seg
+    assert vars(sel) == before_sel
 
 
 def test_web_image_installer_requires_and_returns_actual_pixel_verdict(tmp_path):

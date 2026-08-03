@@ -18,12 +18,15 @@ without human intervention, exactly the way the manual recovery did on job olenn
      recovery retries against the new footage — including sampled region frames for
      coarse-shot/dark sources.
 
-Bounded and fail-open everywhere: max rounds, max sources per beat, a no-progress round stops
-the loop, and every gate decision stays with the existing gate code. Kill switch:
+Bounded throughout: max rounds, max sources per beat, a no-progress round stops the loop, and every
+gate decision stays with the existing gate code. Any failure in specificity softening rolls its
+mutations back before the publication contract runs again. Kill switch:
 VIDLORE_CLIPSTUDIO_SELFHEAL=0.
 """
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import os
 import re
@@ -75,13 +78,18 @@ def beat_unfillable(seg) -> bool:
     return bool(_UNFILLABLE_RX.search(txt))
 
 
-def _soften_to_abstract(seg, log) -> None:
-    log(f"self-heal: beat {seg.index} asks for gate-forbidden content "
+def _soften_to_abstract(seg, log, *, cause: str = "gate-forbidden content") -> None:
+    log(f"self-heal: beat {seg.index} — {cause} "
         f"({(seg.expected_visual or seg.text or '')[:60]!r}) — softened to an abstract beat "
-        f"(a meta line must not fail the video)")
+        f"(the audit records that literal specificity was surrendered)")
     seg.visual_policy = "abstract_effect"
     seg.required_entity = ""
     seg.required_kind = ""
+    # These fields point retrieval back at the exact moment we just proved unreachable. Keeping
+    # them made the abstract rung repeatedly fetch the same rejected scene and also left an authored
+    # dialogue promise attached to a beat that no longer claims to show literal dialogue.
+    seg.quote = ""
+    seg.scene_query = ""
     try:
         seg.is_specific_claim = False
     except Exception:                                    # noqa: BLE001
@@ -300,12 +308,37 @@ def _install_still(sel, kf_path: str, sid: str, shot_idx: int, rel: float) -> No
                       "lowres_still": False, "exact_scene_missing": True}
 
 
+def _discard_invalid_still(sel, reason: str, log=print) -> dict:
+    """Detach a strict-rejected still without deleting its recoverable bytes."""
+    old = {
+        "image_path": str(getattr(sel, "image_path", "") or ""),
+        "image_meta": dict(getattr(sel, "image_meta", {}) or {}),
+        "reason": str(reason or "unverified still"),
+    }
+    if old["image_path"]:
+        log(f"self-heal: beat {getattr(sel, 'segment_index', '?')} — existing still is not "
+            f"publication evidence ({old['reason']}); retrying without it")
+    sel.image_path = ""
+    sel.image_meta = {}
+    return old
+
+
 def still_recover(proj, seg, sel, eng_cfg, *, pool=None, cand_n: int = 8,
                   used_paths=None, log=print) -> bool:
     """Pool-wide venue-bar still recovery for one beat. True when a verified still installed."""
     from . import image_fallback as IF
     if getattr(sel, "image_path", ""):
-        return True
+        # A path/legacy `still_verified` flag is not proof of its pixels. The 101-beat run installed
+        # three contextual exact stills, counted them as healed, then the strict contract correctly
+        # rejected all three. Only bound strict evidence may short-circuit this recovery pass.
+        try:
+            from .relevance_contract import verified_still_coverage
+            ok, why = verified_still_coverage(sel, seg)
+        except Exception as exc:                         # noqa: BLE001 — fail closed
+            ok, why = False, f"still evidence check failed: {type(exc).__name__}"
+        if ok:
+            return True
+        _discard_invalid_still(sel, why, log)
     pool = pool if pool is not None else _clean_pool(proj)
     used_paths = used_paths if used_paths is not None else set()
     q = " ".join(x for x in (getattr(seg, "scene_query", ""),
@@ -594,6 +627,56 @@ def acquire_for_beat(proj, seg, cfg, *, policy: str, log=print) -> list:
 
 # ── the loop ──────────────────────────────────────────────────────────────────────────────────
 
+def _strictly_confirm_concrete_still(proj, seg, sel, eng) -> tuple[bool, str]:
+    """Bind an exact/character still decision to the actual bytes under the strict contract.
+
+    ``still_recover`` intentionally uses the cheaper venue/context question to search. That answer
+    is a candidate filter, not publication proof. Re-ask the exact bytes with the strict concrete
+    question before claiming recovery succeeded; otherwise a lenient contextual still can silently
+    bypass the relevance contract before or after policy softening.
+    """
+    path = str(getattr(sel, "image_path", "") or "")
+    if not path or not Path(path).is_file():
+        return False, "character-rung still is missing"
+    try:
+        from . import verify as V
+        from . import policy as P
+        from . import relevance_contract as R
+        analysis = (getattr(proj, "meta", {}) or {}).get("analysis", {}) or {}
+        era = str(analysis.get("episode_hint", "") or "")
+        exact = P.policy_of(seg) == P.EXACT
+        verdict = V.verify_frame(
+            path, getattr(seg, "text", "") or "",
+            getattr(seg, "required_entity", "") or "",
+            getattr(seg, "required_kind", "") or "", [], eng,
+            getattr(eng, "anthropic_model", ""), is_specific=True,
+            expected_visual=getattr(seg, "expected_visual", "") or "",
+            scene_query=getattr(seg, "scene_query", "") or "", era_hint=era,
+            venue_fallback=False, must_see=P.deictic_target(seg))
+        if not isinstance(verdict, dict):
+            return False, "strict character-rung verifier returned no verdict"
+        verdict = {**verdict, "status": "ok"}
+        why = R.strict_still_evidence_reason(verdict, seg)
+        meta = dict(getattr(sel, "image_meta", {}) or {})
+        meta.update({
+            "still_verification_attempted": True,
+            "still_verified": not bool(why),
+            "still_semantic_verified": not bool(why),
+            "still_verifier": verdict,
+            "still_image_sha256": R.image_sha256(path),
+            "exact_still_verified": bool(exact and not why),
+            "exact_still_verifier": (verdict if exact else {}),
+            "relevance_class": ("exact_scene" if exact else "contextual_fallback"),
+        })
+        sel.image_meta = meta
+        if why:
+            return False, why
+        covered, coverage_why = R.verified_still_coverage(sel, seg)
+        return (True, "") if covered else (False, coverage_why or "strict coverage absent")
+    except Exception as exc:                             # noqa: BLE001 — fail closed
+        return False, f"strict character-rung verification failed: {type(exc).__name__}: {exc}"
+
+
 def _soften_and_retry(proj, seg, sel, eng, pool, used, log) -> bool:
     """Soften an unreachable exact beat and search the SAME pool once more under the looser bar.
 
@@ -601,10 +684,25 @@ def _soften_and_retry(proj, seg, sel, eng, pool, used, log) -> bool:
     asking for something retrieval cannot return. The candidate depth is raised because a
     character-policy still only has to show the right subject, so it is worth looking past the
     handful of frames that already failed the exact test."""
+    if not _env_on("VIDLORE_CLIPSTUDIO_SELFHEAL_SOFTEN", "1"):
+        return False
     _n = _env_int("VIDLORE_CLIPSTUDIO_SELFHEAL_SOFT_CANDS", 16)
+    _before = {
+        "visual_policy": getattr(seg, "visual_policy", ""),
+        "required_entity": getattr(seg, "required_entity", ""),
+        "required_kind": getattr(seg, "required_kind", ""),
+        "is_specific_claim": getattr(seg, "is_specific_claim", False),
+        "expected_visual": getattr(seg, "expected_visual", ""),
+        "scene_query": getattr(seg, "scene_query", ""),
+        "quote": getattr(seg, "quote", ""),
+    }
     if _soften_to_character(seg, log) and still_recover(
             proj, seg, sel, eng, pool=pool, used_paths=used, cand_n=_n, log=log):
-        return True
+        ok, why = _strictly_confirm_concrete_still(proj, seg, sel, eng)
+        if ok:
+            sel.image_meta["selfheal_rung"] = "character_specific"
+            return True
+        _discard_invalid_still(sel, why, log)
     # SECOND AND FINAL RUNG. Dropping the requirement is not enough when the NARRATION itself names
     # the unfindable thing: beat 24 reads "The flayed man banners brought down to the ground", and
     # the still verifier judges candidates against that sentence, so no frame in the pool can pass
@@ -613,15 +711,24 @@ def _soften_and_retry(proj, seg, sel, eng, pool, used, log) -> bool:
     # `_soften_to_abstract` is the pipeline's own designed escape for a beat nothing can satisfy: it
     # rewrites the beat as visual rest and takes era-appropriate atmosphere. Reached only after the
     # character rung has also failed, on a beat that would otherwise cost the whole video.
-    _soften_to_abstract(seg, log)
-    return bool(still_recover(
-        proj, seg, sel, eng, pool=pool, used_paths=used, cand_n=_n, log=log))
+    _soften_to_abstract(
+        seg, log, cause="exact and character-specific recovery both exhausted")
+    if still_recover(
+            proj, seg, sel, eng, pool=pool, used_paths=used, cand_n=_n, log=log):
+        sel.image_meta["selfheal_rung"] = "abstract"
+        return True
+    # Never let a failed abstract search erase the original strict request. Otherwise the semantic
+    # contract skips the now-abstract beat even though no replacement visual exists.
+    for field, value in _before.items():
+        setattr(seg, field, value)
+    return False
 
 
 def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
                        allow_acquire: bool = True, log=print) -> int:
     """One healing pass over `blocked` beat indexes. Returns beats resolved this pass."""
     from .config import engine_config
+    from . import policy as _P
     eng = engine_config()
     segs = {s.index: s for s in segments}
     sels = {s.segment_index: s for s in proj.selections}
@@ -629,14 +736,30 @@ def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
     used = {getattr(s, "image_path", "") for s in proj.selections
             if getattr(s, "image_path", "")}
     resolved = 0
+
+    def _accept_installed(seg, sel) -> bool:
+        if _P.policy_of(seg) not in (_P.EXACT, _P.CHARACTER):
+            return True
+        ok, why = _strictly_confirm_concrete_still(proj, seg, sel, eng)
+        if not ok:
+            _discard_invalid_still(sel, why, log)
+        return ok
+
     for bidx in blocked:
         seg = segs.get(bidx)
         sel = sels.get(bidx)
         if seg is None or sel is None:
             continue
         if getattr(sel, "image_path", ""):
-            resolved += 1
-            continue
+            try:
+                from .relevance_contract import verified_still_coverage
+                _covered, _why = verified_still_coverage(sel, seg)
+            except Exception as _exc:                    # noqa: BLE001 — fail closed
+                _covered, _why = False, f"still evidence check failed: {type(_exc).__name__}"
+            if _covered:
+                resolved += 1
+                continue
+            _discard_invalid_still(sel, _why, log)
         if beat_unfillable(seg):
             _soften_to_abstract(seg, log)
         if pool is None:
@@ -644,8 +767,9 @@ def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
         if still_recover(proj, seg, sel, eng, pool=pool, used_paths=used,
                          cand_n=_env_int("VIDLORE_CLIPSTUDIO_SELFHEAL_STILL_CANDS", 8),
                          log=log):
-            resolved += 1
-            continue
+            if _accept_installed(seg, sel):
+                resolved += 1
+                continue
         if allow_acquire:
             fresh = acquire_for_beat(proj, seg, cfg, policy=policy, log=log)
             if fresh:
@@ -653,12 +777,14 @@ def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
                 if still_recover(proj, seg, sel, eng, pool=pool, used_paths=used,
                                  cand_n=_env_int("VIDLORE_CLIPSTUDIO_SELFHEAL_STILL_CANDS", 8),
                                  log=log):
-                    resolved += 1
-                    continue
+                    if _accept_installed(seg, sel):
+                        resolved += 1
+                        continue
                 for sv in fresh:
                     if _region_frames_recover(proj, seg, sel, sv, eng, log=log):
-                        resolved += 1
-                        break
+                        if _accept_installed(seg, sel):
+                            resolved += 1
+                            break
                 else:
                     if _soften_and_retry(proj, seg, sel, eng, pool, used, log):
                         resolved += 1
@@ -674,6 +800,261 @@ def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
     # re-runs the whole heal) replays them instead of re-buying identical answers
     _venue_cache_save(proj)
     return resolved
+
+
+_SEMANTIC_CONTENT_REASONS = (
+    "verdict_replace", "matches_narration_false", "specific_enough_false",
+    "correct_subject_visible_false", "wrong_subject_visible_true",
+    "contradicts_narration_true", "deterministic_contradiction",
+    "exact_verifier_evidence_not_strict", "exact_moving_verdict_was_downgraded",
+    "exact_moving_relevance_is_contextual", "invalid_still:",
+)
+_SEMANTIC_TECHNICAL_REASONS = (
+    "selection_absent", "moving_source_absent", "verifier_absent", "verifier_error",
+    "verifier_breaker", "verifier_unavailable", "verifier_evidence_absent",
+    "verifier_evidence_schema_mismatch", "verifier_evidence_model_mismatch",
+    "verifier_evidence_mismatch", "verifier_evidence_unrecomputable",
+    "verifier_evidence_window_not_sampled", "matches_narration_absent",
+    "specific_enough_absent", "quality_ok_absent", "wrong_subject_visible_absent",
+    "correct_subject_visible_absent", "target_visible_absent", "quality_ok_false",
+    "exact_quote_pool_classification_indeterminate",
+)
+
+
+def _gap_beat_fingerprint(seg) -> str:
+    """Identity of the authored visual promise a human/pool audit actually classified."""
+    payload = {
+        "index": int(getattr(seg, "index", -1)),
+        "text": str(getattr(seg, "text", "") or ""),
+        "visual_policy": str(getattr(seg, "visual_policy", "") or ""),
+        "required_entity": str(getattr(seg, "required_entity", "") or ""),
+        "required_kind": str(getattr(seg, "required_kind", "") or ""),
+        "expected_visual": str(getattr(seg, "expected_visual", "") or ""),
+        "scene_query": str(getattr(seg, "scene_query", "") or ""),
+        "quote": str(getattr(seg, "quote", "") or ""),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
+
+
+def _gap_pool_fingerprint(proj) -> tuple[str, int]:
+    """Bind a footage-gap decision to source bytes and their searchable indexes."""
+    rows = []
+    for src in sorted((getattr(proj, "sources", None) or []),
+                      key=lambda s: str(getattr(s, "id", "") or "")):
+        if str(getattr(src, "status", "") or "") != SOURCE_OK:
+            continue
+        sid = str(getattr(src, "id", "") or "")
+
+        def _stat(path) -> list:
+            try:
+                st = Path(path).stat()
+                return [int(st.st_size), int(st.st_mtime_ns)]
+            except Exception:                            # noqa: BLE001 — absence is part of identity
+                return [0, 0]
+
+        rows.append({
+            "id": sid,
+            "checksum": str(getattr(src, "checksum", "") or ""),
+            "media": _stat(getattr(src, "local_path", "") or ""),
+            "shots": _stat(proj.shots_path(sid)),
+            "words": _stat(Path(proj.index_dir) / f"{sid}.words.json"),
+        })
+    raw = json.dumps(rows, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest(), len(rows)
+
+
+def make_selection_relevance_gap_review(proj, segments, confirmed_gap_beats, *,
+                                        method: str, source: str = "") -> dict:
+    """Create a tamper/staleness-bound authorization for the specificity ladder.
+
+    Bare beat numbers are unsafe: matching can rewrite a beat and strict recovery can add source
+    material after a viewer judged the old pool.  Consumers verify both fingerprints immediately
+    before softening; any change leaves the strict publication blocker in place.
+    """
+    wanted = sorted({int(i) for i in (confirmed_gap_beats or [])})
+    by_idx = {int(getattr(s, "index", -1)): s for s in (segments or [])}
+    missing = [i for i in wanted if i not in by_idx]
+    if missing:
+        raise ValueError(f"cannot bind unknown gap beat(s): {missing}")
+    pool_fp, pool_n = _gap_pool_fingerprint(proj)
+    return {
+        "schema_version": 2,
+        "method": str(method or "actual_frame_and_pool_audit"),
+        "source": str(source or ""),
+        "confirmed_gap_beats": wanted,
+        "beat_fingerprints": {str(i): _gap_beat_fingerprint(by_idx[i]) for i in wanted},
+        "pool_fingerprint": pool_fp,
+        "pool_source_count": pool_n,
+    }
+
+
+def semantic_gap_candidates(proj, audit: dict) -> tuple[list[int], str]:
+    """Typed, fail-closed candidates for the post-recovery specificity ladder.
+
+    A persisted viewer/pool audit may confirm genuine gaps and is authoritative when present. This
+    keeps a known retrieval/ranking bug out of the softening path: a wrong pick is not permission to
+    erase specificity. Without that marker nothing is softened. Even confirmed beats are excluded
+    for technical/evidence-binding failures and real/indeterminate quote promises.
+    """
+    review = (getattr(proj, "meta", {}) or {}).get("selection_relevance_gap_review") or {}
+    confirmed_raw = review.get("confirmed_gap_beats")
+    confirmed = {int(i) for i in confirmed_raw} \
+        if isinstance(confirmed_raw, (list, tuple, set)) else None
+    # A semantic negative alone cannot distinguish "pool lacks it" from "matcher ignored the
+    # correct pool shot"—the exact classification error this fix must not repeat. Without an
+    # actual-frame/pool audit marker, fail closed and leave the publication blocker intact.
+    if confirmed is None:
+        return [], "no_confirmed_actual_frame_gap_audit"
+    if int(review.get("schema_version", 0) or 0) < 2:
+        return [], "unbound_gap_review"
+
+    by_seg = {int(getattr(s, "index", -1)): s for s in (getattr(proj, "segments", None) or [])}
+    bound_beats = review.get("beat_fingerprints") or {}
+    if any(i not in by_seg or str(bound_beats.get(str(i), "")) != _gap_beat_fingerprint(by_seg[i])
+           for i in confirmed):
+        return [], "stale_gap_review_beat_changed"
+    pool_fp, _pool_n = _gap_pool_fingerprint(proj)
+    if not review.get("pool_fingerprint") or str(review.get("pool_fingerprint")) != pool_fp:
+        return [], "stale_gap_review_source_pool_changed"
+
+    out = []
+    for entry in (audit.get("blockers") or []):
+        idx = int(entry.get("segment_index", -1))
+        reasons = [str(r) for r in (entry.get("reasons") or [])]
+        branch = str((entry.get("quote_evidence") or {}).get("branch", "") or "")
+        if branch in ("verbatim", "indeterminate"):
+            continue                                    # the real quote contract remains intact
+        if any(any(r.startswith(p) for p in _SEMANTIC_TECHNICAL_REASONS) for r in reasons):
+            continue                                    # a code/evidence fault cannot buy a downgrade
+        if idx in confirmed and any(
+                any(r.startswith(p) for p in _SEMANTIC_CONTENT_REASONS) for r in reasons):
+            out.append(idx)
+    return sorted(set(out)), "confirmed_actual_frame_audit"
+
+
+def heal_selection_relevance_gaps(proj, segments, cfg, audit: dict, *, policy: str,
+                                  eng=None, log=print) -> dict:
+    """Run exact→character→abstract only after strict-positive semantic recovery is exhausted.
+
+    The unchanged selection-relevance contract is evaluated again by the caller. This helper never
+    turns a technical failure or a located real quote into an abstract pass, and every surrendered
+    requirement is persisted for the next audit.
+    """
+    from .config import engine_config
+    from . import policy as P
+    candidates, basis = semantic_gap_candidates(proj, audit)
+    by_seg = {int(getattr(s, "index", -1)): s for s in (segments or [])}
+    by_sel = {int(getattr(s, "segment_index", -1)): s for s in (proj.selections or [])}
+    by_entry = {int(e.get("segment_index", -1)): e for e in (audit.get("blockers") or [])}
+    eng = eng or engine_config()
+    pool = _clean_pool(proj) if candidates else []
+    used = {str(getattr(s, "image_path", "") or "") for s in (proj.selections or [])
+            if getattr(s, "image_path", "")}
+    # This is a transaction with respect to the publication contract.  A verifier, cache, disk, or
+    # audit failure must not strand a beat in the abstract policy (which the strict contract skips).
+    # Snapshot every potentially-mutated object and the prior audit/meta before the first rung.
+    snapshots = {
+        idx: (copy.deepcopy(vars(by_seg[idx])), copy.deepcopy(vars(by_sel[idx])))
+        for idx in candidates if idx in by_seg and idx in by_sel
+    }
+    old_meta_present = "selection_relevance_gap_softening" in (getattr(proj, "meta", {}) or {})
+    old_meta = copy.deepcopy((getattr(proj, "meta", {}) or {}).get(
+        "selection_relevance_gap_softening"))
+    dest = Path(proj.output_dir) / "semantic_gap_softening_audit.json"
+    old_audit_present = dest.is_file()
+    old_audit = dest.read_bytes() if old_audit_present else b""
+    rows = []
+    try:
+        for idx in candidates:
+            seg, sel = by_seg.get(idx), by_sel.get(idx)
+            entry = by_entry.get(idx) or {}
+            if seg is None or sel is None:
+                rows.append({"segment_index": idx, "status": "not_attempted",
+                             "reason": "segment_or_selection_absent"})
+                continue
+            old = {
+                "visual_policy": P.policy_of(seg),
+                "required_entity": str(getattr(seg, "required_entity", "") or ""),
+                "required_kind": str(getattr(seg, "required_kind", "") or ""),
+                "quote": str(getattr(seg, "quote", "") or ""),
+                "scene_query": str(getattr(seg, "scene_query", "") or ""),
+                "image_path": str(getattr(sel, "image_path", "") or ""),
+            }
+            if old["image_path"]:
+                try:
+                    from .relevance_contract import verified_still_coverage
+                    covered, why = verified_still_coverage(sel, seg)
+                except Exception as exc:                 # noqa: BLE001 — fail closed
+                    covered, why = False, f"still evidence check failed: {type(exc).__name__}"
+                if not covered:
+                    _discard_invalid_still(sel, why, log)
+            log(f"semantic-gap: beat {idx} exhausted strict-positive recovery; running the "
+                f"specificity ladder ({basis})")
+            ok = _soften_and_retry(proj, seg, sel, eng, pool, used, log)
+            row = {
+                "segment_index": idx,
+                "basis": basis,
+                "status": "softened" if ok else "still_blocked",
+                "original": old,
+                "new": {
+                    "visual_policy": P.policy_of(seg),
+                    "required_entity": str(getattr(seg, "required_entity", "") or ""),
+                    "required_kind": str(getattr(seg, "required_kind", "") or ""),
+                    "quote": str(getattr(seg, "quote", "") or ""),
+                    "scene_query": str(getattr(seg, "scene_query", "") or ""),
+                    "image_path": str(getattr(sel, "image_path", "") or ""),
+                    "rung": str((getattr(sel, "image_meta", {}) or {}).get(
+                        "selfheal_rung", "") or ""),
+                },
+                "trigger_reasons": list(entry.get("reasons") or []),
+                "quote_branch": str((entry.get("quote_evidence") or {}).get("branch", "") or ""),
+            }
+            row["dropped_requirement"] = bool(
+                old["required_entity"] and not row["new"]["required_entity"])
+            rows.append(row)
+        payload = {
+            "schema_version": 2,
+            "basis": basis,
+            "candidate_count": len(candidates),
+            "candidates": candidates,
+            "softened_count": sum(1 for r in rows if r.get("status") == "softened"),
+            "still_blocked_count": sum(1 for r in rows if r.get("status") != "softened"),
+            "beats": rows,
+        }
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
+        try:
+            tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            tmp.replace(dest)
+        finally:
+            tmp.unlink(missing_ok=True)
+        proj.meta["selection_relevance_gap_softening"] = payload
+        proj.save()
+        _venue_cache_save(proj)
+        return payload
+    except Exception:
+        # Restore in-memory state first: even if disk itself is failing, the caller's immediate
+        # contract evaluation must see the original strict promises and block publication.
+        for idx, (seg_state, sel_state) in snapshots.items():
+            vars(by_seg[idx]).clear()
+            vars(by_seg[idx]).update(copy.deepcopy(seg_state))
+            vars(by_sel[idx]).clear()
+            vars(by_sel[idx]).update(copy.deepcopy(sel_state))
+        if old_meta_present:
+            proj.meta["selection_relevance_gap_softening"] = old_meta
+        else:
+            proj.meta.pop("selection_relevance_gap_softening", None)
+        try:
+            if old_audit_present:
+                restore_tmp = dest.with_suffix(dest.suffix + ".rollback.tmp")
+                restore_tmp.write_bytes(old_audit)
+                restore_tmp.replace(dest)
+            else:
+                dest.unlink(missing_ok=True)
+            proj.save()
+        except Exception:                                # noqa: BLE001 — gate uses restored memory
+            pass
+        raise
 
 
 def run(proj, segments, cfg, analysis, *, policy: str, log=print) -> str | None:

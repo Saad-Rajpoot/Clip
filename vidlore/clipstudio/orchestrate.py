@@ -1691,6 +1691,10 @@ def _selection_relevance_retry_fingerprint(proj, segs, audit: dict) -> str:
         "selections": sels,
         "segments": seg_state,
         "sources": src_state,
+        # Adding or revising a viewer-confirmed gap review must make a previously exhausted retry
+        # runnable again.  The review itself is content evidence, not an out-of-band escape hatch.
+        "gap_review": (getattr(proj, "meta", {}) or {}).get(
+            "selection_relevance_gap_review") or {},
     }
     raw = _json_sr.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return _hashlib_sr.sha256(raw.encode("utf-8", "replace")).hexdigest()
@@ -1862,6 +1866,31 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
                         f"{str(exc)[:90]})")
                 proj.save()
 
+    # Genuine, audited footage gaps are different from wrong picks and technical evidence faults.
+    # Strict-positive recovery above gets the first and final chance to preserve specificity. Only
+    # after it is exhausted may the existing exact→character→abstract ladder run, and it excludes
+    # located real quotes plus binding/schema/backend failures. The unchanged publication contract
+    # is immediately re-evaluated below; softening never bypasses it.
+    pre_soften = _R_sr.evaluate_selection_relevance(proj, segs)
+    _gap_softening = None
+    if pre_soften.get("blockers"):
+        import os as _os_gap
+        if (_os_gap.environ.get("VIDLORE_CLIPSTUDIO_SELFHEAL", "1").strip().lower()
+                not in ("0", "false", "no")
+                and _os_gap.environ.get("VIDLORE_CLIPSTUDIO_SELFHEAL_SOFTEN", "1")
+                .strip().lower() not in ("0", "false", "no")):
+            try:
+                from . import selfheal as _selfheal_gap
+                _gap_softening = _selfheal_gap.heal_selection_relevance_gaps(
+                    proj, segs, cfg, pre_soften, policy=policy, eng=eng, log=log)
+                if _gap_softening.get("candidate_count"):
+                    log(f"semantic-gap: specificity ladder softened "
+                        f"{_gap_softening.get('softened_count', 0)}/"
+                        f"{_gap_softening.get('candidate_count', 0)} exhausted gap beat(s)")
+            except Exception as exc:                     # noqa: BLE001 — gate remains authoritative
+                log(f"semantic-gap: ladder failed ({type(exc).__name__}: {str(exc)[:90]}); "
+                    "publication gate remains authoritative")
+
     final = _R_sr.evaluate_selection_relevance(proj, segs)
     _R_sr.write_selection_relevance_audit(audit_path, final)
     after = sorted(int(e["segment_index"]) for e in final.get("blockers") or [])
@@ -1870,6 +1899,7 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
         "before": before,
         "after": after,
         "post_fingerprint": _selection_relevance_retry_fingerprint(proj, segs, final),
+        "gap_softening": _gap_softening or {},
     }
     proj.save()
     if after:
