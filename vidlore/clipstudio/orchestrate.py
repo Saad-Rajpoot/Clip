@@ -248,7 +248,8 @@ def produce(project_dir, *, script_path: Optional[str] = None, script_text: Opti
     }
 
 
-def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cfg=None) -> int:
+def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cfg=None,
+                          fail_on_web_technical: bool = False) -> int:
     """For every WEAK beat (no source / low confidence / confirmed wrong character / a repeated
     filler shot) attach a relevant still as a Ken-Burns image_path. PREFERENCE ORDER:
       1) a REAL source-footage frame (a shot keyframe) drawn from the matcher's own ranked
@@ -554,6 +555,10 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
     used_phash: set = set()
     aired_shots: set = set()
     aired_phash: set = set()
+    # Strict beats whose source-frame candidates produced ONLY technical non-verdicts. Keep this
+    # separate from explicit semantic rejects: an outage is retryable, while a real reject is a
+    # conclusive content result that may legitimately proceed to the audited gap ladder.
+    _strict_unverified_only: dict[int, dict] = {}
 
     # ---- PASS 1 — SOURCE-FRAME STILLS (preferred): real downloaded keyframes (Ken-Burns) for beats
     # that are abstract (prefer a still/effect), a FILLER repeat (variety), weak/unconfirmed, an
@@ -644,6 +649,7 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                             f"passed the deterministic same-show/era/CLIP/Face-ID checks → left "
                             f"unresolved (no arbitrary unverified still installed)")
                 _lowres_pick = False
+                _lr_cands = []
                 if still is None and shots_lowres_by_key:
                     # LAST-RESORT sub-HD retry: this project's only face-confirmed shots of the
                     # required character may live entirely in sub-480p uploads (observed: ALL 73
@@ -696,6 +702,14 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                             log(f"image-fallback: beat {seg.index} — vision recovered after an "
                                 f"outage window; still installed on backoff retry")
                             break
+                        _rej += (_vd == "reject")
+                        _unv += (_vd == "unverified")
+                if still is None and _unv > 0 and _rej == 0:
+                    _strict_unverified_only[int(seg.index)] = {
+                        "unverified": int(_unv),
+                        "source_candidates": len(_cands),
+                        "lowres_candidates": len(_lr_cands),
+                    }
                 if still is None and _cands:
                     log(f"image-fallback: beat {seg.index} — {len(_cands)} recovery still(s) not "
                         f"installed ({_rej} rejected wrong-char/era, {_unv} unverified) → left for "
@@ -790,8 +804,19 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
             try:
                 res = _imgfb.fetch_scene_image(seg, analysis, img_dir, faceid_obj=faceid_obj,
                                                refs=refs, char2actor=char2actor, log=log,
-                                               seen_hashes=seen_hashes, eng_cfg=eng_cfg)
+                                               seen_hashes=seen_hashes, eng_cfg=eng_cfg,
+                                               raise_on_technical=fail_on_web_technical)
+            except _imgfb.SceneImageTechnicalError:
+                if fail_on_web_technical:
+                    raise
+                log(f"image-fallback: beat {seg.index} web acquisition was technically "
+                    "inconclusive")
+                res = None
             except Exception as e:
+                if fail_on_web_technical:
+                    raise _imgfb.SceneImageTechnicalError(
+                        f"unexpected web-image failure for beat {seg.index}: "
+                        f"{type(e).__name__}: {e}") from e
                 log(f"image-fallback: beat {seg.index} web error ({type(e).__name__})")
                 res = None
             if not res:
@@ -818,6 +843,27 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                                   _policy.is_exact(seg) and _web_semantic),
                               "exact_still_verifier": (_web_ev if _policy.is_exact(seg) else {})}
             web_filled += 1
+
+    # A strict beat with only transport/malformed non-verdicts has NOT exhausted image recovery.
+    # Give a successfully verified web result the final word; otherwise stop before PASS 3 mutates
+    # flags and before the caller can run specificity softening or write an exhaustion marker.
+    _strict_technical_pending = []
+    for _idx, _facts in sorted(_strict_unverified_only.items()):
+        _sel = sel_by_idx.get(_idx)
+        _seg = next((s for s in segs if int(getattr(s, "index", -1)) == _idx), None)
+        _covered = False
+        if _seg is not None and _sel is not None and getattr(_sel, "image_path", ""):
+            try:
+                _covered = bool(_verified_still_coverage(_sel, _seg)[0])
+            except Exception:                            # noqa: BLE001 — absence remains inconclusive
+                _covered = False
+        if not _covered:
+            _strict_technical_pending.append((_idx, _facts))
+    if _strict_technical_pending:
+        detail = ", ".join(
+            f"{idx}({facts['unverified']} unverified)" for idx, facts in _strict_technical_pending)
+        raise PipelineError(
+            "strict image fallback verifier was technically inconclusive for beat(s) " + detail)
 
     # ---- PASS 3 — exact_scene still uncovered/unconfirmed → MANUAL REVIEW (never silent weak filler
     # or AI). A source-frame-recovery still covers it visually but stays flagged; a validated
@@ -870,6 +916,15 @@ def _purge_unwanted_sources(proj, log) -> int:
     return n
 
 
+def recovery_query(seg) -> str:
+    """The same authored text hierarchy that makes a beat retrievable by matching/discovery."""
+    if seg is None:
+        return ""
+    return next((str(getattr(seg, field, "") or "").strip()
+                 for field in ("scene_query", "required_entity", "expected_visual", "text")
+                 if str(getattr(seg, field, "") or "").strip()), "")
+
+
 def recovery_pick(unresolved: list, seg_by_idx: dict, policy_mod, tried: set,
                   max_beats: int) -> list:
     """Which unresolved beats get this bounded recovery round's slots.
@@ -877,7 +932,8 @@ def recovery_pick(unresolved: list, seg_by_idx: dict, policy_mod, tried: set,
     Module level so the rotation is testable without a project — the ordering IS the fix (see the
     call site for the measurement).
 
-      1. Beats with no query material at all cannot be rediscovered; they must not burn a slot.
+      1. Beats with no effective matcher/discovery text at all cannot be rediscovered; they must
+         not burn a slot. ``expected_visual`` and narration text are real fallback queries.
       2. Gate-vulnerable classes first: CHARACTER, then FILLER/ABSTRACT, then EXACT.
       3. Within a class, a beat that has never been searched outranks one already tried and not
          recovered. Re-attempts are kept, just last: a later round has a larger pool.
@@ -889,9 +945,7 @@ def recovery_pick(unresolved: list, seg_by_idx: dict, policy_mod, tried: set,
         return ({policy_mod.CHARACTER: 0, policy_mod.FILLER: 1, policy_mod.ABSTRACT: 1,
                  policy_mod.EXACT: 2}.get(p, 1), 1 if i in (tried or set()) else 0, i)
 
-    have_query = [i for i in unresolved
-                  if ((getattr(seg_by_idx.get(i), "scene_query", "") or "").strip()
-                      or (getattr(seg_by_idx.get(i), "required_entity", "") or "").strip())]
+    have_query = [i for i in unresolved if recovery_query(seg_by_idx.get(i))]
     return sorted(have_query, key=_rank)[:max_beats]
 
 
@@ -902,6 +956,190 @@ def _write_recovery_audit(proj, audit: dict,
         (proj.output_dir / filename).write_text(_json.dumps(audit, indent=1), encoding="utf-8")
     except Exception:
         pass
+
+
+_SEMANTIC_RECOVERY_PAGE_SCHEMA = 1
+
+
+def _verifier_summary_error(summary) -> str:
+    """Why a scoped verifier pass is technically inconclusive, else ``""``.
+
+    The strict contract can only judge evidence that was actually produced. A partial batch with
+    even one transport error, an unavailable provider, or an open breaker is not a negative content
+    verdict and must never authorize fallback, specificity loss, or a completed recovery page.
+    """
+    if not isinstance(summary, dict):
+        return "verifier_summary_missing"
+    available = summary.get("available")
+    if available is not True:
+        return "verifier_available_false" if available is False else "verifier_available_missing"
+    errored = summary.get("errored")
+    if isinstance(errored, bool) or not isinstance(errored, int):
+        return "verifier_summary_errored_missing_or_malformed"
+    if errored != 0:
+        return f"verifier_errored:{errored}"
+    verifier_down = summary.get("verifier_down")
+    if verifier_down is not False:
+        if verifier_down is True:
+            return "verifier_down"
+        return "verifier_down_missing_or_malformed"
+    return ""
+
+
+def _load_conclusive_semantic_recovery_page(path: Path, *, request_id: str,
+                                             requested_scope: set[int]) -> dict:
+    """Load one freshly-requested semantic recovery page, or fail closed.
+
+    The audit is the hand-off between the bounded recovery helper and the image/softening stages.
+    A helper return value cannot prove that its page actually ran: the helper deliberately catches
+    environmental failures, and a stale audit may still be present from an earlier Resume.  Require
+    a per-call nonce, exact scope/partition, an explicit completion bit, and an error-free current
+    pool attempt before any downstream loss of specificity is allowed.
+    """
+    import json as _json_page
+
+    try:
+        raw = _json_page.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:                            # noqa: BLE001 — missing/corrupt is retryable
+        raise PipelineError(
+            f"semantic recovery page audit is missing or corrupt: {type(exc).__name__}: {exc}") \
+            from exc
+    if not isinstance(raw, dict):
+        raise PipelineError("semantic recovery page audit is not an object")
+
+    def _indices(name: str) -> list[int]:
+        value = raw.get(name)
+        if not isinstance(value, list) or any(
+                isinstance(i, bool) or not isinstance(i, int) for i in value):
+            raise PipelineError(f"semantic recovery page audit has invalid {name}")
+        if len(value) != len(set(value)):
+            raise PipelineError(f"semantic recovery page audit has duplicate {name}")
+        return value
+
+    expected = sorted({int(i) for i in requested_scope})
+    if raw.get("schema_version") != _SEMANTIC_RECOVERY_PAGE_SCHEMA:
+        raise PipelineError("semantic recovery page audit schema mismatch")
+    if raw.get("request_id") != request_id:
+        raise PipelineError("semantic recovery page audit request mismatch")
+    if sorted(_indices("requested_scope")) != expected:
+        raise PipelineError("semantic recovery page audit scope mismatch")
+
+    page_scope = _indices("page_scope")
+    deferred = _indices("deferred")
+    if set(page_scope) & set(deferred) or sorted(page_scope + deferred) != expected:
+        raise PipelineError("semantic recovery page audit partition mismatch")
+    deferred_retriable = _indices("deferred_retriable")
+    if not set(deferred_retriable).issubset(set(deferred)):
+        raise PipelineError("semantic recovery page audit retriable-deferred mismatch")
+
+    current = raw.get("current_pool_rematch")
+    if page_scope:
+        if not isinstance(current, dict):
+            raise PipelineError("semantic recovery page audit lacks current-pool result")
+        if "error" not in current or not isinstance(current.get("error"), str):
+            raise PipelineError("semantic recovery page audit lacks explicit current-pool status")
+        attempted = current.get("attempted")
+        if (not isinstance(attempted, list)
+                or any(isinstance(i, bool) or not isinstance(i, int) for i in attempted)
+                or sorted(attempted) != sorted(page_scope)):
+            raise PipelineError("semantic recovery page audit attempted-scope mismatch")
+    if isinstance(current, dict) and str(current.get("error") or "").strip():
+        raise PipelineError(
+            f"semantic recovery current-pool attempt was inconclusive: {current['error']}")
+    if "page_error" not in raw or not isinstance(raw.get("page_error"), str):
+        raise PipelineError("semantic recovery page audit lacks explicit error status")
+    if str(raw["page_error"] or "").strip():
+        raise PipelineError(f"semantic recovery page was inconclusive: {raw['page_error']}")
+    if raw.get("page_completed") is not True:
+        raise PipelineError("semantic recovery page did not record conclusive completion")
+    return raw
+
+
+def _commit_scoped_recovery(proj, cfg, snapshot: dict, rematched: dict,
+                            recovered: set[int], *, log=print) -> bool:
+    """Atomically retain and cut only strictly recovered scoped selections.
+
+    ``match_segments`` rebuilds the whole selection list.  Recovery is allowed to retain only
+    scoped entries that passed the publication contract; every snapshot entry outside that set is
+    restored byte-for-byte, and arbitrary new rematch entries are discarded.  Clip filenames are
+    keyed only by beat index, so cutting before reconciliation can overwrite a non-target clip and
+    recreate the selection/clip divergence this pipeline's lineage gate was added to catch.
+
+    The final recovered clips are therefore cut only after reconciliation.  Existing target clip
+    bytes are backed up, and any partial cut failure rolls both metadata and bytes back.  A recovery
+    is never reported unless every retained selection has a fresh clip from its own source window.
+    """
+    import shutil as _shutil_commit
+    import tempfile as _tempfile_commit
+    from .cut import cut_selection as _cut_one_commit
+
+    accepted = {int(i) for i in (recovered or set())}
+    if any(i not in rematched for i in accepted):
+        log("recovery: scoped commit refused — a recovered selection is absent from rematch")
+        proj.selections = [snapshot[i] for i in sorted(snapshot)]
+        try:
+            proj.save()
+        except Exception:                                # noqa: BLE001 — caller/final gate stops
+            pass
+        return False
+
+    final = [rematched[i] if i in accepted else snapshot[i] for i in sorted(snapshot)]
+    final.extend(rematched[i] for i in sorted(accepted - set(snapshot)))
+    if not accepted:
+        proj.selections = final
+        try:
+            proj.save()                                  # verifier may have persisted its rematch
+            return True
+        except Exception as exc:                         # noqa: BLE001 — disk state is not proven
+            log(f"recovery: scoped metadata restore failed ({type(exc).__name__}: {exc})")
+            return False
+
+    backed_up: dict[int, Path] = {}
+    clip_paths = {i: proj.clips_dir / f"seg_{i:03d}.mp4" for i in accepted}
+    original_exists: Optional[dict[int, bool]] = None
+    backup_dir: Optional[Path] = None
+    try:
+        # Allocation belongs inside the transaction too.  At entry the exploratory matcher may
+        # already have replaced ``proj.selections``; if mkdir/mkdtemp fails before the old guard,
+        # those uncommitted metadata could remain paired with the original clip bytes.
+        original_exists = {i: p.is_file() for i, p in clip_paths.items()}
+        proj.output_dir.mkdir(parents=True, exist_ok=True)
+        backup_dir = Path(_tempfile_commit.mkdtemp(
+            prefix=".scoped_recovery_", dir=str(proj.output_dir)))
+        for idx, clip in clip_paths.items():
+            if clip.is_file():
+                dest = backup_dir / clip.name
+                _shutil_commit.copy2(clip, dest)
+                backed_up[idx] = dest
+
+        proj.selections = final
+        by_idx = {int(s.segment_index): s for s in final}
+        for idx in sorted(accepted):
+            made = _cut_one_commit(proj, by_idx[idx], cfg, resume=False)
+            if made is None or not Path(made).is_file() or Path(made).stat().st_size <= 0:
+                raise RuntimeError(f"cut failed for recovered beat {idx}")
+            by_idx[idx].clip_path = str(made)
+        proj.save()
+        return True
+    except Exception as exc:                              # noqa: BLE001 — rollback is fail-closed
+        for idx, clip in clip_paths.items():
+            try:
+                if idx in backed_up and backed_up[idx].is_file():
+                    _shutil_commit.copy2(backed_up[idx], clip)
+                elif original_exists is not None and not original_exists.get(idx, False):
+                    clip.unlink(missing_ok=True)
+            except Exception:                            # noqa: BLE001 — lineage gate remains final
+                pass
+        proj.selections = [snapshot[i] for i in sorted(snapshot)]
+        try:
+            proj.save()
+        except Exception:                                # noqa: BLE001
+            pass
+        log(f"recovery: scoped commit rolled back ({type(exc).__name__}: {exc})")
+        return False
+    finally:
+        if backup_dir is not None:
+            _shutil_commit.rmtree(backup_dir, ignore_errors=True)
 
 
 # Generic title words that carry NO show identity — they must never manufacture a same-show match
@@ -1409,7 +1647,8 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
 
 def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, refs, roster,
                               policy, log, only_indices=None,
-                              audit_filename: str = "recovery_audit.json") -> int:
+                              audit_filename: str = "recovery_audit.json",
+                              audit_request_id: str = "") -> int:
     """R4-5 BOUNDED AUTONOMOUS RECOVERY. For EXACT beats still unresolved after match + verify, run
     ONE bounded round of targeted rediscovery → download → index → rematch → (re-cut) → reverify
     BEFORE the render can fall back to a deterministic still / editorial hold / release-block.
@@ -1433,29 +1672,156 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
     import dataclasses as _dc
     from . import policy as _policy
 
-    if _os.environ.get("VIDLORE_CLIPSTUDIO_RECOVERY", "1").strip() in ("0", "false", "no"):
-        return 0
     max_beats = int(_os.environ.get("VIDLORE_CLIPSTUDIO_RECOVERY_MAX_BEATS", "8") or 8)
     max_sources = int(_os.environ.get("VIDLORE_CLIPSTUDIO_RECOVERY_MAX_SOURCES", "4") or 4)
 
     seg_by_idx = {s.index: s for s in segs}
     sel_by_idx = {s.segment_index: s for s in proj.selections}
     _scope = set(only_indices) if only_indices is not None else None
+    # ``only_indices`` comes from the strict publication contract, whose blocker vocabulary is
+    # deliberately wider than the legacy rejected-footage predicate below.  Re-filtering that
+    # scope through ``_beat_is_unresolved`` silently discarded real quote-window failures and
+    # strict/contextual evidence failures (e.g. the dedicated "Chaos is a ladder" source was on
+    # disk, but its wrong selected window never entered recovery).  The caller has already proved
+    # every scoped index is blocked, so preserve the whole scope.  The legacy call still uses its
+    # original predicate.
     unresolved = [s.index for s in segs
-                  if (_scope is None or s.index in _scope)
-                  and _beat_is_unresolved(sel_by_idx.get(s.index), s, _policy)]
-    audit = {"unresolved_before": list(unresolved), "caps": {"beats": max_beats, "sources": max_sources},
-             "attempts": [], "new_sources": [], "recovered": [], "still_unresolved": []}
-    if not unresolved:
+                  if (_scope is not None and s.index in _scope)
+                  or (_scope is None and _beat_is_unresolved(sel_by_idx.get(s.index), s, _policy))]
+    audit = {
+        "schema_version": _SEMANTIC_RECOVERY_PAGE_SCHEMA,
+        "request_id": str(audit_request_id or ""),
+        "requested_scope": sorted(_scope) if _scope is not None else [],
+        "page_scope": [],
+        "page_completed": False,
+        "page_error": "",
+        "unresolved_before": list(unresolved),
+        "caps": {"beats": max_beats, "sources": max_sources},
+        "attempts": [], "new_sources": [], "download_failures": [], "index_results": [],
+        "recovered": [], "still_unresolved": [],
+        "current_pool_rematch": {},
+    }
+
+    def _finish_page(result: int, *, completed: bool, error: str = "") -> int:
+        current_error = ""
+        current = audit.get("current_pool_rematch")
+        if isinstance(current, dict):
+            current_error = str(current.get("error") or "").strip()
+        final_error = str(error or current_error).strip()
+        audit["page_error"] = final_error
+        audit["page_completed"] = bool(completed and not final_error)
         _write_recovery_audit(proj, audit, audit_filename)
-        return 0
+        return result
+
+    if _os.environ.get("VIDLORE_CLIPSTUDIO_RECOVERY", "1").strip() in ("0", "false", "no"):
+        return _finish_page(0, completed=False, error="bounded recovery is disabled")
+    if _scope is not None and set(unresolved) != _scope:
+        missing = sorted(_scope - set(unresolved))
+        return _finish_page(
+            0, completed=False,
+            error=f"requested semantic scope has no matching segment(s): {missing}")
+    if not unresolved:
+        return _finish_page(0, completed=(_scope is None))
+
+    unresolved_before = list(unresolved)
+    current_pool_recovered: set[int] = set()
+    _tried = {int(i) for i in (proj.meta.get("recovery_attempted") or [])
+              if str(i).lstrip("-").isdigit()}
+    # The per-round cap applies to local rematch/verification as well as network acquisition.
+    # Otherwise a 29-beat strict scope silently turns an 8-beat bounded recovery into 29 fresh
+    # vision decisions and two full-project cuts.  Deferred beats stay explicit in the audit and
+    # rotate into a later Resume; they are never mislabeled as attempted or recovered.
+    if _scope is not None:
+        # Semantic rotation is generation-scoped by `_retry_selection_relevance`: a changed source/
+        # selection fingerprint starts a new finite walk, and an unchanged Resume passes only the
+        # prior tail. Do not let the legacy project's process-wide `recovery_attempted` history
+        # reorder a fresh semantic generation (otherwise [0,1,2] with cap=2 can start [2,0]).
+        unresolved = recovery_pick(unresolved, seg_by_idx, _policy, set(), max_beats)
+    audit["page_scope"] = list(unresolved)
+    audit["deferred"] = [i for i in unresolved_before if i not in set(unresolved)]
+    audit["deferred_retriable"] = [
+        i for i in audit["deferred"]
+        if recovery_query(seg_by_idx.get(i))]
+    if not unresolved:
+        audit["still_unresolved"] = list(unresolved_before)
+        # Every scoped beat was explicitly classified as non-retrievable (no query material).
+        # That is a conclusive page result, not a helper crash; downstream still/abstract handling
+        # may proceed for those beats while capped retriable beats remain in deferred_retriable.
+        return _finish_page(0, completed=True)
+
+    # A source acquired by the earlier self-heal pass is downloaded and indexed immediately, but
+    # only the beat that triggered that acquisition searches it.  The final recovery used to ask
+    # discovery for a NEW URL first and returned early when the right URL was already present.  On
+    # the 101-beat run this left the dedicated Littlefinger-death and Chaos-monologue uploads idle
+    # in the indexed pool while the affected beats stayed on known-wrong windows.  Before spending
+    # network budget, rematch the strict blockers against the pool that ACTUALLY exists now.  Match
+    # may rebuild every selection internally for its diversity constraints; snapshot reconciliation
+    # ensures only contract-cleared scoped beats survive, and a final cut re-establishes clip lineage.
+    if _scope is not None:
+        current_snapshot = {s.segment_index: _copy.deepcopy(s) for s in proj.selections}
+        current_error = ""
+        try:
+            match_segments(proj, segs, cfg, analysis=analysis, progress=None)
+            from . import verify as _verify_pool
+            import os as _os_pool
+            _pool_workers_unset = "VIDLORE_CLIPSTUDIO_VERIFY_WORKERS" not in _os_pool.environ
+            if _pool_workers_unset:
+                _os_pool.environ["VIDLORE_CLIPSTUDIO_VERIFY_WORKERS"] = "4"
+            try:
+                _pool_verify_result = _verify_pool.verify_and_repair(
+                    proj, segs, cfg, eng, only_indices=set(unresolved), progress=None,
+                    materialize_promotions=False, persist_project=False)
+            finally:
+                if _pool_workers_unset:
+                    _os_pool.environ.pop("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", None)
+            _pool_verify_error = _verifier_summary_error(_pool_verify_result)
+            if _pool_verify_error:
+                raise RuntimeError(f"current_pool_{_pool_verify_error}")
+
+            from . import relevance_contract as _rel_pool
+            strict_after = _rel_pool.evaluate_selection_relevance(proj, segs)
+            blocked_after = {int(e.get("segment_index", -1))
+                             for e in (strict_after.get("blockers") or [])}
+            current_pool_recovered = set(unresolved) - blocked_after
+        except Exception as e:                           # noqa: BLE001 — restore and fail closed
+            current_error = f"{type(e).__name__}: {e}"
+            log(f"recovery: current-pool scoped rematch errored ({current_error[:120]}) — "
+                "no selection accepted")
+            current_pool_recovered.clear()
+
+        rematched = {s.segment_index: s for s in proj.selections}
+        if not _commit_scoped_recovery(
+                proj, cfg, current_snapshot, rematched, current_pool_recovered, log=log):
+            current_error = current_error or "scoped_cut_or_lineage_commit_failed"
+            current_pool_recovered.clear()
+        audit["current_pool_rematch"] = {
+            "attempted": list(unresolved),
+            "recovered": sorted(current_pool_recovered),
+            "still_unresolved": [i for i in unresolved_before
+                                 if i not in current_pool_recovered],
+            "deferred": list(audit["deferred"]),
+            "error": current_error,
+        }
+        if current_error:
+            # Matching/verifier infrastructure did not complete, so this is not an exhausted
+            # content page. The scoped commit above has already restored exploratory metadata.
+            return _finish_page(0, completed=False, error=current_error)
+        if current_pool_recovered:
+            log(f"recovery: current indexed pool recovered {len(current_pool_recovered)} "
+                f"strict blocker(s) {sorted(current_pool_recovered)} before rediscovery")
+        unresolved = [i for i in unresolved if i not in current_pool_recovered]
+        if not unresolved:
+            audit["recovered"] = sorted(current_pool_recovered)
+            audit["still_unresolved"] = [i for i in unresolved_before
+                                         if i not in current_pool_recovered]
+            return _finish_page(len(current_pool_recovered), completed=True)
     # GATE-VULNERABLE beats first when the cap trims. Evidence across four blocked renders:
     # every blocker was a CHARACTER beat (their stills need a verified face — the hardest
     # coverage) plus one capped abstract beat; abstract/filler rejected beats take a lenient
     # CLIP-ranked still, and exact beats keep the deterministic-still fallback downstream. So:
     # character first, then filler/abstract, exact last; script order within each class. Beats
-    # with NO query material (no scene_query/required_entity — e.g. an abstract outro line)
-    # can't be rediscovered and must not burn a slot; stills cover them.
+    # with NO effective query material across scene_query/entity/expected_visual/narration cannot
+    # be rediscovered and must not burn a slot; stills cover those truly empty authored beats.
     # ROTATION. The rank below is deterministic, so every round re-selected the SAME head of the
     # same list. MEASURED on job 409e284b60: 32 beats unresolved, cap 8; round 1 took
     # [90,110,166,76,89,91,12,13] and round 2 took [90,110,76,79,89,12,13,19] — six of eight were
@@ -1466,8 +1832,8 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
     # A beat already tried and not recovered therefore goes LAST within its class rather than
     # being dropped: a later round has a bigger pool, so it may still be worth a retry, but only
     # after every beat that has had no turn at all. Same cap, same cost, strictly wider coverage.
-    _tried = {int(i) for i in (proj.meta.get("recovery_attempted") or []) if str(i).lstrip("-").isdigit()}
-    unresolved = recovery_pick(unresolved, seg_by_idx, _policy, _tried, max_beats)
+    if _scope is None:
+        unresolved = recovery_pick(unresolved, seg_by_idx, _policy, _tried, max_beats)
     # LOOK-MISS ACQUISITION — "watch the chalice" beats whose target nothing on disk shows are
     # KEPT (usable footage, never gambled) but flagged; when the recovery round has spare slots,
     # spend up to 3 on fetching footage that actually shows the named thing ("the footage exists
@@ -1493,12 +1859,14 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
                 f"acquisition {sorted(_look_aug)} (targets: "
                 f"{', '.join(repr(t) for t in _look_aug.values())})")
     if not unresolved:
-        _write_recovery_audit(proj, audit, audit_filename)
-        return 0
+        return _finish_page(0, completed=True)
     #  Recorded BEFORE the attempt: a round that dies mid-way must still count as this beat's
     #  turn, otherwise a beat whose search reliably crashes monopolises the cap forever.
     _fresh = [i for i in unresolved if i not in _tried]
-    proj.meta["recovery_attempted"] = sorted(_tried | set(unresolved))
+    # This process-wide marker belongs to the legacy recovery rotation. Semantic pages have their
+    # own nonce-bound completion marker and must not record exhaustion before the page succeeds.
+    if _scope is None:
+        proj.meta["recovery_attempted"] = sorted(_tried | set(unresolved))
     audit["attempted_before"] = sorted(_tried)
     audit["first_attempt_this_round"] = _fresh
     log(f"recovery: {len(unresolved)} unresolved beat(s) → bounded rediscovery {unresolved} "
@@ -1506,21 +1874,27 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
 
     # Snapshot EVERY current selection; the final selection list is snapshot ∪ (recovered new picks).
     snapshot = {s.segment_index: _copy.deepcopy(s) for s in proj.selections}
-    unresolved_segs = [seg_by_idx[i] for i in unresolved if i in seg_by_idx]
-    # look-miss beats search WITH their named target ("... Joffrey drinks chalice close-up") —
-    # a shallow shim copy so the project's own segment list is never mutated
-    if _look_aug:
-        _aug_segs = []
-        for s in unresolved_segs:
-            if s.index in _look_aug:
-                s2 = _copy.copy(s)
-                s2.scene_query = f"{(getattr(s, 'scene_query', '') or '').strip()} " \
-                                 f"{_look_aug[s.index]} close-up".strip()
-                _aug_segs.append(s2)
-            else:
-                _aug_segs.append(s)
-        unresolved_segs = _aug_segs
+    # Discovery's query builder consumes ``scene_query``/entity/keywords, while recovery eligibility
+    # intentionally also admits expected_visual- and narration-only beats. Give discovery a shallow
+    # recovery-only copy whose scene_query is the exact effective query we audit and title-rank.
+    # Never mutate the authored/project segments just to adapt one recovery attempt.
+    unresolved_segs = []
+    for _original_seg in (seg_by_idx[i] for i in unresolved if i in seg_by_idx):
+        _recovery_seg = _copy.copy(_original_seg)
+        _effective_query = recovery_query(_original_seg)
+        if not (getattr(_recovery_seg, "scene_query", "") or "").strip():
+            _recovery_seg.scene_query = _effective_query
+        # look-miss beats search WITH their named target
+        # ("... Joffrey drinks chalice close-up") on the same disposable copy.
+        if _original_seg.index in _look_aug:
+            _recovery_seg.scene_query = (
+                f"{(_recovery_seg.scene_query or '').strip()} "
+                f"{_look_aug[_original_seg.index]} close-up").strip()
+        unresolved_segs.append(_recovery_seg)
+    _effective_queries = [
+        (getattr(s, "scene_query", "") or "").strip() for s in unresolved_segs]
     recovered: set = set()
+    round_error = ""
 
     try:
         from .discover import discover_sources, _STOPQ as _R_STOP
@@ -1535,7 +1909,9 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
         # the uploads the recovery exists to fetch.
         cfg_r = _dc.replace(cfg, discover_target=max(12, 3 * max_sources))
         have_urls = {(getattr(s, "url", "") or "").strip() for s in proj.sources if getattr(s, "url", "")}
-        cands = discover_sources(analysis, cfg_r, segments=unresolved_segs, progress=None) or []
+        cands = discover_sources(
+            analysis, cfg_r, segments=unresolved_segs, progress=None,
+            extra_queries=_effective_queries, required_queries=_effective_queries) or []
         import re as _re_r
         _r_mv = {w for w in _re_r.findall(r"\w+", (getattr(analysis, "movie_title", "") or "").lower())
                  if len(w) > 2}
@@ -1543,9 +1919,9 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
         def _beat_hits(c) -> int:
             tw = set(_re_r.findall(r"\w+", (getattr(c, "title", "") or "").lower()))
             best = 0
-            for s in unresolved_segs:
+            for _query in _effective_queries:
                 toks = {w for w in _re_r.findall(
-                            r"\w+", (getattr(s, "scene_query", "") or "").lower())
+                            r"\w+", _query.lower())
                         if len(w) > 2 and w not in _R_STOP and w not in _r_mv}
                 hits = sum(1 for w in toks
                            if any(t == w or (t.startswith(w) and len(t) - len(w) <= 2)
@@ -1559,33 +1935,86 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
         new_cands = ([c for c in _new_all if _beat_hits(c) >= 2]
                      or _new_all)[:max_sources]
         audit["attempts"].append({
-            "queries": [getattr(s, "scene_query", "") or getattr(s, "required_entity", "")
-                        for s in unresolved_segs],
+            "queries": list(_effective_queries),
             "candidates_found": len(cands), "new_candidates": len(new_cands)})
         if not new_cands:
             log("recovery: targeted rediscovery found no NEW source — leaving beats for downstream fallback")
-            _write_recovery_audit(proj, audit, audit_filename)
-            return 0
+            audit["recovered"] = sorted(current_pool_recovered)
+            audit["still_unresolved"] = [i for i in unresolved_before
+                                         if i not in current_pool_recovered]
+            return _finish_page(len(current_pool_recovered), completed=True)
+
+        # Source acquisition is part of this page's transaction too. A technical failure must not
+        # leave a failed/zero-index row whose URL suppresses the same candidate on Resume.
+        _sources_before_acquire = _copy.deepcopy(proj.sources)
+        _source_ids_before = {s.id for s in _sources_before_acquire}
+
+        def _rollback_acquired_sources(source_ids) -> None:
+            from .index import purge_source_index as _purge_recovery_index
+            for _sid in source_ids:
+                try:
+                    _purge_recovery_index(proj, _sid)
+                except Exception:                       # noqa: BLE001 — manifest rollback is primary
+                    pass
+            proj.sources = list(_sources_before_acquire)
+            proj.save()
 
         before_ok = {s.id for s in proj.sources if s.status == SOURCE_OK}
-        download_candidates(proj, new_cands, cfg_r, policy=policy, limit=len(new_cands), progress=None)
+        try:
+            download_candidates(
+                proj, new_cands, cfg_r, policy=policy, limit=len(new_cands), progress=None)
+        except Exception:
+            _rollback_acquired_sources({s.id for s in proj.sources
+                                        if s.id not in _source_ids_before})
+            raise
+        from .models import SOURCE_FAILED as _SOURCE_FAILED_RECOVERY
+        _attempted_new = [s for s in proj.sources if s.id not in _source_ids_before]
         newly = [s for s in proj.sources if s.status == SOURCE_OK and s.id not in before_ok]
         audit["new_sources"] = [{"id": s.id, "title": (getattr(s, "title", "") or "")[:70],
                                  "height": getattr(s, "height", 0)} for s in newly]
+        _technical_downloads = [s for s in _attempted_new
+                                if s.status == _SOURCE_FAILED_RECOVERY
+                                and str(getattr(s, "error", "") or "").strip()]
+        if _technical_downloads:
+            audit["download_failures"] = [
+                {"id": s.id, "url": s.url, "error": str(s.error)[:240]}
+                for s in _technical_downloads]
+            _rollback_acquired_sources({s.id for s in _attempted_new})
+            raise RuntimeError(
+                f"targeted downloads were technically inconclusive for "
+                f"{len(_technical_downloads)} candidate(s)")
         if not newly:
             log(f"recovery: no NEW source downloaded under policy={policy} — leaving beats unresolved")
-            _write_recovery_audit(proj, audit, audit_filename)
-            return 0
+            audit["recovered"] = sorted(current_pool_recovered)
+            audit["still_unresolved"] = [i for i in unresolved_before
+                                         if i not in current_pool_recovered]
+            return _finish_page(len(current_pool_recovered), completed=True)
 
-        # index the new sources, rematch, cut, then reverify. proj.selections is fully rebuilt here;
+        # Index the new sources, rematch, then reverify directly from the selected SOURCE windows.
+        # Never cut the exploratory full-project rematch: deterministic seg_NNN filenames would
+        # overwrite clips belonging to the snapshot before we know which scoped picks are valid.
+        # proj.selections is fully rebuilt here;
         # it is reconciled against the snapshot below so only recovered beats survive the change.
         # The re-verify is restricted to the recovered beats ONLY (only_indices) — re-verifying all
         # 229 beats here just to re-check ~8 recovered ones cost hours; every other beat is restored
         # from the snapshot anyway, so its verdict does not matter.
-        index_all(proj, cfg_r, references=refs, faceid=faceid_obj, roster=roster,
-                  force=False, progress=None)
+        try:
+            _indexed = index_all(proj, cfg_r, references=refs, faceid=faceid_obj, roster=roster,
+                                 force=False, progress=None)
+        except Exception:
+            _rollback_acquired_sources({s.id for s in _attempted_new})
+            raise
+        _indexed = _indexed if isinstance(_indexed, dict) else {}
+        audit["index_results"] = [
+            {"id": s.id, "shots": len(_indexed.get(s.id) or [])} for s in newly]
+        _unindexed_new = [s for s in newly if not _indexed.get(s.id)]
+        if _unindexed_new:
+            _failed_ids = {s.id for s in _attempted_new}
+            _rollback_acquired_sources(_failed_ids)
+            raise RuntimeError(
+                "targeted indexing produced no searchable shots for new source(s): "
+                + ", ".join(sorted(s.id for s in _unindexed_new)))
         match_segments(proj, segs, cfg_r, analysis=analysis, progress=None)
-        cut_all(proj, cfg_r, progress=None)
         from . import verify as _verify_r
         # same scoped 4-worker prefetch as the main verify stage (set + restore, never leaked)
         import os as _os_vwr
@@ -1593,48 +2022,79 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
         if _vwr_unset:
             _os_vwr.environ["VIDLORE_CLIPSTUDIO_VERIFY_WORKERS"] = "4"
         try:
-            _verify_r.verify_and_repair(proj, segs, cfg, eng, only_indices=set(unresolved),
-                                        progress=None)
+            _new_verify_result = _verify_r.verify_and_repair(
+                proj, segs, cfg, eng, only_indices=set(unresolved),
+                progress=None, materialize_promotions=False, persist_project=False)
         finally:
             if _vwr_unset:
                 _os_vwr.environ.pop("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", None)
+        _new_verify_error = _verifier_summary_error(_new_verify_result)
+        if _new_verify_error:
+            raise RuntimeError(f"new_source_{_new_verify_error}")
 
         new_sel_by_idx = {s.segment_index: s for s in proj.selections}
-        for i in unresolved:
-            if not _beat_is_unresolved(new_sel_by_idx.get(i), seg_by_idx.get(i), _policy):
-                recovered.add(i)
+        if _scope is not None:
+            # Acceptance in the semantic-recovery path is the SAME strict contract that invoked
+            # it, not the weaker legacy verifier predicate.  This keeps a visually plausible but
+            # dialogue-wrong quote window from being recorded/retained as recovered.
+            from . import relevance_contract as _rel_new
+            strict_new = _rel_new.evaluate_selection_relevance(proj, segs)
+            strict_blocked = {int(e.get("segment_index", -1))
+                              for e in (strict_new.get("blockers") or [])}
+            recovered.update(i for i in unresolved if i not in strict_blocked)
+        else:
+            for i in unresolved:
+                if not _beat_is_unresolved(new_sel_by_idx.get(i), seg_by_idx.get(i), _policy):
+                    recovered.add(i)
     except Exception as e:
+        round_error = f"{type(e).__name__}: {e}"
         log(f"recovery: bounded round errored ({type(e).__name__}: {e}) — leaving beats unresolved")
 
-    # Reconcile: recovered beats keep their NEW pick; EVERY other beat is restored from the snapshot
-    # (good beats unchanged; un-recovered unresolved beats keep their prior state for the honest
-    # downstream still/hold/block). A final re-cut guarantees each beat's on-disk clip matches its
-    # final selection — so a re-verify that happened to swap a good beat can never leave a stale clip.
+    # Reconcile and CUT only contract-cleared scoped picks. The transactional helper restores both
+    # selections and prior clip bytes on any partial cut; arbitrary rematched indices never survive.
     new_sel_by_idx = {s.segment_index: s for s in proj.selections}
-    final = []
-    for idx in sorted(set(snapshot) | set(new_sel_by_idx)):
-        if idx in recovered and idx in new_sel_by_idx:
-            final.append(new_sel_by_idx[idx])
-        elif idx in snapshot:
-            final.append(snapshot[idx])
-        else:
-            final.append(new_sel_by_idx[idx])
-    proj.selections = final
-    try:
-        cut_all(proj, cfg, progress=None)
-    except Exception as e:
-        log(f"recovery: final re-cut errored ({type(e).__name__}: {e})")
-    proj.save()
+    if not _commit_scoped_recovery(proj, cfg, snapshot, new_sel_by_idx, recovered, log=log):
+        recovered.clear()
+        round_error = round_error or "scoped_cut_or_lineage_commit_failed"
 
-    audit["recovered"] = sorted(recovered)
-    audit["still_unresolved"] = [i for i in unresolved if i not in recovered]
-    _write_recovery_audit(proj, audit, audit_filename)
-    if recovered:
-        log(f"recovery: ✓ recovered {len(recovered)} beat(s) with real verified footage {sorted(recovered)}")
+    all_recovered = current_pool_recovered | recovered
+    audit["recovered"] = sorted(all_recovered)
+    audit["still_unresolved"] = [i for i in unresolved_before if i not in all_recovered]
+    _finish_page(len(all_recovered), completed=not bool(round_error), error=round_error)
+    if all_recovered:
+        log(f"recovery: ✓ recovered {len(all_recovered)} beat(s) with real verified footage "
+            f"{sorted(all_recovered)}")
     if audit["still_unresolved"]:
         log(f"recovery: {len(audit['still_unresolved'])} beat(s) still unresolved → deterministic still / "
             f"editorial hold / honest release-block downstream {audit['still_unresolved']}")
-    return len(recovered)
+    return len(all_recovered)
+
+
+def _semantic_recovery_pool_fingerprint(proj) -> str:
+    """Identity of footage/index bytes available to a semantic recovery page."""
+    import hashlib as _hashlib_pool
+    import json as _json_pool
+
+    def _stat(path) -> list[int]:
+        try:
+            st = Path(str(path or "")).stat()
+            return [int(st.st_size), int(st.st_mtime_ns)]
+        except Exception:                                # noqa: BLE001 — absence is pool state too
+            return [0, 0]
+
+    rows = []
+    for source in sorted((proj.sources or []),
+                         key=lambda item: str(getattr(item, "id", "") or "")):
+        sid = str(getattr(source, "id", "") or "")
+        rows.append({
+            "id": sid,
+            "status": str(getattr(source, "status", "") or ""),
+            "media": _stat(getattr(source, "local_path", "") or ""),
+            "shots": _stat(proj.shots_path(sid)),
+            "words": _stat(Path(proj.index_dir) / f"{sid}.words.json"),
+        })
+    raw = _json_pool.dumps(rows, sort_keys=True, separators=(",", ":"))
+    return _hashlib_pool.sha256(raw.encode("utf-8", "replace")).hexdigest()
 
 
 def _selection_relevance_retry_fingerprint(proj, segs, audit: dict) -> str:
@@ -1691,6 +2151,9 @@ def _selection_relevance_retry_fingerprint(proj, segs, audit: dict) -> str:
         "selections": sels,
         "segments": seg_state,
         "sources": src_state,
+        # An exhausted generation is invalidated by index-only repair/growth too. Source media may
+        # be byte-identical while fresh shot boundaries or ASR words make a strict rematch solvable.
+        "pool_fingerprint": _semantic_recovery_pool_fingerprint(proj),
         # Adding or revising a viewer-confirmed gap review must make a previously exhausted retry
         # runnable again.  The review itself is content evidence, not an out-of-band escape hatch.
         "gap_review": (getattr(proj, "meta", {}) or {}).get(
@@ -1729,6 +2192,44 @@ def _unverifiable_relevance_indices(audit: dict) -> set[int]:
     }
 
 
+def _strict_still_reply_schema_error(verdict, seg) -> str:
+    """Validate a legacy-still reply before it can mutate persisted evidence.
+
+    An explicit replace is a conclusive content judgment.  A keep is stronger: every boolean the
+    publication contract consumes must be explicitly present and typed, including conditional
+    subject/deictic facts.  Partial JSON and error wrappers are technical non-verdicts, not proof
+    that a still failed semantically.
+    """
+    if not isinstance(verdict, dict):
+        return "reply is not an object"
+    raw_status = verdict.get("status", "")
+    if not isinstance(raw_status, str):
+        return "status is malformed"
+    status = raw_status.strip().lower()
+    if status not in ("", "ok"):
+        return f"status={status or '<empty>'}"
+    value = verdict.get("verdict")
+    if value not in ("keep", "replace"):
+        return f"verdict is unrecognized ({value!r})"
+    if value == "replace":
+        return ""
+    for field in ("matches_narration", "specific_enough", "quality_ok",
+                  "wrong_subject_visible", "contradicts_narration"):
+        if not isinstance(verdict.get(field), bool):
+            return f"keep is missing/malformed required boolean {field!r}"
+    if str(getattr(seg, "required_entity", "") or "").strip() \
+            and not isinstance(verdict.get("correct_subject_visible"), bool):
+        return "keep is missing/malformed required boolean 'correct_subject_visible'"
+    try:
+        from . import policy as _policy_still_schema
+        target = _policy_still_schema.deictic_target(seg)
+    except Exception:                                    # noqa: BLE001 — schema must fail closed
+        target = ""
+    if target and not isinstance(verdict.get("target_visible"), bool):
+        return "keep is missing/malformed required boolean 'target_visible'"
+    return ""
+
+
 def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, refs,
                                roster, policy, log) -> dict:
     """One scoped, strictly-positive repair chance after the publication contract blocks.
@@ -1748,10 +2249,19 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
 
     initial_fp = _selection_relevance_retry_fingerprint(proj, segs, audit)
     previous = (getattr(proj, "meta", {}) or {}).get("selection_relevance_recovery") or {}
-    if previous.get("post_fingerprint") == initial_fp:
+    _same_recovery_generation = previous.get("post_fingerprint") == initial_fp
+    _current_initial_blockers = {
+        int(e.get("segment_index", -1)) for e in (audit.get("blockers") or [])}
+    _pending_deferred = [int(i) for i in (previous.get("deferred") or [])
+                         if str(i).lstrip("-").isdigit()
+                         and int(i) in _current_initial_blockers]
+    if _same_recovery_generation and not _pending_deferred:
         log(f"semantic-recovery: unchanged content failure already exhausted for "
             f"{audit['blocked_count']} beat(s) — skipping duplicate download/verification")
         return audit
+    if _same_recovery_generation and _pending_deferred:
+        log(f"semantic-recovery: continuing {len(_pending_deferred)} audited deferred blocker(s) "
+            f"from the prior bounded round {_pending_deferred}")
 
     before = sorted(int(e["segment_index"]) for e in audit["blockers"])
     log(f"semantic-recovery: publication contract blocked {len(before)} beat(s) {before}; "
@@ -1789,11 +2299,18 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
                     expected_visual=getattr(seg, "expected_visual", "") or "",
                     scene_query=getattr(seg, "scene_query", "") or "", era_hint=_era_img,
                     venue_fallback=False, must_see=_policy_img_sr.deictic_target(seg))
-            except Exception:                            # noqa: BLE001 — absence stays a blocker
-                verdict = None
-            if not isinstance(verdict, dict):
-                continue
-            verdict = {**verdict, "status": "ok"}
+            except Exception as exc:                     # noqa: BLE001 — retryable technical stop
+                raise PipelineError(
+                    f"semantic recovery legacy-still verifier failed for beat {idx}: "
+                    f"{type(exc).__name__}: {exc}") from exc
+            schema_error = _strict_still_reply_schema_error(verdict, seg)
+            if schema_error:
+                raise PipelineError(
+                    f"semantic recovery legacy-still verifier was malformed/incomplete for "
+                    f"beat {idx}: {schema_error}")
+            verdict = dict(verdict)
+            if not str(verdict.get("status", "") or "").strip():
+                verdict["status"] = "ok"
             why = _R_sr.strict_still_evidence_reason(verdict, seg)
             meta = dict(getattr(sel, "image_meta", {}) or {})
             exact = _policy_img_sr.is_exact(seg)
@@ -1821,49 +2338,106 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
         try:
             from . import verify as _verify_sr
             result = _verify_sr.verify_and_repair(
-                proj, segs, cfg, eng, only_indices=unverified, progress=None) or {}
-            backend_down = bool(result.get("verifier_down"))
+                proj, segs, cfg, eng, only_indices=unverified, progress=None)
+            _scoped_verify_error = _verifier_summary_error(result)
+            if _scoped_verify_error:
+                raise PipelineError(
+                    f"semantic scoped re-verification was inconclusive: "
+                    f"{_scoped_verify_error}")
             proj.save()
-            log(f"semantic-recovery: scoped reverify completed for {sorted(unverified)}"
-                + (" (vision backend down; acquisition skipped)" if backend_down else ""))
-            if backend_down:
-                raise _verify_sr.VisionBackendError(
-                    "vision backend unavailable during scoped semantic re-verification; "
-                    "restore it and Resume (the semantic recovery attempt was not exhausted)",
-                    kind="down")
-        except _verify_sr.VisionBackendError:
+            log(f"semantic-recovery: scoped reverify completed for {sorted(unverified)}")
+        except (_verify_sr.VisionBackendError, PipelineError):
             raise
-        except Exception as exc:                         # noqa: BLE001 — final gate remains fail-closed
-            log(f"semantic-recovery: scoped reverify failed ({type(exc).__name__}: "
-                f"{str(exc)[:90]}); publication gate remains authoritative")
+        except Exception as exc:                         # noqa: BLE001 — retryable technical stop
+            raise PipelineError(
+                f"semantic scoped re-verification failed: {type(exc).__name__}: {exc}") from exc
 
     audit = _R_sr.evaluate_selection_relevance(proj, segs)
     blockers = {int(e["segment_index"]) for e in audit.get("blockers") or []}
+    _recovery_deferred: list[int] = []
+    _page_pool_changed = False
+    _completed_page_scope: set[int] = set()
     if blockers and not backend_down:
-        try:
-            _recover_unresolved_beats(
-                proj, segs, analysis, cfg, eng, faceid_obj=faceid_obj, refs=refs,
-                roster=roster, policy=policy, log=log, only_indices=blockers,
-                audit_filename="semantic_recovery_audit.json")
-        except Exception as exc:                         # noqa: BLE001 — gate still blocks bad media
-            log(f"semantic-recovery: acquisition failed ({type(exc).__name__}: {str(exc)[:90]})")
+        # One unchanged generation walks its capped scope exactly once. The first round receives all
+        # blockers and persists the cap tail; the next Resume receives ONLY that tail. Passing the
+        # full blocker set again would let `recovery_pick` refill spare slots with already-attempted
+        # beats, producing an endless [head+tail] cycle. A changed source/selection fingerprint starts
+        # a new generation and may legitimately reconsider the full scope.
+        _recovery_scope = (set(_pending_deferred) & blockers
+                           if _same_recovery_generation else set(blockers))
+        if _recovery_scope:
+            import uuid as _uuid_sr_page
+            _page_request_id = _uuid_sr_page.uuid4().hex
+            _pool_before_page = _semantic_recovery_pool_fingerprint(proj)
+            try:
+                _recover_unresolved_beats(
+                    proj, segs, analysis, cfg, eng, faceid_obj=faceid_obj, refs=refs,
+                    roster=roster, policy=policy, log=log, only_indices=_recovery_scope,
+                    audit_filename="semantic_recovery_audit.json",
+                    audit_request_id=_page_request_id)
+            except Exception as exc:                     # noqa: BLE001 — retryable technical stop
+                raise PipelineError(
+                    f"semantic recovery helper failed before conclusive page completion: "
+                    f"{type(exc).__name__}: {exc}") from exc
+            try:
+                _ra = _load_conclusive_semantic_recovery_page(
+                    proj.output_dir / "semantic_recovery_audit.json",
+                    request_id=_page_request_id, requested_scope=_recovery_scope)
+            except PipelineError:
+                # Do not write selection_relevance_recovery, and do not let an empty/stale audit
+                # turn an unattempted strict page into permission for stills or specificity loss.
+                raise
+            _recovery_deferred = sorted({
+                int(i) for i in (_ra.get("deferred_retriable") or [])
+                if str(i).lstrip("-").isdigit()})
+            _completed_page_scope = {int(i) for i in (_ra.get("page_scope") or [])}
+            _page_pool_changed = (
+                _semantic_recovery_pool_fingerprint(proj) != _pool_before_page)
         proj.save()
 
         # Re-evaluate before the still pass: recovered moving footage needs no image, and passing a
         # subset keeps the second still pass from decorating/changing any already-approved beat.
         audit = _R_sr.evaluate_selection_relevance(proj, segs)
         blockers = {int(e["segment_index"]) for e in audit.get("blockers") or []}
-        if blockers:
+        if _page_pool_changed:
+            # The page's own scoped beats were rematched after its downloads/indexing. Every prior
+            # blocker outside that page was transactionally restored, so it has never seen the new
+            # pool. Re-open those retrievable beats exactly once under the new post-page generation;
+            # queryless beats cannot benefit from another matcher page and do not rotate.
+            by_idx = {int(getattr(s, "index", -1)): s for s in segs}
+            retriable = {idx for idx in blockers if recovery_query(by_idx.get(idx))}
+            reconsider = retriable - _completed_page_scope
+            _recovery_deferred = sorted(
+                (set(_recovery_deferred) & blockers) | reconsider)
+            if reconsider:
+                log(f"semantic-recovery: page expanded the indexed pool; deferring prior "
+                    f"out-of-page blocker(s) {sorted(reconsider)} for one strict pass against "
+                    "the new generation")
+        _recovery_deferred = sorted(set(_recovery_deferred) & blockers)
+        # Pagination is one generation-wide strict walk. If any retrievable tail remains, none of
+        # the current blockers may lose specificity yet: a later page can add footage that solves a
+        # previously attempted head beat. Only a fully exhausted/stable walk releases the whole
+        # blocker set to image fallback and the audited softening ladder.
+        _waiting_for_strict_page = set(blockers) if _recovery_deferred else set()
+        _strict_page_exhausted = blockers - _waiting_for_strict_page
+        if _waiting_for_strict_page:
+            log(f"semantic-recovery: strict pagination still has deferred page(s) "
+                f"{_recovery_deferred}; preserving exact state for all current blockers "
+                f"{sorted(_waiting_for_strict_page)} until the generation-wide walk completes")
+        if _strict_page_exhausted:
             import os as _os_sr
             if _os_sr.environ.get("VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK", "1").strip().lower() \
                     not in ("0", "false", "no"):
-                target_segs = [s for s in segs if int(getattr(s, "index", -1)) in blockers]
+                target_segs = [s for s in segs
+                               if int(getattr(s, "index", -1)) in _strict_page_exhausted]
                 try:
                     _fill_image_fallbacks(
-                        proj, target_segs, analysis, faceid_obj, refs, log, eng_cfg=eng)
-                except Exception as exc:                 # noqa: BLE001 — final gate remains the word
-                    log(f"semantic-recovery: exact-image retry failed ({type(exc).__name__}: "
-                        f"{str(exc)[:90]})")
+                        proj, target_segs, analysis, faceid_obj, refs, log, eng_cfg=eng,
+                        fail_on_web_technical=True)
+                except Exception as exc:                 # noqa: BLE001 — retryable technical stop
+                    raise PipelineError(
+                        f"semantic recovery exact-image fallback failed before completion: "
+                        f"{type(exc).__name__}: {exc}") from exc
                 proj.save()
 
     # Genuine, audited footage gaps are different from wrong picks and technical evidence faults.
@@ -1872,8 +2446,20 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
     # located real quotes plus binding/schema/backend failures. The unchanged publication contract
     # is immediately re-evaluated below; softening never bypasses it.
     pre_soften = _R_sr.evaluate_selection_relevance(proj, segs)
+    _pre_soften_for_ladder = pre_soften
+    if _recovery_deferred:
+        # Keep this generation-wide too. A deferred tail may acquire footage for an already-tried
+        # head, so softening even that head before the tail runs would erase the very blocker that
+        # needs to be reconsidered against the expanded pool.
+        _ladder_blockers = []
+        _pre_soften_for_ladder = {
+            **pre_soften,
+            "blockers": _ladder_blockers,
+            "blocked_count": len(_ladder_blockers),
+            "status": "blocked" if _ladder_blockers else "pass",
+        }
     _gap_softening = None
-    if pre_soften.get("blockers"):
+    if _pre_soften_for_ladder.get("blockers"):
         import os as _os_gap
         if (_os_gap.environ.get("VIDLORE_CLIPSTUDIO_SELFHEAL", "1").strip().lower()
                 not in ("0", "false", "no")
@@ -1882,24 +2468,33 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
             try:
                 from . import selfheal as _selfheal_gap
                 _gap_softening = _selfheal_gap.heal_selection_relevance_gaps(
-                    proj, segs, cfg, pre_soften, policy=policy, eng=eng, log=log)
+                    proj, segs, cfg, _pre_soften_for_ladder,
+                    policy=policy, eng=eng, log=log)
                 if _gap_softening.get("candidate_count"):
                     log(f"semantic-gap: specificity ladder softened "
                         f"{_gap_softening.get('softened_count', 0)}/"
                         f"{_gap_softening.get('candidate_count', 0)} exhausted gap beat(s)")
-            except Exception as exc:                     # noqa: BLE001 — gate remains authoritative
-                log(f"semantic-gap: ladder failed ({type(exc).__name__}: {str(exc)[:90]}); "
-                    "publication gate remains authoritative")
+            except Exception as exc:                     # noqa: BLE001 — retryable technical stop
+                # The ladder owns a transaction that restores the exact beat/selection state before
+                # re-raising. Do not convert that technical failure into a content exhaustion marker:
+                # Resume must get another chance once the verifier/cache/disk fault is repaired.
+                raise PipelineError(
+                    f"semantic gap specificity ladder failed before completion: "
+                    f"{type(exc).__name__}: {exc}") from exc
 
     final = _R_sr.evaluate_selection_relevance(proj, segs)
     _R_sr.write_selection_relevance_audit(audit_path, final)
     after = sorted(int(e["segment_index"]) for e in final.get("blockers") or [])
+    _recovery_deferred = [i for i in _recovery_deferred if i in set(after)]
     proj.meta["selection_relevance_recovery"] = {
         "schema_version": _R_sr.SCHEMA_VERSION,
         "before": before,
         "after": after,
         "post_fingerprint": _selection_relevance_retry_fingerprint(proj, segs, final),
         "gap_softening": _gap_softening or {},
+        "deferred": _recovery_deferred,
+        "pool_changed_during_page": _page_pool_changed,
+        "completed_page_scope": sorted(_completed_page_scope),
     }
     proj.save()
     if after:
@@ -2432,6 +3027,18 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
                 raise VisionBackendError(
                     f"vision backend unavailable ({_kind}): {_err}/{_att} exact-scene beats could "
                     f"not be verified. {_hint}.", kind=_kind)
+        elif int(_vres.get("materialization_errors", 0) or 0) > 0:
+            # Vision reached a positive alternate, but its deterministic clip could not be cut and
+            # was transactionally rolled back. This is disk/ffmpeg infrastructure uncertainty, not
+            # a semantic rejection and not a completed verify stage. Leave the checkpoint absent so
+            # Resume retries from the restored selection/clip instead of silently keeping stale or
+            # partial bytes under promoted metadata.
+            _mat_err = int(_vres.get("materialization_errors", 0) or 0)
+            log(f"⛔ VERIFY PROMOTION MATERIALIZATION FAILED — {_mat_err} promotion(s) rolled "
+                "back; verify was NOT checkpointed. Fix ffmpeg/disk and Resume.")
+            raise PipelineError(
+                f"verify promotion materialization failed for {_mat_err} beat(s); "
+                "selection and clip were rolled back, Resume will retry")
         else:
             _stage_done(proj, "verify", _sig_verify)
 
@@ -2537,8 +3144,8 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
                     _saudit = _retry_selection_relevance(
                         proj, segs, cfg, analysis, eng, faceid_obj=faceid_obj, refs=refs,
                         roster=roster, policy=policy, log=log)
-                except _verify.VisionBackendError:
-                    raise                                # retryable infrastructure failure, no marker
+                except (_verify.VisionBackendError, PipelineError):
+                    raise                                # retryable technical failure, no marker
                 except Exception as _se:                 # technical repair fault cannot bypass gate
                     log(f"semantic-recovery: technical failure ({type(_se).__name__}: "
                         f"{str(_se)[:100]}); original publication block preserved")

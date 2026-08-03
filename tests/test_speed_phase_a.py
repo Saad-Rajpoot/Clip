@@ -101,8 +101,10 @@ class TestOcrPoolOptIn(unittest.TestCase):
 class TestVerifyWorkersScoped(unittest.TestCase):
     def test_scoped_set_and_restore_not_setdefault_leak(self):
         src = (ROOT / "orchestrate.py").read_text()
-        # both verify call sites: set when unset, ALWAYS popped in finally — never leaked
-        self.assertEqual(src.count('environ.pop("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", None)'), 2)
+        # All three verify call sites (main pass, current-pool strict rematch, post-download retry):
+        # set when unset, ALWAYS popped in finally — never leaked.
+        self.assertEqual(src.count('environ["VIDLORE_CLIPSTUDIO_VERIFY_WORKERS"] = "4"'), 3)
+        self.assertEqual(src.count('environ.pop("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", None)'), 3)
         self.assertNotIn('setdefault("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS"', src)
 
     def test_operator_env_always_wins(self):

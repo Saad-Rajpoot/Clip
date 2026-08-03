@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vidlore.clipstudio import selfheal as SH               # noqa: E402
 from vidlore.clipstudio.models import (                     # noqa: E402
-    ClipProject, ClipSelection, ScriptSegment, Shot, SourceVideo, SOURCE_OK)
+    ClipProject, ClipSelection, ScriptSegment, Shot, SourceVideo, SOURCE_FAILED, SOURCE_OK)
 from vidlore.clipstudio.config import ClipConfig            # noqa: E402
 
 
@@ -123,6 +123,33 @@ class TestStillRecovery(unittest.TestCase):
             pool = SH._clean_pool(p)
             self.assertEqual(pool, [])
 
+    def test_stronger_ranked_non_ok_source_index_is_not_a_ladder_candidate(self):
+        """A stale index is not permission to air bytes from a currently blocked source."""
+        with tempfile.TemporaryDirectory() as td:
+            p = _proj(td)
+            blocked = _add_source_with_shots(p, "blocked_src", n=1)
+            blocked.status = "download_failed"
+            _add_source_with_shots(p, "good_src", n=1)
+            seg = _seg(41)
+            sel = ClipSelection(segment_index=41, source_id="x", shot_index=0,
+                                in_point=0, out_point=2, confidence=0.5)
+            p.selections = [sel]
+
+            def relevance(_shot, path, *_args, **_kwargs):
+                return 0.99 if "blocked_src" in str(path) else 0.10
+
+            with mock.patch.object(SH, "_venue_verify",
+                                   return_value={"verdict": "keep", "reason": "candidate"}), \
+                    mock.patch("vidlore.clipstudio.image_fallback._shot_relevance",
+                               side_effect=relevance) as ranked:
+                ok = SH.still_recover(p, seg, sel, eng_cfg=None, log=lambda _m: None)
+
+            self.assertTrue(ok)
+            self.assertIn("good_src", sel.image_path)
+            self.assertTrue(ranked.call_args_list)
+            self.assertTrue(all("blocked_src" not in str(call.args[1])
+                                for call in ranked.call_args_list))
+
 
 class TestQueries(unittest.TestCase):
     def test_llm_queries_fall_back_deterministically(self):
@@ -164,7 +191,7 @@ class TestAcquisition(unittest.TestCase):
                             return_value=cands), \
                     mock.patch("vidlore.clipstudio.download.download_candidates",
                                side_effect=fake_download), \
-                    mock.patch("vidlore.clipstudio.index.index_source", return_value=None), \
+                    mock.patch("vidlore.clipstudio.index.index_source", return_value=[object()]), \
                     mock.patch.object(SH, "_llm_queries",
                                       return_value=["Purple Wedding chalice scene"]):
                 fresh = SH.acquire_for_beat(p, seg, cfg, policy="approved_testing",
@@ -172,6 +199,153 @@ class TestAcquisition(unittest.TestCase):
             self.assertEqual(seen["n"], 2, "SELFHEAL_MAX_SRC=2 must bound the fetch")
             self.assertEqual(seen["policy"], "approved_testing")
             self.assertEqual(len(fresh), 2)
+
+    def test_discovery_exception_is_inconclusive_not_an_empty_pool(self):
+        with tempfile.TemporaryDirectory() as td:
+            p, seg, cfg = _proj(td), _seg(71), ClipConfig()
+            with mock.patch.object(SH, "_yt_search_candidates", return_value=[]), \
+                    mock.patch.object(SH, "_llm_queries", return_value=["exact scene"]), \
+                    mock.patch("vidlore.clipstudio.discover.discover_sources",
+                               side_effect=TimeoutError("search timed out")):
+                with self.assertRaisesRegex(SH.InconclusiveAcquisitionError, "discovery"):
+                    SH.acquire_for_beat(
+                        p, seg, cfg, policy="approved_testing", log=lambda _m: None)
+
+    def test_real_required_query_all_provider_technical_is_inconclusive(self):
+        """Exercise discover's real status fan-out, not a mocked top-level exception."""
+        from vidlore.clipstudio import discover as D
+        with tempfile.TemporaryDirectory() as td:
+            p, seg, cfg = _proj(td), _seg(711), ClipConfig()
+            provider = lambda _q, _n: ([], D.STATUS_TRANSPORT)
+            with mock.patch.object(SH, "_yt_search_candidates", return_value=[]), \
+                    mock.patch.object(SH, "_llm_queries", return_value=["required exact scene"]), \
+                    mock.patch.object(D, "build_queries", return_value=[]), \
+                    mock.patch.object(D, "anchor_queries", return_value=[]), \
+                    mock.patch.object(D, "_ytsearch_ex", side_effect=provider), \
+                    mock.patch.object(D, "_archive_search_ex", side_effect=provider), \
+                    mock.patch("time.sleep", return_value=None):
+                with self.assertRaisesRegex(
+                        SH.InconclusiveAcquisitionError, "TargetedDiscoveryTechnicalError"):
+                    SH.acquire_for_beat(
+                        p, seg, cfg, policy="approved_testing", log=lambda _m: None)
+
+    def test_all_failed_downloads_are_inconclusive_not_policy_exhaustion(self):
+        with tempfile.TemporaryDirectory() as td:
+            p, seg, cfg = _proj(td), _seg(72), ClipConfig()
+            cand = types.SimpleNamespace(
+                url="https://y/fail", title="Purple Wedding exact scene")
+
+            def failed_download(proj, new, _cfg, **_kwargs):
+                for item in new:
+                    proj.sources.append(SourceVideo(
+                        id="failed", url=item.url, title=item.title,
+                        status=SOURCE_FAILED, error="HTTP 403"))
+
+            with mock.patch.object(SH, "_yt_search_candidates", return_value=[]), \
+                    mock.patch.object(SH, "_llm_queries", return_value=["exact scene"]), \
+                    mock.patch("vidlore.clipstudio.discover.discover_sources",
+                               return_value=[cand]), \
+                    mock.patch("vidlore.clipstudio.download.download_candidates",
+                               side_effect=failed_download):
+                with self.assertRaisesRegex(SH.InconclusiveAcquisitionError, "download"):
+                    SH.acquire_for_beat(
+                        p, seg, cfg, policy="approved_testing", log=lambda _m: None)
+            self.assertEqual(p.sources, [], "failed source rows must roll back for Resume")
+
+    def test_mixed_success_and_failed_download_rolls_back_and_retries_same_urls(self):
+        with tempfile.TemporaryDirectory() as td:
+            p, seg, cfg = _proj(td), _seg(721), ClipConfig()
+            cands = [types.SimpleNamespace(url=f"https://y/{i}", title=f"exact scene {i}")
+                     for i in range(2)]
+            attempts = []
+
+            def download(proj, new, _cfg, **_kwargs):
+                attempts.append([c.url for c in new])
+                first = len(attempts) == 1
+                for i, item in enumerate(new):
+                    proj.sources.append(SourceVideo(
+                        id=f"s{i}", url=item.url, title=item.title,
+                        status=(SOURCE_FAILED if first and i == 1 else SOURCE_OK),
+                        error=("network" if first and i == 1 else ""),
+                        local_path=("" if first and i == 1 else str(Path(td) / f"{i}.mp4"))))
+
+            common = [
+                mock.patch.object(SH, "_yt_search_candidates", return_value=[]),
+                mock.patch.object(SH, "_llm_queries", return_value=["exact scene"]),
+                mock.patch("vidlore.clipstudio.discover.discover_sources", return_value=cands),
+                mock.patch("vidlore.clipstudio.download.download_candidates", side_effect=download),
+                mock.patch("vidlore.clipstudio.index.index_source", return_value=[object()]),
+            ]
+            with common[0], common[1], common[2], common[3], common[4]:
+                with self.assertRaises(SH.InconclusiveAcquisitionError):
+                    SH.acquire_for_beat(
+                        p, seg, cfg, policy="approved_testing", log=lambda _m: None)
+                self.assertEqual(p.sources, [])
+                fresh = SH.acquire_for_beat(
+                    p, seg, cfg, policy="approved_testing", log=lambda _m: None)
+            self.assertEqual(len(fresh), 2)
+            self.assertEqual(attempts[0], attempts[1], "rollback must not suppress failed URLs")
+
+    def test_duplicate_only_download_is_conclusive(self):
+        with tempfile.TemporaryDirectory() as td:
+            p, seg, cfg = _proj(td), _seg(722), ClipConfig()
+            cand = types.SimpleNamespace(url="https://y/dup", title="exact scene duplicate")
+
+            def duplicate_download(proj, new, _cfg, **_kwargs):
+                proj.sources.append(SourceVideo(
+                    id="dup", url=new[0].url, title=new[0].title, status="duplicate"))
+
+            with mock.patch.object(SH, "_yt_search_candidates", return_value=[]), \
+                    mock.patch.object(SH, "_llm_queries", return_value=["exact scene"]), \
+                    mock.patch("vidlore.clipstudio.discover.discover_sources",
+                               return_value=[cand]), \
+                    mock.patch("vidlore.clipstudio.download.download_candidates",
+                               side_effect=duplicate_download):
+                self.assertEqual(SH.acquire_for_beat(
+                    p, seg, cfg, policy="approved_testing", log=lambda _m: None), [])
+
+    def test_index_exception_is_inconclusive(self):
+        self._assert_index_failure_is_inconclusive(RuntimeError("decoder unavailable"), "RuntimeError")
+
+    def test_zero_shot_index_is_inconclusive(self):
+        self._assert_index_failure_is_inconclusive([], "zero_shots")
+
+    def _assert_index_failure_is_inconclusive(self, index_outcome, detail):
+        with tempfile.TemporaryDirectory() as td:
+            p, seg, cfg = _proj(td), _seg(73), ClipConfig()
+            cand = types.SimpleNamespace(
+                url="https://y/index", title="Purple Wedding exact scene")
+
+            def successful_download(proj, new, _cfg, **_kwargs):
+                for item in new:
+                    proj.sources.append(SourceVideo(
+                        id="downloaded", url=item.url, title=item.title,
+                        status=SOURCE_OK, local_path=str(Path(td) / "downloaded.mp4")))
+
+            def index_failure(proj, source, *_args, **_kwargs):
+                (proj.index_dir / f"{source.id}.shots.json").write_text("partial")
+                if isinstance(index_outcome, BaseException):
+                    raise index_outcome
+                return index_outcome
+
+            patch_index = (mock.patch("vidlore.clipstudio.index.index_source",
+                                      side_effect=index_failure)
+                           if isinstance(index_outcome, BaseException)
+                           else mock.patch("vidlore.clipstudio.index.index_source",
+                                           side_effect=index_failure))
+            with mock.patch.object(SH, "_yt_search_candidates", return_value=[]), \
+                    mock.patch.object(SH, "_llm_queries", return_value=["exact scene"]), \
+                    mock.patch("vidlore.clipstudio.discover.discover_sources",
+                               return_value=[cand]), \
+                    mock.patch("vidlore.clipstudio.download.download_candidates",
+                               side_effect=successful_download), patch_index:
+                with self.assertRaisesRegex(
+                        SH.InconclusiveAcquisitionError, f"index.*{detail}"):
+                    SH.acquire_for_beat(
+                        p, seg, cfg, policy="approved_testing", log=lambda _m: None)
+            self.assertEqual(p.sources, [])
+            self.assertFalse((p.index_dir / "downloaded.shots.json").exists(),
+                             "partial index must be purged on retryable abort")
 
 
 class TestLoop(unittest.TestCase):

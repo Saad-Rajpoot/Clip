@@ -57,6 +57,26 @@ def test_legacy_wrappers_still_return_bare_lists():
         D._ytsearch_ex = orig
 
 
+def test_archive_parseable_non_2xx_is_technical_not_empty():
+    import requests
+    original = requests.get
+
+    class Response:
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+        def json(self):
+            return {"response": {"docs": []}}
+
+    try:
+        for code in (403, 500):
+            requests.get = lambda *_a, _code=code, **_kw: Response(_code)
+            result, status = D._archive_search_ex("required scene", 4)
+            assert result == [] and status == D.STATUS_TRANSPORT
+    finally:
+        requests.get = original
+
+
 # ---------------------------------------------------------------------------
 # E2 — fan-out orchestration under scripted provider failures
 # ---------------------------------------------------------------------------
@@ -83,7 +103,7 @@ class _Script:
         return list(res), st
 
 
-def _run_fanout(yt, ar, queries, workers, jitter=False):
+def _run_fanout(yt, ar, queries, workers, jitter=False, required_queries=None):
     orig = (D._ytsearch_ex, D._archive_search_ex, D.build_queries, D.anchor_queries)
     orig_env = os.environ.get("VIDLORE_CLIPSTUDIO_DISCOVER_WORKERS")
     orig_sleep = time.sleep
@@ -107,7 +127,9 @@ def _run_fanout(yt, ar, queries, workers, jitter=False):
                       anchor_scenes=[], actors=[], characters=[], key_scenes=[], events=[],
                       visual_keywords=[], locations=[], year="", synopsis="",
                       emotional_moments=[], episode_hint="", tone="")
-        return D.discover_sources(analysis, cfg)
+        return D.discover_sources(
+            analysis, cfg, extra_queries=required_queries,
+            required_queries=required_queries)
     finally:
         (D._ytsearch_ex, D._archive_search_ex, D.build_queries, D.anchor_queries) = orig
         time.sleep = orig_sleep
@@ -162,6 +184,32 @@ def test_legitimate_empty_is_an_answer_not_a_retry():
         "a genuine zero-result answer must never be retried"
 
 
+def test_required_query_partial_provider_answer_is_conclusive():
+    yt = _Script({("qr", 1): ([], D.STATUS_TRANSPORT),
+                  ("qr", 2): ([], D.STATUS_TRANSPORT),
+                  ("qr", 3): ([], D.STATUS_TRANSPORT)}, lambda q: [])
+    ar = _Script({("qr", 1): ([], D.STATUS_EMPTY)}, lambda q: [])
+    out = _run_fanout(yt, ar, ["qr"], 1, required_queries=["qr"])
+    assert out == []
+    assert yt.calls["qr"] == 3 and ar.calls["qr"] == 1
+
+
+def test_required_query_partial_results_with_only_technical_status_is_inconclusive():
+    partial = [_cand("partial-old-hit", "qp")]
+    yt = _Script({("qp", 1): (partial, D.STATUS_TRANSPORT),
+                  ("qp", 2): (partial, D.STATUS_TRANSPORT),
+                  ("qp", 3): (partial, D.STATUS_TRANSPORT)}, lambda q: [])
+    ar = _Script({("qp", 1): ([], D.STATUS_TIMEOUT),
+                  ("qp", 2): ([], D.STATUS_TIMEOUT),
+                  ("qp", 3): ([], D.STATUS_TIMEOUT)}, lambda q: [])
+    try:
+        _run_fanout(yt, ar, ["qp"], 1, required_queries=["qp"])
+    except D.TargetedDiscoveryTechnicalError:
+        pass
+    else:
+        raise AssertionError("technical partial hits must not certify required-query exhaustion")
+
+
 def test_throttled_backoff_is_bounded_and_serial_path_matches_parallel():
     queries = [f"q{i}" for i in range(5)]
 
@@ -182,9 +230,12 @@ def test_throttled_backoff_is_bounded_and_serial_path_matches_parallel():
 TESTS = [
     test_error_classification,
     test_legacy_wrappers_still_return_bare_lists,
+    test_archive_parseable_non_2xx_is_technical_not_empty,
     test_failed_provider_bucket_retries_and_recovers_preserving_partials,
     test_one_provider_hard_down_keeps_other_providers_partial_results,
     test_legitimate_empty_is_an_answer_not_a_retry,
+    test_required_query_partial_provider_answer_is_conclusive,
+    test_required_query_partial_results_with_only_technical_status_is_inconclusive,
     test_throttled_backoff_is_bounded_and_serial_path_matches_parallel,
 ]
 

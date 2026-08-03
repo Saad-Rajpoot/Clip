@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+import os
 from types import SimpleNamespace
 from unittest import mock
 
@@ -22,6 +23,18 @@ GOOD = {
     "wrong_subject_visible": False, "contradicts_narration": False,
     "quality_ok": True, "target_visible": True,
 }
+
+VERIFY_OK = {"available": True, "errored": 0, "verifier_down": False}
+
+INCONCLUSIVE_VERIFY_SUMMARIES = [
+    pytest.param({}, "verifier_available_missing", id="empty-summary"),
+    pytest.param({"available": True, "errored": 1, "verifier_down": False},
+                 "verifier_errored:1", id="errored"),
+    pytest.param({"available": False, "errored": 0, "verifier_down": False},
+                 "verifier_available_false", id="unavailable"),
+    pytest.param({"available": True, "errored": 0, "verifier_down": True},
+                 "verifier_down", id="breaker-down"),
+]
 
 
 def _fixture(tmp_path, verifier):
@@ -66,6 +79,29 @@ def _call(proj, segs):
         policy="approved_testing", log=lambda _m: None)
 
 
+def _write_mock_recovery_page(proj, kw, *, deferred=(), page_completed=True,
+                              page_error="", current_error=""):
+    """Give mocked recovery the same nonce/scope-bound receipt required in production."""
+    requested = sorted(kw["only_indices"])
+    deferred = sorted(deferred)
+    page_scope = [i for i in requested if i not in set(deferred)]
+    audit = {
+        "schema_version": O._SEMANTIC_RECOVERY_PAGE_SCHEMA,
+        "request_id": kw["audit_request_id"],
+        "requested_scope": requested,
+        "page_scope": page_scope,
+        "page_completed": page_completed,
+        "page_error": page_error,
+        "deferred": deferred,
+        "deferred_retriable": deferred,
+        "current_pool_rematch": {
+            "attempted": page_scope, "recovered": [], "still_unresolved": requested,
+            "deferred": deferred, "error": current_error,
+        },
+    }
+    (proj.output_dir / kw["audit_filename"]).write_text(json.dumps(audit))
+
+
 def test_missing_evidence_gets_scoped_reverify_before_acquisition(tmp_path):
     proj, segs, sel = _fixture(tmp_path, {"status": "ok", "verdict": "keep"})
 
@@ -75,7 +111,7 @@ def test_missing_evidence_gets_scoped_reverify_before_acquisition(tmp_path):
         V.bind_selection_verifier_evidence(
             proj, sel, segs[0], sel.verifier, model="vision", is_specific=True,
             multiframe=True, faceid_names=[], era="", must_see="")
-        return {"verifier_down": False}
+        return dict(VERIFY_OK)
 
     with mock.patch("vidlore.clipstudio.verify.verify_and_repair", side_effect=reverify) as rv, \
             mock.patch.object(O, "_recover_unresolved_beats") as recover, \
@@ -87,6 +123,26 @@ def test_missing_evidence_gets_scoped_reverify_before_acquisition(tmp_path):
     stills.assert_not_called()
 
 
+@pytest.mark.parametrize("summary,expected_reason", INCONCLUSIVE_VERIFY_SUMMARIES)
+def test_missing_evidence_inconclusive_summary_is_retryable_before_recovery(
+        tmp_path, summary, expected_reason):
+    proj, segs, _sel = _fixture(tmp_path, {"status": "ok", "verdict": "keep"})
+
+    with mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                    return_value=summary) as verifier, \
+            mock.patch.object(O, "_recover_unresolved_beats") as recover, \
+            mock.patch.object(O, "_fill_image_fallbacks") as stills, \
+            mock.patch("vidlore.clipstudio.selfheal.heal_selection_relevance_gaps") as ladder:
+        with pytest.raises(O.PipelineError, match=expected_reason):
+            _call(proj, segs)
+
+    verifier.assert_called_once()
+    recover.assert_not_called()
+    stills.assert_not_called()
+    ladder.assert_not_called()
+    assert "selection_relevance_recovery" not in proj.meta
+
+
 def test_explicit_negative_skips_duplicate_reverify_and_recovers_only_blocker(tmp_path):
     proj, segs, sel = _fixture(
         tmp_path, {**GOOD, "verdict": "replace", "matches_narration": False,
@@ -95,6 +151,7 @@ def test_explicit_negative_skips_duplicate_reverify_and_recovers_only_blocker(tm
     def recover(_proj, _segs, _analysis, _cfg, _eng, **kw):
         assert kw["only_indices"] == {0}
         assert kw["audit_filename"] == "semantic_recovery_audit.json"
+        _write_mock_recovery_page(_proj, kw)
         sel.verifier = dict(GOOD)
         V.bind_selection_verifier_evidence(
             proj, sel, segs[0], sel.verifier, model="vision", is_specific=True,
@@ -133,11 +190,57 @@ def test_legacy_still_is_reverified_on_its_actual_bytes_before_acquisition(tmp_p
     assert sel.image_meta["still_image_sha256"]
 
 
+@pytest.mark.parametrize("failure", [
+    "exception", "none", "partial_keep", "malformed_keep", "missing_subject", "error_keep",
+])
+def test_legacy_still_inconclusive_verifier_is_retryable_before_any_fallback(tmp_path, failure):
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, sel = _fixture(tmp_path, bad)
+    still = tmp_path / "legacy-unverified.jpg"
+    still.write_bytes(b"legacy actual bytes")
+    sel.image_path = str(still)
+    sel.image_meta = {"source": "web-exact-scene", "relevance_class": "exact_scene"}
+    before_meta = copy.deepcopy(sel.image_meta)
+
+    def inconclusive(*_args, **_kwargs):
+        if failure == "exception":
+            raise RuntimeError("still verifier transport failed")
+        if failure == "none":
+            return None
+        if failure == "partial_keep":
+            return {"status": "ok", "verdict": "keep"}
+        if failure == "malformed_keep":
+            return {**GOOD, "matches_narration": "yes"}
+        if failure == "missing_subject":
+            out = dict(GOOD)
+            out.pop("correct_subject_visible")
+            return out
+        return {**GOOD, "status": "error", "verdict": "keep"}
+
+    with mock.patch("vidlore.clipstudio.verify.verify_frame", side_effect=inconclusive), \
+            mock.patch.object(O, "_recover_unresolved_beats") as recover, \
+            mock.patch.object(O, "_fill_image_fallbacks") as fallback, \
+            mock.patch("vidlore.clipstudio.selfheal.heal_selection_relevance_gaps") as ladder:
+        with pytest.raises(O.PipelineError, match="legacy-still verifier"):
+            _call(proj, segs)
+
+    recover.assert_not_called()
+    fallback.assert_not_called()
+    ladder.assert_not_called()
+    assert sel.image_meta == before_meta
+    assert "selection_relevance_recovery" not in proj.meta
+
+
 def test_failed_retry_stays_blocked_and_unchanged_resume_does_not_repeat(tmp_path):
     bad = {**GOOD, "verdict": "replace", "matches_narration": False,
            "specific_enough": False, "correct_subject_visible": False}
     proj, segs, _sel = _fixture(tmp_path, bad)
-    with mock.patch.object(O, "_recover_unresolved_beats", return_value=0) as recover, \
+    def exhausted(_proj, _segs, _analysis, _cfg, _eng, **kw):
+        _write_mock_recovery_page(_proj, kw)
+        return 0
+
+    with mock.patch.object(O, "_recover_unresolved_beats", side_effect=exhausted) as recover, \
             mock.patch.object(O, "_fill_image_fallbacks", return_value=0) as stills:
         first = _call(proj, segs)
         second = _call(proj, segs)
@@ -147,6 +250,1515 @@ def test_failed_retry_stays_blocked_and_unchanged_resume_does_not_repeat(tmp_pat
     marker = proj.meta["selection_relevance_recovery"]
     assert marker["before"] == marker["after"] == [0]
     assert marker["post_fingerprint"]
+
+
+@pytest.mark.parametrize("index_kind", ["shots", "words"])
+def test_index_only_pool_growth_reopens_exhausted_semantic_generation(tmp_path, index_kind):
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    media = proj.sources[0].local_path
+    media_stat = (os.stat(media).st_size, os.stat(media).st_mtime_ns)
+
+    def exhausted(_proj, _segs, _analysis, _cfg, _eng, **kw):
+        _write_mock_recovery_page(_proj, kw)
+        return 0
+
+    with mock.patch.object(O, "_recover_unresolved_beats", side_effect=exhausted) as recover, \
+            mock.patch.object(O, "_fill_image_fallbacks", return_value=0):
+        _call(proj, segs)
+        _call(proj, segs)
+        assert recover.call_count == 1, "unchanged exhausted generation is finite"
+        old_pool = O._semantic_recovery_pool_fingerprint(proj)
+
+        if index_kind == "words":
+            (proj.index_dir / "s1.words.json").write_text(json.dumps([
+                {"word": "fresh", "start": 0.0, "end": 0.4},
+            ]), encoding="utf-8")
+        else:
+            shots_path = proj.shots_path("s1")
+            shots = json.loads(shots_path.read_text(encoding="utf-8"))
+            shots.append(Shot(
+                source_id="s1", index=99, start=3.0, end=5.0,
+                keyframe_path=str(tmp_path / "fresh-index-frame.jpg")).to_dict())
+            shots_path.write_text(json.dumps(shots), encoding="utf-8")
+
+        assert O._semantic_recovery_pool_fingerprint(proj) != old_pool
+        assert (os.stat(media).st_size, os.stat(media).st_mtime_ns) == media_stat
+        _call(proj, segs)
+        _call(proj, segs)
+
+    assert recover.call_count == 2, "index-only growth earns exactly one fresh strict generation"
+
+
+@pytest.mark.parametrize("failure", [
+    "helper_exception", "missing_audit", "corrupt_audit", "mismatched_audit",
+    "incomplete_page", "current_pool_error",
+])
+def test_inconclusive_recovery_page_never_authorizes_fallback_or_exhaustion(tmp_path, failure):
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+
+    def inconclusive(_proj, _segs, _analysis, _cfg, _eng, **kw):
+        audit_path = _proj.output_dir / kw["audit_filename"]
+        if failure == "helper_exception":
+            raise RuntimeError("recovery helper crashed")
+        if failure == "missing_audit":
+            return 0
+        if failure == "corrupt_audit":
+            audit_path.write_text("{not-json", encoding="utf-8")
+            return 0
+        if failure == "mismatched_audit":
+            wrong = dict(kw)
+            wrong["audit_request_id"] = "stale-request"
+            _write_mock_recovery_page(_proj, wrong)
+            return 0
+        if failure == "incomplete_page":
+            _write_mock_recovery_page(_proj, kw, page_completed=False)
+            return 0
+        _write_mock_recovery_page(
+            _proj, kw, page_completed=True, current_error="vision rematch timed out")
+        return 0
+
+    with mock.patch.object(O, "_recover_unresolved_beats", side_effect=inconclusive) as recover, \
+            mock.patch.object(O, "_fill_image_fallbacks") as images, \
+            mock.patch("vidlore.clipstudio.selfheal.heal_selection_relevance_gaps") as ladder:
+        with pytest.raises(O.PipelineError):
+            _call(proj, segs)
+
+    recover.assert_called_once()
+    images.assert_not_called()
+    ladder.assert_not_called()
+    assert "selection_relevance_recovery" not in proj.meta
+    assert segs[0].visual_policy == P.EXACT
+
+
+@pytest.mark.parametrize("failing_helper", ["match", "verify"])
+def test_real_recovery_helper_error_is_retryable_and_never_softens(tmp_path, failing_helper):
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+
+    def rematch(*_args, **_kwargs):
+        if failing_helper == "match":
+            raise RuntimeError("matcher temporarily unavailable")
+        return proj.selections
+
+    def reverify(*_args, **_kwargs):
+        if failing_helper == "verify":
+            raise RuntimeError("verifier temporarily unavailable")
+        return {}
+
+    with mock.patch.object(O, "match_segments", side_effect=rematch), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair", side_effect=reverify), \
+            mock.patch("vidlore.clipstudio.discover.discover_sources", return_value=[]), \
+            mock.patch.object(O, "_fill_image_fallbacks") as images, \
+            mock.patch("vidlore.clipstudio.selfheal.heal_selection_relevance_gaps") as ladder:
+        with pytest.raises(O.PipelineError):
+            _call(proj, segs)
+
+    page = json.loads(
+        (proj.output_dir / "semantic_recovery_audit.json").read_text(encoding="utf-8"))
+    assert page["page_completed"] is False
+    expected_word = "matcher" if failing_helper == "match" else "verifier"
+    assert expected_word in page["current_pool_rematch"]["error"].lower()
+    images.assert_not_called()
+    ladder.assert_not_called()
+    assert "selection_relevance_recovery" not in proj.meta
+
+
+def test_exact_image_fallback_exception_is_retryable_before_ladder_or_marker(tmp_path):
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+
+    def exhausted(_proj, _segs, _analysis, _cfg, _eng, **kw):
+        _write_mock_recovery_page(_proj, kw)
+        return 0
+
+    with mock.patch.object(O, "_recover_unresolved_beats", side_effect=exhausted) as recover, \
+            mock.patch.object(O, "_fill_image_fallbacks",
+                              side_effect=RuntimeError("image verifier transport failed")) as images, \
+            mock.patch("vidlore.clipstudio.selfheal.heal_selection_relevance_gaps") as ladder:
+        for _attempt in range(2):
+            with pytest.raises(O.PipelineError, match="exact-image fallback failed"):
+                _call(proj, segs)
+            assert "selection_relevance_recovery" not in proj.meta
+
+    assert recover.call_count == 2, "no exhaustion marker means Resume retries strict recovery"
+    assert images.call_count == 2
+    ladder.assert_not_called()
+    assert segs[0].visual_policy == P.EXACT
+
+
+def test_web_image_technical_nonverdict_stops_real_strict_fallback_before_marker(
+        tmp_path):
+    from vidlore.clipstudio import image_fallback as IF
+    from vidlore.clipstudio import ocr
+    from vidlore.clipstudio import selfheal as S
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, sel = _fixture(tmp_path, bad)
+    # Model the strict footage-gap shape: no moving clip and no local still, so the real web pass
+    # is the final exact-preserving rung.
+    sel.source_id = ""
+    sel.shot_index = -1
+    sel.clip_path = ""
+    before_seg, before_sel = copy.deepcopy(vars(segs[0])), copy.deepcopy(vars(sel))
+
+    def exhausted(_proj, _segs, _analysis, _cfg, _eng, **kw):
+        _write_mock_recovery_page(_proj, kw)
+        return 0
+
+    candidate = {
+        "image_url": "https://img/exact.jpg", "source_site": "example.org",
+        "source_page": "https://example.org/game-of-thrones",
+        "title": "Game of Thrones exact necklace scene",
+    }
+
+    def download(_url, dest):
+        dest.write_bytes(b"candidate pixels awaiting verifier")
+        return dest
+
+    analysis = SimpleNamespace(
+        movie_title="Game of Thrones", episode_hint="",
+        char_to_actor=lambda: {})
+    env = {"VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK": "1",
+           "VIDLORE_CLIPSTUDIO_WEB_IMAGE_FALLBACK": "1"}
+    with mock.patch.dict(os.environ, env), \
+            mock.patch.object(O, "_recover_unresolved_beats", side_effect=exhausted), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=dict(VERIFY_OK)), \
+            mock.patch.object(IF, "pick_source_still", return_value=None), \
+            mock.patch.object(IF, "pick_pool_still", return_value=None), \
+            mock.patch.object(IF._wi, "search_images", return_value=[candidate]), \
+            mock.patch.object(IF._wi, "download_image", side_effect=download), \
+            mock.patch.object(IF._wi, "is_ai_generated_source", return_value=False), \
+            mock.patch.object(IF, "_web_candidate_ok", return_value=True), \
+            mock.patch.object(IF, "_aspect", return_value=1.7), \
+            mock.patch.object(IF, "_has_center_seam", return_value=False), \
+            mock.patch.object(IF, "_photographic_ok", return_value=True), \
+            mock.patch.object(IF, "_clip_relevance", return_value=0.8), \
+            mock.patch.object(IF, "_face_verdict", return_value="skip"), \
+            mock.patch.object(ocr, "available", return_value=False), \
+            mock.patch("vidlore.clipstudio.verify.verify_frame", return_value=None), \
+            mock.patch.object(S, "heal_selection_relevance_gaps") as ladder:
+        with pytest.raises(O.PipelineError, match="exact-image fallback failed.*"
+                                                    "SceneImageTechnicalError"):
+            O._retry_selection_relevance(
+                proj, segs, ClipConfig(), analysis,
+                SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+                policy="approved_testing", log=lambda _m: None)
+
+    ladder.assert_not_called()
+    assert "selection_relevance_recovery" not in proj.meta
+    assert "exact_scene_missing" not in sel.flag_reasons
+    assert vars(segs[0]) == before_seg
+    assert vars(sel) == before_sel
+
+
+def test_all_web_search_providers_technical_raise_without_caching_empty_result(tmp_path):
+    from vidlore.clipstudio import image_fallback as IF
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, sel = _fixture(tmp_path / "project", bad)
+    sel.source_id = ""
+    sel.shot_index = -1
+    sel.clip_path = ""
+    before_seg, before_sel = copy.deepcopy(vars(segs[0])), copy.deepcopy(vars(sel))
+    analysis = SimpleNamespace(
+        movie_title="Game of Thrones", episode_hint="",
+        char_to_actor=lambda: {})
+    cache_dir = tmp_path / "web-cache"
+    env = {
+        "VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK": "1",
+        "VIDLORE_CLIPSTUDIO_WEB_IMAGE_FALLBACK": "1",
+        "VIDLORE_CLIPSTUDIO_IMG_BING": "1",
+        "VIDLORE_CLIPSTUDIO_IMG_DDG": "1",
+        "VIDLORE_CLIPSTUDIO_IMG_WIKI": "1",
+        "VIDLORE_CLIPSTUDIO_IMG_CACHE": str(cache_dir),
+    }
+    with mock.patch.dict(os.environ, env), \
+            mock.patch.object(IF, "pick_source_still", return_value=None), \
+            mock.patch.object(IF, "pick_pool_still", return_value=None), \
+            mock.patch.object(IF._wi, "_guarded_get",
+                              side_effect=TimeoutError("all image providers timed out")):
+        with pytest.raises(IF.SceneImageTechnicalError, match="image search failed"):
+            O._fill_image_fallbacks(
+                proj, segs, analysis, None, {}, lambda _m: None,
+                eng_cfg=SimpleNamespace(anthropic_model="vision"),
+                fail_on_web_technical=True)
+
+    assert not list((cache_dir / "search").glob("*.json")), (
+        "an all-provider outage must not create a long-lived empty search cache")
+    assert "selection_relevance_recovery" not in proj.meta
+    assert vars(segs[0]) == before_seg
+    assert vars(sel) == before_sel
+
+
+def test_strict_still_all_unverified_retries_then_mixed_reject_allows_ladder_marker(tmp_path):
+    from vidlore.clipstudio import image_fallback as IF
+    from vidlore.clipstudio import selfheal as S
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, sel = _fixture(tmp_path, bad)
+    sel.flag_reasons = ["verifier_failed"]
+    sel.flagged = True
+    first_shot = json.loads(proj.shots_path("s1").read_text(encoding="utf-8"))[0]
+    second_frame = tmp_path / "shot_0001.jpg"
+    second_frame.write_bytes(b"second strict still candidate")
+    second_shot = Shot(source_id="s1", index=1, start=3.0, end=5.0,
+                       keyframe_path=str(second_frame))
+    proj.shots_path("s1").write_text(
+        json.dumps([first_shot, second_shot.to_dict()]), encoding="utf-8")
+    candidates = [
+        (first_shot["keyframe_path"], "s1", 0, 0.92, ""),
+        (str(second_frame), "s1", 1, 0.88, ""),
+    ]
+    outage = {"active": True}
+
+    def pick_candidate(_seg, _pool, used_keys, *_args, **_kwargs):
+        return next((c for c in candidates if (c[1], c[2]) not in used_keys), None)
+
+    def judge(path, *_args, **_kwargs):
+        # First Resume: every candidate is a transport non-verdict. Second Resume: candidate 0
+        # remains unverified but candidate 1 supplies an explicit semantic reject, making the mixed
+        # batch a conclusive content result rather than an outage.
+        if outage["active"] or str(path) == first_shot["keyframe_path"]:
+            return None
+        return dict(bad)
+
+    def exhausted(_proj, _segs, _analysis, _cfg, _eng, **kw):
+        _write_mock_recovery_page(_proj, kw)
+        return 0
+
+    analysis = SimpleNamespace(movie_title="Game of Thrones", char_to_actor=lambda: {})
+
+    def retry():
+        return O._retry_selection_relevance(
+            proj, segs, ClipConfig(), analysis, SimpleNamespace(anthropic_model="vision"),
+            faceid_obj=None, refs={}, roster=[], policy="approved_testing", log=lambda _m: None)
+
+    env = {
+        "VIDLORE_CLIPSTUDIO_WEB_IMAGE_FALLBACK": "0",
+        "VIDLORE_CLIPSTUDIO_VISION_RETRY_SEC": "0",
+        "VIDLORE_CLIPSTUDIO_STILL_CANDIDATES": "2",
+    }
+    with mock.patch.dict(os.environ, env), \
+            mock.patch.object(O, "_recover_unresolved_beats", side_effect=exhausted) as recover, \
+            mock.patch("vidlore.clipstudio.llm.has_llm", return_value=True), \
+            mock.patch.object(IF, "pick_source_still", return_value=None), \
+            mock.patch.object(IF, "pick_pool_still", side_effect=pick_candidate), \
+            mock.patch("vidlore.clipstudio.verify.verify_frame", side_effect=judge), \
+            mock.patch.object(S, "heal_selection_relevance_gaps",
+                              return_value={"candidate_count": 1, "softened_count": 0}) as ladder:
+        with pytest.raises(O.PipelineError, match="technically inconclusive"):
+            retry()
+        assert ladder.call_count == 0
+        assert "selection_relevance_recovery" not in proj.meta
+        assert "exact_scene_missing" not in sel.flag_reasons
+
+        outage["active"] = False
+        final = retry()
+
+    assert final["status"] == "blocked"
+    assert recover.call_count == 2, "the technical still page is retried on Resume"
+    ladder.assert_called_once()
+    assert proj.meta["selection_relevance_recovery"]["deferred"] == []
+    assert segs[0].visual_policy == P.EXACT
+
+
+def test_gap_ladder_exception_rolls_back_and_resume_retries_without_exhaustion_marker(tmp_path):
+    from vidlore.clipstudio import selfheal as S
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, sel = _fixture(tmp_path, bad)
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, segs, [0], method="actual_frame_and_pool_audit")
+    before_seg = copy.deepcopy(vars(segs[0]))
+    before_sel = copy.deepcopy(vars(sel))
+
+    def exhausted(_proj, _segs, _analysis, _cfg, _eng, **kw):
+        _write_mock_recovery_page(_proj, kw)
+        return 0
+
+    def mutate_then_fail(_proj, seg, selection, *_args, **_kwargs):
+        seg.visual_policy = P.ABSTRACT
+        seg.required_entity = ""
+        selection.image_meta = {"partial_ladder_mutation": True}
+        raise RuntimeError("ladder verifier transport failed")
+
+    with mock.patch.object(O, "_recover_unresolved_beats", side_effect=exhausted) as recover, \
+            mock.patch.object(O, "_fill_image_fallbacks", return_value=0), \
+            mock.patch.object(S, "_soften_and_retry", side_effect=mutate_then_fail) as soften:
+        for _attempt in range(2):
+            with pytest.raises(O.PipelineError, match="specificity ladder failed"):
+                _call(proj, segs)
+            assert vars(segs[0]) == before_seg
+            assert vars(sel) == before_sel
+            assert "selection_relevance_recovery" not in proj.meta
+            assert "selection_relevance_gap_softening" not in proj.meta
+
+    assert recover.call_count == 2, "the failed page remains eligible on the next Resume"
+    assert soften.call_count == 2
+    assert not (proj.output_dir / "semantic_gap_softening_audit.json").exists()
+    persisted = ClipProject.load(tmp_path)
+    assert persisted.segments[0].visual_policy == P.EXACT
+    assert persisted.selections[0].source_id == "s1"
+
+
+def test_pool_bound_softening_stays_for_same_pool_then_restores_and_blocks_on_new_pool(
+        tmp_path):
+    """A footage-gap downgrade is valid for one indexed pool, never an authored-script rewrite."""
+    from vidlore.clipstudio import relevance_contract as R
+    from vidlore.clipstudio import selfheal as S
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, sel = _fixture(tmp_path, bad)
+    seg = segs[0]
+    sel.image_meta = {"pre_softening": {"reviewed": True}}
+    original_seg = copy.deepcopy(vars(seg))
+    original_image_path = sel.image_path
+    original_image_meta = copy.deepcopy(sel.image_meta)
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, segs, [0], method="actual_frame_and_pool_audit")
+    audit = R.evaluate_selection_relevance(proj, segs)
+    assert audit["blocked_count"] == 1
+
+    softened_frame = tmp_path / "softened-abstract.jpg"
+    softened_frame.write_bytes(b"softened-frame")
+
+    def successful_softening(_proj, target, selection, *_args, **_kwargs):
+        target.visual_policy = P.ABSTRACT
+        target.required_entity = ""
+        target.required_kind = ""
+        target.quote = ""
+        target.scene_query = ""
+        target.expected_visual = "Neutral atmosphere"
+        target.is_specific_claim = False
+        selection.image_path = str(softened_frame)
+        selection.image_meta = {"selfheal_rung": "abstract", "installed": True}
+        return True
+
+    with mock.patch.object(S, "_soften_and_retry", side_effect=successful_softening):
+        payload = S.heal_selection_relevance_gaps(
+            proj, segs, ClipConfig(), audit, policy="approved_testing",
+            eng=SimpleNamespace(anthropic_model="vision"), log=lambda _m: None)
+
+    assert payload["schema_version"] == S._SOFTENING_SCHEMA
+    row = next(r for r in payload["beats"] if r["status"] == "softened")
+    assert row["pool_fingerprint"] == S._gap_pool_fingerprint(proj)[0]
+    assert row["original"]["expected_visual"] == original_seg["expected_visual"]
+    assert row["original"]["is_specific_claim"] is True
+    assert row["original"]["image_path"] == original_image_path
+    assert row["original"]["image_meta"] == original_image_meta
+
+    # No source/index change: the reviewed fallback is still valid and the assertion remains a pass.
+    same_pool = R.assert_selection_relevance(proj, segs)
+    assert same_pool["blocked_count"] == 0
+    assert seg.visual_policy == P.ABSTRACT
+    assert proj.meta["selection_relevance_gap_softening"]["active"] is True
+
+    # A new searchable source invalidates the old footage-gap premise. The assertion must restore
+    # every authored/selection field first, then expose the original exact beat to strict recovery.
+    late_media = tmp_path / "late_source.mp4"
+    late_media.write_bytes(b"new-footage")
+    late_frame = tmp_path / "late_shot.jpg"
+    late_frame.write_bytes(b"late-frame")
+    proj.sources.append(SourceVideo(
+        id="late", url="late", title="new exact-scene candidate", permission="owner",
+        status="ok", local_path=str(late_media)))
+    proj.shots_path("late").write_text(json.dumps([Shot(
+        source_id="late", index=0, start=0.0, end=2.0,
+        keyframe_path=str(late_frame)).to_dict()]))
+    (proj.index_dir / "late.words.json").write_text("[]")
+
+    with pytest.raises(V.NonRetryableBuildError) as exc:
+        R.assert_selection_relevance(proj, segs)
+
+    assert exc.value.kind == "selection_relevance"
+    for field in ("visual_policy", "required_entity", "required_kind", "quote",
+                  "scene_query", "expected_visual", "is_specific_claim"):
+        assert getattr(seg, field) == original_seg[field]
+    assert sel.image_path == original_image_path
+    assert sel.image_meta == original_image_meta
+    restored_marker = proj.meta["selection_relevance_gap_softening"]
+    assert restored_marker["active"] is False
+    assert restored_marker["restored_count"] == 1
+    assert restored_marker["beats"][0]["status"] == "restored_pool_changed"
+    persisted = ClipProject.load(tmp_path)
+    assert persisted.segments[0].visual_policy == P.EXACT
+    assert persisted.selections[0].image_meta == original_image_meta
+
+
+def test_banning_softened_source_invalidates_pool_binding_and_restores_exact_beat(tmp_path):
+    from vidlore.clipstudio import relevance_contract as R
+    from vidlore.clipstudio import selfheal as S
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, sel = _fixture(tmp_path, bad)
+    seg = segs[0]
+    original = S._capture_softening_state(seg, sel)
+    pool_fp, pool_n = S._gap_pool_fingerprint(proj)
+    seg.visual_policy = P.ABSTRACT
+    seg.required_entity = ""
+    seg.required_kind = ""
+    seg.scene_query = ""
+    seg.expected_visual = "Neutral atmosphere"
+    seg.is_specific_claim = False
+    sel.image_path = str(tmp_path / "shot_0000.jpg")
+    sel.image_meta = {"selfheal_rung": "abstract", "installed": True}
+    S._record_phase1_softening(
+        proj, seg, sel, original, basis="test_bound_softening",
+        pool_fingerprint=pool_fp, pool_source_count=pool_n)
+
+    # No bytes or timestamps change. Eligibility alone must change the searchable-pool identity.
+    proj.meta["banned_sources"] = ["s1"]
+    assert S._gap_pool_fingerprint(proj)[0] != pool_fp
+    with pytest.raises(V.NonRetryableBuildError) as exc:
+        R.assert_selection_relevance(proj, segs)
+
+    assert exc.value.kind == "selection_relevance"
+    assert seg.visual_policy == P.EXACT
+    assert sel.image_path == original["image_path"]
+    assert sel.image_meta == original["image_meta"]
+    assert proj.meta["selection_relevance_gap_softening"]["active"] is False
+
+
+def test_unchanged_resume_rotates_real_capped_recovery_once_then_stops(tmp_path):
+    """Exercise the actual capped recovery audit and persisted semantic marker.
+
+    With no changing footage, three blockers under cap=2 have exactly two useful pages. The third
+    Resume must return to the strict gate without replaying page one. Adding source bytes changes the
+    generation fingerprint and is allowed to start a fresh finite rotation.
+    """
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    frame = tmp_path / "shot_0000.jpg"
+    shot = Shot(source_id="s1", index=0, start=0.0, end=2.0,
+                keyframe_path=str(frame))
+    for idx in (1, 2):
+        seg = ScriptSegment(
+            index=idx, text=f"Blocked exact narration {idx}",
+            expected_visual=f"Exact missing scene {idx}",
+            required_entity=f"target {idx}", required_kind="object",
+            scene_query=f"Game of Thrones exact missing scene {idx}",
+            visual_policy=P.EXACT, is_specific_claim=True)
+        sel = ClipSelection(
+            segment_index=idx, source_id="s1", shot_index=0,
+            in_point=0.0, out_point=2.0, confidence=0.8, verifier=dict(bad))
+        V.bind_selection_verifier_evidence(
+            proj, sel, seg, sel.verifier, shot=shot, model="vision",
+            is_specific=True, multiframe=True, faceid_names=[], era="", must_see="")
+        proj.segments.append(seg)
+        proj.selections.append(sel)
+        segs.append(seg)
+    # Legacy recovery may already have touched the head. Semantic generations are independently
+    # finite and must still begin at their deterministic first page.
+    proj.meta["recovery_attempted"] = [0, 1]
+    from vidlore.clipstudio import selfheal as S
+    # The viewer confirmed only the cap-tail beat as a genuine gap. That authorization must not let
+    # it jump ahead of its scheduled strict-positive page.
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, segs, [2], method="actual_frame_and_pool_audit")
+
+    env = {
+        "VIDLORE_CLIPSTUDIO_RECOVERY_MAX_BEATS": "2",
+        "VIDLORE_CLIPSTUDIO_SELFHEAL": "1",
+        "VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK": "1",
+    }
+    image_scopes = []
+    ladder_calls = []
+
+    def record_image_scope(_proj, target_segs, *_args, **_kwargs):
+        image_scopes.append([s.index for s in target_segs])
+        return 0
+
+    def exhausted_ladder(_proj, seg, *_args, **_kwargs):
+        ladder_calls.append(seg.index)
+        return False
+
+    with mock.patch.dict(os.environ, env), \
+            mock.patch.object(O, "match_segments", side_effect=lambda *a, **k: proj.selections) \
+            as matcher, \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=dict(VERIFY_OK)), \
+            mock.patch("vidlore.clipstudio.discover.discover_sources", return_value=[]), \
+            mock.patch.object(O, "_fill_image_fallbacks", side_effect=record_image_scope), \
+            mock.patch.object(S, "_soften_and_retry", side_effect=exhausted_ladder):
+        first = _call(proj, segs)
+        round1 = json.loads(
+            (proj.output_dir / "semantic_recovery_audit.json").read_text())
+        assert image_scopes == []
+        assert ladder_calls == [], "any deferred page preserves every blocker at exact specificity"
+        second = _call(proj, segs)
+        round2 = json.loads(
+            (proj.output_dir / "semantic_recovery_audit.json").read_text())
+        assert image_scopes == [[0, 1, 2]]
+        assert ladder_calls == [2], "beat 2 becomes eligible only after its own page is exhausted"
+        third = _call(proj, segs)
+        assert ladder_calls == [2] and len(image_scopes) == 1
+
+        # A real source-state change starts a new generation; its first page is bounded again.
+        new_media = tmp_path / "new_generation.mp4"
+        new_media.write_bytes(b"new indexed-pool generation")
+        proj.sources.append(SourceVideo(
+            id="new_generation", url="u2", title="Game of Thrones new exact scene source",
+            permission="owner", status="ok", local_path=str(new_media)))
+        changed = _call(proj, segs)
+        changed_round = json.loads(
+            (proj.output_dir / "semantic_recovery_audit.json").read_text())
+
+    assert all(a["status"] == "blocked" and a["blocked_count"] == 3
+               for a in (first, second, third, changed)), "the publication gate never weakens"
+    assert round1["current_pool_rematch"]["attempted"] == [0, 1]
+    assert round1["deferred_retriable"] == [2]
+    assert round2["current_pool_rematch"]["attempted"] == [2]
+    assert round2["deferred"] == round2["deferred_retriable"] == []
+    assert matcher.call_count == 3, "third unchanged Resume must not run recovery"
+    assert changed_round["current_pool_rematch"]["attempted"] == [0, 1]
+    assert proj.meta["selection_relevance_recovery"]["deferred"] == [2]
+
+
+def test_tail_page_pool_growth_reopens_prior_blockers_once_then_exhausts(tmp_path):
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    base_frame = tmp_path / "shot_0000.jpg"
+    base_shot = Shot(source_id="s1", index=0, start=0.0, end=2.0,
+                     keyframe_path=str(base_frame))
+    for idx in (1, 2):
+        seg = ScriptSegment(
+            index=idx, text=f"Still blocked narration {idx}",
+            expected_visual=f"Missing exact scene {idx}", required_entity=f"target {idx}",
+            required_kind="object", scene_query=f"exact scene target {idx}",
+            visual_policy=P.EXACT, is_specific_claim=True)
+        sel = ClipSelection(
+            segment_index=idx, source_id="s1", shot_index=0, in_point=0.0,
+            out_point=2.0, confidence=0.8, verifier=dict(bad))
+        V.bind_selection_verifier_evidence(
+            proj, sel, seg, sel.verifier, shot=base_shot, model="vision",
+            is_specific=True, multiframe=True, faceid_names=[], era="", must_see="")
+        proj.segments.append(seg)
+        proj.selections.append(sel)
+        segs.append(seg)
+
+    scopes = []
+    image_scopes = []
+    new_shot = None
+
+    def recover(_proj, _segs, _analysis, _cfg, _eng, **kw):
+        nonlocal new_shot
+        scope = sorted(kw["only_indices"])
+        scopes.append(scope)
+        if len(scopes) == 1:
+            assert scope == [0, 1, 2]
+            _write_mock_recovery_page(_proj, kw, deferred=[2])
+        elif len(scopes) == 2:
+            assert scope == [2]
+            media = tmp_path / "source-b.mp4"
+            media.write_bytes(b"new pool generation containing beat zero")
+            frame = tmp_path / "source-b-shot.jpg"
+            frame.write_bytes(b"source-b exact beat zero frame")
+            new_shot = Shot(source_id="source_b", index=0, start=4.0, end=6.0,
+                            keyframe_path=str(frame))
+            _proj.sources.append(SourceVideo(
+                id="source_b", url="u-source-b", title="Exact scene for beat zero",
+                permission="owner", status="ok", local_path=str(media)))
+            _proj.shots_path("source_b").write_text(json.dumps([new_shot.to_dict()]))
+            _write_mock_recovery_page(_proj, kw)
+        else:
+            assert scope == [0, 1], "only prior out-of-page blockers see the new generation"
+            recovered = ClipSelection(
+                segment_index=0, source_id="source_b", shot_index=0, in_point=4.0,
+                out_point=6.0, confidence=0.96, verifier=dict(GOOD))
+            V.bind_selection_verifier_evidence(
+                _proj, recovered, segs[0], recovered.verifier, shot=new_shot,
+                model="vision", is_specific=True, multiframe=True,
+                faceid_names=[], era="", must_see="")
+            _proj.selections = [recovered] + [
+                s for s in _proj.selections if s.segment_index != 0]
+            _write_mock_recovery_page(_proj, kw)
+        return 0
+
+    def record_images(_proj, target_segs, *_args, **_kwargs):
+        image_scopes.append([s.index for s in target_segs])
+        return 0
+
+    with mock.patch.object(O, "_recover_unresolved_beats", side_effect=recover) as recovery, \
+            mock.patch.object(O, "_fill_image_fallbacks", side_effect=record_images):
+        first = _call(proj, segs)
+        first_marker = copy.deepcopy(proj.meta["selection_relevance_recovery"])
+        assert image_scopes == []
+        assert all(s.visual_policy == P.EXACT for s in segs)
+        second = _call(proj, segs)
+        second_marker = copy.deepcopy(proj.meta["selection_relevance_recovery"])
+        assert image_scopes == []
+        assert all(s.visual_policy == P.EXACT for s in segs), \
+            "the head must survive exact until it sees the source added by the tail"
+        third = _call(proj, segs)
+        fourth = _call(proj, segs)
+
+    assert first["blocked_count"] == second["blocked_count"] == 3
+    assert first_marker["deferred"] == [2]
+    assert second_marker["pool_changed_during_page"] is True
+    assert second_marker["completed_page_scope"] == [2]
+    assert second_marker["deferred"] == [0, 1]
+    assert scopes == [[0, 1, 2], [2], [0, 1]]
+    assert recovery.call_count == 3, "the unchanged post-growth generation exhausts finitely"
+    assert image_scopes == [[1, 2]], "fallback starts only after the stable full strict walk"
+    assert third["blocked_count"] == fourth["blocked_count"] == 2
+    assert {e["segment_index"] for e in third["blockers"]} == {1, 2}
+    assert proj.meta["selection_relevance_recovery"]["deferred"] == []
+
+
+def test_scoped_recovery_reuses_current_pool_before_demanding_a_new_url(tmp_path):
+    """A contract blocker is eligible even when the legacy verifier says ``keep``.
+
+    This is the exact shape of a quote-window failure: the dedicated source is already indexed,
+    the selected picture looks plausible, but the timed dialogue is outside the window.  Recovery
+    must rematch the current pool and retain only the scoped beat that clears the strict contract.
+    """
+    proj, segs, old_target = _fixture(tmp_path, GOOD)
+    other_seg = ScriptSegment(index=1, text="Context line", visual_policy=P.FILLER)
+    old_other = ClipSelection(
+        segment_index=1, source_id="s1", shot_index=0, in_point=0.0, out_point=1.0,
+        confidence=0.9, verifier=dict(GOOD))
+    proj.segments.append(other_seg)
+    segs.append(other_seg)
+    proj.selections.append(old_other)
+
+    def rematch(_proj, _segs, _cfg, **_kw):
+        _proj.selections = [
+            ClipSelection(segment_index=0, source_id="dedicated_quote_source", shot_index=9,
+                          in_point=12.0, out_point=14.0, confidence=0.95,
+                          verifier=dict(GOOD)),
+            ClipSelection(segment_index=1, source_id="churned_non_target", shot_index=4,
+                          in_point=8.0, out_point=9.0, confidence=0.7,
+                          verifier=dict(GOOD)),
+            ClipSelection(segment_index=99, source_id="invented_non_target", shot_index=2,
+                          in_point=3.0, out_point=4.0, confidence=0.7,
+                          verifier=dict(GOOD)),
+        ]
+        return _proj.selections
+
+    def cut_one(_proj, sel, _cfg, **_kw):
+        path = _proj.clips_dir / f"seg_{sel.segment_index:03d}.mp4"
+        path.write_bytes(f"clip:{sel.source_id}".encode())
+        return path
+
+    strict_clear = {"blockers": [], "blocked_count": 0, "status": "pass"}
+    with mock.patch.object(O, "match_segments", side_effect=rematch) as matcher, \
+            mock.patch("vidlore.clipstudio.cut.cut_selection", side_effect=cut_one) as cutter, \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=dict(VERIFY_OK)) as verify, \
+            mock.patch("vidlore.clipstudio.relevance_contract.evaluate_selection_relevance",
+                       return_value=strict_clear), \
+            mock.patch("vidlore.clipstudio.discover.discover_sources") as discover:
+        recovered = O._recover_unresolved_beats(
+            proj, segs, SimpleNamespace(movie_title="Game of Thrones"), ClipConfig(),
+            SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+            policy="approved_testing", log=lambda _m: None, only_indices={0},
+            audit_filename="strict-current-pool.json")
+
+    assert recovered == 1
+    matcher.assert_called_once()
+    verify.assert_called_once()
+    assert verify.call_args.kwargs["only_indices"] == {0}
+    assert verify.call_args.kwargs["materialize_promotions"] is False
+    assert verify.call_args.kwargs["persist_project"] is False
+    discover.assert_not_called(), "an already-indexed recovery must not demand a novel URL"
+    by_idx = {s.segment_index: s for s in proj.selections}
+    assert by_idx[0].source_id == "dedicated_quote_source"
+    assert by_idx[1].source_id == old_other.source_id, "non-target matcher churn must roll back"
+    assert 99 not in by_idx, "a rematched entry absent from the snapshot must never leak in"
+    assert cutter.call_count == 1, "only the accepted scoped selection gets fresh clip bytes"
+    audit = json.loads((proj.output_dir / "strict-current-pool.json").read_text())
+    assert audit["current_pool_rematch"]["recovered"] == [0]
+
+
+@pytest.mark.parametrize("summary,expected_reason", INCONCLUSIVE_VERIFY_SUMMARIES)
+def test_current_pool_inconclusive_verifier_rolls_back_and_marks_page_incomplete(
+        tmp_path, summary, expected_reason):
+    proj, segs, original = _fixture(tmp_path, GOOD)
+
+    def exploratory_rematch(_proj, *_args, **_kwargs):
+        _proj.selections = [ClipSelection(
+            segment_index=0, source_id="exploratory", shot_index=7,
+            in_point=9.0, out_point=11.0, confidence=0.97, verifier=dict(GOOD))]
+        return _proj.selections
+
+    with mock.patch.object(O, "match_segments", side_effect=exploratory_rematch), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=summary) as verifier, \
+            mock.patch("vidlore.clipstudio.relevance_contract.evaluate_selection_relevance") \
+            as contract, \
+            mock.patch("vidlore.clipstudio.discover.discover_sources") as discover, \
+            mock.patch("vidlore.clipstudio.cut.cut_selection") as cutter:
+        recovered = O._recover_unresolved_beats(
+            proj, segs, SimpleNamespace(movie_title="Game of Thrones"), ClipConfig(),
+            SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+            policy="approved_testing", log=lambda _m: None, only_indices={0},
+            audit_filename="strict-current-inconclusive.json", audit_request_id="current-page")
+
+    assert recovered == 0
+    verifier.assert_called_once()
+    contract.assert_not_called(), "no strict acceptance may run on an inconclusive verdict batch"
+    discover.assert_not_called()
+    cutter.assert_not_called()
+    assert proj.selections[0].source_id == original.source_id == "s1"
+    page = json.loads(
+        (proj.output_dir / "strict-current-inconclusive.json").read_text(encoding="utf-8"))
+    assert page["page_completed"] is False
+    assert expected_reason in page["current_pool_rematch"]["error"]
+    assert expected_reason in page["page_error"]
+
+
+def _targeted_recovery_analysis():
+    return SimpleNamespace(
+        movie_title="Game of Thrones", year="", video_type="multi_scene",
+        anchor_scenes=[], key_scenes=[], characters=[], actors=[], locations=[], events=[],
+        visual_keywords=[], emotional_moments=[], episode_hint="", synopsis="", tone="",
+        char_to_actor=lambda: {})
+
+
+def test_targeted_discovery_all_technical_statuses_leave_page_retryable(tmp_path):
+    from vidlore.clipstudio import discover as D
+    from vidlore.clipstudio import selfheal as S
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    yt_calls, archive_calls = [], []
+
+    def yt_down(query, _n):
+        yt_calls.append(query)
+        return [], D.STATUS_TRANSPORT
+
+    def archive_down(query, _n):
+        archive_calls.append(query)
+        return [], D.STATUS_TIMEOUT
+
+    query = segs[0].scene_query
+    env = {"VIDLORE_CLIPSTUDIO_DISCOVER_WORKERS": "1",
+           "VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK": "1"}
+    with mock.patch.dict(os.environ, env), \
+            mock.patch.object(O, "match_segments", side_effect=lambda *a, **k: proj.selections), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=dict(VERIFY_OK)), \
+            mock.patch.object(D, "_ytsearch_ex", side_effect=yt_down), \
+            mock.patch.object(D, "_archive_search_ex", side_effect=archive_down), \
+            mock.patch("time.sleep", return_value=None), \
+            mock.patch.object(O, "_fill_image_fallbacks") as images, \
+            mock.patch.object(S, "heal_selection_relevance_gaps") as ladder:
+        with pytest.raises(O.PipelineError, match="TargetedDiscoveryTechnicalError"):
+            O._retry_selection_relevance(
+                proj, segs, ClipConfig(), _targeted_recovery_analysis(),
+                SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+                policy="approved_testing", log=lambda _m: None)
+
+    assert yt_calls.count(query) == archive_calls.count(query) == 3
+    images.assert_not_called()
+    ladder.assert_not_called()
+    assert "selection_relevance_recovery" not in proj.meta
+    page = json.loads((proj.output_dir / "semantic_recovery_audit.json").read_text())
+    assert page["page_completed"] is False
+    assert "TargetedDiscoveryTechnicalError" in page["page_error"]
+
+
+def test_targeted_download_all_failed_rolls_back_rows_and_resume_retries(tmp_path):
+    from vidlore.clipstudio import selfheal as S
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    candidate = SimpleNamespace(
+        url="https://video/retry-download", title="Game of Thrones Olenna necklace stone",
+        id="retry-download", query=segs[0].scene_query, provider="youtube",
+        permission_hint="", relevance=0.95, anchor_verified=False)
+    attempts = []
+
+    def fail_download(cand, sid, perm, note, _proj, _cfg, progress=None):
+        attempts.append(cand.url)
+        return SourceVideo(
+            id=sid, url=cand.url, title=cand.title, permission=perm,
+            permission_note=note, status="download_failed", error="timed out after retries")
+
+    env = {"VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK": "1", "VIDLORE_HD_403_SWEEP": "0"}
+    with mock.patch.dict(os.environ, env), \
+            mock.patch.object(O, "match_segments", side_effect=lambda *a, **k: proj.selections), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=dict(VERIFY_OK)), \
+            mock.patch("vidlore.clipstudio.discover.discover_sources",
+                       return_value=[candidate]) as discover, \
+            mock.patch("vidlore.clipstudio.download._download_one",
+                       side_effect=fail_download), \
+            mock.patch("time.sleep", return_value=None), \
+            mock.patch.object(O, "index_all") as indexer, \
+            mock.patch.object(O, "_fill_image_fallbacks") as images, \
+            mock.patch.object(S, "heal_selection_relevance_gaps") as ladder:
+        for _resume in range(2):
+            with pytest.raises(O.PipelineError, match="targeted downloads were technically"):
+                O._retry_selection_relevance(
+                    proj, segs, ClipConfig(), _targeted_recovery_analysis(),
+                    SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+                    policy="approved_testing", log=lambda _m: None)
+            assert all(s.url != candidate.url for s in proj.sources)
+            assert "selection_relevance_recovery" not in proj.meta
+
+    assert attempts == [candidate.url, candidate.url]
+    assert discover.call_count == 2, "the failed URL must remain eligible on Resume"
+    indexer.assert_not_called()
+    images.assert_not_called()
+    ladder.assert_not_called()
+    page = json.loads((proj.output_dir / "semantic_recovery_audit.json").read_text())
+    assert page["page_completed"] is False
+    assert page["download_failures"][0]["error"] == "timed out after retries"
+
+
+def test_targeted_downloader_exception_after_row_mutation_rolls_back_for_resume(tmp_path):
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    candidate = SimpleNamespace(
+        url="https://video/raised-download", title="Game of Thrones Olenna necklace stone",
+        id="raised-download", query=segs[0].scene_query, provider="youtube")
+    attempts = []
+
+    def mutate_then_raise(_proj, *_args, **_kwargs):
+        attempts.append(candidate.url)
+        _proj.sources.append(SourceVideo(
+            id="raised_download_row", url=candidate.url, title=candidate.title,
+            permission="owner", status="download_failed", error="worker future exploded"))
+        _proj.save()
+        raise RuntimeError("downloader crashed after manifest mutation")
+
+    still_blocked = {"status": "blocked", "blocked_count": 1,
+                     "blockers": [{"segment_index": 0}]}
+    with mock.patch.object(O, "match_segments", side_effect=lambda *a, **k: proj.selections), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=dict(VERIFY_OK)), \
+            mock.patch("vidlore.clipstudio.relevance_contract.evaluate_selection_relevance",
+                       return_value=still_blocked), \
+            mock.patch("vidlore.clipstudio.discover.discover_sources",
+                       return_value=[candidate]) as discover, \
+            mock.patch("vidlore.clipstudio.download.download_candidates",
+                       side_effect=mutate_then_raise):
+        for _resume in range(2):
+            assert O._recover_unresolved_beats(
+                proj, segs, _targeted_recovery_analysis(), ClipConfig(),
+                SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+                policy="approved_testing", log=lambda _m: None, only_indices={0},
+                audit_filename="raised-download.json",
+                audit_request_id=f"raised-{_resume}") == 0
+            assert all(s.url != candidate.url for s in proj.sources)
+            persisted = ClipProject.load(tmp_path)
+            assert all(s.url != candidate.url for s in persisted.sources)
+
+    assert attempts == [candidate.url, candidate.url]
+    assert discover.call_count == 2
+    page = json.loads((proj.output_dir / "raised-download.json").read_text())
+    assert page["page_completed"] is False
+    assert "downloader crashed after manifest mutation" in page["page_error"]
+
+
+def test_targeted_download_mixed_success_and_failure_is_still_inconclusive(tmp_path):
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    candidates = [
+        SimpleNamespace(
+            url=f"https://video/mixed-{kind}",
+            title=f"Game of Thrones Olenna necklace {kind}", id=f"mixed-{kind}",
+            query=segs[0].scene_query, provider="youtube", permission_hint="",
+            relevance=0.95, anchor_verified=False)
+        for kind in ("good", "failed")
+    ]
+
+    def mixed_download(cand, sid, perm, note, _proj, _cfg, progress=None):
+        if cand.url.endswith("good"):
+            media = tmp_path / f"{sid}.mp4"
+            media.write_bytes(b"usable new source")
+            return SourceVideo(
+                id=sid, url=cand.url, title=cand.title, permission=perm,
+                permission_note=note, status="ok", local_path=str(media), height=1080)
+        return SourceVideo(
+            id=sid, url=cand.url, title=cand.title, permission=perm,
+            permission_note=note, status="download_failed", error="transport reset")
+
+    still_blocked = {"status": "blocked", "blocked_count": 1,
+                     "blockers": [{"segment_index": 0}]}
+    env = {"VIDLORE_HD_403_SWEEP": "0"}
+    with mock.patch.dict(os.environ, env), \
+            mock.patch.object(O, "match_segments", side_effect=lambda *a, **k: proj.selections), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=dict(VERIFY_OK)), \
+            mock.patch("vidlore.clipstudio.relevance_contract.evaluate_selection_relevance",
+                       return_value=still_blocked), \
+            mock.patch("vidlore.clipstudio.discover.discover_sources",
+                       return_value=candidates), \
+            mock.patch("vidlore.clipstudio.download._download_one",
+                       side_effect=mixed_download), \
+            mock.patch("time.sleep", return_value=None), \
+            mock.patch.object(O, "index_all") as indexer:
+        recovered = O._recover_unresolved_beats(
+            proj, segs, _targeted_recovery_analysis(), ClipConfig(),
+            SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+            policy="approved_testing", log=lambda _m: None, only_indices={0},
+            audit_filename="mixed-download.json", audit_request_id="mixed-download")
+
+    assert recovered == 0
+    assert all(s.url not in {c.url for c in candidates} for s in proj.sources)
+    indexer.assert_not_called()
+    page = json.loads((proj.output_dir / "mixed-download.json").read_text())
+    assert page["page_completed"] is False
+    assert len(page["download_failures"]) == 1
+
+
+def test_targeted_source_with_zero_index_rolls_back_and_resume_retries(tmp_path):
+    from vidlore.clipstudio import selfheal as S
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    candidate = SimpleNamespace(
+        url="https://video/retry-index", title="Game of Thrones Olenna necklace stone",
+        id="retry-index", query=segs[0].scene_query, provider="youtube")
+    downloads = []
+
+    def download_ok(_proj, *_args, **_kwargs):
+        downloads.append(candidate.url)
+        media = tmp_path / "retry-index.mp4"
+        media.write_bytes(b"readable media with no searchable shots")
+        _proj.sources.append(SourceVideo(
+            id="retry_index_source", url=candidate.url, title=candidate.title,
+            permission="owner", status="ok", local_path=str(media)))
+        return _proj.sources
+
+    env = {"VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK": "1"}
+    with mock.patch.dict(os.environ, env), \
+            mock.patch.object(O, "match_segments", side_effect=lambda *a, **k: proj.selections), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=dict(VERIFY_OK)), \
+            mock.patch("vidlore.clipstudio.discover.discover_sources",
+                       return_value=[candidate]) as discover, \
+            mock.patch("vidlore.clipstudio.download.download_candidates",
+                       side_effect=download_ok), \
+            mock.patch.object(O, "index_all",
+                              return_value={"retry_index_source": []}) as indexer, \
+            mock.patch.object(O, "_fill_image_fallbacks") as images, \
+            mock.patch.object(S, "heal_selection_relevance_gaps") as ladder:
+        for _resume in range(2):
+            with pytest.raises(O.PipelineError, match="no searchable shots"):
+                O._retry_selection_relevance(
+                    proj, segs, ClipConfig(), _targeted_recovery_analysis(),
+                    SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+                    policy="approved_testing", log=lambda _m: None)
+            assert all(s.url != candidate.url for s in proj.sources)
+            assert "selection_relevance_recovery" not in proj.meta
+
+    assert downloads == [candidate.url, candidate.url]
+    assert discover.call_count == indexer.call_count == 2
+    images.assert_not_called()
+    ladder.assert_not_called()
+    page = json.loads((proj.output_dir / "semantic_recovery_audit.json").read_text())
+    assert page["page_completed"] is False
+    assert page["index_results"] == [{"id": "retry_index_source", "shots": 0}]
+
+
+def test_targeted_index_mixed_searchable_and_empty_rolls_back_whole_attempt(tmp_path):
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    candidate = SimpleNamespace(
+        url="https://video/mixed-index", title="Game of Thrones Olenna necklace stone",
+        id="mixed-index", query=segs[0].scene_query, provider="youtube")
+    new_urls = {"https://video/index-good", "https://video/index-empty"}
+
+    def download_two(_proj, *_args, **_kwargs):
+        for sid, url in (("index_good", "https://video/index-good"),
+                         ("index_empty", "https://video/index-empty")):
+            media = tmp_path / f"{sid}.mp4"
+            media.write_bytes(b"new source bytes")
+            _proj.sources.append(SourceVideo(
+                id=sid, url=url, title=sid, permission="owner", status="ok",
+                local_path=str(media)))
+        return _proj.sources
+
+    still_blocked = {"status": "blocked", "blocked_count": 1,
+                     "blockers": [{"segment_index": 0}]}
+    with mock.patch.object(O, "match_segments", side_effect=lambda *a, **k: proj.selections), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=dict(VERIFY_OK)), \
+            mock.patch("vidlore.clipstudio.relevance_contract.evaluate_selection_relevance",
+                       return_value=still_blocked), \
+            mock.patch("vidlore.clipstudio.discover.discover_sources",
+                       return_value=[candidate]), \
+            mock.patch("vidlore.clipstudio.download.download_candidates",
+                       side_effect=download_two), \
+            mock.patch.object(O, "index_all", return_value={
+                "index_good": [object()], "index_empty": []}), \
+            mock.patch("vidlore.clipstudio.cut.cut_selection") as cutter:
+        recovered = O._recover_unresolved_beats(
+            proj, segs, _targeted_recovery_analysis(), ClipConfig(),
+            SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+            policy="approved_testing", log=lambda _m: None, only_indices={0},
+            audit_filename="mixed-index.json", audit_request_id="mixed-index")
+
+    assert recovered == 0
+    assert all(s.url not in new_urls for s in proj.sources)
+    cutter.assert_not_called()
+    page = json.loads((proj.output_dir / "mixed-index.json").read_text())
+    assert page["page_completed"] is False
+    assert page["index_results"] == [
+        {"id": "index_good", "shots": 1}, {"id": "index_empty", "shots": 0}]
+
+
+def test_new_source_recovery_uses_strict_contract_not_legacy_keep_predicate(tmp_path):
+    """A visual ``keep`` is not recovery when a real quote still misses its timed window."""
+    proj, segs, old_target = _fixture(tmp_path, GOOD)
+    segs[0].quote = "Chaos isn't a pit. Chaos is a ladder."
+
+    candidate = SimpleNamespace(
+        url="https://video/new", title="Game of Thrones Chaos is a Ladder", id="new",
+        query="Chaos is a ladder", provider="youtube")
+
+    def rematch(_proj, _segs, _cfg, **_kw):
+        # First call (current pool) remains wrong; after download, select the newly indexed source.
+        sid = "new_source" if any(s.id == "new_source" for s in _proj.sources) else "s1"
+        _proj.selections = [ClipSelection(
+            segment_index=0, source_id=sid, shot_index=1, in_point=4.0, out_point=7.0,
+            confidence=0.9, verifier=dict(GOOD))]
+        return _proj.selections
+
+    def download(_proj, _cands, _cfg, **_kw):
+        media = tmp_path / "new.mp4"
+        media.write_bytes(b"new source")
+        _proj.sources.append(SourceVideo(
+            id="new_source", url=candidate.url, title=candidate.title, permission="owner",
+            status="ok", local_path=str(media)))
+        return _proj.sources
+
+    def cut_one(_proj, sel, _cfg, **_kw):
+        path = _proj.clips_dir / f"seg_{sel.segment_index:03d}.mp4"
+        path.write_bytes(f"clip:{sel.source_id}".encode())
+        return path
+
+    strict_blocked = {"blockers": [{"segment_index": 0}], "blocked_count": 1,
+                      "status": "blocked"}
+    strict_clear = {"blockers": [], "blocked_count": 0, "status": "pass"}
+    with mock.patch.object(O, "match_segments", side_effect=rematch) as matcher, \
+            mock.patch("vidlore.clipstudio.cut.cut_selection", side_effect=cut_one), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=dict(VERIFY_OK)) as verifier, \
+            mock.patch("vidlore.clipstudio.relevance_contract.evaluate_selection_relevance",
+                       side_effect=[strict_blocked, strict_clear]) as contract, \
+            mock.patch("vidlore.clipstudio.discover.discover_sources",
+                       return_value=[candidate]), \
+            mock.patch("vidlore.clipstudio.download.download_candidates",
+                       side_effect=download), \
+            mock.patch.object(O, "index_all", return_value={"new_source": [object()]}):
+        recovered = O._recover_unresolved_beats(
+            proj, segs, SimpleNamespace(movie_title="Game of Thrones"), ClipConfig(),
+            SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+            policy="approved_testing", log=lambda _m: None, only_indices={0},
+            audit_filename="strict-new-source.json")
+
+    assert recovered == 1
+    assert matcher.call_count == 2
+    assert verifier.call_count == 2
+    assert all(call.kwargs["materialize_promotions"] is False
+               and call.kwargs["persist_project"] is False
+               for call in verifier.call_args_list)
+    assert contract.call_count == 2
+    assert proj.selections[0].source_id == "new_source"
+    audit = json.loads((proj.output_dir / "strict-new-source.json").read_text())
+    assert audit["recovered"] == [0]
+
+
+@pytest.mark.parametrize("summary,expected_reason", INCONCLUSIVE_VERIFY_SUMMARIES)
+def test_new_source_inconclusive_verifier_rolls_back_and_marks_page_incomplete(
+        tmp_path, summary, expected_reason):
+    proj, segs, original = _fixture(tmp_path, GOOD)
+    candidate = SimpleNamespace(
+        url="https://video/new-inconclusive", title="Exact scene candidate", id="new-candidate",
+        query="exact scene", provider="youtube")
+
+    def rematch(_proj, *_args, **_kwargs):
+        if any(s.id == "new_inconclusive" for s in _proj.sources):
+            _proj.selections = [ClipSelection(
+                segment_index=0, source_id="new_inconclusive", shot_index=3,
+                in_point=5.0, out_point=7.0, confidence=0.98, verifier=dict(GOOD))]
+        return _proj.selections
+
+    def download(_proj, *_args, **_kwargs):
+        media = tmp_path / "new-inconclusive.mp4"
+        media.write_bytes(b"new source awaiting a real verdict")
+        _proj.sources.append(SourceVideo(
+            id="new_inconclusive", url=candidate.url, title=candidate.title,
+            permission="owner", status="ok", local_path=str(media)))
+        return _proj.sources
+
+    still_blocked = {"status": "blocked", "blocked_count": 1,
+                     "blockers": [{"segment_index": 0}]}
+    with mock.patch.object(O, "match_segments", side_effect=rematch) as matcher, \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       side_effect=[dict(VERIFY_OK), summary]) as verifier, \
+            mock.patch("vidlore.clipstudio.relevance_contract.evaluate_selection_relevance",
+                       return_value=still_blocked) as contract, \
+            mock.patch("vidlore.clipstudio.discover.discover_sources",
+                       return_value=[candidate]), \
+            mock.patch("vidlore.clipstudio.download.download_candidates", side_effect=download), \
+            mock.patch.object(O, "index_all",
+                              return_value={"new_inconclusive": [object()]}), \
+            mock.patch("vidlore.clipstudio.cut.cut_selection") as cutter:
+        recovered = O._recover_unresolved_beats(
+            proj, segs, SimpleNamespace(movie_title="Game of Thrones"), ClipConfig(),
+            SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+            policy="approved_testing", log=lambda _m: None, only_indices={0},
+            audit_filename="strict-new-inconclusive.json", audit_request_id="new-page")
+
+    assert recovered == 0
+    assert matcher.call_count == verifier.call_count == 2
+    assert contract.call_count == 1, "new footage is never contract-cleared without a verdict"
+    cutter.assert_not_called()
+    assert proj.selections[0].source_id == original.source_id == "s1"
+    assert any(s.id == "new_inconclusive" for s in proj.sources)
+    page = json.loads(
+        (proj.output_dir / "strict-new-inconclusive.json").read_text(encoding="utf-8"))
+    assert page["page_completed"] is False
+    assert page["current_pool_rematch"]["error"] == ""
+    assert expected_reason in page["page_error"]
+
+
+def test_scoped_commit_rolls_back_metadata_and_clip_bytes_on_partial_cut(tmp_path):
+    proj, segs, old0 = _fixture(tmp_path, GOOD)
+    seg1 = ScriptSegment(index=1, text="Second exact line", scene_query="second scene",
+                         required_entity="Ned Stark", required_kind="character",
+                         visual_policy=P.EXACT, is_specific_claim=True)
+    old1 = ClipSelection(segment_index=1, source_id="s1", shot_index=0,
+                         in_point=0.0, out_point=1.0, confidence=0.8,
+                         verifier=dict(GOOD))
+    proj.segments.append(seg1)
+    proj.selections.append(old1)
+    snapshot = {s.segment_index: copy.deepcopy(s) for s in proj.selections}
+    rematched = {
+        0: ClipSelection(segment_index=0, source_id="new0", shot_index=3,
+                         in_point=4.0, out_point=6.0, confidence=0.9),
+        1: ClipSelection(segment_index=1, source_id="new1", shot_index=4,
+                         in_point=7.0, out_point=9.0, confidence=0.9),
+    }
+    old_bytes = {0: b"old-clip-zero", 1: b"old-clip-one"}
+    for idx, payload in old_bytes.items():
+        (proj.clips_dir / f"seg_{idx:03d}.mp4").write_bytes(payload)
+
+    def partial_cut(_proj, sel, _cfg, **_kw):
+        path = _proj.clips_dir / f"seg_{sel.segment_index:03d}.mp4"
+        path.write_bytes(f"new:{sel.source_id}".encode())
+        return path if sel.segment_index == 0 else None
+
+    with mock.patch("vidlore.clipstudio.cut.cut_selection", side_effect=partial_cut):
+        ok = O._commit_scoped_recovery(
+            proj, ClipConfig(), snapshot, rematched, {0, 1}, log=lambda _m: None)
+
+    assert ok is False
+    assert {s.segment_index: s.source_id for s in proj.selections} == {0: "s1", 1: "s1"}
+    for idx, payload in old_bytes.items():
+        assert (proj.clips_dir / f"seg_{idx:03d}.mp4").read_bytes() == payload
+
+
+@pytest.mark.parametrize("allocation_failure", ["mkdir", "mkdtemp"])
+def test_scoped_commit_allocation_failure_restores_metadata_without_touching_clips(
+        tmp_path, allocation_failure):
+    proj, _segs, _old = _fixture(tmp_path, GOOD)
+    snapshot = {s.segment_index: copy.deepcopy(s) for s in proj.selections}
+    rematched = {
+        0: ClipSelection(segment_index=0, source_id="exploratory", shot_index=8,
+                         in_point=12.0, out_point=14.0, confidence=0.95),
+    }
+    clip = proj.clips_dir / "seg_000.mp4"
+    clip.write_bytes(b"known-old-clip-bytes")
+    # This is the real entry state: match/verify has already installed exploratory metadata while
+    # the deterministic clip filename still contains the snapshot's bytes.
+    proj.selections = list(rematched.values())
+    proj.save()
+
+    if allocation_failure == "mkdtemp":
+        allocation_patch = mock.patch("tempfile.mkdtemp", side_effect=OSError("disk full"))
+    else:
+        real_mkdir = type(proj.output_dir).mkdir
+
+        def fail_output_dir(path, *args, **kwargs):
+            if path == proj.output_dir:
+                raise OSError("output directory unavailable")
+            return real_mkdir(path, *args, **kwargs)
+
+        # Install a real descriptor function so ``path`` is the Path instance (a MagicMock class
+        # method would consume/bind arguments differently and also break rollback's project save).
+        allocation_patch = mock.patch("pathlib.Path.mkdir", new=fail_output_dir)
+
+    with allocation_patch, \
+            mock.patch("vidlore.clipstudio.cut.cut_selection") as cutter:
+        ok = O._commit_scoped_recovery(
+            proj, ClipConfig(), snapshot, rematched, {0}, log=lambda _m: None)
+
+    assert ok is False
+    cutter.assert_not_called()
+    assert [(s.segment_index, s.source_id) for s in proj.selections] == [(0, "s1")]
+    assert clip.read_bytes() == b"known-old-clip-bytes"
+    persisted = ClipProject.load(tmp_path)
+    assert [(s.segment_index, s.source_id) for s in persisted.selections] == [(0, "s1")]
+
+
+def test_current_pool_recovery_honors_cap_and_audits_deferred_scope(tmp_path):
+    proj, first_segs, first_sel = _fixture(tmp_path, GOOD)
+    segs = []
+    sels = []
+    for idx in range(5):
+        segs.append(ScriptSegment(
+            index=idx, text=f"Exact line {idx}", scene_query=f"exact scene {idx}",
+            required_entity="Ned Stark", required_kind="character",
+            visual_policy=P.EXACT, is_specific_claim=True))
+        sels.append(ClipSelection(
+            segment_index=idx, source_id="s1", shot_index=0, in_point=0.0,
+            out_point=2.0, confidence=0.8, verifier=dict(GOOD)))
+    proj.segments = segs
+    proj.selections = sels
+    all_blocked = {"status": "blocked", "blocked_count": 5,
+                   "blockers": [{"segment_index": i} for i in range(5)]}
+
+    with mock.patch.dict(os.environ, {"VIDLORE_CLIPSTUDIO_RECOVERY_MAX_BEATS": "2"}), \
+            mock.patch.object(O, "match_segments", return_value=proj.selections), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=dict(VERIFY_OK)) as verify, \
+            mock.patch("vidlore.clipstudio.relevance_contract.evaluate_selection_relevance",
+                       return_value=all_blocked), \
+            mock.patch("vidlore.clipstudio.discover.discover_sources", return_value=[]):
+        recovered = O._recover_unresolved_beats(
+            proj, segs, SimpleNamespace(movie_title="Game of Thrones"), ClipConfig(),
+            SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+            policy="approved_testing", log=lambda _m: None, only_indices=set(range(5)),
+            audit_filename="strict-cap.json")
+
+    assert recovered == 0
+    assert verify.call_args.kwargs["only_indices"] == {0, 1}
+    audit = json.loads((proj.output_dir / "strict-cap.json").read_text())
+    assert audit["current_pool_rematch"]["attempted"] == [0, 1]
+    assert audit["deferred"] == [2, 3, 4]
+    assert audit["still_unresolved"] == [0, 1, 2, 3, 4]
+
+
+def test_text_only_strict_beat_is_retrievable_in_current_pool_page(tmp_path):
+    proj, segs, old0 = _fixture(tmp_path, GOOD)
+    text_only = ScriptSegment(
+        index=1, text="That name is Tyrion Lannister.", scene_query="",
+        expected_visual="", required_entity="", required_kind="", visual_policy=P.EXACT,
+        is_specific_claim=True)
+    segs.append(text_only)
+    proj.segments.append(text_only)
+    proj.selections.append(ClipSelection(
+        segment_index=1, source_id="s1", shot_index=0, in_point=0.0, out_point=1.0,
+        confidence=0.8, verifier=dict(GOOD)))
+
+    def rematch(_proj, _segs, _cfg, **_kw):
+        _proj.selections = [
+            ClipSelection(segment_index=0, source_id="current_pool_exact", shot_index=4,
+                          in_point=4.0, out_point=6.0, confidence=0.9,
+                          verifier=dict(GOOD)),
+            ClipSelection(segment_index=1, source_id="churned", shot_index=2,
+                          in_point=2.0, out_point=3.0, confidence=0.7,
+                          verifier=dict(GOOD)),
+        ]
+        return _proj.selections
+
+    def cut_one(_proj, sel, _cfg, **_kw):
+        path = _proj.clips_dir / f"seg_{sel.segment_index:03d}.mp4"
+        path.write_bytes(b"new exact clip")
+        return path
+
+    with mock.patch.object(O, "match_segments", side_effect=rematch), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=dict(VERIFY_OK)), \
+            mock.patch("vidlore.clipstudio.relevance_contract.evaluate_selection_relevance",
+                       return_value={"status": "pass", "blocked_count": 0, "blockers": []}), \
+            mock.patch("vidlore.clipstudio.cut.cut_selection", side_effect=cut_one), \
+            mock.patch("vidlore.clipstudio.discover.discover_sources") as discover:
+        recovered = O._recover_unresolved_beats(
+            proj, segs, SimpleNamespace(movie_title="Game of Thrones"), ClipConfig(),
+            SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+            policy="approved_testing", log=lambda _m: None, only_indices={0, 1},
+            audit_filename="strict-text-only.json")
+
+    assert recovered == 2
+    discover.assert_not_called()
+    audit = json.loads((proj.output_dir / "strict-text-only.json").read_text())
+    assert audit["current_pool_rematch"]["attempted"] == [0, 1]
+    assert audit["recovered"] == [0, 1]
+    assert audit["deferred"] == audit["deferred_retriable"] == []
+    assert audit["still_unresolved"] == []
+
+
+@pytest.mark.parametrize(
+    "expected_visual,narration,expected_query",
+    [
+        ("Olenna removes the necklace stone", "", "Olenna removes the necklace stone"),
+        ("", "Who does this belong to?", "Who does this belong to?"),
+    ],
+    ids=["expected-visual-only", "narration-only"],
+)
+def test_recovery_discovery_receives_effective_query_on_disposable_segment_copy(
+        tmp_path, expected_visual, narration, expected_query):
+    proj, segs, _old = _fixture(tmp_path, GOOD)
+    original = segs[0]
+    original.scene_query = ""
+    original.required_entity = ""
+    original.expected_visual = expected_visual
+    original.text = narration
+    captured = []
+
+    def capture_discovery(_analysis, _cfg, *, segments, progress, extra_queries,
+                          required_queries):
+        captured.extend(segments)
+        assert extra_queries == required_queries == [expected_query]
+        return []
+
+    still_blocked = {"status": "blocked", "blocked_count": 1,
+                     "blockers": [{"segment_index": 0}]}
+    with mock.patch.object(O, "match_segments"), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=dict(VERIFY_OK)), \
+            mock.patch("vidlore.clipstudio.relevance_contract.evaluate_selection_relevance",
+                       return_value=still_blocked), \
+            mock.patch("vidlore.clipstudio.discover.discover_sources",
+                       side_effect=capture_discovery):
+        recovered = O._recover_unresolved_beats(
+            proj, segs, SimpleNamespace(movie_title="Game of Thrones"), ClipConfig(),
+            SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+            policy="approved_testing", log=lambda _m: None, only_indices={0},
+            audit_filename="strict-effective-query.json")
+
+    assert recovered == 0
+    assert len(captured) == 1
+    assert captured[0] is not original
+    assert captured[0].scene_query == expected_query
+    assert original.scene_query == ""
+    assert proj.segments[0] is original
+    assert original.expected_visual == expected_visual
+    assert original.text == narration
+    audit = json.loads((proj.output_dir / "strict-effective-query.json").read_text())
+    assert audit["attempts"][0]["queries"] == [expected_query]
+
+
+def test_only_all_four_empty_recovery_fields_are_non_retrievable(tmp_path):
+    proj, segs, _sel = _fixture(tmp_path, GOOD)
+    seg = segs[0]
+    seg.scene_query = seg.required_entity = seg.expected_visual = seg.text = ""
+
+    with mock.patch.object(O, "match_segments") as matcher:
+        recovered = O._recover_unresolved_beats(
+            proj, segs, SimpleNamespace(movie_title="Game of Thrones"), ClipConfig(),
+            SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+            policy="approved_testing", log=lambda _m: None, only_indices={0},
+            audit_filename="strict-truly-empty.json")
+
+    assert recovered == 0
+    matcher.assert_not_called()
+    audit = json.loads((proj.output_dir / "strict-truly-empty.json").read_text())
+    assert audit["page_completed"] is True
+    assert audit["page_scope"] == []
+    assert audit["deferred"] == [0]
+    assert audit["deferred_retriable"] == []
+
+
+def test_current_pool_recovery_clears_a_real_timed_quote_window_contract(tmp_path):
+    """Exercise the real quote contract, not a mocked blocker list.
+
+    The old window has a visually positive verdict but no quote audio. The same indexed source has
+    the exact line later; rematching to that timed span must be accepted, cut, and audited.
+    """
+    from vidlore.clipstudio import relevance_contract as R
+
+    proj = ClipProject(name="quote-window", root=str(tmp_path))
+    proj.ensure_dirs()
+    media = tmp_path / "source.mp4"
+    media.write_bytes(b"show source")
+    proj.sources = [SourceVideo(
+        id="s1", url="u", title="Game of Thrones Chaos is a Ladder scene",
+        permission="owner", status="ok", local_path=str(media))]
+    frames = []
+    shots = []
+    for idx, (start, end) in enumerate(((0.0, 2.0), (10.0, 12.0))):
+        frame = tmp_path / f"shot_{idx}.jpg"
+        frame.write_bytes(f"frame-{idx}".encode())
+        frames.append(frame)
+        shots.append(Shot(source_id="s1", index=idx, start=start, end=end,
+                          keyframe_path=str(frame)))
+    proj.shots_path("s1").write_text(json.dumps([s.to_dict() for s in shots]))
+    quote = "Chaos isn't a pit. Chaos is a ladder."
+    words = "Chaos isn't a pit Chaos is a ladder".split()
+    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+        [10.2 + i * .12, 10.3 + i * .12, word] for i, word in enumerate(words)
+    ]))
+    seg = ScriptSegment(
+        index=0, text="Which is why genius is the wrong word.", quote=quote,
+        scene_query="Game of Thrones Littlefinger chaos is a ladder speech Varys",
+        expected_visual="Littlefinger delivers the chaos is a ladder speech to Varys",
+        required_entity="Petyr Baelish", required_kind="character",
+        visual_policy=P.EXACT, is_specific_claim=True)
+    old = ClipSelection(
+        segment_index=0, source_id="s1", shot_index=0, in_point=0.0, out_point=2.0,
+        confidence=0.9, signals={"dialogue": 0.0}, verifier=dict(GOOD))
+    V.bind_selection_verifier_evidence(
+        proj, old, seg, old.verifier, shot=shots[0], model="vision", is_specific=True,
+        multiframe=True, faceid_names=[], era="", must_see="")
+    proj.segments = [seg]
+    proj.selections = [old]
+    initial = R.evaluate_selection_relevance(proj, [seg])
+    assert initial["blockers"][0]["reasons"] == [
+        "exact_quote_dialogue_signal_below_floor"]
+
+    def rematch(_proj, _segs, _cfg, **_kw):
+        new = ClipSelection(
+            segment_index=0, source_id="s1", shot_index=1, in_point=10.0, out_point=12.0,
+            confidence=0.95, signals={"dialogue": 1.0, "moment_lock": 1.0},
+            verifier=dict(GOOD))
+        V.bind_selection_verifier_evidence(
+            _proj, new, seg, new.verifier, shot=shots[1], model="vision",
+            is_specific=True, multiframe=True, faceid_names=[], era="", must_see="")
+        _proj.selections = [new]
+        return _proj.selections
+
+    def cut_one(_proj, sel, _cfg, **_kw):
+        path = _proj.clips_dir / f"seg_{sel.segment_index:03d}.mp4"
+        path.write_bytes(b"quote-window-clip")
+        return path
+
+    with mock.patch.object(O, "match_segments", side_effect=rematch), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=dict(VERIFY_OK)), \
+            mock.patch("vidlore.clipstudio.cut.cut_selection", side_effect=cut_one), \
+            mock.patch("vidlore.clipstudio.discover.discover_sources") as discover:
+        recovered = O._recover_unresolved_beats(
+            proj, [seg], SimpleNamespace(movie_title="Game of Thrones"), ClipConfig(),
+            SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+            policy="approved_testing", log=lambda _m: None, only_indices={0},
+            audit_filename="strict-real-quote.json")
+
+    assert recovered == 1
+    discover.assert_not_called()
+    assert proj.selections[0].in_point == 10.0
+    final = R.evaluate_selection_relevance(proj, [seg])
+    assert final["status"] == "pass"
+    assert final["quote_branch_counts"] == {
+        "verbatim": 1, "paraphrase": 0, "indeterminate": 0}
 
 
 def test_orchestrate_runs_strict_recovery_then_confirmed_gap_ladder_then_asserts():
@@ -211,6 +1823,77 @@ def test_real_quote_and_technical_fault_never_buy_a_gap_downgrade(tmp_path):
     assert S.semantic_gap_candidates(proj, audit)[0] == []
 
 
+def test_character_verbatim_quote_and_missing_branch_both_fail_closed(tmp_path):
+    from vidlore.clipstudio import relevance_contract as R
+    from vidlore.clipstudio import selfheal as S
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    seg = segs[0]
+    seg.visual_policy = P.CHARACTER
+    seg.quote = "Chaos isn't a pit. Chaos is a ladder."
+    words = "Chaos isn't a pit Chaos is a ladder".split()
+    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+        [0.1 + i * .1, 0.2 + i * .1, word] for i, word in enumerate(words)
+    ]))
+    # The beat contract changed after the fixture bound its verifier; rebind the current negative
+    # so the only reason for denial is quote typing, not stale selection evidence.
+    V.bind_selection_verifier_evidence(
+        proj, _sel, seg, _sel.verifier, model="vision", is_specific=True,
+        multiframe=True, faceid_names=[], era="", must_see="")
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, segs, [0], method="actual_frame_and_pool_audit")
+
+    audit = R.evaluate_selection_relevance(proj, segs)
+    assert audit["blockers"][0]["quote_evidence"]["branch"] == "verbatim"
+    assert S.semantic_gap_candidates(proj, audit)[0] == []
+
+    missing = copy.deepcopy(audit)
+    missing["blockers"][0]["quote_evidence"] = {}
+    assert S.semantic_gap_candidates(proj, missing)[0] == []
+
+
+def test_phase2_denies_mixed_or_unknown_evidence_reasons(tmp_path):
+    from vidlore.clipstudio import selfheal as S
+
+    proj, segs, _sel = _fixture(tmp_path, GOOD)
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, segs, [0], method="actual_frame_and_pool_audit")
+    for reasons in (
+        ["verdict_absent", "exact_verifier_evidence_not_strict"],
+        ["verdict_replace", "future_evidence_schema_fault"],
+    ):
+        audit = {"blockers": [{
+            "segment_index": 0, "reasons": reasons, "quote_evidence": {}}]}
+        assert S.semantic_gap_candidates(proj, audit)[0] == []
+
+
+def test_phase2_confirmed_paraphrase_with_only_semantic_negatives_remains_eligible(tmp_path):
+    from vidlore.clipstudio import relevance_contract as R
+    from vidlore.clipstudio import selfheal as S
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, sel = _fixture(tmp_path, bad)
+    seg = segs[0]
+    seg.quote = "The essayist's paraphrase is not spoken dialogue."
+    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+        [0.1, 0.2, "completely"], [0.3, 0.4, "unrelated"],
+    ]))
+    V.bind_selection_verifier_evidence(
+        proj, sel, seg, sel.verifier, model="vision", is_specific=True,
+        multiframe=True, faceid_names=[], era="", must_see="")
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, segs, [0], method="actual_frame_and_pool_audit")
+
+    audit = R.evaluate_selection_relevance(proj, segs)
+
+    assert audit["blockers"][0]["quote_evidence"]["branch"] == "paraphrase"
+    assert set(audit["blockers"][0]["reasons"]) <= set(S._SEMANTIC_NEGATIVE_REASONS)
+    assert S.semantic_gap_candidates(proj, audit) == ([0], "confirmed_actual_frame_audit")
+
+
 def test_gap_ladder_exception_rolls_back_abstract_mutation(monkeypatch, tmp_path):
     from vidlore.clipstudio import selfheal as S
     proj, segs, sel = _fixture(
@@ -261,7 +1944,7 @@ def test_web_image_installer_requires_and_returns_actual_pixel_verdict(tmp_path)
         return dict(bad if len(calls) == 1 else GOOD)
 
     patches = (
-        mock.patch.object(IF._wi, "search_images", return_value=[candidate]),
+        mock.patch.object(IF._wi, "search_images", side_effect=[[], [candidate], [candidate]]),
         mock.patch.object(IF._wi, "download_image", side_effect=download),
         mock.patch.object(IF._wi, "is_ai_generated_source", return_value=False),
         mock.patch.object(IF, "_web_candidate_ok", return_value=True),
@@ -276,7 +1959,11 @@ def test_web_image_installer_requires_and_returns_actual_pixel_verdict(tmp_path)
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
             patches[6], patches[7], patches[8], patches[9], patches[10]:
         assert IF.fetch_scene_image(
-            seg, analysis, tmp_path / "bad", eng_cfg=SimpleNamespace(anthropic_model="vision")) is None
+            seg, analysis, tmp_path / "empty", eng_cfg=SimpleNamespace(anthropic_model="vision"),
+            raise_on_technical=True) is None
+        assert IF.fetch_scene_image(
+            seg, analysis, tmp_path / "bad", eng_cfg=SimpleNamespace(anthropic_model="vision"),
+            raise_on_technical=True) is None
         good = IF.fetch_scene_image(
             seg, analysis, tmp_path / "good", eng_cfg=SimpleNamespace(anthropic_model="vision"))
 

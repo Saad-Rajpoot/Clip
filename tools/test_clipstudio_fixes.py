@@ -70,10 +70,18 @@ def test_verifier_promotion_rewrites_beat_windows():
 
     orig_vf, orig_lookup = V.verify_frame, V._shot_lookup
     orig_cut, orig_has = V._cut.cut_selection, L.has_llm
+
+    def successful_cut(p, _s, _c):
+        calls["cut"] += 1
+        p.clips_dir.mkdir(parents=True, exist_ok=True)
+        made = p.clips_dir / "seg_000.mp4"
+        made.write_bytes(b"materialized promoted clip")
+        return made
+
     try:
         V.verify_frame = fake_verify_frame
         V._shot_lookup = lambda p: (lambda sid, idx: fake_shot)
-        V._cut.cut_selection = lambda p, s, c: calls.__setitem__("cut", calls["cut"] + 1)
+        V._cut.cut_selection = successful_cut
         L.has_llm = lambda eng_cfg=None: True
         eng = types.SimpleNamespace(anthropic_model="test-model")
         out = V.verify_and_repair(proj, [seg], ClipConfig(), eng, progress=None)
@@ -542,10 +550,17 @@ def test_round2_review_fixes():
                 "confidence": 0.5, "reason": "r"}
 
     orig = (V.verify_frame, V._shot_lookup, V._cut.cut_selection, L.has_llm)
+
+    def successful_cut(p, _s, _c):
+        p.clips_dir.mkdir(parents=True, exist_ok=True)
+        made = p.clips_dir / "seg_000.mp4"
+        made.write_bytes(b"materialized promoted clip")
+        return made
+
     try:
         V.verify_frame = fake_vf
         V._shot_lookup = lambda p: fake_shot_of
-        V._cut.cut_selection = lambda p, s, c: None
+        V._cut.cut_selection = successful_cut
         L.has_llm = lambda eng_cfg=None: True
         V.verify_and_repair(proj, [seg], ClipConfig(),
                             types.SimpleNamespace(anthropic_model="m"))

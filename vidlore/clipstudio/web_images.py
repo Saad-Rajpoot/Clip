@@ -167,7 +167,14 @@ def _guarded_get(url, *, timeout=20, max_bytes=8_000_000, **kw):
 # --------------------------------------------------------------------------- #
 # search backends
 # --------------------------------------------------------------------------- #
-def _search_bing(query: str, n: int = 24) -> list[dict]:
+_SEARCH_OK, _SEARCH_EMPTY, _SEARCH_TECHNICAL = "ok", "empty", "technical"
+
+
+class WebImageSearchTechnicalError(RuntimeError):
+    """Every enabled image provider ended without a conclusive response."""
+
+
+def _search_bing_ex(query: str, n: int = 24) -> tuple[list[dict], str]:
     """Bing Images — each `.iusc` anchor embeds an HTML-escaped m="{...}" JSON with
     murl (full-res image), purl (hosting page), t (title)."""
     out: list[dict] = []
@@ -176,10 +183,10 @@ def _search_bing(query: str, n: int = 24) -> list[dict]:
                          params={"q": query, "form": "HDRSC2", "first": "1"},
                          headers={**_UA, "Referer": "https://www.bing.com/"}, timeout=20)
         if r.status_code != 200:
-            return out
+            return out, _SEARCH_TECHNICAL
         page = r.text or ""
     except Exception:
-        return out
+        return out, _SEARCH_TECHNICAL
     seen: set[str] = set()
     for blob in re.findall(r'\bm="(\{[^"]+\})"', page):
         raw = html.unescape(blob)
@@ -203,28 +210,32 @@ def _search_bing(query: str, n: int = 24) -> list[dict]:
                     "title": title, "width": 0, "height": 0})
         if len(out) >= n:
             break
-    return out
+    return out, (_SEARCH_OK if out else _SEARCH_EMPTY)
 
 
-def _search_ddg(query: str, n: int = 24) -> list[dict]:
+def _search_bing(query: str, n: int = 24) -> list[dict]:
+    return _search_bing_ex(query, n)[0]
+
+
+def _search_ddg_ex(query: str, n: int = 24) -> tuple[list[dict], str]:
     """DuckDuckGo images — page yields a vqd token, then /i.js returns JSON."""
     out: list[dict] = []
     try:
         r = _guarded_get("https://duckduckgo.com/",
                          params={"q": query, "iax": "images", "ia": "images"}, timeout=20)
         if r.status_code != 200:
-            return out
+            return out, _SEARCH_TECHNICAL
         m = re.search(r"vqd=['\"]?(\d+-\d+(?:-\d+)?)['\"]?", r.text) or \
             re.search(r"vqd=([\d-]+)", r.text)
         if not m:
-            return out
+            return out, _SEARCH_TECHNICAL
         time.sleep(0.4)
         r2 = _guarded_get("https://duckduckgo.com/i.js",
                           params={"l": "us-en", "o": "json", "q": query, "vqd": m.group(1),
                                   "f": ",,,", "p": "1", "v7exp": "a"},
                           headers={**_UA, "Referer": "https://duckduckgo.com/"}, timeout=25)
         if r2.status_code != 200:
-            return out
+            return out, _SEARCH_TECHNICAL
         data = json.loads(r2.text)
         for item in (data.get("results") or [])[:n]:
             url = item.get("image") or ""
@@ -236,11 +247,15 @@ def _search_ddg(query: str, n: int = 24) -> list[dict]:
                         "width": int(item.get("width") or 0),
                         "height": int(item.get("height") or 0)})
     except Exception:
-        return out
-    return out
+        return out, _SEARCH_TECHNICAL
+    return out, (_SEARCH_OK if out else _SEARCH_EMPTY)
 
 
-def _search_wikimedia(query: str, n: int = 10) -> list[dict]:
+def _search_ddg(query: str, n: int = 24) -> list[dict]:
+    return _search_ddg_ex(query, n)[0]
+
+
+def _search_wikimedia_ex(query: str, n: int = 10) -> tuple[list[dict], str]:
     out: list[dict] = []
     try:
         r = _guarded_get("https://commons.wikimedia.org/w/api.php",
@@ -249,10 +264,10 @@ def _search_wikimedia(query: str, n: int = 10) -> list[dict]:
                                  "prop": "imageinfo", "iiprop": "url|size|mime",
                                  "iiurlwidth": 1920}, timeout=20)
         if r.status_code != 200:
-            return out
+            return out, _SEARCH_TECHNICAL
         pages = list((json.loads(r.text).get("query", {}) or {}).get("pages", {}).values())
     except Exception:
-        return out
+        return out, _SEARCH_TECHNICAL
     for p in pages:
         ii = (p.get("imageinfo") or [{}])[0]
         if (ii.get("mime") or "").lower() not in ("image/jpeg", "image/png", "image/webp"):
@@ -264,10 +279,15 @@ def _search_wikimedia(query: str, n: int = 10) -> list[dict]:
                     "source_site": "commons.wikimedia.org",
                     "title": (p.get("title") or "").replace("File:", "").rsplit(".", 1)[0],
                     "width": int(ii.get("width") or 0), "height": int(ii.get("height") or 0)})
-    return out
+    return out, (_SEARCH_OK if out else _SEARCH_EMPTY)
 
 
-def search_images(query: str, n: int = 30, ttl_days: int = 14) -> list[dict]:
+def _search_wikimedia(query: str, n: int = 10) -> list[dict]:
+    return _search_wikimedia_ex(query, n)[0]
+
+
+def search_images(query: str, n: int = 30, ttl_days: int = 14, *,
+                  raise_on_technical: bool = False) -> list[dict]:
     """Bing + DDG + Wikimedia, deduped by image URL, disk-cached. Blacklisted /
     watermarked-stock domains are dropped here so they never reach scoring."""
     q = (query or "").strip()
@@ -281,27 +301,29 @@ def search_images(query: str, n: int = 30, ttl_days: int = 14) -> list[dict]:
                 # Re-apply the domain blacklist to the CACHED list too. The blacklist can GROW
                 # between runs (we keep adding AI-art / clipart farms as we spot them); a still-
                 # warm 14-day cache written before a domain was banned must not resurrect it.
-                return [it for it in d.get("r", [])
-                        if not is_unusable_domain(it.get("image_url") or "")]
+                _cached = [it for it in d.get("r", [])
+                           if not is_unusable_domain(it.get("image_url") or "")]
+                # Old/nonempty caches remain useful. A legacy EMPTY cache has no proof that a
+                # provider answered rather than failed, so strict recovery refreshes it once.
+                if _cached or not raise_on_technical or d.get("conclusive") is True:
+                    return _cached
         except Exception:
             pass
     results: list[dict] = []
+    statuses: list[str] = []
     with _lock:                                  # serialize SERP hits — be polite
         if _env_flag("VIDLORE_CLIPSTUDIO_IMG_BING", True):
-            try:
-                results += _search_bing(q)
-            except Exception:
-                pass
+            got, status = _search_bing_ex(q)
+            results += got
+            statuses.append(status)
         if _env_flag("VIDLORE_CLIPSTUDIO_IMG_DDG", True):
-            try:
-                results += _search_ddg(q)
-            except Exception:
-                pass
+            got, status = _search_ddg_ex(q)
+            results += got
+            statuses.append(status)
         if _env_flag("VIDLORE_CLIPSTUDIO_IMG_WIKI", True):
-            try:
-                results += _search_wikimedia(q)
-            except Exception:
-                pass
+            got, status = _search_wikimedia_ex(q)
+            results += got
+            statuses.append(status)
     seen: set[str] = set()
     deduped = []
     for it in results:
@@ -310,8 +332,17 @@ def search_images(query: str, n: int = 30, ttl_days: int = 14) -> list[dict]:
             continue
         seen.add(u)
         deduped.append(it)
+    _conclusive = bool(statuses) and any(s in (_SEARCH_OK, _SEARCH_EMPTY) for s in statuses)
+    if statuses and not _conclusive:
+        # Never poison the 14-day cache with an outage-shaped empty result. Legacy callers retain
+        # their historical [] result; strict recovery gets a typed retryable failure.
+        if raise_on_technical:
+            raise WebImageSearchTechnicalError(
+                "all enabled image-search providers failed technically")
+        return deduped
     try:
-        cache.write_text(json.dumps({"t": time.time(), "r": deduped}))
+        cache.write_text(json.dumps(
+            {"t": time.time(), "r": deduped, "conclusive": bool(_conclusive)}))
     except Exception:
         pass
     return deduped

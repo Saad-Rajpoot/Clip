@@ -20,6 +20,14 @@ _STOP = {"the", "a", "an", "of", "and", "or", "in", "on", "at", "to", "is", "was
          "for", "as", "by", "from", "who", "what", "when", "where", "scene", "moment"}
 
 
+class SceneImageTechnicalError(RuntimeError):
+    """Strict still acquisition produced no conclusive content judgment.
+
+    Ordinary callers retain the historical ``dict | None`` API. Strict recovery opts into this
+    typed failure so transport/download/verifier outages cannot be recorded as exhausted footage.
+    """
+
+
 def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^\w' ]", " ", s or "")).strip()
 
@@ -574,17 +582,34 @@ def _web_candidate_ok(c: dict, analysis) -> bool:
 
 def fetch_scene_image(seg, analysis, dest_dir: Path, *, faceid_obj=None, refs: dict | None = None,
                       char2actor: dict | None = None, log=None, budget: int = 12,
-                      seen_hashes: set | None = None, eng_cfg=None) -> Optional[dict]:
+                      seen_hashes: set | None = None, eng_cfg=None,
+                      raise_on_technical: bool = False) -> Optional[dict]:
     """Search + validate an exact-scene still for one beat. Returns
     {path, score, query, source, clip, face, strict_verifier, image_sha256} or None.
 
     CLIP/Face-ID/source-domain checks only rank candidates. Publication requires a strict vision
     verdict on the ACTUAL downloaded image, bound to those bytes by sha256. A provider label such as
     ``web-exact-scene`` is never semantic proof by itself.
-    `seen_hashes` (shared across beats) prevents the SAME image being used at two beats."""
+    `seen_hashes` (shared across beats) prevents the SAME image being used at two beats.
+
+    With ``raise_on_technical=True``, a batch containing only search/download/verifier
+    non-verdicts raises :class:`SceneImageTechnicalError`. A legitimate empty search or any
+    explicit candidate/semantic rejection remains the conclusive legacy ``None`` result."""
     refs = refs or {}
     char2actor = char2actor or {}
     seen_hashes = seen_hashes if seen_hashes is not None else set()
+
+    def _technical(reason: str, exc: Exception | None = None):
+        if log:
+            log(f"image-fallback: technically inconclusive for {getattr(seg, 'index', '?')} "
+                f"({reason})")
+        if raise_on_technical:
+            err = SceneImageTechnicalError(reason)
+            if exc is not None:
+                raise err from exc
+            raise err
+        return None
+
     if not _wi._env_flag("VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK", True):
         return None
     q = build_query(seg, analysis)
@@ -602,7 +627,10 @@ def fetch_scene_image(seg, analysis, dest_dir: Path, *, faceid_obj=None, refs: d
         all_actors.add(c.lower())
         all_actors.add(a.lower())
 
-    cands = _wi.search_images(q, n=30)
+    try:
+        cands = _wi.search_images(q, n=30, raise_on_technical=raise_on_technical)
+    except Exception as exc:                            # strict caller distinguishes outage from []
+        return _technical(f"image search failed: {type(exc).__name__}: {exc}", exc)
     if not cands:
         if log:
             log(f"image-fallback: no candidates for {q!r}")
@@ -613,6 +641,8 @@ def fetch_scene_image(seg, analysis, dest_dir: Path, *, faceid_obj=None, refs: d
     dest_dir.mkdir(parents=True, exist_ok=True)
     scored = []
     tried = 0
+    technical_failures: list[str] = []
+    conclusive_rejections = 0
     for c in cands:
         if tried >= budget:
             break
@@ -620,12 +650,23 @@ def fetch_scene_image(seg, analysis, dest_dir: Path, *, faceid_obj=None, refs: d
         # SOURCE page is a pure AI generator (shedevrum.ai etc.) — the file may sit on a neutral
         # CDN but it is synthetic art, not a real still.
         if _wi.is_ai_generated_source(c.get("source_site", "")):
+            conclusive_rejections += 1
             continue
         if not _web_candidate_ok(c, analysis):     # wrong franchise / BTS / red-carpet / portrait / off-title
+            conclusive_rejections += 1
             continue
         tmp = dest_dir / f"_imgcand_{seg.index:03d}_{tried}.jpg"
-        p = _wi.download_image(c["image_url"], tmp)
+        image_url = c.get("image_url", "")
+        if not image_url:
+            conclusive_rejections += 1
+            continue
+        try:
+            p = _wi.download_image(image_url, tmp)
+        except Exception as exc:                        # noqa: BLE001 — counted across the batch
+            technical_failures.append(f"download exception: {type(exc).__name__}")
+            continue
         if p is None:
+            technical_failures.append("download returned no image")
             continue
         tried += 1
         # reject wide banners / side-by-side collages (a 2:1 "10 opinions" panel is two
@@ -633,23 +674,27 @@ def fetch_scene_image(seg, analysis, dest_dir: Path, *, faceid_obj=None, refs: d
         ar = _aspect(p)
         if ar > 1.95 or ar < 0.55 or _has_center_seam(p):
             p.unlink(missing_ok=True)
+            conclusive_rejections += 1
             continue
         # reject posters / title cards / meme overlays with big burned text, and
         # fan/cosplay/stock photos with a social-handle or watermark caption
         try:
             if _ocr.available() and (_ocr.has_big_text(p) or _has_watermark_text(p)):
                 p.unlink(missing_ok=True)
+                conclusive_rejections += 1
                 continue
         except Exception:
             pass
         # reject illustrated / concept-art / game-screenshot / cartoon — live-action only
         if not _photographic_ok(p):
             p.unlink(missing_ok=True)
+            conclusive_rejections += 1
             continue
         # cross-beat dedup — never reuse the same image at two beats
         _h = _md5(p)
         if _h and _h in seen_hashes:
             p.unlink(missing_ok=True)
+            conclusive_rejections += 1
             continue
         clip_rel = _clip_relevance(p, scene_text)
         face = _face_verdict(p, target_actors, all_actors, faceid_obj, refs)
@@ -658,6 +703,7 @@ def fetch_scene_image(seg, analysis, dest_dir: Path, *, faceid_obj=None, refs: d
         # reject too, the beat keeps its footage instead.
         if face == "wrong" or (target_actors and face == "unknown"):
             p.unlink(missing_ok=True)
+            conclusive_rejections += 1
             continue
         # score: CLIP relevance is the spine; a confirmed target face is a strong boost,
         # a missing face on a person-beat is a real penalty
@@ -672,6 +718,9 @@ def fetch_scene_image(seg, analysis, dest_dir: Path, *, faceid_obj=None, refs: d
     if not scored:
         if log:
             log(f"image-fallback: 0/{tried} candidates usable for {q!r}")
+        if technical_failures and not conclusive_rejections:
+            return _technical(
+                f"all candidate downloads were inconclusive ({len(technical_failures)})")
         return None
     scored.sort(key=lambda d: -d["score"])
     # DETERMINISTIC CANDIDATE BAR — still only a prefilter. The actual-image semantic verdict below
@@ -692,8 +741,10 @@ def fetch_scene_image(seg, analysis, dest_dir: Path, *, faceid_obj=None, refs: d
         if target_actors and cand["face"] not in ("match", "skip") and cand["clip"] < 0.55:
             ok = False
         if not ok:
+            conclusive_rejections += 1
             continue
         if eng_cfg is None:
+            technical_failures.append("actual-image verifier is unavailable")
             continue                                  # no actual-image judgment → fail closed
         try:
             verdict = verify_frame(
@@ -704,20 +755,45 @@ def fetch_scene_image(seg, analysis, dest_dir: Path, *, faceid_obj=None, refs: d
                 expected_visual=getattr(seg, "expected_visual", "") or "",
                 scene_query=getattr(seg, "scene_query", "") or "", era_hint=era_hint,
                 venue_fallback=False, must_see=_pol.deictic_target(seg))
-        except Exception:
+        except Exception as exc:                        # noqa: BLE001 — retryable technical fact
+            technical_failures.append(f"verifier exception: {type(exc).__name__}")
             verdict = None
-        if verdict is None:
+        if not isinstance(verdict, dict):
+            if verdict is not None:
+                technical_failures.append("verifier returned a malformed non-object verdict")
+            elif not technical_failures or not technical_failures[-1].startswith("verifier exception"):
+                technical_failures.append("verifier returned no verdict")
+            continue
+        verdict_status = str(verdict.get("status", "ok") or "ok").strip().lower()
+        if verdict_status not in ("", "ok") or verdict.get("verdict") not in ("keep", "replace"):
+            technical_failures.append(
+                f"verifier returned inconclusive status/schema ({verdict_status or 'ok'})")
             continue
         verdict = {**verdict, "status": "ok"}
         why = strict_still_evidence_reason(verdict, seg)
         if why:
-            if log:
-                log(f"image-fallback: candidate rejected by actual-image semantic gate "
-                    f"({why}) for {q!r}")
+            _explicit_negative = (
+                verdict.get("verdict") == "replace"
+                or verdict.get("matches_narration") is False
+                or verdict.get("specific_enough") is False
+                or verdict.get("quality_ok") is False
+                or verdict.get("wrong_subject_visible") is True
+                or verdict.get("contradicts_narration") is True
+                or verdict.get("era_ok") is False
+                or verdict.get("correct_subject_visible") is False
+                or verdict.get("target_visible") is False)
+            if _explicit_negative:
+                conclusive_rejections += 1
+                if log:
+                    log(f"image-fallback: candidate rejected by actual-image semantic gate "
+                        f"({why}) for {q!r}")
+            else:
+                technical_failures.append(f"verifier omitted required affirmative facts: {why}")
             continue
         cand["strict_verifier"] = verdict
         cand["image_sha256"] = image_sha256(cand["path"])
         if not cand["image_sha256"]:
+            technical_failures.append("verified image bytes could not be hashed")
             continue
         best = cand
         break
@@ -730,6 +806,9 @@ def fetch_scene_image(seg, analysis, dest_dir: Path, *, faceid_obj=None, refs: d
         if log:
             log(f"image-fallback: no candidate passed strict actual-image semantic verification "
                 f"for {q!r} — skipped")
+        if technical_failures and not conclusive_rejections:
+            return _technical(
+                f"all candidate judgments were inconclusive ({len(technical_failures)})")
         return None
     final = dest_dir / f"scene_img_{seg.index:03d}.jpg"
     Path(best["path"]).replace(final)

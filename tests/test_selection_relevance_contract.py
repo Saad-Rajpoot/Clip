@@ -170,6 +170,79 @@ def test_exact_authored_quote_requires_strong_timed_asr_at_selected_window(tmp_p
     assert "exact_quote_timed_asr_outside_selected_window" in _block_reasons(proj, seg)
 
 
+def _containment_quote_fixture(tmp_path):
+    quote = "You don't think I'd let you marry that beast, do you?"
+    proj, seg, sel = _fixture(
+        tmp_path, text=f'"{quote}" That single line is the whole confession.', quote=quote,
+        entity="Olenna Tyrell", signals={"dialogue": 0.965, "moment_lock": 0.965})
+    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+        [0.20, 0.35, "You"], [0.35, 0.50, "don't"], [0.50, 0.65, "think"],
+        [0.65, 0.80, "I'd"], [0.80, 0.95, "let"], [0.95, 1.10, "you"],
+        [1.10, 1.22, "marry"], [1.22, 1.34, "that"], [1.34, 1.50, "beast"],
+        [1.50, 1.62, "do"], [1.62, 1.74, "you"],
+    ]))
+    contract = R._quote_pool_branches(proj, [seg])[0]
+    assert contract["branch"] == "verbatim"
+    return proj, seg, sel, contract
+
+
+@pytest.mark.parametrize(("selected_window", "old_interval_gap"), [
+    ((1.70, 3.70), 0.0),   # only 40 ms overlaps; the quote starts 1.5 s before the trim
+    ((2.20, 4.20), 0.46),  # the entire quote is outside, but the old 0.75 s gap test passed
+])
+def test_quote_span_must_be_contained_not_merely_near_or_touching(
+        tmp_path, selected_window, old_interval_gap):
+    proj, seg, sel, contract = _containment_quote_fixture(tmp_path)
+    sel.in_point, sel.out_point = selected_window
+
+    ok, reason, detail = R.exact_quote_dialogue_evidence(
+        proj, sel, seg, quote_contract=contract)
+
+    assert ok is False
+    assert reason == "exact_quote_timed_asr_outside_selected_window"
+    assert detail["timed_asr_span"] == [0.2, 1.74]
+    assert detail["selected_window"] == list(selected_window)
+    assert detail["window_gap_sec"] == old_interval_gap
+    assert detail["window_tolerance_sec"] == R.QUOTE_WINDOW_TOLERANCE_SEC
+    assert detail["start_containment_margin_sec"] < 0.0
+
+
+def test_quote_span_fully_inside_tolerated_window_boundary_passes(tmp_path):
+    proj, seg, sel, contract = _containment_quote_fixture(tmp_path)
+    # Expanded by ±0.75, this 0.90–1.10 selection contains the complete 0.20–1.74 ASR span.
+    sel.in_point, sel.out_point = 0.90, 1.10
+
+    ok, reason, detail = R.exact_quote_dialogue_evidence(
+        proj, sel, seg, quote_contract=contract)
+
+    assert ok is True and reason == ""
+    assert detail["quote_start_vs_window_start_sec"] == -0.7
+    assert detail["quote_end_vs_window_end_sec"] == 0.64
+    assert detail["start_containment_margin_sec"] == 0.05
+    assert detail["end_containment_margin_sec"] == 0.11
+
+
+def test_character_policy_quote_still_gets_complete_pool_branch(tmp_path):
+    """A montage may be CHARACTER while retaining an authored quote; typing cannot disappear."""
+    quote = "Chaos isn't a pit. Chaos is a ladder."
+    proj, seg, _sel = _fixture(
+        tmp_path, policy=P.CHARACTER,
+        text="She makes the identification three separate times.", quote=quote,
+        entity="Varys, Petyr Baelish, Tyrion Lannister", kind="montage")
+    words = "Chaos isn't a pit Chaos is a ladder".split()
+    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+        [0.1 + i * .1, 0.2 + i * .1, word] for i, word in enumerate(words)
+    ]))
+
+    audit = R.evaluate_selection_relevance(proj, [seg])
+
+    assert P.policy_of(seg) == P.CHARACTER
+    assert audit["checked"][0]["quote_evidence"]["branch"] == "verbatim"
+    assert "exact_quote_dialogue_signal_below_floor" in audit["blockers"][0]["reasons"]
+    assert audit["quote_branch_counts"] == {
+        "verbatim": 1, "paraphrase": 0, "indeterminate": 0}
+
+
 def test_pool_absent_quote_is_paraphrase_and_skips_only_verbatim_floor(tmp_path):
     quote = "Who does this belong to?"
     proj, seg, _sel = _fixture(

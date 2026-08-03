@@ -506,6 +506,10 @@ STATUS_THROTTLED, STATUS_TIMEOUT, STATUS_TRANSPORT = "throttled", "timeout", "tr
 _RETRYABLE = (STATUS_THROTTLED, STATUS_TIMEOUT, STATUS_TRANSPORT)
 
 
+class TargetedDiscoveryTechnicalError(RuntimeError):
+    """A required recovery query never received a conclusive provider answer."""
+
+
 def _classify_net_error(exc) -> str:
     """Map a provider exception to a status. Message-based for yt-dlp (it wraps HTTP errors
     into DownloadError strings); type-based where real types exist."""
@@ -568,8 +572,11 @@ def _archive_search_ex(query: str, n: int) -> tuple[list[SourceCandidate], str]:
                          params={"q": f"({query}) AND mediatype:(movies)",
                                  "fl[]": ["identifier", "title"], "rows": n, "output": "json"},
                          timeout=20, headers={"User-Agent": "ClipStudio/0.1 (testing)"})
-        if getattr(r, "status_code", 200) == 429:
+        _status_code = int(getattr(r, "status_code", 200) or 0)
+        if _status_code == 429:
             return out, STATUS_THROTTLED
+        if not 200 <= _status_code < 300:
+            return out, STATUS_TRANSPORT
         for d in r.json().get("response", {}).get("docs", []):
             ident = d.get("identifier", "")
             if not ident:
@@ -1015,26 +1022,36 @@ def resolve_quality(cands: list[SourceCandidate], cfg: ClipConfig, progress=None
 
 
 def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None,
-                     progress=None, extra_queries=None) -> list[SourceCandidate]:
+                     progress=None, extra_queries=None,
+                     required_queries=None) -> list[SourceCandidate]:
     """Return a ranked, de-duplicated, diverse candidate list (~discover_target items).
     `segments` enables PER-BEAT targeted queries (the exact scene each line needs).
 
     `extra_queries` are caller-supplied searches run FIRST, at anchor depth. The backfill pass uses
     them to go looking for a clean copy of a source the pool gates threw out: the rejected upload's
     own title is the sharpest description we have of the footage that was lost, and no beat-derived
-    query reproduces it."""
+    query reproduces it.
+
+    `required_queries` is an opt-in strict recovery contract. Every named query must receive at
+    least one final provider ``ok`` or legitimate ``empty`` status after bounded retries. If all
+    providers remain technical for any required query, :class:`TargetedDiscoveryTechnicalError`
+    is raised. The default remains the historical best-effort candidate-list API."""
     def log(m):
         if progress:
             progress(m)
 
     queries = build_queries(analysis, segments)
-    if extra_queries:
+    _extra_queries = [str(q).strip() for q in (extra_queries or []) if str(q).strip()]
+    _required_queries = list(dict.fromkeys(
+        str(q).strip() for q in (required_queries or []) if str(q).strip()))
+    if _extra_queries:
         _seen_q = {q.lower() for q in queries}
-        queries = [q for q in dict.fromkeys(extra_queries) if q and q.lower() not in _seen_q] + queries
+        queries = [q for q in dict.fromkeys(_extra_queries)
+                   if q.lower() not in _seen_q] + queries
     # the anchor-scene queries are the most important searches — go DEEPER on them (more results) so
     # the exact raw scene clip can't be missed under the noise of essays/compilations.
     anchor_qset = {q.lower() for q in anchor_queries(analysis, segments)}
-    anchor_qset |= {q.lower() for q in (extra_queries or []) if q}   # backfill searches go deep too
+    anchor_qset |= {q.lower() for q in _extra_queries}   # backfill/recovery searches go deep too
     log(f"discover: {len(queries)} queries ({len(anchor_qset)} anchor) · type={getattr(analysis,'video_type','')}")
     from . import perf_metrics as _pm
 
@@ -1092,6 +1109,7 @@ def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None
     except (TypeError, ValueError):
         _dw = 4
     raw: list[SourceCandidate] = []
+    _final_provider_status: dict[str, tuple[str, str]] = {}
     _EMPTY_BUCKET = {"yt": ([], STATUS_TRANSPORT), "ar": ([], STATUS_TRANSPORT)}
     if _dw > 1 and len(queries) > 1:
         import concurrent.futures as _cf
@@ -1109,6 +1127,8 @@ def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None
             if any(_buckets[_qi][p][1] in _RETRYABLE for p in ("yt", "ar")):
                 _buckets[_qi] = _retry_failed_providers(q, _buckets[_qi])
         for _qi, q in enumerate(queries):
+            _final_provider_status[q.lower()] = tuple(
+                _buckets[_qi][p][1] for p in ("yt", "ar"))
             raw += _bucket_list(_buckets[_qi])
             log(f"discover: '{q[:40]}' → {len(raw)} cumulative")
     else:
@@ -1116,8 +1136,20 @@ def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None
             _b = _one_query_ex(q)
             if any(_b[p][1] in _RETRYABLE for p in ("yt", "ar")):
                 _b = _retry_failed_providers(q, _b)
+            _final_provider_status[q.lower()] = tuple(_b[p][1] for p in ("yt", "ar"))
             raw += _bucket_list(_b)
             log(f"discover: '{q[:40]}' → {len(raw)} cumulative")
+
+    if _required_queries:
+        _unanswered = []
+        for _rq in _required_queries:
+            _statuses = _final_provider_status.get(_rq.lower())
+            if not _statuses or not any(s in (STATUS_OK, STATUS_EMPTY) for s in _statuses):
+                _unanswered.append((_rq, _statuses or ("not-issued",)))
+        if _unanswered:
+            detail = "; ".join(f"{q!r}={','.join(st)}" for q, st in _unanswered)
+            raise TargetedDiscoveryTechnicalError(
+                f"required recovery query had no conclusive provider response: {detail}")
 
     # dedupe by id and by normalized title
     seen_id, seen_title, uniq = set(), set(), []

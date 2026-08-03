@@ -16,7 +16,7 @@ from pathlib import Path
 from . import policy as _policy
 from .verify import _contradiction_reason, selection_verifier_evidence_reason
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 AUDIT_FILENAME = "selection_relevance_audit.json"
 QUOTE_DIALOGUE_FLOOR = 0.78
 QUOTE_WINDOW_TOLERANCE_SEC = 0.75
@@ -114,7 +114,7 @@ def _selection_source_title(proj, sel) -> str:
 
 
 def _quote_pool_branches(proj, segments) -> dict[int, dict]:
-    """Classify authored exact-beat quotes against the complete usable dialogue index.
+    """Classify authored strict-beat quotes against the complete usable dialogue index.
 
     The analyzer's ``quote`` field is not a type guarantee: it contains real show dialogue,
     paraphrases, and sometimes the essayist's own narration.  A selected-window ASR floor is only
@@ -127,7 +127,7 @@ def _quote_pool_branches(proj, segments) -> dict[int, dict]:
     evaluations, so a process-global cache would make an old ``paraphrase`` decision stale.
     """
     quoted = [s for s in (segments or [])
-              if _policy.policy_of(s) == _policy.EXACT
+              if _strict_semantic_beat(s)
               and str(getattr(s, "quote", "") or "").strip()]
     if not quoted:
         return {}
@@ -252,13 +252,25 @@ def exact_quote_dialogue_evidence(proj, sel, seg, *, quote_contract=None) \
     w0 = float(getattr(sel, "in_point", 0.0) or 0.0)
     w1 = float(getattr(sel, "out_point", 0.0) or 0.0)
     gap = max(0.0, w0 - q1, q0 - w1)
+    start_delta = q0 - w0
+    end_delta = q1 - w1
+    start_margin = q0 - (w0 - QUOTE_WINDOW_TOLERANCE_SEC)
+    end_margin = (w1 + QUOTE_WINDOW_TOLERANCE_SEC) - q1
     detail.update({
         "timed_asr_span": [round(q0, 3), round(q1, 3)],
         "timed_asr_ratio": round(ratio, 3),
         "selected_window": [round(w0, 3), round(w1, 3)],
         "window_gap_sec": round(gap, 3),
+        "window_tolerance_sec": QUOTE_WINDOW_TOLERANCE_SEC,
+        "quote_start_vs_window_start_sec": round(start_delta, 3),
+        "quote_end_vs_window_end_sec": round(end_delta, 3),
+        "start_containment_margin_sec": round(start_margin, 3),
+        "end_containment_margin_sec": round(end_margin, 3),
     })
-    if not (w1 > w0 >= 0.0) or gap > QUOTE_WINDOW_TOLERANCE_SEC:
+    contained = (q1 >= q0 >= 0.0
+                 and q0 >= w0 - QUOTE_WINDOW_TOLERANCE_SEC
+                 and q1 <= w1 + QUOTE_WINDOW_TOLERANCE_SEC)
+    if not (w1 > w0 >= 0.0) or not contained:
         return False, "exact_quote_timed_asr_outside_selected_window", detail
     return True, "", detail
 
@@ -327,6 +339,12 @@ def evaluate_selection_relevance(proj, segments) -> dict:
                         reasons.append("exact_moving_verdict_was_downgraded")
                     if str(verifier.get("relevance_class", "") or "") == "contextual_fallback":
                         reasons.append("exact_moving_relevance_is_contextual")
+                # The montage guard may demote a multi-subject beat from EXACT to CHARACTER, but a
+                # real authored quote remains a timed dialogue promise.  Apply the same pool typing
+                # and selected-window floor to every strict beat; only an affirmative paraphrase
+                # branch skips it.  Otherwise CHARACTER would merely record "verbatim" in the
+                # audit while still allowing an unrelated, silent right-subject window to pass.
+                if str(getattr(seg, "quote", "") or "").strip():
                     quote_ok, quote_why, quote_evidence = exact_quote_dialogue_evidence(
                         proj, sel, seg, quote_contract=quote_evidence)
                     if not quote_ok:
@@ -428,6 +446,17 @@ def write_selection_relevance_audit(path: Path | str, audit: dict) -> Path:
 
 def assert_selection_relevance(proj, segments, audit_path: Path | str | None = None) -> dict:
     """Persist the audit and release-block any exact/concrete semantic uncertainty."""
+    # A specificity downgrade is evidence about one exact indexed pool, not a permanent rewrite of
+    # the authored beat.  When footage/indexes change, revive the full original segment + selection
+    # before this strict assertion runs so the new pool gets a chance to satisfy the exact promise.
+    # Keep ``evaluate_selection_relevance`` itself read-only for audit/replay callers.
+    try:
+        from .selfheal import restore_stale_selection_relevance_softenings
+        restore_stale_selection_relevance_softenings(proj, segments)
+    except Exception as exc:
+        raise RuntimeError(
+            f"could not restore stale pool-bound semantic softening before publication: {exc}"
+        ) from exc
     audit = evaluate_selection_relevance(proj, segments)
     dest = Path(audit_path) if audit_path is not None else proj.output_dir / AUDIT_FILENAME
     try:

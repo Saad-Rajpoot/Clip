@@ -13,6 +13,7 @@ its verdict is recorded per clip for the QC report and to drive replacement.
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import re
 from pathlib import Path
@@ -1084,12 +1085,19 @@ def _venue_candidates(sel, seg, proj, get_shot, beat_era: str, cap: int = 8):
 
 
 def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfig,
-                      eng_cfg, *, max_replacements: int = 3, only_indices=None, progress=None) -> dict:
-    """Verify every selection; replace failures with the best passing alternate; re-cut swaps.
+                      eng_cfg, *, max_replacements: int = 3, only_indices=None, progress=None,
+                      materialize_promotions: bool = True,
+                      persist_project: bool = True) -> dict:
+    """Verify every selection; replace failures with the best passing alternate; re-cut swaps by default.
     Returns a summary. No-op (records 'unavailable') if there's no LLM key.
     `only_indices` (a set of segment indices) restricts verification to just those beats — used by
     the bounded recovery pass to re-verify ONLY the beats it re-matched, instead of re-running the
-    whole (very expensive) verifier over every beat. Beats outside the set keep their prior verdict."""
+    whole (very expensive) verifier over every beat. Beats outside the set keep their prior verdict.
+    `materialize_promotions=False` is for transactional exploratory recovery: accepted alternates
+    update selection metadata so the strict contract can judge them, but their deterministic clip
+    filenames are not overwritten until the caller commits the accepted scoped selections.
+    `persist_project=False` keeps those exploratory metadata mutations in memory as well. Verdict
+    cache writes remain durable because they do not alter the selection/clip lineage transaction."""
     _subset = set(only_indices) if only_indices is not None else None
 
     def log(m):
@@ -1154,6 +1162,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
     _vcache = _load_verdict_cache(proj)
     _vcache_n0 = len(_vcache)
     _errored = _reused = _consec_err = _skipped_breaker = _fp_mismatch = 0
+    _materialization_errors = 0
     _breaker_open = False
     # The REAL vision provider+model, not the configured text brain. With the deepseek default a
     # vision call is actually served by Gemini (DeepSeek cannot see images), so keying on
@@ -1783,6 +1792,12 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         if v.get("verdict") == "replace":
             swapped = False
             failed_wins: list = []      # alternates the verifier explicitly REJECTED on the way
+            # Promotion changes many coupled fields (source/window/signals/verifier/beat windows) and
+            # overwrites a deterministic clip filename.  Keep one pre-promotion state for the whole
+            # ladder so a cut failure restores the actual rejected selection, including alternate
+            # Window-QC mutations made while searching.
+            _promotion_base_state = copy.deepcopy(vars(sel))
+            _promotion_materialization_error = {"detail": ""}
 
             def _try_promote(downgrade: bool, pool=None, label: str = "") -> bool:
                 """Scan the beat's relevance-ranked alternates and promote the first acceptable one.
@@ -1802,7 +1817,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     _look_scope["on"] = True
 
             def _try_promote_inner(downgrade: bool, pool=None, label: str = "") -> bool:
-                nonlocal swapped, replaced
+                nonlocal swapped, replaced, _errored, _materialization_errors
                 tried = 0
                 # SCENE-AFFINITY ordering for exact beats — try same-scene sources first (see
                 # _scene_affinity_order). Ordering only; every gate below still applies.
@@ -1876,41 +1891,95 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     if _reuse[(alt.source_id, alt.shot_index)] >= _reuse_cap:
                         failed_wins.append((alt.source_id, float(alt.in_point)))
                         continue
-                    # promote the alternate into the selection
-                    old_sid, old_in = sel.source_id, sel.in_point
-                    _old_key = (sel.source_id, sel.shot_index)
-                    sel.source_id = alt.source_id
-                    sel.shot_index = alt.shot_index
-                    sel.in_point = alt.in_point
-                    sel.out_point = alt.out_point
-                    sel.signals = alt.signals
-                    sel.confidence = alt.score
-                    sel.source_url = (proj.source(alt.source_id).url if proj.source(alt.source_id) else "")
-                    sel.identity = (anames[0] if anames else "")
-                    # build_video plays the scene's beats from beat_windows (rejected pick is
-                    # FIRST there) — drop it AND every alternate the verifier explicitly failed
-                    # on the way here, then lead with the promoted window; otherwise rejected
-                    # footage still airs on the scene's later beats.
-                    new_win = [alt.source_id, round(alt.in_point, 3), round(alt.out_point, 3)]
-                    kept = [w for w in (sel.beat_windows or [])
-                            if not (w and w[0] == old_sid and abs(float(w[1]) - float(old_in)) < 0.05)
-                            and not (w and w[0] == new_win[0] and abs(float(w[1]) - new_win[1]) < 0.05)
-                            and not any(w and w[0] == fs and abs(float(w[1]) - fi) < 0.05
-                                        for fs, fi in failed_wins)]
-                    sel.beat_windows = [new_win] + kept
-                    av["status"] = "ok"
-                    av["replaced_from"] = {"shot": shot.index if shot else -1}
-                    if downgrade:
-                        av["verdict"] = "keep"
-                        av["downgraded"] = label or "exact→contextual"
-                        av["relevance_class"] = "contextual_fallback"
-                    # _look_scope is intentionally off for alternates, so the actual prompt carried
-                    # no look-target clause.  The release contract still independently demands
-                    # target_visible for a deictic beat; this binding records the question honestly.
-                    _bind_evidence(av, sel, seg, ashot, _alt_strict, anames,
-                                   _av_used_sheet, "")
-                    sel.verifier = av
-                    _cut.cut_selection(proj, sel, cfg)     # re-cut the new in/out
+                    # Snapshot the deterministic clip bytes BEFORE any selection mutation. A failed
+                    # ffmpeg invocation may leave a non-empty partial at this same filename, so the
+                    # return value alone is not enough to make rollback possible.
+                    _clip = proj.clips_dir / f"seg_{int(sel.segment_index):03d}.mp4"
+                    _clip_existed = _clip.is_file()
+                    _clip_backup = None
+                    try:
+                        if materialize_promotions and _clip_existed:
+                            _clip_backup = _clip.read_bytes()
+
+                        # Promote the alternate into the selection, but do not update reuse/replaced
+                        # accounting or emit a success log until its clip is proven materialized.
+                        old_sid, old_in = sel.source_id, sel.in_point
+                        _old_key = (sel.source_id, sel.shot_index)
+                        sel.source_id = alt.source_id
+                        sel.shot_index = alt.shot_index
+                        sel.in_point = alt.in_point
+                        sel.out_point = alt.out_point
+                        sel.signals = alt.signals
+                        sel.confidence = alt.score
+                        sel.source_url = (proj.source(alt.source_id).url
+                                          if proj.source(alt.source_id) else "")
+                        sel.identity = (anames[0] if anames else "")
+                        # build_video plays the scene's beats from beat_windows (rejected pick is
+                        # FIRST there) — drop it AND every alternate the verifier explicitly failed
+                        # on the way here, then lead with the promoted window.
+                        new_win = [alt.source_id, round(alt.in_point, 3), round(alt.out_point, 3)]
+                        kept = [w for w in (sel.beat_windows or [])
+                                if not (w and w[0] == old_sid
+                                        and abs(float(w[1]) - float(old_in)) < 0.05)
+                                and not (w and w[0] == new_win[0]
+                                        and abs(float(w[1]) - new_win[1]) < 0.05)
+                                and not any(w and w[0] == fs
+                                            and abs(float(w[1]) - fi) < 0.05
+                                            for fs, fi in failed_wins)]
+                        sel.beat_windows = [new_win] + kept
+                        av["status"] = "ok"
+                        av["replaced_from"] = {"shot": shot.index if shot else -1}
+                        if downgrade:
+                            av["verdict"] = "keep"
+                            av["downgraded"] = label or "exact→contextual"
+                            av["relevance_class"] = "contextual_fallback"
+                        # _look_scope is intentionally off for alternates, so the actual prompt
+                        # carried no look-target clause. Record that question honestly.
+                        _bind_evidence(av, sel, seg, ashot, _alt_strict, anames,
+                                       _av_used_sheet, "")
+                        sel.verifier = av
+                        if materialize_promotions:
+                            made = _cut.cut_selection(proj, sel, cfg)
+                            made_path = Path(made) if made is not None else None
+                            if (made_path is None or not made_path.is_file()
+                                    or made_path.stat().st_size <= 0):
+                                raise RuntimeError("promotion cut returned no complete clip")
+                            sel.clip_path = str(made_path)
+                    except Exception as exc:             # noqa: BLE001 — disk transaction rollback
+                        vars(sel).clear()
+                        vars(sel).update(copy.deepcopy(_promotion_base_state))
+                        _restore_error = ""
+                        if materialize_promotions:
+                            try:
+                                if _clip_existed:
+                                    _tmp_restore = _clip.with_suffix(
+                                        _clip.suffix + ".verify_rollback.tmp")
+                                    try:
+                                        _tmp_restore.write_bytes(_clip_backup or b"")
+                                        _tmp_restore.replace(_clip)
+                                    finally:
+                                        _tmp_restore.unlink(missing_ok=True)
+                                else:
+                                    _clip.unlink(missing_ok=True)
+                            except Exception as restore_exc:  # noqa: BLE001 — remain inconclusive
+                                _restore_error = (
+                                    f"; clip rollback failed: {type(restore_exc).__name__}: "
+                                    f"{restore_exc}")
+                        _materialization_errors += 1
+                        _errored += 1
+                        _promotion_materialization_error["detail"] = (
+                            f"{type(exc).__name__}: {exc}{_restore_error}")
+                        if persist_project:
+                            try:
+                                proj.save()
+                            except Exception as save_exc:  # noqa: BLE001 — summary stays technical
+                                _promotion_materialization_error["detail"] += (
+                                    f"; metadata rollback save failed: "
+                                    f"{type(save_exc).__name__}: {save_exc}")
+                        log(f"verify: seg{sel.segment_index} promotion MATERIALIZATION ERROR — "
+                            f"rolled back selection/clip; "
+                            f"{_promotion_materialization_error['detail']}")
+                        return False
                     _reuse[(alt.source_id, alt.shot_index)] += 1   # this look now airs one more time
                     if _reuse[_old_key] > 0:
                         _reuse[_old_key] -= 1                       # the replaced pick no longer airs here
@@ -1923,6 +1992,12 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 return False
 
             _try_promote(downgrade=False)     # ORIGINAL strict/normal promotion (unchanged behavior)
+            if _promotion_materialization_error["detail"]:
+                # A cut/rollback failure is infrastructure uncertainty, not evidence that the
+                # accepted alternate was semantically bad. Do not run contextual/filler rungs or
+                # write a semantic rejection; the summary's errored/materialization counts make
+                # every scoped/full caller retry this beat.
+                continue
 
             # EXACT→CONTEXTUAL DOWNGRADE (relevance hierarchy: exact → contextual_fallback → filler).
             # The strict verifier rejected every candidate for not being the EXACT moment — but a clip
@@ -2144,7 +2219,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         if progress and sel.segment_index % 10 == 0:
             log(f"verify: {verified} checked, {replaced} replaced, {failed} unresolved")
 
-    proj.save()
+    if persist_project:
+        proj.save()
     if len(_vcache) != _vcache_n0:
         _save_verdict_cache(proj, _vcache)
     _attempted = verified + _errored
@@ -2163,6 +2239,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             f"(backend errors){' — CIRCUIT BREAKER OPEN' if _breaker_open else ''}")
     return {"verified": verified, "replaced": replaced, "failed": failed, "available": True,
             "errored": _errored, "reused": _reused, "attempted": _attempted,
+            "materialization_errors": _materialization_errors,
             "verifier_down": bool(_breaker_open), "breaker_skipped": _skipped_breaker,
             "vision_config": _vmodel,
             "verified_frac": (verified / _attempted) if _attempted else 1.0}

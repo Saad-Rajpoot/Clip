@@ -435,6 +435,113 @@ def test_vision_outage_does_not_checkpoint_verify_and_skips_the_grind():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_verify_materialization_failure_rolls_back_checkpoint_and_resume_retries():
+    """A promoted alternate is not a completed verify result until its clip exists.
+
+    The verifier owns the selection/clip rollback; orchestration owns the stage transaction.  A
+    materialization failure must therefore stop before recovery/build, leave ``verify`` absent from
+    the persisted checkpoint, and let Resume rerun only that unfinished stage.  The second pass
+    below simulates repaired ffmpeg/disk infrastructure and must proceed normally.
+    """
+    from vidlore.clipstudio import analyze as AN, discover as DS, download as DL
+    from vidlore.clipstudio import faceid as FI, verify as VF, review as RV, index as IX, ledger as LG
+    from vidlore.clipstudio import llm as LM
+    from vidlore.clipstudio.analyze import ScriptAnalysis
+
+    calls = {}
+    def _count(n): calls[n] = calls.get(n, 0) + 1
+
+    def fake_analyze(script_text, **k):
+        _count("analyze")
+        return ScriptAnalysis(topic="t", movie_title="Movie", video_type="multi_scene",
+                              actors=["Actor"], characters=[]), [_seg(0, "throne room", "tyrion")]
+
+    def fake_download(proj, candidates, cfg, **k):
+        _count("download")
+        proj.sources = [SourceVideo(id="srcA", url="https://y/1", local_path="/tmp/x.mp4",
+                                    title="Scene", duration=60.0, status="ok")]
+
+    def fake_match(proj, segs, cfg, **k):
+        _count("match")
+        proj.selections = [_sel(s.index, "srcA") for s in segs]
+
+    def fake_verify(proj, segs, cfg, eng, **k):
+        _count("verify")
+        if calls["verify"] == 1:
+            return {"verified": 1, "errored": 1, "attempted": 2,
+                    "verifier_down": False, "available": True,
+                    "materialization_errors": 1}
+        return {"verified": 1, "errored": 0, "attempted": 1,
+                "verifier_down": False, "available": True,
+                "materialization_errors": 0}
+
+    def fake_build(proj, segs, cfg, **k):
+        _count("build")
+        out = proj.output_dir / "final.mp4"
+        out.write_text("video")
+        return out
+
+    patches = [
+        (AN, "analyze_script", fake_analyze),
+        (DS, "discover_sources", lambda a, c, **k: [
+            DS.SourceCandidate(url="https://y/1", id="srcA", title="Scene")]),
+        (DL, "download_candidates", fake_download),
+        (FI, "available", lambda: False),
+        (IX, "clip_available", lambda: True),
+        (VF, "verify_and_repair", fake_verify),
+        (LM, "vision_probe", lambda *a, **k: (True, "ok")),
+        (RV, "write_review", lambda *a, **k: "review.html"),
+        (LG, "finalize", lambda proj, segs, cfg: {
+            "flagged_for_review": 0, "segments": len(segs), "mean_confidence": 1.0}),
+        (O, "index_all", lambda *a, **k: _count("index")),
+        (O, "match_segments", fake_match),
+        (O, "cut_all", lambda *a, **k: (_count("cut"), 0)[1]),
+        (O, "build_video", fake_build),
+        (O, "_recover_unresolved_beats", lambda *a, **k: _count("recover")),
+        (O, "_fill_image_fallbacks", lambda *a, **k: _count("fallback")),
+        (O, "_purge_unwanted_sources", lambda *a, **k: 0),
+    ]
+    saved = [(m, n, getattr(m, n, None)) for m, n, _ in patches]
+    tmp = tempfile.mkdtemp()
+    try:
+        for m, n, fn in patches:
+            setattr(m, n, fn)
+        kw = dict(topic="t", script_text="a real script line", movie_hint="Movie",
+                  policy="approved_testing", max_sources=4, do_build=True, verify=True)
+
+        raised = None
+        try:
+            O.produce_auto(tmp, **kw)
+        except O.PipelineError as exc:
+            raised = exc
+        assert raised is not None, "a promotion cut failure must fail the verify stage"
+        assert "materialization failed" in str(raised)
+        assert calls.get("verify") == 1
+        assert calls.get("recover", 0) == 0, "recovery must not reinterpret infra failure"
+        assert calls.get("fallback", 0) == 0, "fallback must not hide infra failure"
+        assert calls.get("build", 0) == 0, "assembly must not run after failed promotion"
+        persisted = ClipProject.load(tmp)
+        assert O._ckpt(persisted)["stages"].get("verify") is None, \
+            "failed promotion materialization must not checkpoint verify as clean"
+
+        O.produce_auto(tmp, resume=True, **kw)
+        assert calls.get("verify") == 2, "Resume must retry the uncheckpointed verify stage"
+        assert calls.get("analyze") == 1 and calls.get("download") == 1, \
+            f"Resume must reuse completed upstream work: {calls}"
+        assert calls.get("match") == 1 and calls.get("cut") == 1, \
+            f"Resume must not rematch or recut upstream selections: {calls}"
+        assert calls.get("recover") == 1 and calls.get("fallback") == 1
+        assert calls.get("build") == 1
+        persisted = ClipProject.load(tmp)
+        assert O._ckpt(persisted)["stages"].get("verify") is not None, \
+            "a clean retry must checkpoint verify"
+    finally:
+        for m, n, orig in saved:
+            if orig is not None:
+                setattr(m, n, orig)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_final_black_gate_honors_review_mode():
     """The final-video black gate must block in production but WARN+DELIVER in review mode — the
     same warn-mode contract the footage + unverified-exact gates follow. A 1s dark region must not
@@ -496,6 +603,7 @@ TESTS = [
     test_vision_error_classifier,
     test_vision_backend_error_is_retryable_and_distinct,
     test_vision_outage_does_not_checkpoint_verify_and_skips_the_grind,
+    test_verify_materialization_failure_rolls_back_checkpoint_and_resume_retries,
     test_final_black_gate_honors_review_mode,
     test_preflight_and_outage_wiring_present,
     test_signature_is_stable_and_sensitive,

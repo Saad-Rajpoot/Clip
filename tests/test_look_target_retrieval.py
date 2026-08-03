@@ -107,8 +107,14 @@ def test_wiring():
     o = open(os.path.join(ROOT, "vidlore", "clipstudio", "orchestrate.py")).read()
     check("recovery adds bounded look-miss acquisition",
           "VIDLORE_CLIPSTUDIO_LOOK_RECOVERY" in o and "_look_aug" in o)
+    # Recovery now augments a disposable segment copy so the authored/project segment is never
+    # mutated just to adapt one search.  Assert the current semantic wiring instead of coupling
+    # this smoke test to the old loop variable name (`s`).
+    look_query_block = o.split("if _original_seg.index in _look_aug:", 1)[1][:300]
     check("recovery augments the search query with the target",
-          "close-up" in o.split("_look_aug[s.index]")[1][:40])
+          "_recovery_seg.scene_query" in look_query_block
+          and "_look_aug[_original_seg.index]" in look_query_block
+          and "close-up" in look_query_block)
 
 
 if __name__ == "__main__":
