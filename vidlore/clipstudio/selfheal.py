@@ -663,7 +663,8 @@ class InconclusiveAcquisitionError(RuntimeError):
         self.detail = str(detail or "")
 
 
-def acquire_for_beat(proj, seg, cfg, *, policy: str, log=print) -> list:
+def acquire_for_beat(proj, seg, cfg, *, policy: str, faceid_obj=None, refs=None,
+                     roster=None, log=print) -> list:
     """Discover→download→index up to SELFHEAL_MAX_SRC new sources for this beat's scene.
     Direct ytsearch results (the precision method) are considered FIRST, the broader
     discovery machinery second. Returns the newly indexed SourceVideo objects."""
@@ -782,7 +783,12 @@ def acquire_for_beat(proj, seg, cfg, *, policy: str, log=print) -> list:
     index_errors = []
     for sv in usable:
         try:
-            shots = I.index_source(proj, sv, cfg, progress=None)
+            # Late-acquired footage must be indexed with the same identity/name capabilities as
+            # the main pool.  Omitting these built a weaker cache (faceid=False, roster=False), so
+            # every Resume re-indexed the source and changed the pool fingerprint before healing.
+            shots = I.index_source(
+                proj, sv, cfg, references=refs, faceid=faceid_obj,
+                roster=roster, progress=None)
             if not shots:
                 index_errors.append(f"{sv.id}:zero_shots")
                 log(f"self-heal: index produced 0 shots for {sv.id}")
@@ -933,7 +939,8 @@ def _soften_and_retry(proj, seg, sel, eng, pool, used, log) -> bool:
 
 
 def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
-                       allow_acquire: bool = True, log=print) -> int:
+                       allow_acquire: bool = True, faceid_obj=None, refs=None,
+                       roster=None, log=print) -> int:
     """One healing pass over `blocked` beat indexes. Returns beats resolved this pass.
 
     Adding footage/stills is always allowed.  Changing an authored visual promise is not: both
@@ -1051,7 +1058,9 @@ def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
             continue
         if allow_acquire:
             try:
-                fresh = acquire_for_beat(proj, seg, cfg, policy=policy, log=log)
+                fresh = acquire_for_beat(
+                    proj, seg, cfg, policy=policy, faceid_obj=faceid_obj,
+                    refs=refs, roster=roster, log=log)
             except InconclusiveAcquisitionError:
                 _rollback_beat()
                 raise
@@ -2027,7 +2036,8 @@ def heal_selection_relevance_gaps(proj, segments, cfg, audit: dict, *, policy: s
         raise
 
 
-def run(proj, segments, cfg, analysis, *, policy: str, log=print) -> str | None:
+def run(proj, segments, cfg, analysis, *, policy: str, faceid_obj=None, refs=None,
+        roster=None, log=print) -> str | None:
     """The bounded self-healing loop around the pre-assembly gate. Returns the final gate
     reason (None = clear). Never weakens the gate: it only adds verified footage/stills."""
     from .build import preassemble_release_block_reason
@@ -2041,8 +2051,10 @@ def run(proj, segments, cfg, analysis, *, policy: str, log=print) -> str | None:
         idxs = parse_blocked(pre) or blocked_indexes(proj)
         log(f"self-heal: round {r}/{rounds} — {len(idxs)} blocked beat(s): {idxs}")
         t0 = time.time()
-        n = heal_blocked_beats(proj, segments, cfg, blocked=idxs, policy=policy,
-                               allow_acquire=(r >= 1), log=log)
+        n = heal_blocked_beats(
+            proj, segments, cfg, blocked=idxs, policy=policy,
+            allow_acquire=(r >= 1), faceid_obj=faceid_obj, refs=refs,
+            roster=roster, log=log)
         proj.save()
         log(f"self-heal: round {r} resolved {n} beat(s) in {(time.time() - t0) / 60:.1f} min")
         pre = preassemble_release_block_reason(proj, segments, analysis)

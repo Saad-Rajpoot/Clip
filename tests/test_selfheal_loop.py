@@ -179,6 +179,9 @@ class TestAcquisition(unittest.TestCase):
                                            title=f"Purple Wedding chalice scene {i}")
                      for i in range(6)]
             seen = {}
+            faceid_obj = object()
+            refs = {"Joffrey": object()}
+            roster = ["Jack Gleeson"]
 
             def fake_download(proj, new, cfg2, *, policy, progress=None):
                 seen["n"] = len(new)
@@ -188,18 +191,30 @@ class TestAcquisition(unittest.TestCase):
                                                     status=SOURCE_OK, height=720,
                                                     local_path=str(Path(td) / "f.mp4")))
 
+            def fake_index(_proj, _source, _cfg, **kwargs):
+                seen.setdefault("index_kwargs", []).append(kwargs)
+                return [object()]
+
             with mock.patch("vidlore.clipstudio.discover.discover_sources",
                             return_value=cands), \
                     mock.patch("vidlore.clipstudio.download.download_candidates",
                                side_effect=fake_download), \
-                    mock.patch("vidlore.clipstudio.index.index_source", return_value=[object()]), \
+                    mock.patch("vidlore.clipstudio.index.index_source",
+                               side_effect=fake_index), \
                     mock.patch.object(SH, "_llm_queries",
                                       return_value=["Purple Wedding chalice scene"]):
-                fresh = SH.acquire_for_beat(p, seg, cfg, policy="approved_testing",
-                                            log=lambda m: None)
+                fresh = SH.acquire_for_beat(
+                    p, seg, cfg, policy="approved_testing",
+                    faceid_obj=faceid_obj, refs=refs, roster=roster,
+                    log=lambda m: None)
             self.assertEqual(seen["n"], 2, "SELFHEAL_MAX_SRC=2 must bound the fetch")
             self.assertEqual(seen["policy"], "approved_testing")
             self.assertEqual(len(fresh), 2)
+            self.assertEqual(len(seen["index_kwargs"]), 2)
+            for kwargs in seen["index_kwargs"]:
+                self.assertIs(kwargs["faceid"], faceid_obj)
+                self.assertIs(kwargs["references"], refs)
+                self.assertIs(kwargs["roster"], roster)
 
     def test_discovery_exception_is_inconclusive_not_an_empty_pool(self):
         with tempfile.TemporaryDirectory() as td:
@@ -357,6 +372,9 @@ class TestLoop(unittest.TestCase):
             p.selections = [ClipSelection(segment_index=1, source_id="x", shot_index=0,
                                           in_point=0, out_point=2, confidence=0.5)]
             cfg = ClipConfig()
+            faceid_obj = object()
+            refs = {"Joffrey": object()}
+            roster = ["Jack Gleeson"]
             gate = ["blocked — scene(s) [1]. x", None]     # blocked once, then clear
 
             def fake_gate(*a, **k):
@@ -365,10 +383,16 @@ class TestLoop(unittest.TestCase):
             with mock.patch("vidlore.clipstudio.build.preassemble_release_block_reason",
                             side_effect=fake_gate), \
                     mock.patch.object(SH, "heal_blocked_beats", return_value=1) as healed:
-                out = SH.run(p, p.segments, cfg, None, policy="approved_testing",
-                             log=lambda m: None)
+                out = SH.run(
+                    p, p.segments, cfg, None, policy="approved_testing",
+                    faceid_obj=faceid_obj, refs=refs, roster=roster,
+                    log=lambda m: None)
             self.assertIsNone(out)
             self.assertEqual(healed.call_count, 1)
+            heal_kwargs = healed.call_args.kwargs
+            self.assertIs(heal_kwargs["faceid_obj"], faceid_obj)
+            self.assertIs(heal_kwargs["refs"], refs)
+            self.assertIs(heal_kwargs["roster"], roster)
 
             gate2 = iter(["blocked — scene(s) [1]. x"] * 10)
             with mock.patch("vidlore.clipstudio.build.preassemble_release_block_reason",
@@ -377,6 +401,33 @@ class TestLoop(unittest.TestCase):
                 out2 = SH.run(p, p.segments, cfg, None, policy="approved_testing",
                               log=lambda m: None)
             self.assertIsNotNone(out2, "gate verdict must survive a no-progress heal")
+
+    def test_heal_threads_main_pool_capabilities_to_targeted_acquisition(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = _proj(td)
+            seg = _seg(12)
+            p.segments = [seg]
+            p.selections = [ClipSelection(
+                segment_index=12, source_id="x", shot_index=0,
+                in_point=0, out_point=2, confidence=0.5)]
+            faceid_obj = object()
+            refs = {"Joffrey": object()}
+            roster = ["Jack Gleeson"]
+            with mock.patch("vidlore.clipstudio.config.engine_config", return_value=None), \
+                    mock.patch.object(SH, "_clean_pool", return_value=[]), \
+                    mock.patch.object(SH, "still_recover", return_value=False), \
+                    mock.patch.object(SH, "beat_unfillable", return_value=False), \
+                    mock.patch.object(SH, "_venue_cache_save"), \
+                    mock.patch.object(SH, "acquire_for_beat", return_value=[]) as acquired:
+                SH.heal_blocked_beats(
+                    p, [seg], ClipConfig(), blocked=[12], policy="approved_testing",
+                    faceid_obj=faceid_obj, refs=refs, roster=roster,
+                    log=lambda _m: None)
+
+            acquire_kwargs = acquired.call_args.kwargs
+            self.assertIs(acquire_kwargs["faceid_obj"], faceid_obj)
+            self.assertIs(acquire_kwargs["refs"], refs)
+            self.assertIs(acquire_kwargs["roster"], roster)
 
     def test_kill_switch(self):
         with tempfile.TemporaryDirectory() as td:
@@ -426,7 +477,9 @@ class TestWiring(unittest.TestCase):
     def test_orchestrate_wires_pre_gate_and_build_retry(self):
         src = (Path(__file__).resolve().parents[1]
                / "vidlore" / "clipstudio" / "orchestrate.py").read_text()
-        self.assertIn("_selfheal.run(proj, segs, cfg, analysis, policy=policy", src)
+        self.assertIn("return _selfheal.run(", src)
+        self.assertIn("proj, segs, cfg, analysis, policy=policy", src)
+        self.assertIn("faceid_obj=faceid_obj, refs=refs, roster=roster", src)
         # the catch routes on the TYPED exception kind — the old message-substring match
         # ("NO valid fallback") never matched the real gate message and was dead code
         self.assertIn('getattr(_be, "kind", "") == "rejected_footage"', src)
@@ -458,11 +511,15 @@ class TestWiring(unittest.TestCase):
             logs = []
             technical = SH.InconclusiveAcquisitionError(
                 80, "download", detail="all attempted sources failed")
-            with mock.patch.object(SH, "run", side_effect=technical):
+            faceid_obj = object()
+            refs = {"Petyr Baelish": object()}
+            roster = ["Aidan Gillen"]
+            with mock.patch.object(SH, "run", side_effect=technical) as runner:
                 with self.assertRaises(SH.InconclusiveAcquisitionError) as raised:
                     O._run_preassemble_selfheal(
                         p, [], ClipConfig(), None, policy="approved_testing",
-                        pre="blocked — scene(s) [80].", log=logs.append)
+                        pre="blocked — scene(s) [80].", faceid_obj=faceid_obj,
+                        refs=refs, roster=roster, log=logs.append)
 
             self.assertIs(raised.exception, technical)
             self.assertNotIsInstance(raised.exception, NonRetryableBuildError)
@@ -473,6 +530,10 @@ class TestWiring(unittest.TestCase):
             self.assertNotIn("selection_relevance_gap_softening", persisted.meta)
             self.assertFalse(any("self-heal: skipped" in line for line in logs),
                              "technical acquisition must propagate, never be logged as a skip")
+            run_kwargs = runner.call_args.kwargs
+            self.assertIs(run_kwargs["faceid_obj"], faceid_obj)
+            self.assertIs(run_kwargs["refs"], refs)
+            self.assertIs(run_kwargs["roster"], roster)
 
 
 if __name__ == "__main__":

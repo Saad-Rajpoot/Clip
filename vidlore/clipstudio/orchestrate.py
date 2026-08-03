@@ -411,7 +411,8 @@ def _run_backfill_invocation(proj, input_sig: str, runner, *, log) -> bool:
 
 
 def _run_preassemble_selfheal(proj, segs, cfg, analysis, *, policy: str,
-                              pre: str, log) -> str | None:
+                              pre: str, faceid_obj=None, refs=None, roster=None,
+                              log) -> str | None:
     """Run structural-gate self-heal without laundering technical acquisition into content.
 
     Most legacy self-heal faults remain fail-open so the authoritative gate can speak.  A typed
@@ -424,7 +425,9 @@ def _run_preassemble_selfheal(proj, segs, cfg, analysis, *, policy: str,
         return pre
     from . import selfheal as _selfheal
     try:
-        return _selfheal.run(proj, segs, cfg, analysis, policy=policy, log=log)
+        return _selfheal.run(
+            proj, segs, cfg, analysis, policy=policy, faceid_obj=faceid_obj,
+            refs=refs, roster=roster, log=log)
     except _selfheal.InconclusiveAcquisitionError:
         _ckpt(proj)["stages"].pop("recover", None)
         proj.save()
@@ -3520,7 +3523,8 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
         # this makes that loop the pipeline's own behavior. VIDLORE_CLIPSTUDIO_SELFHEAL=0 off.
         if _pre:
             _pre = _run_preassemble_selfheal(
-                proj, segs, cfg, analysis, policy=policy, pre=_pre, log=log)
+                proj, segs, cfg, analysis, policy=policy, pre=_pre,
+                faceid_obj=faceid_obj, refs=refs, roster=roster, log=log)
         if _pre:
             _mode = _os.environ.get("VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE", "block").strip().lower()
             if _mode == "warn":
@@ -3584,8 +3588,9 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
                 _idxs = _selfheal_b.blocked_indexes(proj)
                 log(f"self-heal: in-build release gate blocked {len(_idxs)} beat(s) — healing "
                     f"and rebuilding once")
-                _n = _selfheal_b.heal_blocked_beats(proj, segs, cfg, blocked=_idxs,
-                                                    policy=policy, log=log)
+                _n = _selfheal_b.heal_blocked_beats(
+                    proj, segs, cfg, blocked=_idxs, policy=policy,
+                    faceid_obj=faceid_obj, refs=refs, roster=roster, log=log)
                 proj.save()
                 if not _n:
                     raise
