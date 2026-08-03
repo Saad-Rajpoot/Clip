@@ -208,11 +208,14 @@ def test_footage_signatures_use_the_post_backfill_pool_and_ignore_duplicate_reco
     two = _Src("two", "newly admitted clean copy")
 
     before = O._footage_stage_signatures(
-        "download", [one], force_index=False, segments=[seg], verify=True)
+        "download", [one], force_index=False, segments=[seg], verify=True,
+        asr_signature="asr-v1")
     duplicate_only = O._footage_stage_signatures(
-        "download", [one, duplicate], force_index=False, segments=[seg], verify=True)
+        "download", [one, duplicate], force_index=False, segments=[seg], verify=True,
+        asr_signature="asr-v1")
     after = O._footage_stage_signatures(
-        "download", [one, duplicate, two], force_index=False, segments=[seg], verify=True)
+        "download", [one, duplicate, two], force_index=False, segments=[seg], verify=True,
+        asr_signature="asr-v1")
 
     assert duplicate_only == before
     assert after != before
@@ -245,7 +248,8 @@ def test_incomplete_backfill_forces_cached_footage_path_then_complete_resume_ski
         movie_title="Game of Thrones", video_type="multi_scene",
         actors=["Aidan Gillen"], characters=[], key_scenes=[])
     footage = O._footage_stage_signatures(
-        "download", [], force_index=False, segments=[seg], verify=True)
+        "download", [], force_index=False, segments=[seg], verify=True,
+        asr_signature="asr-v1")
     sig_match, sig_verify, sig_recover = footage[1], footage[3], footage[4]
     for stage, sig in (("match", sig_match), ("verify", sig_verify),
                        ("recover", sig_recover)):
@@ -279,6 +283,51 @@ def test_incomplete_backfill_forces_cached_footage_path_then_complete_resume_ski
     assert not O._footage_stages_required(
         **downstream, backfill_enabled=True, skip_backfill=skip_backfill), \
         "resume 2 may skip only after the same semantic inputs completed conclusively"
+
+
+def test_asr_semantic_change_invalidates_cached_match_and_every_downstream_stage():
+    """A Resume must re-index before matching when persisted ASR semantics changed."""
+    proj = _Proj([], [])
+    seg = types.SimpleNamespace(
+        index=0, text="beat", visual_policy="exact_scene", required_entity="",
+        required_kind="", scene_query="scene", quote="A real line")
+    old = O._footage_stage_signatures(
+        "download", [], force_index=False, segments=[seg], verify=True,
+        asr_signature="whisper-v1:old-roster")
+    new = O._footage_stage_signatures(
+        "download", [], force_index=False, segments=[seg], verify=True,
+        asr_signature="whisper-v2:new-roster")
+
+    cached = (("match", old[1]), ("cut", old[2]),
+              ("verify", old[3]), ("recover", old[4]))
+    changed = (("match", new[1]), ("cut", new[2]),
+               ("verify", new[3]), ("recover", new[4]))
+    for stage, sig in cached:
+        O._stage_done(proj, stage, sig)
+
+    assert all(O._stage_skip(proj, stage, sig, resume=True) for stage, sig in cached)
+    assert all(not O._stage_skip(proj, stage, sig, resume=True) for stage, sig in changed)
+    assert old[0] != new[0], "ASR semantics are part of the persisted index identity"
+
+
+def test_production_asr_signature_binds_model_roster_and_whisper_version(monkeypatch):
+    from vidlore.clipstudio import index as I
+
+    proj = _Proj([], [])
+    proj.meta["analysis"] = {
+        "actors": ["Lena Headey"], "characters": [{"name": "Cersei Lannister"}]}
+    cfg = types.SimpleNamespace(whisper_model="base", whisper_compute="int8")
+    monkeypatch.setattr(I, "_faster_whisper_version", lambda: "1.2.1")
+    baseline = O.asr_semantic_fingerprint(proj, cfg)
+
+    cfg.whisper_model = "small"
+    assert O.asr_semantic_fingerprint(proj, cfg) != baseline
+    cfg.whisper_model = "base"
+    proj.meta["analysis"]["characters"].append({"name": "Olenna Tyrell"})
+    assert O.asr_semantic_fingerprint(proj, cfg) != baseline
+    proj.meta["analysis"]["characters"].pop()
+    monkeypatch.setattr(I, "_faster_whisper_version", lambda: "1.3.0")
+    assert O.asr_semantic_fingerprint(proj, cfg) != baseline
 
 
 def test_backfill_signature_binds_cfg_analysis_and_gate_env_but_not_recovery_pool(monkeypatch):

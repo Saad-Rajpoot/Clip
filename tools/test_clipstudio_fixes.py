@@ -970,6 +970,7 @@ def test_index_cache_and_atomic_saves():
     # same cache, same (no-cap) call, now schema-2 complete → still served from cache
     (proj.index_dir / "s1.index.meta.json").write_text(
         json.dumps({"faceid": False, "ocr": False, "words": True,
+                    "asr_prompt_fingerprint": IX._asr_prompt_fingerprint(cfg_noocr, ""),
                     "schema": IX.INDEX_SCHEMA}), encoding="utf-8")
     (proj.index_dir / "s1.words.json").write_text("[]", encoding="utf-8")
     msgs2 = []

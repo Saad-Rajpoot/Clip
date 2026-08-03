@@ -13,6 +13,8 @@ cheap. Re-indexing is skipped when shots.json already exists (resume), unless fo
 from __future__ import annotations
 
 import json
+import hashlib
+import inspect
 import math
 import os
 import re
@@ -30,8 +32,10 @@ from .segment import _STOP as _CONTENT_STOP
 #   1 → shots + per-shot transcript only
 #   2 → + <sid>.words.json (word-level ASR start/end/text) for quote-span location
 INDEX_SCHEMA = 2
+_ASR_PIPELINE_REVISION = 4
+_ASR_PROMPT_RESERVE_TOKENS = 16
 
-_WHISPER = {}   # cache: model_name -> WhisperModel
+_WHISPER = {}   # cache: exact Whisper constructor identity -> WhisperModel
 
 
 # ---------------------------------------------------------------------------
@@ -103,16 +107,157 @@ def _merge_short(scenes: list[tuple[float, float]], min_sec: float) -> list[tupl
 # ---------------------------------------------------------------------------
 
 def _whisper(cfg: ClipConfig):
-    key = cfg.whisper_model
+    threads = int(getattr(cfg, "whisper_cpu_threads", 0) or 0)
+    key = (str(cfg.whisper_model), str(cfg.whisper_compute), max(0, threads))
     if key not in _WHISPER:
         from faster_whisper import WhisperModel
         # cpu_threads: 0 = ctranslate2 default; a positive value pins the ASR pass to that many
         # cores (auto-scaled from the machine in config) so a powerful box transcribes much faster.
-        threads = int(getattr(cfg, "whisper_cpu_threads", 0) or 0)
         _WHISPER[key] = WhisperModel(cfg.whisper_model, device="cpu",
                                      compute_type=cfg.whisper_compute,
                                      cpu_threads=max(0, threads))
     return _WHISPER[key]
+
+
+def _asr_hotwords(roster) -> str:
+    """Stable, name-delimited vocabulary; order affects both truncation and decoder output."""
+    return ", ".join(dict.fromkeys(
+        str(name or "").strip() for name in (roster or []) if str(name or "").strip()))
+
+
+def _project_asr_hotwords(proj, fallback=None) -> str:
+    """ASR-only vocabulary; never reuse this richer list as OCR identity evidence."""
+    analysis = (getattr(proj, "meta", {}) or {}).get("analysis") or {}
+    # Character names are the words the show actually speaks, so keep them first when an unusually
+    # large cast must be bounded to Whisper's context. Actor names remain useful for interviews and
+    # credits, but must not evict a scripted character name such as Cersei.
+    names = [str(row.get("name", "") or "")
+             for row in (analysis.get("characters") or []) if isinstance(row, dict)]
+    names.extend(analysis.get("actors") or [])
+    return _asr_hotwords(names or fallback)
+
+
+def _faster_whisper_version() -> str:
+    try:
+        from importlib.metadata import version
+        return str(version("faster-whisper") or "unknown")
+    except Exception:
+        return "unknown"
+
+
+def _asr_prompt_fingerprint(cfg: ClipConfig, hotwords: str) -> str:
+    """Identity of every persisted-ASR input/options dependency relevant to word evidence."""
+    payload = {
+        "revision": _ASR_PIPELINE_REVISION,
+        "model": str(getattr(cfg, "whisper_model", "") or ""),
+        "compute": str(getattr(cfg, "whisper_compute", "") or ""),
+        "faster_whisper": _faster_whisper_version(),
+        "hotwords": str(hotwords or ""),
+        "primary": {"word_timestamps": True, "vad_filter": True},
+        "eof_rescue": {
+            "window_sec": _ASR_EOF_WINDOW_SEC,
+            "gap_sec": _ASR_EOF_RESCUE_GAP_SEC,
+            "max_no_speech": _ASR_EOF_MAX_NO_SPEECH,
+            "min_avg_logprob": _ASR_EOF_MIN_AVG_LOGPROB,
+            "vad_filter": False,
+            "condition_on_previous_text": False,
+        },
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def asr_semantic_fingerprint(proj, cfg: ClipConfig) -> str:
+    """Public checkpoint/cache identity for the ASR evidence a project requires."""
+    return _asr_prompt_fingerprint(cfg, _project_asr_hotwords(proj))
+
+
+def _token_ids(tokenizer, text: str) -> Optional[list[int]]:
+    """Return tokenizer IDs across HuggingFace-tokenizers and simple test doubles."""
+    try:
+        try:
+            encoded = tokenizer.encode(text, add_special_tokens=False)
+        except TypeError:
+            encoded = tokenizer.encode(text)
+        ids = getattr(encoded, "ids", encoded)
+        return [int(token) for token in ids]
+    except Exception:
+        return None
+
+
+def _bound_asr_vocabulary(model, hotwords: str, *, duplicated: bool) -> str:
+    """Keep the complete-name prefix that provably fits Whisper's decoder context.
+
+    Faster-Whisper independently clips ``hotwords`` and ``initial_prompt`` to half of the context,
+    then concatenates both. Near the boundary that can exceed the model's 448-token limit. Project
+    vocabularies are comma-delimited so this function drops whole low-priority names, never half a
+    name. The conservative character fallback is only for old/test models without a tokenizer.
+    """
+    raw = str(hotwords or "").strip()
+    if not raw:
+        return ""
+    entries = [entry.strip() for entry in raw.split(",") if entry.strip()]
+    if not entries:
+        return ""
+    tokenizer = getattr(model, "hf_tokenizer", None)
+    max_length = max(32, int(getattr(model, "max_length", 448) or 448))
+    half_limit = max(1, max_length // 2 - 1)
+
+    def fits(value: str) -> bool:
+        initial = f"Cast and character names: {value}"
+        if tokenizer is None:
+            # Whisper uses byte-level BPE, so UTF-8 byte count is a conservative token upper bound
+            # even for old wrappers/test doubles that do not expose ``hf_tokenizer``.
+            initial_bound = len(initial.encode("utf-8"))
+            hotword_bound = len(value.encode("utf-8")) if duplicated else 0
+            return (initial_bound <= half_limit
+                    and hotword_bound <= half_limit
+                    and initial_bound + hotword_bound + _ASR_PROMPT_RESERVE_TOKENS
+                    <= max_length)
+        initial_ids = _token_ids(tokenizer, " " + initial.strip())
+        hotword_ids = _token_ids(tokenizer, " " + value.strip()) if duplicated else []
+        if initial_ids is None or hotword_ids is None:
+            return False
+        return (len(initial_ids) <= half_limit
+                and len(hotword_ids) <= half_limit
+                and len(initial_ids) + len(hotword_ids) + _ASR_PROMPT_RESERVE_TOKENS
+                <= max_length)
+
+    kept: list[str] = []
+    for entry in entries:
+        candidate = ", ".join([*kept, entry])
+        if fits(candidate):
+            kept.append(entry)
+        else:
+            # Inputs are priority ordered. Once the prefix is full, later entries cannot be added
+            # without making prompt identity/order surprising on resume.
+            break
+    return ", ".join(kept)
+
+
+def _transcribe_with_vocabulary(model, path: Path, *, hotwords: str = "", **kwargs):
+    """Call Faster-Whisper without breaking supported 1.0.x installs.
+
+    ``hotwords`` arrived after 1.0.0 while requirements intentionally support 1.0+.  Every version
+    accepts ``initial_prompt``; pass the stronger hotword hint only when the installed method (or a
+    test double's **kwargs) advertises it.  Never retry a TypeError after decoding starts.
+    """
+    if hotwords:
+        try:
+            params = inspect.signature(model.transcribe).parameters.values()
+            supports_hotwords = any(
+                p.name == "hotwords" or p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+        except (TypeError, ValueError):
+            supports_hotwords = False
+        bounded = _bound_asr_vocabulary(model, hotwords, duplicated=supports_hotwords)
+        if not bounded:
+            # The requested proper-name vocabulary is part of the persisted ASR identity. Decoding
+            # without it and stamping the full-roster fingerprint would be false provenance.
+            raise RuntimeError("ASR vocabulary could not be bounded/tokenized safely")
+        kwargs["initial_prompt"] = f"Cast and character names: {bounded}"
+        if supports_hotwords:
+            kwargs["hotwords"] = bounded
+    return model.transcribe(str(path), **kwargs)
 
 
 _ASR_EOF_WINDOW_SEC = 30.0
@@ -164,8 +309,9 @@ def _merge_eof_words(primary: list[tuple[float, float, str]],
     return out
 
 
-def _rescue_eof_words(path: Path, model, primary: list[tuple[float, float, str]],
-                      duration: float, *, hotwords: str = "") -> list[tuple[float, float, str]]:
+def _rescue_eof_words_result(path: Path, model, primary: list[tuple[float, float, str]],
+                             duration: float, *, hotwords: str = "") \
+        -> tuple[bool, list[tuple[float, float, str]]]:
     """Recover trailing dialogue that whole-source Silero VAD can omit.
 
     The independent pass is narrowly EOF-anchored and disables VAD/previous-text conditioning.  It
@@ -175,36 +321,43 @@ def _rescue_eof_words(path: Path, model, primary: list[tuple[float, float, str]]
     """
     duration = float(duration or 0.0)
     if duration <= 2.0:
-        return primary
+        return True, primary
     last_end = max((float(row[1]) for row in primary), default=0.0)
     if duration - last_end < _ASR_EOF_RESCUE_GAP_SEC:
-        return primary
+        return True, primary
     tail_start = max(0.0, duration - _ASR_EOF_WINDOW_SEC)
     try:
-        segments, _info = model.transcribe(
-            str(path), word_timestamps=True, vad_filter=False,
+        segments, _info = _transcribe_with_vocabulary(
+            model, path, word_timestamps=True, vad_filter=False,
             condition_on_previous_text=False,
             clip_timestamps=[tail_start, duration],
-            hotwords=hotwords or None,
-            initial_prompt=(f"Cast and character names: {hotwords}" if hotwords else None),
+            hotwords=hotwords,
         )
         # no-VAD is required precisely because Silero missed this tail, but that also makes silent
         # outro hallucinations possible.  Faster-Whisper supplies independent decoder confidence
         # per segment; fail closed when it is missing/non-finite or says silence/low likelihood.
         credible = []
+        confidence_unverifiable = False
         for seg in segments:
             try:
                 no_speech = float(seg.no_speech_prob)
                 avg_logprob = float(seg.avg_logprob)
             except (AttributeError, TypeError, ValueError):
+                confidence_unverifiable = True
                 continue
-            if (math.isfinite(no_speech) and math.isfinite(avg_logprob)
-                    and no_speech <= _ASR_EOF_MAX_NO_SPEECH
+            if not (math.isfinite(no_speech) and math.isfinite(avg_logprob)):
+                confidence_unverifiable = True
+                continue
+            if (no_speech <= _ASR_EOF_MAX_NO_SPEECH
                     and avg_logprob >= _ASR_EOF_MIN_AVG_LOGPROB):
                 credible.append(seg)
+        if confidence_unverifiable:
+            return False, primary
         rescue = _timed_words(credible, lo=tail_start, hi=duration)
     except Exception:
-        return primary
+        # The rescue was triggered because the primary decoder left a material unknown tail. A
+        # technical failure here cannot certify that tail as silence or absence of a real quote.
+        return False, primary
 
     # Require a coherent multi-word observation strictly after the persisted stream.  Existing
     # overlap words are still merged below, but cannot by themselves authorize the rescue.
@@ -215,30 +368,45 @@ def _rescue_eof_words(path: Path, model, primary: list[tuple[float, float, str]]
         coherent = coherent + 1 if cur[0] - prev[1] <= 4.0 else 1
         best = max(best, coherent)
     if best < 2:
-        return primary
-    return _merge_eof_words(primary, rescue)
+        return True, primary
+    return True, _merge_eof_words(primary, rescue)
 
 
-def transcribe_words(path: Path, cfg: ClipConfig, *, duration: float = 0.0,
-                     hotwords: str = "") \
-        -> list[tuple[float, float, str]]:
-    """Return [(start,end,word)] for the whole source. Empty list if ASR unavailable."""
+def _rescue_eof_words(path: Path, model, primary: list[tuple[float, float, str]],
+                      duration: float, *, hotwords: str = "") -> list[tuple[float, float, str]]:
+    """Compatibility wrapper; persistence callers use the result form's success bit."""
+    return _rescue_eof_words_result(
+        path, model, primary, duration, hotwords=hotwords)[1]
+
+
+def _transcribe_words_result(path: Path, cfg: ClipConfig, *, duration: float = 0.0,
+                             hotwords: str = "") \
+        -> tuple[bool, list[tuple[float, float, str]]]:
+    """Return ``(decode_succeeded, timed_words)`` without conflating silence and failure."""
     try:
         model = _whisper(cfg)
-        segments, _info = model.transcribe(
-            str(path), word_timestamps=True, vad_filter=True, hotwords=hotwords or None,
-            initial_prompt=(f"Cast and character names: {hotwords}" if hotwords else None))
+        segments, _info = _transcribe_with_vocabulary(
+            model, path, word_timestamps=True, vad_filter=True, hotwords=hotwords)
         words = _timed_words(segments)
     except Exception:
-        return []
+        return False, []
     if not duration:
         try:
             duration = float(probe(path).get("duration", 0.0) or 0.0)
         except Exception:
             # Duration discovery only controls the optional rescue.  Never discard a successful
-            # primary transcript because ffprobe is unavailable or the container is malformed.
-            return words
-    return _rescue_eof_words(path, model, words, duration, hotwords=hotwords)
+            # primary transcript, but do not certify EOF completeness when its boundary is unknown.
+            return False, words
+    return _rescue_eof_words_result(
+        path, model, words, duration, hotwords=hotwords)
+
+
+def transcribe_words(path: Path, cfg: ClipConfig, *, duration: float = 0.0,
+                     hotwords: str = "") \
+        -> list[tuple[float, float, str]]:
+    """Compatibility wrapper returning words; use result form when persistence depends on success."""
+    return _transcribe_words_result(
+        path, cfg, duration=duration, hotwords=hotwords)[1]
 
 
 def _assign_transcript(shots: list[Shot], words: list[tuple[float, float, str]]) -> None:
@@ -280,15 +448,107 @@ def save_words(proj: ClipProject, source_id: str, words: list[tuple[float, float
     tmp.replace(f)
 
 
-def load_words(proj: ClipProject, source_id: str) -> list[tuple[float, float, str]]:
+def _load_words_result(proj: ClipProject, source_id: str) \
+        -> tuple[bool, list[tuple[float, float, str]]]:
+    """Distinguish a valid silent ``[]`` cache from missing, corrupt, or malformed JSON."""
     f = proj.index_dir / f"{source_id}.words.json"
     if not f.exists():
-        return []
+        return False, []
     try:
-        return [(float(a), float(b), str(c)) for a, b, c in
-                json.loads(f.read_text(encoding="utf-8"))]
+        payload = json.loads(f.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            return False, []
+        words: list[tuple[float, float, str]] = []
+        for row in payload:
+            if not isinstance(row, (list, tuple)) or len(row) != 3:
+                return False, []
+            start, end, text = float(row[0]), float(row[1]), str(row[2])
+            if (not math.isfinite(start) or not math.isfinite(end)
+                    or start < 0.0 or end <= start or not text.strip()):
+                return False, []
+            words.append((start, end, text))
+        return True, words
     except Exception:
-        return []
+        return False, []
+
+
+def load_words(proj: ClipProject, source_id: str) -> list[tuple[float, float, str]]:
+    return _load_words_result(proj, source_id)[1]
+
+
+def asr_pool_cache_audit(proj, cfg: ClipConfig, sources=None) -> dict:
+    """Cheap artifact check used before Resume trusts match and downstream checkpoints."""
+    expected = asr_semantic_fingerprint(proj, cfg)
+    invalid: list[dict] = []
+    seen: set[str] = set()
+    selected_shots: dict[str, set[int]] = {}
+    for selection in (getattr(proj, "selections", None) or []):
+        selected_sid = str(getattr(selection, "source_id", "") or "")
+        if not selected_sid:
+            continue
+        try:
+            selected_index = int(getattr(selection, "shot_index", -1))
+        except (TypeError, ValueError):
+            selected_index = -1
+        if selected_index >= 0:
+            selected_shots.setdefault(selected_sid, set()).add(selected_index)
+    pool = (getattr(proj, "sources", None) or []) if sources is None else (sources or [])
+    for source in pool:
+        sid = str(getattr(source, "id", "") or "")
+        if (not sid or sid in seen
+                or str(getattr(source, "status", "") or "") != SOURCE_OK):
+            continue
+        seen.add(sid)
+        try:
+            shots = load_shots(proj, sid)
+        except Exception:
+            shots = []
+        if not shots:
+            invalid.append({"source_id": sid, "reason": "shots_cache_invalid_or_missing"})
+            continue
+        indexed_shots = {int(getattr(shot, "index", -1)) for shot in shots}
+        if not selected_shots.get(sid, set()).issubset(indexed_shots):
+            invalid.append({"source_id": sid, "reason": "selected_shot_missing_from_index"})
+            continue
+        valid_words, _words = _load_words_result(proj, sid)
+        if not valid_words:
+            invalid.append({"source_id": sid, "reason": "words_cache_invalid_or_missing"})
+            continue
+        meta_file = Path(proj.index_dir) / f"{sid}.index.meta.json"
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        except Exception:
+            meta = None
+        if not isinstance(meta, dict):
+            invalid.append({"source_id": sid, "reason": "index_metadata_invalid_or_missing"})
+            continue
+        if meta.get("asr_refresh_in_progress"):
+            invalid.append({"source_id": sid, "reason": "asr_refresh_interrupted"})
+            continue
+        if meta.get("words") is not True:
+            invalid.append({"source_id": sid, "reason": "word_evidence_not_certified"})
+            continue
+        try:
+            schema_current = int(meta.get("schema", 0) or 0) >= INDEX_SCHEMA
+        except (TypeError, ValueError):
+            schema_current = False
+        if not schema_current:
+            invalid.append({"source_id": sid, "reason": "word_evidence_schema_stale"})
+            continue
+        if str(meta.get("asr_prompt_fingerprint", "") or "") != expected:
+            invalid.append({"source_id": sid, "reason": "asr_prompt_fingerprint_mismatch"})
+    for sid in sorted(set(selected_shots) - seen):
+        invalid.append({"source_id": sid, "reason": "selected_source_not_in_usable_pool"})
+    return {
+        "expected_asr_prompt_fingerprint": expected,
+        "source_count": len(seen),
+        "current_count": len(seen) - len(invalid),
+        "invalid": invalid,
+    }
+
+
+def asr_pool_current(proj, cfg: ClipConfig, sources=None) -> bool:
+    return not asr_pool_cache_audit(proj, cfg, sources).get("invalid")
 
 
 def _tok_close(a: str, b: str, thresh: float = 0.8) -> bool:
@@ -918,6 +1178,8 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
 
     shots_file = proj.shots_path(source.id)
     meta_file = proj.index_dir / f"{source.id}.index.meta.json"
+    asr_hotwords = _project_asr_hotwords(proj, fallback=roster)
+    asr_fingerprint = _asr_prompt_fingerprint(cfg, asr_hotwords)
     # capabilities this call wants — a cache built WITHOUT them (e.g. by the manual pipeline,
     # roster-less) must not satisfy an auto-mode call that needs Face-ID/OCR signals. "Wanted"
     # includes availability, else a missing OCR lib would force a futile re-index every run.
@@ -941,10 +1203,27 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
             have_caps = {}
         if int(have_caps.get("schema", 1) or 1) < INDEX_SCHEMA:
             have_caps["words"] = False           # schema bump invalidates the word cache
-        if want_caps["words"] and not (proj.index_dir / f"{source.id}.words.json").exists():
-            have_caps["words"] = False           # meta may claim words while the file is gone
+        words_cache_valid, old_words = _load_words_result(proj, source.id)
+        if want_caps["words"] and not words_cache_valid:
+            have_caps["words"] = False           # meta alone cannot certify missing/corrupt words
         missing = [k for k, v in want_caps.items() if v and not have_caps.get(k)]
+        if str(have_caps.get("asr_prompt_fingerprint", "") or "") != asr_fingerprint:
+            missing.append("asr_prompt")
         if missing:
+            # A changed model/vocabulary/options dependency invalidates only ASR-derived files.
+            # Refresh those transactionally and preserve every expensive visual artifact.
+            if (set(missing).issubset({"words", "asr_prompt"})
+                    and source.status == SOURCE_OK and source.local_path):
+                refreshed = refresh_source_words(
+                    proj, source, cfg, progress=progress, hotwords=asr_hotwords)
+                if refreshed:
+                    log(f"index: {source.id} ASR cache upgraded for current model/vocabulary "
+                        f"({len(refreshed)} shots; visual index preserved)")
+                    return refreshed
+                state = ("corrupt/missing" if not words_cache_valid else
+                         ("non-empty" if old_words else "silent"))
+                raise RuntimeError(
+                    f"ASR cache upgrade failed for {source.id}; {state} cache preserved")
             log(f"index: {source.id} re-indexing (cache lacks {'+'.join(missing)})")
         else:
             try:
@@ -980,10 +1259,17 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
     log(f"index: {source.id} {len(bounds)} shots detected")
 
     # 2) transcript
-    asr_hotwords = " ".join(dict.fromkeys(
-        str(name or "").strip() for name in (roster or []) if str(name or "").strip()))
-    words = transcribe_words(path, cfg, duration=source.duration, hotwords=asr_hotwords)
+    asr_succeeded, words = _transcribe_words_result(
+        path, cfg, duration=source.duration, hotwords=asr_hotwords)
     log(f"index: {source.id} transcript words={len(words)}")
+    if not asr_succeeded:
+        log(f"index: ⚠ {source.id} ASR failed; visual index will remain reusable but word "
+            "evidence is not certified")
+        prior_valid, prior_words = _load_words_result(proj, source.id)
+        if prior_valid:
+            # Retain earlier evidence bytes/meaning during a forced visual rebuild, but mark it
+            # uncertified below. A later targeted refresh can repair it without rebuilding images.
+            words = prior_words
 
     # 3) keyframes + CLIP embeds + faces + Face-ID + OCR + quality + phash
     import cv2
@@ -1135,16 +1421,20 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
     _mtmp = meta_file.with_suffix(".json.tmp")
     # "words" records that the word-level PASS RAN, never that it found anything — a genuinely
     # silent source yields [] and must still be cacheable, or it re-indexes on every run forever.
-    _mtmp.write_text(json.dumps({"faceid": do_faceid, "ocr": do_ocr,
-                                 "roster": bool(roster), "words": True,
-                                 "schema": INDEX_SCHEMA}), encoding="utf-8")
+    index_meta = {"faceid": do_faceid, "ocr": do_ocr,
+                  "roster": bool(roster), "words": bool(asr_succeeded),
+                  "schema": INDEX_SCHEMA}
+    if asr_succeeded:
+        index_meta["asr_prompt_fingerprint"] = asr_fingerprint
+    _mtmp.write_text(json.dumps(index_meta), encoding="utf-8")
     _mtmp.replace(meta_file)
     log(f"index: {source.id} done — {len(shots)} shots, {len(embeds)} embeds, clip={use_clip}")
     return shots
 
 
 def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
-                         *, progress=None) -> list[Shot]:
+                         *, progress=None, hotwords: Optional[str] = None,
+                         allow_empty: bool = False) -> list[Shot]:
     """Refresh one source's ASR words and shot transcripts without rebuilding visual indexes.
 
     This is the safe repair path for an otherwise-valid cached source whose transcript is known to
@@ -1160,24 +1450,45 @@ def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig
         shots = load_shots(proj, source.id)
     except Exception:
         return []
-    analysis = (getattr(proj, "meta", {}) or {}).get("analysis") or {}
-    names = list(analysis.get("actors") or [])
-    names.extend(str(row.get("name", "") or "") for row in (analysis.get("characters") or [])
-                 if isinstance(row, dict))
-    asr_hotwords = " ".join(dict.fromkeys(
-        str(name or "").strip() for name in names if str(name or "").strip()))
-    words = transcribe_words(
+    if hotwords is None:
+        asr_hotwords = _project_asr_hotwords(proj)
+    else:
+        asr_hotwords = str(hotwords or "")
+    old_valid, old_words = _load_words_result(proj, source.id)
+    asr_succeeded, words = _transcribe_words_result(
         Path(source.local_path), cfg, duration=source.duration, hotwords=asr_hotwords)
-    if not words:
+    if not asr_succeeded:
         if progress:
-            progress(f"index: ⚠ {source.id} word refresh produced no ASR; cache preserved")
+            progress(f"index: ⚠ {source.id} word refresh failed technically; cache preserved")
         return []
+    if not words and (not old_valid or bool(old_words)):
+        # A successful no-word decode is trustworthy only when it confirms an already-valid silent
+        # cache. It must never erase prior speech or turn malformed JSON into certified silence.
+        if progress:
+            state = "malformed/missing" if not old_valid else "non-empty"
+            progress(f"index: ⚠ {source.id} silent refresh conflicts with {state} cache; "
+                     "cache preserved")
+        return []
+    # ``allow_empty`` remains accepted for API compatibility, but callers cannot override the
+    # evidence check above. Clear old per-shot text before assigning the newly proven stream.
+    for shot in shots:
+        shot.transcript = ""
     _assign_transcript(shots, words)
     words_file = Path(proj.index_dir) / f"{source.id}.words.json"
+    meta_file = Path(proj.index_dir) / f"{source.id}.index.meta.json"
     words_tmp = words_file.with_name(words_file.name + ".refresh.tmp")
     shots_tmp = shots_file.with_name(shots_file.name + ".refresh.tmp")
     rollback_tmp = words_file.with_name(words_file.name + ".refresh.rollback.tmp")
-    old_words = words_file.read_bytes() if words_file.exists() else None
+    meta_tmp = meta_file.with_name(meta_file.name + ".refresh.tmp")
+    meta_rollback_tmp = meta_file.with_name(meta_file.name + ".refresh.rollback.tmp")
+    old_words_bytes = words_file.read_bytes() if words_file.exists() else None
+    old_meta_bytes = meta_file.read_bytes() if meta_file.exists() else None
+    try:
+        meta = json.loads(old_meta_bytes.decode("utf-8")) if old_meta_bytes is not None else {}
+    except Exception:
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
     try:
         # Stage both complete payloads before replacing either member of the dependent pair.
         words_tmp.write_text(json.dumps([
@@ -1185,22 +1496,42 @@ def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig
         ]), encoding="utf-8")
         shots_tmp.write_text(
             json.dumps([shot.to_dict() for shot in shots], indent=1), encoding="utf-8")
-        words_tmp.replace(words_file)
+        # Publish an invalid transaction marker BEFORE either dependent file can change. If the
+        # process dies in the two-replace window, Resume sees this marker and must refresh again;
+        # it can never trust new words paired with stale per-shot transcripts.
+        in_progress_meta = dict(meta)
+        in_progress_meta.update({
+            "words": False,
+            "schema": INDEX_SCHEMA,
+            "asr_refresh_in_progress": True,
+        })
+        in_progress_meta.pop("asr_prompt_fingerprint", None)
+        meta_tmp.write_text(json.dumps(in_progress_meta), encoding="utf-8")
+        meta_tmp.replace(meta_file)
         try:
+            words_tmp.replace(words_file)
             shots_tmp.replace(shots_file)
         except Exception:
-            # The second atomic replace failed.  Restore the first file so readers can never see
-            # new words paired with stale per-shot transcripts.
-            if old_words is None:
+            # An ordinary replace failure is recoverable in-process. Restore both the old words and
+            # old certification; a BaseException/process death deliberately leaves the invalid
+            # marker behind so a later Resume repairs the ambiguous pair.
+            if old_words_bytes is None:
                 words_file.unlink(missing_ok=True)
             else:
-                rollback_tmp.write_bytes(old_words)
+                rollback_tmp.write_bytes(old_words_bytes)
                 rollback_tmp.replace(words_file)
+            if old_meta_bytes is None:
+                meta_file.unlink(missing_ok=True)
+            else:
+                meta_rollback_tmp.write_bytes(old_meta_bytes)
+                meta_rollback_tmp.replace(meta_file)
             raise
     finally:
         words_tmp.unlink(missing_ok=True)
         shots_tmp.unlink(missing_ok=True)
         rollback_tmp.unlink(missing_ok=True)
+        meta_tmp.unlink(missing_ok=True)
+        meta_rollback_tmp.unlink(missing_ok=True)
     # Same-process matching memoizes absent and present quote spans.  Invalidate only this source,
     # and only after the dependent cache pair committed successfully.
     try:
@@ -1209,6 +1540,19 @@ def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig
             _QSPAN_CACHE.pop(key, None)
     except Exception:
         pass
+    # Bind the refreshed stream to its exact model/options/vocabulary. A metadata-write failure is
+    # safe: the next resume sees a mismatch and refreshes again rather than trusting unknown words.
+    meta.update({
+        "words": True,
+        "asr_prompt_fingerprint": _asr_prompt_fingerprint(cfg, asr_hotwords),
+        "schema": INDEX_SCHEMA,
+    })
+    meta.pop("asr_refresh_in_progress", None)
+    try:
+        meta_tmp.write_text(json.dumps(meta), encoding="utf-8")
+        meta_tmp.replace(meta_file)
+    finally:
+        meta_tmp.unlink(missing_ok=True)
     if progress:
         progress(f"index: {source.id} refreshed {len(words)} words across {len(shots)} shots")
     return shots
@@ -1222,6 +1566,12 @@ def index_all(proj: ClipProject, cfg: ClipConfig, *, references=None, faceid=Non
             continue
         out[src.id] = index_source(proj, src, cfg, references=references, faceid=faceid,
                                    roster=roster, force=force, progress=progress)
+    audit = asr_pool_cache_audit(proj, cfg)
+    if audit["invalid"]:
+        sample = [row["source_id"] for row in audit["invalid"][:8]]
+        raise RuntimeError(
+            f"ASR evidence incomplete for {len(audit['invalid'])}/{audit['source_count']} "
+            f"usable source(s): {sample}; index/match checkpoints were not authorized")
     return out
 
 

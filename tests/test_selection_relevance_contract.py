@@ -7,8 +7,10 @@ import json
 import pytest
 
 from vidlore.clipstudio import policy as P
+from vidlore.clipstudio import index as IX
 from vidlore.clipstudio import relevance_contract as R
 from vidlore.clipstudio import verify as V
+from vidlore.clipstudio.config import load_clip_config
 from vidlore.clipstudio.models import ClipProject, ClipSelection, ScriptSegment, Shot, SourceVideo
 from vidlore.clipstudio.verify import NonRetryableBuildError
 
@@ -19,6 +21,15 @@ GOOD = {
     "wrong_subject_visible": False, "contradicts_narration": False,
     "quality_ok": True,
 }
+
+
+def _stamp_current_asr_provenance(proj, sid):
+    meta = {
+        "schema": IX.INDEX_SCHEMA,
+        "words": True,
+        "asr_prompt_fingerprint": IX.asr_semantic_fingerprint(proj, load_clip_config()),
+    }
+    (proj.index_dir / f"{sid}.index.meta.json").write_text(json.dumps(meta))
 
 
 def _fixture(tmp_path, *, policy=P.EXACT, verifier=None, text="Jaime rides Ned down.",
@@ -36,6 +47,7 @@ def _fixture(tmp_path, *, policy=P.EXACT, verifier=None, text="Jaime rides Ned d
                 keyframe_path=str(frame))
     proj.shots_path("s1").write_text(json.dumps([shot.to_dict()]))
     proj.meta["analysis"] = {"video_type": "multi_scene", "characters": [], "actors": []}
+    _stamp_current_asr_provenance(proj, "s1")
     seg = ScriptSegment(index=0, text=text, required_entity=entity, required_kind=kind,
                         visual_policy=policy, is_specific_claim=(policy == P.EXACT), quote=quote)
     verdict = dict(GOOD if verifier is None else verifier)
@@ -66,6 +78,7 @@ def _add_indexed_source(proj, root, sid, *, title, words, transcripts=None):
             keyframe_path=str(frame), transcript=transcript).to_dict())
     proj.shots_path(sid).write_text(json.dumps(rows))
     (proj.index_dir / f"{sid}.words.json").write_text(json.dumps(words))
+    _stamp_current_asr_provenance(proj, sid)
 
 
 def _block_reasons(proj, seg):
@@ -327,6 +340,160 @@ def test_pool_scan_types_hotword_repaired_real_quote_without_lowering_floor(tmp_
     assert ev["scan_ratio_floor"] == 0.78
     assert ev["selected_window_ratio_floor"] == 0.78
     assert "exact_quote_dialogue_signal_below_floor" in entry["reasons"]
+
+
+@pytest.mark.parametrize(("metadata", "provenance_reason"), [
+    (None, "index_metadata_missing"),
+    ({"asr_prompt_fingerprint": "stale"}, "asr_prompt_fingerprint_mismatch"),
+    ("not-json", "index_metadata_unreadable"),
+])
+def test_stale_or_missing_pool_asr_provenance_is_indeterminate(
+        tmp_path, metadata, provenance_reason):
+    """A matching word cache cannot type its own quote unless its ASR inputs are current."""
+    quote = "Chaos isn't a pit. Chaos is a ladder."
+    proj, seg, _sel = _fixture(
+        tmp_path, text="Baelish explains his philosophy.", quote=quote,
+        signals={"dialogue": 1.0})
+    words = "Chaos isn't a pit Chaos is a ladder".split()
+    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+        [0.1 + i * .1, 0.2 + i * .1, word] for i, word in enumerate(words)
+    ]))
+    meta_path = proj.index_dir / "s1.index.meta.json"
+    if metadata is None:
+        meta_path.unlink()
+    elif isinstance(metadata, str):
+        meta_path.write_text(metadata)
+    else:
+        meta_path.write_text(json.dumps(metadata))
+
+    audit = R.evaluate_selection_relevance(proj, [seg])
+
+    entry = audit["blockers"][0]
+    evidence = entry["quote_evidence"]
+    assert evidence["branch"] == "indeterminate"
+    assert evidence["pool_match"] is None
+    assert evidence["asr_provenance_invalid_source_count"] == 1
+    assert evidence["asr_provenance_invalid_sources"] == [{
+        "source_id": "s1",
+        "reason": provenance_reason,
+        "actual_asr_prompt_fingerprint": "stale" if metadata == {
+            "asr_prompt_fingerprint": "stale"} else "",
+    }]
+    assert "exact_quote_pool_classification_indeterminate" in entry["reasons"]
+
+
+def test_project_asr_identity_change_invalidates_previously_current_pool_cache(tmp_path):
+    quote = "Tell Cersei. I want her to know it was me."
+    proj, seg, _sel = _fixture(
+        tmp_path, text="Olenna confesses before dying.", quote=quote,
+        signals={"dialogue": 1.0})
+    words = "Tell Cersei I want her to know it was me".split()
+    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+        [0.1 + i * .1, 0.2 + i * .1, word] for i, word in enumerate(words)
+    ]))
+    old_fingerprint = json.loads(
+        (proj.index_dir / "s1.index.meta.json").read_text())["asr_prompt_fingerprint"]
+    proj.meta["analysis"]["characters"] = [{"name": "Cersei Lannister"}]
+
+    evidence = R._quote_pool_branches(proj, [seg])[0]
+
+    assert evidence["branch"] == "indeterminate"
+    assert evidence["asr_prompt_fingerprint_expected"] != old_fingerprint
+    assert evidence["asr_provenance_invalid_sources"][0]["reason"] == \
+        "asr_prompt_fingerprint_mismatch"
+
+
+def test_current_metadata_cannot_certify_a_corrupt_words_payload(tmp_path):
+    quote = "Tell Cersei. I want her to know it was me."
+    proj, seg, _sel = _fixture(
+        tmp_path, text="Olenna confesses before dying.", quote=quote,
+        signals={"dialogue": 1.0})
+    (proj.index_dir / "s1.words.json").write_text("{corrupt")
+
+    evidence = R._quote_pool_branches(proj, [seg])[0]
+
+    assert evidence["branch"] == "indeterminate"
+    assert evidence["asr_provenance_invalid_sources"] == [{
+        "source_id": "s1",
+        "reason": "words_cache_invalid_or_missing",
+        "actual_asr_prompt_fingerprint": "",
+    }]
+
+
+@pytest.mark.parametrize("shots_payload", [None, "{corrupt", "[]"])
+def test_missing_corrupt_or_empty_shots_make_quote_typing_indeterminate(
+        tmp_path, shots_payload):
+    quote = "Chaos isn't a pit. Chaos is a ladder."
+    proj, seg, _sel = _fixture(
+        tmp_path, text="Baelish explains his philosophy.", quote=quote,
+        signals={"dialogue": 1.0})
+    words = "Chaos isn't a pit Chaos is a ladder".split()
+    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+        [0.1 + i * .1, 0.2 + i * .1, word] for i, word in enumerate(words)
+    ]))
+    shots_path = proj.shots_path("s1")
+    if shots_payload is None:
+        shots_path.unlink()
+    else:
+        shots_path.write_text(shots_payload)
+
+    evidence = R._quote_pool_branches(proj, [seg])[0]
+
+    assert evidence["branch"] == "indeterminate"
+    assert evidence["pool_match"] is None
+    assert evidence["asr_provenance_invalid_sources"] == [{
+        "source_id": "s1",
+        "reason": "shots_cache_invalid_or_missing",
+        "actual_asr_prompt_fingerprint": "",
+    }]
+
+
+def test_title_rejected_commentary_needs_no_shot_cache_to_be_excluded(tmp_path):
+    quote = "Chaos isn't a pit. Chaos is a ladder."
+    proj, seg, _sel = _fixture(
+        tmp_path, title="Why Chaos Is A Ladder - Video Essay",
+        text="Baelish explains his philosophy.", quote=quote,
+        signals={"dialogue": 1.0})
+    proj.shots_path("s1").unlink()
+    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+        [0.1 + i * .1, 0.2 + i * .1, word]
+        for i, word in enumerate("Chaos isn't a pit Chaos is a ladder".split())
+    ]))
+    _add_indexed_source(
+        proj, tmp_path, "clean", title="Game of Thrones scene",
+        words=[[0.0, 0.2, "unrelated"]])
+
+    evidence = R._quote_pool_branches(proj, [seg])[0]
+
+    assert evidence["branch"] == "paraphrase"
+    assert evidence["commentary_sources_excluded"] == 1
+    assert evidence["asr_provenance_invalid_source_count"] == 0
+
+
+def test_verbatim_pool_hit_cannot_let_stale_selected_asr_pass(tmp_path):
+    """A current second source may type the quote, but selected-window proof is source-bound."""
+    quote = "I did warn you not to trust me."
+    proj, seg, _sel = _fixture(
+        tmp_path, text="The betrayal lands.", quote=quote,
+        signals={"dialogue": 1.0})
+    matching = [[0.1 + i * .1, 0.2 + i * .1, word]
+                for i, word in enumerate("I did warn you not to trust me".split())]
+    (proj.index_dir / "s1.words.json").write_text(json.dumps(matching))
+    stale = json.loads((proj.index_dir / "s1.index.meta.json").read_text())
+    stale["asr_prompt_fingerprint"] = "stale-selected-source"
+    (proj.index_dir / "s1.index.meta.json").write_text(json.dumps(stale))
+    _add_indexed_source(
+        proj, tmp_path, "s2", title="Game of Thrones betrayal scene", words=matching)
+
+    audit = R.evaluate_selection_relevance(proj, [seg])
+
+    entry = audit["blockers"][0]
+    evidence = entry["quote_evidence"]
+    assert evidence["branch"] == "verbatim"
+    assert evidence["pool_match"]["source_id"] == "s2"
+    assert evidence["selected_asr_provenance_status"] == \
+        "asr_prompt_fingerprint_mismatch"
+    assert "exact_quote_selected_asr_provenance_invalid" in entry["reasons"]
 
 
 def test_no_dialogue_eligible_index_is_indeterminate_and_fails_closed(tmp_path):

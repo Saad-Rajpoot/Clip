@@ -960,7 +960,7 @@ def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
     logged_denials: set[tuple[int, str]] = set()
 
     def _may_soften(seg) -> bool:
-        ok, reason = _phase1_softening_authorization(proj, seg)
+        ok, reason = _phase1_softening_authorization(proj, seg, cfg)
         if not ok:
             key = (int(getattr(seg, "index", -1)), reason)
             if key not in logged_denials:
@@ -1042,7 +1042,7 @@ def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
         # ``acquire_for_beat`` can add media and make its own authorization stale.  Ordinary
         # unreviewed/stale/incomplete beats keep the acquire-first path below unchanged.
         reviewed_exhausted, _review_reason = \
-            _phase1_reviewed_exhaustion_authorization(proj, seg)
+            _phase1_reviewed_exhaustion_authorization(proj, seg, cfg)
         if reviewed_exhausted:
             if _phase1_softening_attempt(
                     proj, seg, sel, used,
@@ -1151,7 +1151,7 @@ _SEMANTIC_NEGATIVE_REASONS = (
 )
 
 
-def _phase1_current_gap_evidence(proj, seg) -> tuple[bool, str]:
+def _phase1_current_gap_evidence(proj, seg, cfg=None) -> tuple[bool, str]:
     """Type the *current* phase-1 blocker before allowing specificity loss.
 
     The review binding below answers "did a viewer audit this authored request against this pool?"
@@ -1162,7 +1162,7 @@ def _phase1_current_gap_evidence(proj, seg) -> tuple[bool, str]:
     """
     try:
         from . import relevance_contract as _rel
-        audit = _rel.evaluate_selection_relevance(proj, [seg])
+        audit = _rel.evaluate_selection_relevance(proj, [seg], cfg=cfg)
         idx = int(getattr(seg, "index", -1))
         entry = next(
             (e for e in (audit.get("checked") or [])
@@ -1596,7 +1596,7 @@ def restore_stale_selection_relevance_softenings(proj, segments, *, log=None) ->
     }
 
 
-def _phase1_softening_authorization(proj, seg) -> tuple[bool, str]:
+def _phase1_softening_authorization(proj, seg, cfg=None) -> tuple[bool, str]:
     """Fail-closed authorization for phase-1 exact→character→abstract policy mutation.
 
     The legacy pre-assembly self-heal sees a deliberately incomplete structural blocker set.  It
@@ -1634,7 +1634,7 @@ def _phase1_softening_authorization(proj, seg) -> tuple[bool, str]:
         if expected_pool != current_pool:
             return False, ("stale_gap_review_source_pool_changed:"
                            f"{expected_pool[:12]}!={current_pool[:12]}")
-        evidence_ok, evidence_reason = _phase1_current_gap_evidence(proj, seg)
+        evidence_ok, evidence_reason = _phase1_current_gap_evidence(proj, seg, cfg)
         if not evidence_ok:
             return False, evidence_reason
         return True, "authorized_by_bound_gap_review_and_current_semantic_gap"
@@ -1779,7 +1779,7 @@ def _strict_acquisition_evidence(proj, segments, beat_indices, *, source: str,
     }, "strict_acquisition_evidence_valid"
 
 
-def _phase1_reviewed_exhaustion_authorization(proj, seg) -> tuple[bool, str]:
+def _phase1_reviewed_exhaustion_authorization(proj, seg, cfg=None) -> tuple[bool, str]:
     """Authorize the sole pre-acquisition specificity-ladder path.
 
     A plain footage-gap review still follows the normal acquire-first flow.  Moving the ladder
@@ -1788,7 +1788,7 @@ def _phase1_reviewed_exhaustion_authorization(proj, seg) -> tuple[bool, str]:
     remains authoritative for beat/pool fingerprints, quote typing, current verifier evidence,
     and the semantic-vs-technical distinction.
     """
-    ok, reason = _phase1_softening_authorization(proj, seg)
+    ok, reason = _phase1_softening_authorization(proj, seg, cfg)
     if not ok:
         return False, reason
     try:

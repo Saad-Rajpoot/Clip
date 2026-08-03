@@ -20,6 +20,8 @@ import shutil
 import sys
 import tempfile
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
@@ -245,14 +247,19 @@ def test_produce_auto_resume_skips_completed_stages_end_to_end():
     """Drive the REAL produce_auto orchestration twice on one dir — a full run, then resume=True —
     stubbing only the heavy leaf ops (LLM/discover/download/index/ffmpeg/vision). The resume run must
     SKIP analyze/discover/download/index/match/verify/recover (their stubs are not called again) and
-    only re-run assembly. This exercises the actual control flow, analysis rehydration, and signature
-    matching — not just the helper units."""
+    only re-run assembly. A third Resume simulates damaged/stale ASR artifacts under the SAME stage
+    signature and must repair index then re-run match plus every dependent footage stage; the next
+    Resume sees current ASR and skips them again. Finally, changing only the installed Whisper
+    version invalidates the whole chain independently. This exercises the actual control flow,
+    analysis rehydration, artifact validity, and signature matching — not just helper units."""
     from vidlore.clipstudio import analyze as AN, discover as DS, download as DL
     from vidlore.clipstudio import faceid as FI, verify as VF, review as RV, index as IX, ledger as LG
     from vidlore.clipstudio import llm as LM
     from vidlore.clipstudio.analyze import ScriptAnalysis
 
     calls = {}
+    asr_state = {"current": False}
+    anchor_state = {"break_asr": False}
     def _count(name):
         calls[name] = calls.get(name, 0) + 1
 
@@ -276,6 +283,15 @@ def test_produce_auto_resume_skips_completed_stages_end_to_end():
         _count("match")
         proj.selections = [_sel(s.index, "srcA") for s in segs]   # clean → no rejected beats
 
+    def fake_index(*_a, **_k):
+        _count("index")
+        asr_state["current"] = True
+
+    def fake_anchor(*_a, **_k):
+        if anchor_state["break_asr"]:
+            asr_state["current"] = False
+        return 0
+
     def fake_build(proj, segs, cfg, **k):
         _count("build")
         out = proj.output_dir / "final.mp4"
@@ -288,12 +304,15 @@ def test_produce_auto_resume_skips_completed_stages_end_to_end():
         (DL, "download_candidates", fake_download),
         (FI, "available", lambda: False),
         (IX, "clip_available", lambda: True),
+        (IX, "_faster_whisper_version", lambda: "1.2.1"),
         (VF, "verify_and_repair", lambda *a, **k: _count("verify")),
         (LM, "vision_probe", lambda *a, **k: (True, "ok")),   # healthy backend → preflight passes
         (RV, "write_review", lambda *a, **k: "review.html"),
         (LG, "finalize", lambda proj, segs, cfg: {"flagged_for_review": 0, "segments": len(segs),
                                                   "mean_confidence": 1.0}),
-        (O, "index_all", lambda *a, **k: _count("index")),
+        (O, "asr_pool_current", lambda *_a, **_k: asr_state["current"]),
+        (O, "index_all", fake_index),
+        (O, "_ensure_anchor_coverage", fake_anchor),
         (O, "match_segments", fake_match),
         (O, "cut_all", lambda *a, **k: (_count("cut"), 0)[1]),
         (O, "build_video", fake_build),
@@ -323,6 +342,48 @@ def test_produce_auto_resume_skips_completed_stages_end_to_end():
         assert calls.get("recover") == 1, f"recovery must NOT re-run: {calls}"
         assert calls.get("index", 0) == 1, f"index must be skipped when all footage stages cached: {calls}"
         assert calls.get("build") == 2, f"assembly MUST re-run on resume: {calls}"
+
+        # 3) The checkpoint signature is unchanged, but its ASR artifacts are no longer valid.
+        # Resume must re-enter indexing AND keep the old match checkpoint invalid for this run even
+        # after targeted ASR repair makes the cache current again.
+        asr_state["current"] = False
+        O.produce_auto(tmp, resume=True, **kw)
+        assert calls.get("index") == 2, f"invalid ASR artifacts must re-enter indexing: {calls}"
+        assert calls.get("match") == 2, f"repaired ASR must feed a fresh match: {calls}"
+        assert calls.get("cut") == 2 and calls.get("verify") == 2, \
+            f"ASR artifact repair must cascade through dependent footage stages: {calls}"
+        assert calls.get("recover") == 2 and calls.get("build") == 3
+
+        # 4) The repair is now current and newly checkpointed, so the next Resume is cheap again.
+        O.produce_auto(tmp, resume=True, **kw)
+        assert calls.get("index") == 2 and calls.get("match") == 2, calls
+        assert calls.get("verify") == 2 and calls.get("recover") == 2, calls
+        assert calls.get("build") == 4
+
+        # 5) Changing only the ASR runtime identity invalidates index→match and the whole footage
+        # dependency chain. Download remains cached; index_all performs the targeted ASR refresh.
+        IX._faster_whisper_version = lambda: "1.3.0"
+        O.produce_auto(tmp, resume=True, **kw)
+        assert calls.get("download") == 1, f"same source files remain reusable: {calls}"
+        assert calls.get("index") == 3, f"changed ASR identity must re-enter indexing: {calls}"
+        assert calls.get("match") == 3, f"stale transcript-driven selections must be rematched: {calls}"
+        assert calls.get("cut") == 3 and calls.get("verify") == 3, \
+            f"ASR invalidation must cascade through dependent footage stages: {calls}"
+        assert calls.get("recover") == 3 and calls.get("build") == 5, \
+            f"recovery and assembly must consume the refreshed selections: {calls}"
+
+        # 6) A source admitted after the main index audit can fail ASR. This must stop BEFORE match
+        # and before any new downstream checkpoint is recorded; disabling only Resume reuse is not
+        # enough because the current run would otherwise consume the incomplete pool.
+        anchor_state["break_asr"] = True
+        IX._faster_whisper_version = lambda: "1.4.0"
+        with pytest.raises(O.PipelineError, match="post-acquisition ASR evidence incomplete"):
+            O.produce_auto(tmp, resume=True, **kw)
+        assert calls.get("index") == 4, calls
+        assert calls.get("match") == 3 and calls.get("cut") == 3, \
+            f"post-acquisition ASR failure must stop before match/cut: {calls}"
+        assert calls.get("verify") == 3 and calls.get("recover") == 3, calls
+        assert calls.get("build") == 5, calls
     finally:
         for m, n, orig in saved:
             if orig is not None:
@@ -493,6 +554,7 @@ def test_verify_materialization_failure_rolls_back_checkpoint_and_resume_retries
         (RV, "write_review", lambda *a, **k: "review.html"),
         (LG, "finalize", lambda proj, segs, cfg: {
             "flagged_for_review": 0, "segments": len(segs), "mean_confidence": 1.0}),
+        (O, "asr_pool_current", lambda *_a, **_k: True),
         (O, "index_all", lambda *a, **k: _count("index")),
         (O, "match_segments", fake_match),
         (O, "cut_all", lambda *a, **k: (_count("cut"), 0)[1]),

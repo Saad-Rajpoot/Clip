@@ -27,7 +27,9 @@ from types import SimpleNamespace as NS
 import pytest
 
 from vidlore.clipstudio import policy as P
+from vidlore.clipstudio import index as IX
 from vidlore.clipstudio import selfheal as S
+from vidlore.clipstudio.config import ClipConfig, load_clip_config
 from vidlore.clipstudio import verify as V
 from vidlore.clipstudio.models import (
     ClipProject, ClipSelection, ScriptSegment, Shot, SourceVideo,
@@ -71,7 +73,7 @@ def _stub_phase1_search(monkeypatch):
 
 
 def _phase1_evidence_fixture(tmp_path, *, index=2, quote="", words=None,
-                             verdict_patch=None):
+                             verdict_patch=None, cfg=None):
     """A bound phase-1 review plus recomputable current-window verifier evidence."""
     proj = ClipProject(name="phase1-evidence", root=str(tmp_path))
     proj.ensure_dirs()
@@ -109,6 +111,13 @@ def _phase1_evidence_fixture(tmp_path, *, index=2, quote="", words=None,
         out_point=2.0, confidence=0.8, verifier=verdict,
         flag_reasons=["verifier_failed"])
     proj.meta["analysis"] = {"video_type": "multi_scene", "characters": [], "actors": []}
+    if words is not None:
+        (proj.index_dir / "show.index.meta.json").write_text(json.dumps({
+            "schema": IX.INDEX_SCHEMA,
+            "words": True,
+            "asr_prompt_fingerprint": IX.asr_semantic_fingerprint(
+                proj, cfg or load_clip_config()),
+        }))
     V.bind_selection_verifier_evidence(
         proj, sel, seg, verdict, shot=shots[0], model="vision-test", is_specific=True,
         multiframe=True, faceid_names=[], era=V._project_beat_era(proj, seg),
@@ -567,6 +576,36 @@ def test_phase1_ladder_runs_when_beat_and_current_pool_are_bound(monkeypatch, tm
     assert row["original"]["is_specific_claim"] is True
     assert row["original"]["image_path"] == ""
     assert row["original"]["image_meta"] == {}
+
+
+def test_phase1_uses_active_custom_asr_cfg_for_quote_typing(monkeypatch, tmp_path):
+    """Custom-model evidence stays current instead of becoming an indeterminate quote blocker."""
+    custom_cfg = ClipConfig(whisper_model="small.en", whisper_compute="float16")
+    words = [[0.1 + i * .1, 0.2 + i * .1, word]
+             for i, word in enumerate("An unrelated real line from the show".split())]
+    proj, seg, _sel = _phase1_evidence_fixture(
+        tmp_path, quote="The essayist paraphrases this moment.", words=words,
+        cfg=custom_cfg)
+    assert IX.asr_semantic_fingerprint(proj, custom_cfg) != \
+        IX.asr_semantic_fingerprint(
+            proj, ClipConfig(whisper_model="base", whisper_compute="int8"))
+    _stub_phase1_search(monkeypatch)
+    monkeypatch.setattr(S, "beat_unfillable", lambda _seg: False)
+    softened = []
+
+    def ladder(_proj, target, *_args, **_kwargs):
+        softened.append(target.index)
+        target.visual_policy = P.ABSTRACT
+        return True
+
+    monkeypatch.setattr(S, "_soften_and_retry", ladder)
+    lines = []
+    resolved = S.heal_blocked_beats(
+        proj, [seg], custom_cfg, blocked=[seg.index], policy="approved_testing",
+        allow_acquire=False, log=lines.append)
+
+    assert resolved == 1 and softened == [seg.index]
+    assert not any("phase1_quote_pool_classification_indeterminate" in line for line in lines)
 
 
 def _write_completed_exhaustion_evidence(

@@ -14,9 +14,10 @@ import hashlib
 from pathlib import Path
 
 from . import policy as _policy
+from .models import SOURCE_OK
 from .verify import _contradiction_reason, selection_verifier_evidence_reason
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 AUDIT_FILENAME = "selection_relevance_audit.json"
 QUOTE_DIALOGUE_FLOOR = 0.78
 QUOTE_WINDOW_TOLERANCE_SEC = 0.75
@@ -113,7 +114,43 @@ def _selection_source_title(proj, sel) -> str:
             (getattr(sel, "source_id", "") or ""))
 
 
-def _quote_pool_branches(proj, segments) -> dict[int, dict]:
+def _source_asr_provenance(proj, source_id: str, expected_fingerprint: str) \
+        -> tuple[bool, str, str]:
+    """Validate that a timed-word cache belongs to the current ASR semantics.
+
+    Word timings are evidence, not an opportunistic cache.  A vocabulary, model, decoder-version
+    or rescue-policy change can change both the words and their timestamps.  Missing/unreadable
+    metadata therefore means UNKNOWN; it must never silently type an authored phrase as verbatim
+    (or let a selected window prove that phrase).
+    """
+    if not expected_fingerprint:
+        return False, "", "expected_fingerprint_unavailable"
+    meta_path = proj.index_dir / f"{source_id}.index.meta.json"
+    try:
+        raw = json.loads(meta_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False, "", "index_metadata_missing"
+    except Exception:
+        return False, "", "index_metadata_unreadable"
+    if not isinstance(raw, dict):
+        return False, "", "index_metadata_invalid"
+    actual = str(raw.get("asr_prompt_fingerprint", "") or "")
+    if not actual:
+        return False, "", "asr_prompt_fingerprint_missing"
+    if actual != expected_fingerprint:
+        return False, actual, "asr_prompt_fingerprint_mismatch"
+    if raw.get("words") is not True:
+        return False, actual, "word_evidence_not_certified"
+    try:
+        from .index import INDEX_SCHEMA
+        if int(raw.get("schema", 0) or 0) < INDEX_SCHEMA:
+            return False, actual, "word_evidence_schema_stale"
+    except Exception:
+        return False, actual, "word_evidence_schema_invalid"
+    return True, actual, ""
+
+
+def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
     """Classify authored strict-beat quotes against the complete usable dialogue index.
 
     The analyzer's ``quote`` field is not a type guarantee: it contains real show dialogue,
@@ -133,32 +170,90 @@ def _quote_pool_branches(proj, segments) -> dict[int, dict]:
         return {}
 
     from . import index as _index
+    if cfg is None:
+        from .config import load_clip_config
+        cfg = load_clip_config()
+    try:
+        expected_asr_fingerprint = str(_index.asr_semantic_fingerprint(proj, cfg) or "")
+    except Exception:
+        # Fingerprint computation is part of the evidence chain.  Treat its failure exactly like
+        # missing source metadata: the quote's type is indeterminate, never a permissive fallback.
+        expected_asr_fingerprint = ""
     # Lazy import avoids a module-initialisation cycle: build imports this contract only at runtime.
-    from .build import _breakout_src_ok
+    from .build import _breakout_src_ok, _ESSAYISH_RX
+    try:
+        from .discover import _REACTION_TITLE
+    except Exception:
+        _REACTION_TITLE = None
 
     streams: list[tuple[object, list]] = []
     indexed = 0
     rejected_commentary = 0
+    invalid_provenance: list[dict] = []
+    seen_source_ids: set[str] = set()
     for src in (getattr(proj, "sources", None) or []):
         sid = str(getattr(src, "id", "") or "")
-        if not sid:
+        if (not sid or sid in seen_source_ids
+                or str(getattr(src, "status", "") or "") != SOURCE_OK):
             continue
-        try:
-            words = _index.load_words(proj, sid)
-        except Exception:
-            words = []
-        if not words:
+        seen_source_ids.add(sid)
+        title = str(getattr(src, "title", "") or "")
+        # Title-only exclusions are independently knowable even when their indexes are damaged;
+        # they are commentary/non-show audio and never belong in the dialogue evidence universe.
+        if _ESSAYISH_RX.search(title) or (_REACTION_TITLE is not None
+                                          and _REACTION_TITLE.search(title)):
+            rejected_commentary += 1
             continue
         indexed += 1
         try:
+            words_valid, words = _index._load_words_result(proj, sid)
+        except Exception:
+            words_valid, words = False, []
+        try:
             shots = _index.load_shots(proj, sid)
+            shots_valid = bool(shots)
+        except Exception:
+            shots, shots_valid = [], False
+        if not shots_valid:
+            # Speech coverage is the second half of the commentary gate. Missing/corrupt/empty
+            # shots make that eligibility unknowable, so the pool result must be indeterminate.
+            invalid_provenance.append({
+                "source_id": sid,
+                "reason": "shots_cache_invalid_or_missing",
+                "actual_asr_prompt_fingerprint": "",
+            })
+            continue
+        if not words_valid:
+            invalid_provenance.append({
+                "source_id": sid,
+                "reason": "words_cache_invalid_or_missing",
+                "actual_asr_prompt_fingerprint": "",
+            })
+            continue
+        provenance_ok, actual_fingerprint, provenance_reason = _source_asr_provenance(
+            proj, sid, expected_asr_fingerprint)
+        if not provenance_ok:
+            invalid_provenance.append({
+                "source_id": sid,
+                "reason": provenance_reason,
+                "actual_asr_prompt_fingerprint": actual_fingerprint,
+            })
+            continue
+        try:
             dialogue_eligible = bool(_breakout_src_ok(src, shots))
         except Exception:
-            # Quote typing must fail closed when source-audio eligibility cannot be established.
-            dialogue_eligible = False
+            invalid_provenance.append({
+                "source_id": sid,
+                "reason": "dialogue_eligibility_unverifiable",
+                "actual_asr_prompt_fingerprint": actual_fingerprint,
+            })
+            continue
         if not dialogue_eligible:
             rejected_commentary += 1
             continue
+        # An empty cache with current provenance is a valid observation of silence.  Retain it in
+        # the scanned set so an entirely silent but fully-current pool can classify a quote as a
+        # paraphrase rather than pretending the index is absent.
         streams.append((src, words))
 
     by_quote: dict[str, dict] = {}
@@ -177,10 +272,12 @@ def _quote_pool_branches(proj, segments) -> dict[int, dict]:
                     span = None
                 if span and (best is None or float(span[2]) > float(best[1][2])):
                     best = (src, span)
-            if not streams:
+            if best is not None:
+                kind = "verbatim"
+            elif invalid_provenance or not streams:
                 kind = "indeterminate"
             else:
-                kind = "verbatim" if best is not None else "paraphrase"
+                kind = "paraphrase"
             match = None
             if best is not None:
                 src, span = best
@@ -199,6 +296,9 @@ def _quote_pool_branches(proj, segments) -> dict[int, dict]:
                 "pool_sources_indexed": indexed,
                 "dialogue_eligible_sources_scanned": len(streams),
                 "commentary_sources_excluded": rejected_commentary,
+                "asr_prompt_fingerprint_expected": expected_asr_fingerprint,
+                "asr_provenance_invalid_source_count": len(invalid_provenance),
+                "asr_provenance_invalid_sources": invalid_provenance,
                 "pool_match": match,
             }
             by_quote[key] = branch
@@ -241,9 +341,19 @@ def exact_quote_dialogue_evidence(proj, sel, seg, *, quote_contract=None) \
         return False, "exact_quote_pool_classification_indeterminate", detail
     if dialogue < QUOTE_DIALOGUE_FLOOR:
         return False, "exact_quote_dialogue_signal_below_floor", detail
+    source_id = str(getattr(sel, "source_id", "") or "")
+    expected_fingerprint = str(detail.get("asr_prompt_fingerprint_expected", "") or "")
+    provenance_ok, actual_fingerprint, provenance_reason = _source_asr_provenance(
+        proj, source_id, expected_fingerprint)
+    detail.update({
+        "selected_asr_prompt_fingerprint": actual_fingerprint,
+        "selected_asr_provenance_status": "current" if provenance_ok else provenance_reason,
+    })
+    if not provenance_ok:
+        return False, "exact_quote_selected_asr_provenance_invalid", detail
     try:
         from . import index as _index
-        words = _index.load_words(proj, str(getattr(sel, "source_id", "") or ""))
+        words = _index.load_words(proj, source_id)
         span = _index.find_quote_span(words, quote, min_ratio=QUOTE_DIALOGUE_FLOOR)
     except Exception:
         span = None
@@ -276,7 +386,7 @@ def exact_quote_dialogue_evidence(proj, sel, seg, *, quote_contract=None) \
     return True, "", detail
 
 
-def evaluate_selection_relevance(proj, segments) -> dict:
+def evaluate_selection_relevance(proj, segments, *, cfg=None) -> dict:
     """Return the complete semantic publication audit without mutating project or selections."""
     by_idx = {int(getattr(s, "segment_index", -1)): s for s in (proj.selections or [])}
     analysis = (getattr(proj, "meta", {}) or {}).get("analysis", {}) or {}
@@ -285,7 +395,7 @@ def evaluate_selection_relevance(proj, segments) -> dict:
         for c in (analysis.get("characters") or [])
         if isinstance(c, dict) and c.get("name") and c.get("actor")
     }
-    quote_contracts = _quote_pool_branches(proj, segments)
+    quote_contracts = _quote_pool_branches(proj, segments, cfg=cfg)
     checked, blockers = [], []
     skipped_generic = 0
 
@@ -445,7 +555,8 @@ def write_selection_relevance_audit(path: Path | str, audit: dict) -> Path:
     return dest
 
 
-def assert_selection_relevance(proj, segments, audit_path: Path | str | None = None) -> dict:
+def assert_selection_relevance(proj, segments, audit_path: Path | str | None = None, *, cfg=None) \
+        -> dict:
     """Persist the audit and release-block any exact/concrete semantic uncertainty."""
     # A specificity downgrade is evidence about one exact indexed pool, not a permanent rewrite of
     # the authored beat.  When footage/indexes change, revive the full original segment + selection
@@ -458,7 +569,7 @@ def assert_selection_relevance(proj, segments, audit_path: Path | str | None = N
         raise RuntimeError(
             f"could not restore stale pool-bound semantic softening before publication: {exc}"
         ) from exc
-    audit = evaluate_selection_relevance(proj, segments)
+    audit = evaluate_selection_relevance(proj, segments, cfg=cfg)
     dest = Path(audit_path) if audit_path is not None else proj.output_dir / AUDIT_FILENAME
     try:
         write_selection_relevance_audit(dest, audit)

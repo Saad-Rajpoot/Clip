@@ -6520,7 +6520,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # deliberately outside its strict scope.
     from .relevance_contract import assert_selection_relevance as _assert_selection_relevance
     _assert_selection_relevance(
-        proj, segments, proj.output_dir / "selection_relevance_audit.json")
+        proj, segments, proj.output_dir / "selection_relevance_audit.json", cfg=cfg)
 
     # CAPTION PRESET + ON/OFF — the single resolution point for the whole render (every downstream
     # caption gate reads _cap_on / _cap_preset, never the raw args). Precedence via the centralized

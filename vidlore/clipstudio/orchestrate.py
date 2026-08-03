@@ -11,7 +11,8 @@ from typing import Optional
 from .models import ClipProject, SOURCE_OK, SOURCE_BLOCKED, SOURCE_FAILED
 from .config import ClipConfig, load_clip_config, engine_config
 from .ingest import ingest_sources, SourceSpec
-from .index import index_all
+from .index import (asr_pool_cache_audit, asr_pool_current,
+                    asr_semantic_fingerprint, index_all)
 from .segment import segment_script, enrich_with_llm
 from .match import match_segments
 from .cut import cut_all
@@ -157,7 +158,8 @@ def _stage_skip(proj, name: str, sig: str, resume: bool, artifact_ok: bool = Tru
 
 
 def _footage_stage_signatures(download_sig: str, sources, *, force_index: bool,
-                              segments, verify: bool) -> tuple[str, str, str, str, str]:
+                              segments, verify: bool,
+                              asr_signature: str) -> tuple[str, str, str, str, str]:
     """Sign the pool actually consumed by match and every dependent footage stage.
 
     Pre-match anchor/backfill passes may add sources after the download checkpoint.  Computing these
@@ -167,7 +169,11 @@ def _footage_stage_signatures(download_sig: str, sources, *, force_index: bool,
     """
     source_ids = tuple(sorted({str(getattr(s, "id", "") or "") for s in (sources or [])
                                if str(getattr(s, "id", "") or "")}))
-    sig_index = _sig(download_sig, source_ids, bool(force_index))
+    # Match consumes persisted shot transcripts, so the ASR decoder/model/prompt identity is an
+    # index input even when the downloaded files themselves have not changed.  Without this edge,
+    # a fully checkpointed Resume can skip index + match and silently reuse words decoded under an
+    # older vocabulary (or even another Whisper build).
+    sig_index = _sig(download_sig, source_ids, bool(force_index), str(asr_signature or ""))
     sig_match = _sig(sig_index, _seg_sig(segments), "gatev2-graphics")
     sig_cut = _sig(sig_match)
     sig_verify = _sig(sig_cut, bool(verify))
@@ -1577,7 +1583,7 @@ def _beat_is_unresolved(sel, seg, _policy) -> bool:
     return bool(verifier_failed)
 
 
-def _ensure_anchor_coverage(proj, analysis, cfg, *, policy: str, log=print) -> int:
+def _ensure_anchor_coverage(proj, analysis, cfg, *, policy: str, roster=None, log=print) -> int:
     """single_scene renders: guarantee the ANCHOR scene has dedicated sources in the pool.
 
     Coverage test is deterministic: a source counts when its title matches >=2 anchor content
@@ -1652,7 +1658,7 @@ def _ensure_anchor_coverage(proj, analysis, cfg, *, policy: str, log=print) -> i
     for sv in proj.sources:
         if sv.url in {c.url for c in fresh} and sv.status == SOURCE_OK and sv.local_path:
             try:
-                _I.index_source(proj, sv, cfg, progress=None)
+                _I.index_source(proj, sv, cfg, roster=roster, progress=None)
                 n += 1
             except Exception as e:                       # noqa: BLE001
                 log(f"5a2/9 · anchor index failed for {sv.id} ({str(e)[:50]})")
@@ -2140,7 +2146,7 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
                 raise RuntimeError(f"current_pool_{_pool_verify_error}")
 
             from . import relevance_contract as _rel_pool
-            strict_after = _rel_pool.evaluate_selection_relevance(proj, segs)
+            strict_after = _rel_pool.evaluate_selection_relevance(proj, segs, cfg=cfg)
             blocked_after = {int(e.get("segment_index", -1))
                              for e in (strict_after.get("blockers") or [])}
             current_pool_recovered = set(unresolved) - blocked_after
@@ -2399,7 +2405,7 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
             # it, not the weaker legacy verifier predicate.  This keeps a visually plausible but
             # dialogue-wrong quote window from being recorded/retained as recovered.
             from . import relevance_contract as _rel_new
-            strict_new = _rel_new.evaluate_selection_relevance(proj, segs)
+            strict_new = _rel_new.evaluate_selection_relevance(proj, segs, cfg=cfg)
             strict_blocked = {int(e.get("segment_index", -1))
                               for e in (strict_new.get("blockers") or [])}
             recovered.update(i for i in unresolved if i not in strict_blocked)
@@ -2603,7 +2609,7 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
     """
     from . import relevance_contract as _R_sr
     audit_path = proj.output_dir / _R_sr.AUDIT_FILENAME
-    audit = _R_sr.evaluate_selection_relevance(proj, segs)
+    audit = _R_sr.evaluate_selection_relevance(proj, segs, cfg=cfg)
     _R_sr.write_selection_relevance_audit(audit_path, audit)
     if not audit.get("blockers"):
         return audit
@@ -2690,7 +2696,7 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
             log(f"semantic-recovery: beat {idx} legacy still actual-image reverify "
                 f"{'passed' if not why else 'failed — ' + why}")
         proj.save()
-        audit = _R_sr.evaluate_selection_relevance(proj, segs)
+        audit = _R_sr.evaluate_selection_relevance(proj, segs, cfg=cfg)
 
     # Missing/old evidence can be repaired without changing selection order. Explicit `false` facts
     # never enter this branch; they require genuinely different footage.
@@ -2713,7 +2719,7 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
             raise PipelineError(
                 f"semantic scoped re-verification failed: {type(exc).__name__}: {exc}") from exc
 
-    audit = _R_sr.evaluate_selection_relevance(proj, segs)
+    audit = _R_sr.evaluate_selection_relevance(proj, segs, cfg=cfg)
     blockers = {int(e["segment_index"]) for e in audit.get("blockers") or []}
     _recovery_deferred: list[int] = []
     _page_pool_changed = False
@@ -2758,7 +2764,7 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
 
         # Re-evaluate before the still pass: recovered moving footage needs no image, and passing a
         # subset keeps the second still pass from decorating/changing any already-approved beat.
-        audit = _R_sr.evaluate_selection_relevance(proj, segs)
+        audit = _R_sr.evaluate_selection_relevance(proj, segs, cfg=cfg)
         blockers = {int(e["segment_index"]) for e in audit.get("blockers") or []}
         if _page_pool_changed:
             # The page's own scoped beats were rematched after its downloads/indexing. Every prior
@@ -2806,7 +2812,7 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
     # after it is exhausted may the existing exact→character→abstract ladder run, and it excludes
     # located real quotes plus binding/schema/backend failures. The unchanged publication contract
     # is immediately re-evaluated below; softening never bypasses it.
-    pre_soften = _R_sr.evaluate_selection_relevance(proj, segs)
+    pre_soften = _R_sr.evaluate_selection_relevance(proj, segs, cfg=cfg)
     _pre_soften_for_ladder = pre_soften
     if _recovery_deferred:
         # Keep this generation-wide too. A deferred tail may acquire footage for an already-tried
@@ -2843,7 +2849,7 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
                     f"semantic gap specificity ladder failed before completion: "
                     f"{type(exc).__name__}: {exc}") from exc
 
-    final = _R_sr.evaluate_selection_relevance(proj, segs)
+    final = _R_sr.evaluate_selection_relevance(proj, segs, cfg=cfg)
     _R_sr.write_selection_relevance_audit(audit_path, final)
     after = sorted(int(e["segment_index"]) for e in final.get("blockers") or [])
     _recovery_deferred = [i for i in _recovery_deferred if i in set(after)]
@@ -3239,11 +3245,14 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
     # MATCH_GATE_VERSION is folded into the helper: a resume must NOT replay selections chosen
     # before a new footage gate existed.  These are refreshed again after every pre-match source
     # mutator so checkpoints describe the pool actually matched, not its pre-backfill ancestor.
+    _asr_signature = asr_semantic_fingerprint(proj, cfg)
     _sig_index, _sig_match, _sig_cut, _sig_verify, _sig_recover = \
         _footage_stage_signatures(
-            _sig_download, usable, force_index=force_index, segments=segs, verify=verify)
+            _sig_download, usable, force_index=force_index, segments=segs, verify=verify,
+            asr_signature=_asr_signature)
     _sel_complete = (bool(proj.selections)
-                     and {s.segment_index for s in proj.selections} >= {s.index for s in segs})
+                     and {s.segment_index for s in proj.selections} >= {s.index for s in segs}
+                     and asr_pool_current(proj, cfg, usable))
     _skip_match = _stage_skip(proj, "match", _sig_match, resume, artifact_ok=_sel_complete)
     _skip_verify = _stage_skip(proj, "verify", _sig_verify, resume, artifact_ok=_sel_complete)
     _skip_recover = _stage_skip(proj, "recover", _sig_recover, resume, artifact_ok=_sel_complete)
@@ -3279,14 +3288,10 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
 
     # 4 — Face-ID references
     faceid_obj, refs = None, {}
-    # OCR and ASR both benefit from the complete on-screen name vocabulary. Face-ID references
-    # remain actor-keyed separately; this richer roster lets Whisper decode proper-name dialogue
-    # (measured: quiet EOF "Cersei" otherwise became "Susie") without prompting it with a beat's
-    # expected quote.
-    roster = list(dict.fromkeys(
-        list(analysis.actors) + [str(c.get("name", "") or "").strip()
-                                for c in (analysis.characters or []) if isinstance(c, dict)
-                                and str(c.get("name", "") or "").strip()]))
+    # OCR identity remains actor-keyed: character names in subtitles/recaps must never count as
+    # proof that the character is visible. Indexing derives a separate actors+characters vocabulary
+    # from project analysis exclusively for ASR proper-name decoding.
+    roster = analysis.actors
     if _need_footage_stages:
         log("4/9 · build Face-ID references")
         if _refs_pre is not None:
@@ -3330,7 +3335,8 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
     # first pick rather than healed afterwards.
     if _need_footage_stages and not _skip_match:
         try:
-            _ensure_anchor_coverage(proj, analysis, cfg, policy=policy, log=log)
+            _ensure_anchor_coverage(
+                proj, analysis, cfg, policy=policy, roster=roster, log=log)
         except Exception as e:                                   # noqa: BLE001
             log(f"5a2/9 · anchor coverage: skipped ({str(e)[:80]})")
 
@@ -3362,9 +3368,15 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
         # Anchor/backfill are source-pool mutators.  Refresh every downstream signature before
         # recording match/cut/verify/recover checkpoints so they describe the pool actually used.
         usable = [s for s in proj.sources if s.status == "ok"]
+        # Once this run observed stale/missing ASR, keep downstream checkpoints invalid even after
+        # targeted indexing repairs the files: refreshed transcripts can change the right window,
+        # so match/verify/recover must consume them once before a later Resume may trust the cache.
+        # A newly-added anchor/backfill source can still turn an initially-current pool stale here.
+        _sel_complete = bool(_sel_complete and asr_pool_current(proj, cfg, usable))
         _sig_index, _sig_match, _sig_cut, _sig_verify, _sig_recover = \
             _footage_stage_signatures(
-                _sig_download, usable, force_index=force_index, segments=segs, verify=verify)
+                _sig_download, usable, force_index=force_index, segments=segs, verify=verify,
+                asr_signature=_asr_signature)
         # A pending backfill can be the sole reason we reached this block while the old downstream
         # checkpoints were initially valid.  If it admitted a source, the refreshed signatures
         # must invalidate those checkpoints now; if it made no pool change, the cached work remains
@@ -3375,6 +3387,18 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
             proj, "verify", _sig_verify, resume, artifact_ok=_sel_complete)
         _skip_recover = _stage_skip(
             proj, "recover", _sig_recover, resume, artifact_ok=_sel_complete)
+
+    # Anchor coverage and backfill can add sources after the main index_all audit. Their individual
+    # index calls preserve useful visual artifacts on ASR failure, but matching must not consume or
+    # checkpoint an incomplete transcript pool. Stop here, before any downstream stage is blessed.
+    if _need_footage_stages and not _skip_match \
+            and not asr_pool_current(proj, cfg, usable):
+        _asr_audit = asr_pool_cache_audit(proj, cfg, usable)
+        _asr_bad = [row.get("source_id", "") for row in _asr_audit.get("invalid", [])[:8]]
+        raise PipelineError(
+            f"post-acquisition ASR evidence incomplete for "
+            f"{len(_asr_audit.get('invalid', []))}/{_asr_audit.get('source_count', 0)} "
+            f"usable source(s): {_asr_bad}; match checkpoints were not written")
 
     # 6 — match
     if _skip_match:
@@ -3578,7 +3602,9 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
                     raise _be
                 if _saudit.get("blockers"):
                     from .relevance_contract import assert_selection_relevance as _assert_sr
-                    _assert_sr(proj, segs, proj.output_dir / "selection_relevance_audit.json")
+                    _assert_sr(
+                        proj, segs, proj.output_dir / "selection_relevance_audit.json",
+                        cfg=cfg)
                 out = build_video(proj, segs, cfg, voice=voice, captions=captions,
                                   caption_style=caption_style,
                                   title=title or analysis.movie_title or proj.name,

@@ -12,8 +12,9 @@ import pytest
 
 from vidlore.clipstudio import orchestrate as O
 from vidlore.clipstudio import policy as P
+from vidlore.clipstudio import index as IX
 from vidlore.clipstudio import verify as V
-from vidlore.clipstudio.config import ClipConfig
+from vidlore.clipstudio.config import ClipConfig, load_clip_config
 from vidlore.clipstudio.models import ClipProject, ClipSelection, ScriptSegment, Shot, SourceVideo
 
 
@@ -37,6 +38,15 @@ INCONCLUSIVE_VERIFY_SUMMARIES = [
 ]
 
 
+def _stamp_current_asr_provenance(proj, sid, cfg=None):
+    cfg = cfg or load_clip_config()
+    (proj.index_dir / f"{sid}.index.meta.json").write_text(json.dumps({
+        "schema": IX.INDEX_SCHEMA,
+        "words": True,
+        "asr_prompt_fingerprint": IX.asr_semantic_fingerprint(proj, cfg),
+    }))
+
+
 def _fixture(tmp_path, verifier):
     proj = ClipProject(name="semantic-retry", root=str(tmp_path))
     proj.ensure_dirs()
@@ -51,6 +61,7 @@ def _fixture(tmp_path, verifier):
                 keyframe_path=str(frame))
     proj.shots_path("s1").write_text(json.dumps([shot.to_dict()]))
     proj.meta["analysis"] = {"video_type": "multi_scene", "characters": [], "actors": []}
+    _stamp_current_asr_provenance(proj, "s1")
     seg = ScriptSegment(
         index=0, text="Olenna removes the stone from Sansa's necklace.",
         expected_visual="Olenna's hand removes a stone from Sansa's necklace",
@@ -77,6 +88,52 @@ def _call(proj, segs):
         proj, segs, ClipConfig(), SimpleNamespace(movie_title="Game of Thrones"),
         SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
         policy="approved_testing", log=lambda _m: None)
+
+
+def test_retry_uses_active_custom_asr_cfg_without_futile_recovery(tmp_path):
+    """A current custom-model index must not look stale under the default environment.
+
+    The semantic retry used to omit ``cfg`` at each contract evaluation.  Quote typing then loaded
+    a second, default ``ClipConfig`` and rejected a perfectly current custom Whisper index as an ASR
+    fingerprint mismatch, sending a passing beat through reverify/acquisition/still recovery.
+    """
+    proj, segs, sel = _fixture(tmp_path, GOOD)
+    seg = segs[0]
+    seg.quote = "Chaos isn't a pit. Chaos is a ladder."
+    sel.signals = {"dialogue": 1.0, "moment_lock": 1.0}
+    words = "Chaos isn't a pit Chaos is a ladder".split()
+    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+        [0.2 + i * .12, 0.3 + i * .12, word] for i, word in enumerate(words)
+    ]))
+    custom_cfg = ClipConfig(whisper_model="small.en", whisper_compute="float16")
+    default_cfg = ClipConfig(whisper_model="base", whisper_compute="int8")
+    assert IX.asr_semantic_fingerprint(proj, custom_cfg) != \
+        IX.asr_semantic_fingerprint(proj, default_cfg)
+    _stamp_current_asr_provenance(proj, "s1", custom_cfg)
+    V.bind_selection_verifier_evidence(
+        proj, sel, seg, sel.verifier, model="vision", is_specific=True,
+        multiframe=True, faceid_names=[], era="", must_see="")
+
+    with mock.patch.object(O, "_recover_unresolved_beats") as recover, \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair") as reverify, \
+            mock.patch.object(O, "_fill_image_fallbacks") as stills, \
+            mock.patch("vidlore.clipstudio.selfheal.heal_selection_relevance_gaps") as ladder:
+        audit = O._retry_selection_relevance(
+            proj, segs, custom_cfg, SimpleNamespace(movie_title="Game of Thrones"),
+            SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+            policy="approved_testing", log=lambda _m: None)
+
+    assert audit["status"] == "pass"
+    assert audit["quote_branch_counts"] == {
+        "verbatim": 1, "paraphrase": 0, "indeterminate": 0}
+    evidence = audit["checked"][0]["quote_evidence"]
+    assert evidence["asr_prompt_fingerprint_expected"] == \
+        IX.asr_semantic_fingerprint(proj, custom_cfg)
+    assert evidence["asr_provenance_invalid_source_count"] == 0
+    recover.assert_not_called()
+    reverify.assert_not_called()
+    stills.assert_not_called()
+    ladder.assert_not_called()
 
 
 def _write_mock_recovery_page(proj, kw, *, deferred=(), page_completed=True,
@@ -1707,6 +1764,7 @@ def test_current_pool_recovery_clears_a_real_timed_quote_window_contract(tmp_pat
     (proj.index_dir / "s1.words.json").write_text(json.dumps([
         [10.2 + i * .12, 10.3 + i * .12, word] for i, word in enumerate(words)
     ]))
+    _stamp_current_asr_provenance(proj, "s1")
     seg = ScriptSegment(
         index=0, text="Which is why genius is the wrong word.", quote=quote,
         scene_query="Game of Thrones Littlefinger chaos is a ladder speech Varys",
