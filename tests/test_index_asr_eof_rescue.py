@@ -49,6 +49,22 @@ def test_transcribe_words_recovers_vad_dropped_eof_dialogue(monkeypatch, tmp_pat
     assert model.calls[1]["clip_timestamps"] == [279.336, 309.336]
 
 
+def test_transcribe_threads_roster_hotwords_to_primary_and_rescue(monkeypatch, tmp_path):
+    model = _TailDroppingModel()
+    monkeypatch.setattr(IX, "_whisper", lambda _cfg: model)
+
+    IX.transcribe_words(
+        tmp_path / "source.mp4", NS(), duration=309.336,
+        hotwords="Cersei Lannister Olenna Tyrell")
+
+    assert model.calls[0]["hotwords"] == "Cersei Lannister Olenna Tyrell"
+    assert model.calls[1]["hotwords"] == "Cersei Lannister Olenna Tyrell"
+    assert model.calls[0]["initial_prompt"] == (
+        "Cast and character names: Cersei Lannister Olenna Tyrell")
+    assert model.calls[1]["initial_prompt"] == (
+        "Cast and character names: Cersei Lannister Olenna Tyrell")
+
+
 def test_eof_rescue_rejects_single_word_outro_hallucination():
     class Model:
         def transcribe(self, _path, **_kwargs):

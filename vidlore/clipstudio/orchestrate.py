@@ -3279,7 +3279,14 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
 
     # 4 — Face-ID references
     faceid_obj, refs = None, {}
-    roster = analysis.actors
+    # OCR and ASR both benefit from the complete on-screen name vocabulary. Face-ID references
+    # remain actor-keyed separately; this richer roster lets Whisper decode proper-name dialogue
+    # (measured: quiet EOF "Cersei" otherwise became "Susie") without prompting it with a beat's
+    # expected quote.
+    roster = list(dict.fromkeys(
+        list(analysis.actors) + [str(c.get("name", "") or "").strip()
+                                for c in (analysis.characters or []) if isinstance(c, dict)
+                                and str(c.get("name", "") or "").strip()]))
     if _need_footage_stages:
         log("4/9 · build Face-ID references")
         if _refs_pre is not None:

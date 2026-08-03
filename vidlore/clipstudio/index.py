@@ -165,7 +165,7 @@ def _merge_eof_words(primary: list[tuple[float, float, str]],
 
 
 def _rescue_eof_words(path: Path, model, primary: list[tuple[float, float, str]],
-                      duration: float) -> list[tuple[float, float, str]]:
+                      duration: float, *, hotwords: str = "") -> list[tuple[float, float, str]]:
     """Recover trailing dialogue that whole-source Silero VAD can omit.
 
     The independent pass is narrowly EOF-anchored and disables VAD/previous-text conditioning.  It
@@ -185,6 +185,8 @@ def _rescue_eof_words(path: Path, model, primary: list[tuple[float, float, str]]
             str(path), word_timestamps=True, vad_filter=False,
             condition_on_previous_text=False,
             clip_timestamps=[tail_start, duration],
+            hotwords=hotwords or None,
+            initial_prompt=(f"Cast and character names: {hotwords}" if hotwords else None),
         )
         # no-VAD is required precisely because Silero missed this tail, but that also makes silent
         # outro hallucinations possible.  Faster-Whisper supplies independent decoder confidence
@@ -217,12 +219,15 @@ def _rescue_eof_words(path: Path, model, primary: list[tuple[float, float, str]]
     return _merge_eof_words(primary, rescue)
 
 
-def transcribe_words(path: Path, cfg: ClipConfig, *, duration: float = 0.0) \
+def transcribe_words(path: Path, cfg: ClipConfig, *, duration: float = 0.0,
+                     hotwords: str = "") \
         -> list[tuple[float, float, str]]:
     """Return [(start,end,word)] for the whole source. Empty list if ASR unavailable."""
     try:
         model = _whisper(cfg)
-        segments, _info = model.transcribe(str(path), word_timestamps=True, vad_filter=True)
+        segments, _info = model.transcribe(
+            str(path), word_timestamps=True, vad_filter=True, hotwords=hotwords or None,
+            initial_prompt=(f"Cast and character names: {hotwords}" if hotwords else None))
         words = _timed_words(segments)
     except Exception:
         return []
@@ -233,7 +238,7 @@ def transcribe_words(path: Path, cfg: ClipConfig, *, duration: float = 0.0) \
             # Duration discovery only controls the optional rescue.  Never discard a successful
             # primary transcript because ffprobe is unavailable or the container is malformed.
             return words
-    return _rescue_eof_words(path, model, words, duration)
+    return _rescue_eof_words(path, model, words, duration, hotwords=hotwords)
 
 
 def _assign_transcript(shots: list[Shot], words: list[tuple[float, float, str]]) -> None:
@@ -345,18 +350,10 @@ def find_quote_span(words, quote: str, *, min_ratio: float = 0.72,
                 float(b[1]) - float(a[2]) > max_interword_gap
                 for a, b in zip(span_words, span_words[1:])))
             win = [x[0] for x in span_words]
-            if substantive:
-                # One shared name is not enough to identify a content-rich line.  Measured false
-                # positive: "Lady Stark is here in King's Landing" scored 0.727 against "Lord
-                # Edward Stark is here ... Protector of the Realm" because the function-word
-                # skeleton and ``Stark`` aligned.  Conversely the EOF-rescued real Olenna quote
-                # has three independent content hits despite base-ASR garbling Cersei.  Require
-                # two distinct substantive query terms once a quote supplies at least three;
-                # short quotes retain the prior one-term requirement.
-                content_hits = sum(1 for wanted in dict.fromkeys(substantive)
-                                   if any(_tok_close(actual, wanted) for actual in win))
-                if content_hits < (2 if len(set(substantive)) >= 3 else 1):
-                    continue
+            if substantive and not any(
+                    _tok_close(actual, wanted)
+                    for actual in win for wanted in substantive):
+                continue
             m = SequenceMatcher(None, win, qt)
             hits = sum(bl.size for bl in m.get_matching_blocks())
             # credit near-miss tokens the block matcher rejected (ASR garble), positionally
@@ -983,7 +980,9 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
     log(f"index: {source.id} {len(bounds)} shots detected")
 
     # 2) transcript
-    words = transcribe_words(path, cfg, duration=source.duration)
+    asr_hotwords = " ".join(dict.fromkeys(
+        str(name or "").strip() for name in (roster or []) if str(name or "").strip()))
+    words = transcribe_words(path, cfg, duration=source.duration, hotwords=asr_hotwords)
     log(f"index: {source.id} transcript words={len(words)}")
 
     # 3) keyframes + CLIP embeds + faces + Face-ID + OCR + quality + phash
@@ -1161,7 +1160,14 @@ def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig
         shots = load_shots(proj, source.id)
     except Exception:
         return []
-    words = transcribe_words(Path(source.local_path), cfg, duration=source.duration)
+    analysis = (getattr(proj, "meta", {}) or {}).get("analysis") or {}
+    names = list(analysis.get("actors") or [])
+    names.extend(str(row.get("name", "") or "") for row in (analysis.get("characters") or [])
+                 if isinstance(row, dict))
+    asr_hotwords = " ".join(dict.fromkeys(
+        str(name or "").strip() for name in names if str(name or "").strip()))
+    words = transcribe_words(
+        Path(source.local_path), cfg, duration=source.duration, hotwords=asr_hotwords)
     if not words:
         if progress:
             progress(f"index: ⚠ {source.id} word refresh produced no ASR; cache preserved")

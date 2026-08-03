@@ -312,19 +312,19 @@ def test_pool_quote_scan_rejects_one_name_function_word_false_match(tmp_path):
     assert R._quote_pool_branches(proj, [seg])[0]["branch"] == "paraphrase"
 
 
-def test_pool_locator_can_type_real_garbled_quote_without_lowering_window_floor(tmp_path):
+def test_pool_scan_types_hotword_repaired_real_quote_without_lowering_floor(tmp_path):
     quote = "Tell Cersei. I want her to know it was me."
     proj, seg, _sel = _fixture(
         tmp_path, text="Olenna confesses before dying.", quote=quote,
-        signals={"dialogue": 0.737})
+        signals={"dialogue": 0.77})
     words = [[i * .1, (i + 1) * .1, w] for i, w in enumerate(
-        "Tell Susie I wanted to know he was me".split())]
+        "Tell Cersei I wanted to know he was me".split())]
     (proj.index_dir / "s1.words.json").write_text(json.dumps(words))
 
     entry = R.evaluate_selection_relevance(proj, [seg])["blockers"][0]
     ev = entry["quote_evidence"]
     assert ev["branch"] == "verbatim"
-    assert ev["scan_ratio_floor"] == 0.72
+    assert ev["scan_ratio_floor"] == 0.78
     assert ev["selected_window_ratio_floor"] == 0.78
     assert "exact_quote_dialogue_signal_below_floor" in entry["reasons"]
 

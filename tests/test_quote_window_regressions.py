@@ -59,6 +59,20 @@ def test_quote_locator_requires_a_substantive_token_not_common_prefix_only():
     assert IX.find_quote_span(words, "He was a monster", min_ratio=0.78) is None
 
 
+def test_quote_locator_floor_rejects_measured_analyzer_paraphrases():
+    cases = [
+        ("You should have told me you were coming.",
+         "you told me you were taking"),
+        ("You didn't think I'd let you marry that monster, did you?",
+         "You don't think I'd let you marry that beast"),
+        ("Myself walking the battlements of Winterfell.",
+         "myself walk along the battlements of Winterfell"),
+    ]
+    for quote, asr in cases:
+        words = [(i * .1, (i + 1) * .1, token) for i, token in enumerate(asr.split())]
+        assert IX.find_quote_span(words, quote, min_ratio=0.78) is None
+
+
 def _pool_shot(sid, index, start, end, *, quality, transcript="same iconic scene dialogue"):
     shot = Shot(source_id=sid, index=index, start=start, end=end, quality=quality,
                 transcript=transcript)
