@@ -117,6 +117,8 @@ def _whisper(cfg: ClipConfig):
 
 _ASR_EOF_WINDOW_SEC = 30.0
 _ASR_EOF_RESCUE_GAP_SEC = 4.0
+_ASR_EOF_MAX_NO_SPEECH = 0.60
+_ASR_EOF_MIN_AVG_LOGPROB = -1.0
 
 
 def _timed_words(segments, *, lo: float = 0.0, hi: float = float("inf")) \
@@ -135,9 +137,11 @@ def _timed_words(segments, *, lo: float = 0.0, hi: float = float("inf")) \
             except (TypeError, ValueError):
                 continue
             text = str(w.word or "").strip()
+            clipped_start, clipped_end = max(lo, start), min(hi, end)
             if (text and math.isfinite(start) and math.isfinite(end)
-                    and end > start + 0.005 and start >= lo - 0.25 and end <= hi + 0.25):
-                out.append((max(lo, start), min(hi, end), text))
+                    and end > start + 0.005 and start >= lo - 0.25 and end <= hi + 0.25
+                    and clipped_end > clipped_start + 0.005):
+                out.append((clipped_start, clipped_end, text))
     return out
 
 
@@ -182,7 +186,21 @@ def _rescue_eof_words(path: Path, model, primary: list[tuple[float, float, str]]
             condition_on_previous_text=False,
             clip_timestamps=[tail_start, duration],
         )
-        rescue = _timed_words(segments, lo=tail_start, hi=duration)
+        # no-VAD is required precisely because Silero missed this tail, but that also makes silent
+        # outro hallucinations possible.  Faster-Whisper supplies independent decoder confidence
+        # per segment; fail closed when it is missing/non-finite or says silence/low likelihood.
+        credible = []
+        for seg in segments:
+            try:
+                no_speech = float(seg.no_speech_prob)
+                avg_logprob = float(seg.avg_logprob)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if (math.isfinite(no_speech) and math.isfinite(avg_logprob)
+                    and no_speech <= _ASR_EOF_MAX_NO_SPEECH
+                    and avg_logprob >= _ASR_EOF_MIN_AVG_LOGPROB):
+                credible.append(seg)
+        rescue = _timed_words(credible, lo=tail_start, hi=duration)
     except Exception:
         return primary
 
@@ -206,11 +224,16 @@ def transcribe_words(path: Path, cfg: ClipConfig, *, duration: float = 0.0) \
         model = _whisper(cfg)
         segments, _info = model.transcribe(str(path), word_timestamps=True, vad_filter=True)
         words = _timed_words(segments)
-        if not duration:
-            duration = float(probe(path).get("duration", 0.0) or 0.0)
-        return _rescue_eof_words(path, model, words, duration)
     except Exception:
         return []
+    if not duration:
+        try:
+            duration = float(probe(path).get("duration", 0.0) or 0.0)
+        except Exception:
+            # Duration discovery only controls the optional rescue.  Never discard a successful
+            # primary transcript because ffprobe is unavailable or the container is malformed.
+            return words
+    return _rescue_eof_words(path, model, words, duration)
 
 
 def _assign_transcript(shots: list[Shot], words: list[tuple[float, float, str]]) -> None:
@@ -1144,10 +1167,42 @@ def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig
             progress(f"index: ⚠ {source.id} word refresh produced no ASR; cache preserved")
         return []
     _assign_transcript(shots, words)
-    save_words(proj, source.id, words)
-    tmp = shots_file.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps([shot.to_dict() for shot in shots], indent=1), encoding="utf-8")
-    tmp.replace(shots_file)
+    words_file = Path(proj.index_dir) / f"{source.id}.words.json"
+    words_tmp = words_file.with_name(words_file.name + ".refresh.tmp")
+    shots_tmp = shots_file.with_name(shots_file.name + ".refresh.tmp")
+    rollback_tmp = words_file.with_name(words_file.name + ".refresh.rollback.tmp")
+    old_words = words_file.read_bytes() if words_file.exists() else None
+    try:
+        # Stage both complete payloads before replacing either member of the dependent pair.
+        words_tmp.write_text(json.dumps([
+            [round(float(a), 3), round(float(b), 3), str(c)] for a, b, c in words
+        ]), encoding="utf-8")
+        shots_tmp.write_text(
+            json.dumps([shot.to_dict() for shot in shots], indent=1), encoding="utf-8")
+        words_tmp.replace(words_file)
+        try:
+            shots_tmp.replace(shots_file)
+        except Exception:
+            # The second atomic replace failed.  Restore the first file so readers can never see
+            # new words paired with stale per-shot transcripts.
+            if old_words is None:
+                words_file.unlink(missing_ok=True)
+            else:
+                rollback_tmp.write_bytes(old_words)
+                rollback_tmp.replace(words_file)
+            raise
+    finally:
+        words_tmp.unlink(missing_ok=True)
+        shots_tmp.unlink(missing_ok=True)
+        rollback_tmp.unlink(missing_ok=True)
+    # Same-process matching memoizes absent and present quote spans.  Invalidate only this source,
+    # and only after the dependent cache pair committed successfully.
+    try:
+        from .match import _QSPAN_CACHE
+        for key in [key for key in _QSPAN_CACHE if key and key[0] == source.id]:
+            _QSPAN_CACHE.pop(key, None)
+    except Exception:
+        pass
     if progress:
         progress(f"index: {source.id} refreshed {len(words)} words across {len(shots)} shots")
     return shots
