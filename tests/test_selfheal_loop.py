@@ -13,7 +13,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from vidlore.clipstudio import selfheal as SH               # noqa: E402
+from vidlore.clipstudio import orchestrate as O              # noqa: E402
+from vidlore.clipstudio import selfheal as SH                # noqa: E402
 from vidlore.clipstudio.models import (                     # noqa: E402
     ClipProject, ClipSelection, ScriptSegment, Shot, SourceVideo, SOURCE_FAILED, SOURCE_OK)
 from vidlore.clipstudio.config import ClipConfig            # noqa: E402
@@ -447,6 +448,31 @@ class TestWiring(unittest.TestCase):
         bsrc = (Path(__file__).resolve().parents[1]
                 / "vidlore" / "clipstudio" / "build.py").read_text()
         self.assertIn('kind="rejected_footage"', bsrc)
+
+    def test_preassemble_acquisition_failure_is_retryable_and_uncheckpoints_recovery(self):
+        """The 101-beat failure: beat 80 download uncertainty must never become content."""
+        from vidlore.clipstudio.verify import NonRetryableBuildError
+        with tempfile.TemporaryDirectory() as td:
+            p = _proj(td)
+            O._stage_done(p, "recover", "recover-sig")
+            logs = []
+            technical = SH.InconclusiveAcquisitionError(
+                80, "download", detail="all attempted sources failed")
+            with mock.patch.object(SH, "run", side_effect=technical):
+                with self.assertRaises(SH.InconclusiveAcquisitionError) as raised:
+                    O._run_preassemble_selfheal(
+                        p, [], ClipConfig(), None, policy="approved_testing",
+                        pre="blocked — scene(s) [80].", log=logs.append)
+
+            self.assertIs(raised.exception, technical)
+            self.assertNotIsInstance(raised.exception, NonRetryableBuildError)
+            persisted = ClipProject.load(td)
+            self.assertIsNone(O._ckpt(persisted)["stages"].get("recover"),
+                              "Resume must rerun recovery after technical acquisition failure")
+            self.assertNotIn("selection_relevance_recovery", persisted.meta)
+            self.assertNotIn("selection_relevance_gap_softening", persisted.meta)
+            self.assertFalse(any("self-heal: skipped" in line for line in logs),
+                             "technical acquisition must propagate, never be logged as a skip")
 
 
 if __name__ == "__main__":

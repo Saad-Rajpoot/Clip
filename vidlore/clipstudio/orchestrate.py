@@ -156,6 +156,30 @@ def _stage_skip(proj, name: str, sig: str, resume: bool, artifact_ok: bool = Tru
     return bool(rec and rec.get("status") == "done" and rec.get("sig") == sig and artifact_ok)
 
 
+def _run_preassemble_selfheal(proj, segs, cfg, analysis, *, policy: str,
+                              pre: str, log) -> str | None:
+    """Run structural-gate self-heal without laundering technical acquisition into content.
+
+    Most legacy self-heal faults remain fail-open so the authoritative gate can speak.  A typed
+    acquisition failure is different: the recovery pool was never exhaustively searched, so the
+    old catch-and-continue path converted infrastructure uncertainty into a non-retryable footage
+    verdict.  Remove the just-written recovery checkpoint and propagate the typed error; Resume
+    must retry recovery after network/download/index health is restored.
+    """
+    if not pre:
+        return pre
+    from . import selfheal as _selfheal
+    try:
+        return _selfheal.run(proj, segs, cfg, analysis, policy=policy, log=log)
+    except _selfheal.InconclusiveAcquisitionError:
+        _ckpt(proj)["stages"].pop("recover", None)
+        proj.save()
+        raise
+    except Exception as exc:                            # noqa: BLE001 — legacy fail-open boundary
+        _log_stage_skip(log, proj, "self-heal", exc)
+        return pre
+
+
 def produce(project_dir, *, script_path: Optional[str] = None, script_text: Optional[str] = None,
             source_specs: Optional[list[SourceSpec]] = None, name: str = "",
             cfg: Optional[ClipConfig] = None, theme: str = "history", voice: str = "",
@@ -3101,11 +3125,8 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
         # weakens the gate. Manual on job olenna_v2_allfixes it took 17 blocked beats to 0;
         # this makes that loop the pipeline's own behavior. VIDLORE_CLIPSTUDIO_SELFHEAL=0 off.
         if _pre:
-            try:
-                from . import selfheal as _selfheal
-                _pre = _selfheal.run(proj, segs, cfg, analysis, policy=policy, log=log)
-            except Exception as _e:                      # noqa: BLE001 — heal must never break a render
-                _log_stage_skip(log, proj, "self-heal", _e)
+            _pre = _run_preassemble_selfheal(
+                proj, segs, cfg, analysis, policy=policy, pre=_pre, log=log)
         if _pre:
             _mode = _os.environ.get("VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE", "block").strip().lower()
             if _mode == "warn":
