@@ -119,7 +119,7 @@ def test_a_missed_target_blocks_the_contextual_downgrade():
     assert "_look_missed" in src
     assert "if _look_missed and _orig_ok:" in src, \
         "a usable pick must be KEPT when the target is missing, not gambled on the bench"
-    assert src.index("_look_missed = ") < src.index("_orig_ok = _contextual_subject_ok(v)"), \
+    assert src.index("_look_missed = ") < src.index("_orig_ok = _exact_contextual_ok(v"), \
         "the look verdict must be computed before the downgrade decision"
 
 

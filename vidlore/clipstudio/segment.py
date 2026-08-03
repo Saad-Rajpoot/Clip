@@ -29,8 +29,11 @@ _YEAR_RX = re.compile(r"\b(1[89]\d{2}|20\d{2})\b")
 _ENTITY_RX = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b")
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 # Split only on commas + coordinating conjunctions — NOT subordinating ones (who/which/because/
-# while), which would fragment a sentence into ungrammatical narration for the TTS.
-_CLAUSE_SPLIT = re.compile(r",\s+|\s+(?:and|but|so|then)\s+", re.I)
+# while), which would fragment a sentence into ungrammatical narration for the TTS.  The delimiter
+# is CAPTURED because it is authored narration, not disposable parsing syntax.  The old split
+# consumed commas and words such as "and", permanently changing both TTS and captions (for example
+# "in secret, hidden her face, and told" became "in secret hidden her face told").
+_CLAUSE_SPLIT = re.compile(r"(,\s+|\s+(?:and|but|so|then)\s+)", re.I)
 
 
 def _word_count(s: str) -> int:
@@ -41,7 +44,27 @@ def _split_long(sentence: str, lo: int, hi: int) -> list[str]:
     """Break a long sentence into ~lo..hi-word chunks at clause boundaries, else word windows."""
     if _word_count(sentence) <= hi:
         return [sentence.strip()]
-    parts = [p.strip() for p in _CLAUSE_SPLIT.split(sentence) if p.strip()]
+    # Convert the captured-token stream into independently chunkable clauses while preserving the
+    # exact punctuation/words.  A comma stays on the clause before it; a coordinating conjunction
+    # stays at the start of the clause after it.  Joining the resulting pieces with one space is
+    # therefore text-preserving after the module's documented whitespace normalization.
+    split = _CLAUSE_SPLIT.split(sentence)
+    parts: list[str] = []
+    current = split[0].strip() if split else ""
+    for i in range(1, len(split), 2):
+        sep = split[i]
+        following = split[i + 1].strip() if i + 1 < len(split) else ""
+        if sep.lstrip().startswith(","):
+            if current:
+                parts.append(current.rstrip() + ",")
+            current = following
+        else:
+            if current:
+                parts.append(current)
+            conjunction = sep.strip()
+            current = f"{conjunction} {following}".strip()
+    if current:
+        parts.append(current)
     chunks, cur = [], ""
     for p in parts:
         cand = (cur + " " + p).strip() if cur else p

@@ -255,7 +255,7 @@ class TestStagedPrefetch(unittest.TestCase):
         seg = src.split("PHASE-2 RUNG PREFETCH")[1].split("for sel in proj.selections:")[0]
         self.assertIn("_alt_waves", seg)                      # depth paid one wave at a time
         self.assertIn("_alt_done", seg)
-        self.assertIn("_contextual_subject_ok(_v0)", seg)     # keep-contextual beats: no lenient
+        self.assertIn("_exact_contextual_ok(_v0", seg)        # keep-contextual beats: no lenient
         self.assertIn("if not _alt_done.get(_bi)", seg)       # promoted beats: no lenient either
         self.assertIn("VIDLORE_CLIPSTUDIO_VERIFY_PREFETCH_RUNGS", seg)
 

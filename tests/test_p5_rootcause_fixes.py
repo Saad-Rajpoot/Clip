@@ -185,7 +185,7 @@ def test_b2_anchor_covered_key_scene_adds_nothing():
 # ---------------------------------------------------------------------------
 def _breakout_fixture(*, quote, asr, seg0_text, llm_reply=None, face_ids=(),
                       luma=80.0, characters=None, aired=None, env=None, seg_idx=0,
-                      work_dir=None):
+                      work_dir=None, probed_width=1920, probed_height=1080):
     from vidlore.clipstudio import build as B
     from vidlore.clipstudio import llm as L
     import vidlore.clipstudio.index as _idxmod
@@ -218,8 +218,13 @@ def _breakout_fixture(*, quote, asr, seg0_text, llm_reply=None, face_ids=(),
 
     _orig_ls = _idxmod.load_shots
     _orig = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
-             B._asr_wav_words, L.complete)
+             B._asr_wav_words, B._probe_breakout_native_dimensions, L.complete)
     _idxmod.load_shots = lambda p, sid: shots
+    # The fixture's /tmp/x.mp4 is intentionally a one-byte stand-in. Breakout admission now probes
+    # the actual source bytes and fails unknown dimensions closed, so give every pre-existing gate
+    # test a truthful native-HD probe result; individual quality tests override it below.
+    B._probe_breakout_native_dimensions = lambda p: {
+        "width": probed_width, "height": probed_height}
     B._extract_breakout = lambda *a, **k: 5.0
     B._breakout_window_luma = lambda *a, **k: luma
     B._frame_has_burned_text = lambda *a, **k: False
@@ -241,7 +246,7 @@ def _breakout_fixture(*, quote, asr, seg0_text, llm_reply=None, face_ids=(),
     finally:
         _idxmod.load_shots = _orig_ls
         (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
-         B._asr_wav_words, L.complete) = _orig
+         B._asr_wav_words, B._probe_breakout_native_dimensions, L.complete) = _orig
         for k, v in saved.items():
             (os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v))
     return out, "\n".join(logs), llm_calls
@@ -323,6 +328,40 @@ def test_b3_unconfirmed_dim_candidate_still_rejected():
     assert not any(o["seg_index"] == 3 for o in out), \
         "dim footage without face confirmation must still be rejected"
     assert "dark" in logs.lower() or "luma" in logs.lower()
+
+
+def test_b4_native_hd_rule_is_pure_and_unknown_fails_closed():
+    from vidlore.clipstudio.build import _breakout_native_hd_ok
+
+    for unknown in (None, {}, {"width": None, "height": None},
+                    {"width": 0, "height": 0}, {"width": "unknown", "height": 720}):
+        assert not _breakout_native_hd_ok(unknown), f"unknown native dimensions admitted: {unknown!r}"
+    assert not _breakout_native_hd_ok({"width": 640, "height": 360})
+    assert not _breakout_native_hd_ok({"width": 1280, "height": 719})
+    assert not _breakout_native_hd_ok({"width": 640, "height": 720})
+    assert _breakout_native_hd_ok({"width": 1280, "height": 720})
+    assert _breakout_native_hd_ok({"width": 1920, "height": 1080})
+    assert _breakout_native_hd_ok({"width": 720, "height": 1280})
+
+
+def test_b4_select_breakouts_uses_probed_native_height_not_claimed_metadata():
+    common = dict(
+        quote="Seize him. Cut his throat.", asr=_SC,
+        seg0_text="the narration describes the arrest in the throne room")
+
+    # The synthetic source claims a 1920-wide HD-looking record, but the local bytes probe 360p.
+    # Upscaling that file later must never make it eligible to air as a breakout.
+    out_sd, logs_sd, _ = _breakout_fixture(**common, probed_width=640, probed_height=360)
+    assert not out_sd, "a native-360p source must be omitted from the optional breakout pool"
+    assert "native 640x360 < 1280x720" in logs_sd and "upscaling cannot create HD detail" in logs_sd
+
+    out_unknown, logs_unknown, _ = _breakout_fixture(**common, probed_width=0, probed_height=0)
+    assert not out_unknown, "an unprobeable source must fail the breakout quality contract closed"
+    assert "native dimensions unknown" in logs_unknown
+
+    out_hd, _logs_hd, _ = _breakout_fixture(**common, probed_width=1280, probed_height=720)
+    assert any(o["seg_index"] == 0 for o in out_hd), \
+        "the native-HD boundary itself must remain eligible; this is a quality gate, not a ban"
 
 
 # ---------------------------------------------------------------------------

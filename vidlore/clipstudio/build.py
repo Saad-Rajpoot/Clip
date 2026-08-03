@@ -820,6 +820,15 @@ def _pick_breakout_stop(words: list, lo: float, hi: float) -> float:
 # these only stop the first consonant / last syllable being clipped.
 _BK_LEAD_S = 0.35
 _BK_TAIL_S = 0.45
+# Breakouts are optional editorial polish, but they are also the only inserts that air a source's
+# own picture AND sound at full prominence.  A 360p source enlarged to a 1080p container is still
+# 360p footage.  Keep this as a hard native-source contract (not an env-tunable ranking bonus): if
+# the local file cannot be probed, or its native height is below 720, it cannot supply a breakout.
+_BK_MIN_NATIVE_SHORT_EDGE = 720
+_BK_MIN_NATIVE_LONG_EDGE = 1280
+# Compatibility name retained for old diagnostics/tests; the gate below uses
+# both decoded dimensions, not this height value alone.
+_BK_MIN_NATIVE_HEIGHT = _BK_MIN_NATIVE_SHORT_EDGE
 # Phrase-alignment tiers for correcting a breakout caption against the known source line — see
 # _correct_breakout_words. Above MIN, context alone decides; between FUZZY and MIN a slot must also
 # look phonetically like an ASR slip; below FUZZY the audio is speaking a different line entirely.
@@ -831,6 +840,54 @@ _BK_CAP_ALIGN_FUZZY = 0.60
 # split "don’t" into "don"+"t", which broke the cross-source dedup Jaccard for the SAME Olenna
 # line from two uploads (job 5462677f95: the confession aired twice, 3.4 min apart).
 _BK_APOS_TR = str.maketrans({"’": "'", "‘": "'", "ʼ": "'", "`": "'", "´": "'"})
+
+
+def _breakout_native_hd_ok(probe_info) -> bool:
+    """Pure native-resolution admission rule for a real-audio breakout.
+
+    `probe_info` must be the result of probing the bytes that would actually be cut.  Persisted
+    source metadata is deliberately not a fallback: it can be stale after a download recovery or
+    can describe the requested format rather than the local file.  Unknown therefore fails closed.
+    """
+    if not isinstance(probe_info, dict):
+        return False
+    try:
+        width = int(probe_info.get("width") or 0)
+        height = int(probe_info.get("height") or 0)
+        short, long = sorted((width, height))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return short >= _BK_MIN_NATIVE_SHORT_EDGE and long >= _BK_MIN_NATIVE_LONG_EDGE
+
+
+def _probe_breakout_native_dimensions(src_path) -> dict:
+    """Probe the local source bytes used by a breakout; return normalized native dimensions."""
+    try:
+        from .ingest import probe as _probe_bk_hd
+        info = _probe_bk_hd(Path(src_path)) or {}
+        return {
+            "width": int(info.get("width") or 0),
+            "height": int(info.get("height") or 0),
+        }
+    except Exception:                                  # noqa: BLE001 — unknown probe fails closed
+        return {"width": 0, "height": 0}
+
+
+def _breakout_video_filter(src_w: int, crop_corner: str = "",
+                           legibility_vf: str = "") -> str:
+    """Build the breakout picture chain: logo crop -> shadow grade -> 1080 normalization."""
+    vf_parts = []
+    if crop_corner:
+        vf_parts.append(_watermark_crop_filter(crop_corner))
+    if legibility_vf:
+        vf_parts.append(legibility_vf)
+    if src_w and src_w < 1280:
+        vf_parts.append(_upscale_filter(src_w))
+    else:
+        vf_parts.append(f"scale=1920:1080:force_original_aspect_ratio=increase,"
+                        f"crop=1920:1080,setsar=1,{_CAS}")
+    vf_parts.append("fps=30")
+    return ",".join(vf_parts)
 
 
 def _bk_dedup_same_line(cq: str, pq: str) -> bool:
@@ -846,13 +903,14 @@ def _bk_dedup_same_line(cq: str, pq: str) -> bool:
 
 def _extract_breakout(src_path: str, start: float, dur: float, vdest: Path,
                       adest: Path, src_w: int = 0, crop_corner: str = "",
-                      min_dur: float = 0.0) -> Optional[float]:
+                      min_dur: float = 0.0, quality_meta: Optional[dict] = None) -> Optional[float]:
     """Cut the breakout VIDEO (enhanced, 1080p30, silent) + its AUDIO (2-pass loudnorm to
     narration level, faded) from the source. Skips leading scene silence so the narration
     pause never dangles over a mute shot; `dur` is treated as the MAX — the real length is
     chosen to end on a complete spoken line (3-10s). Returns the exact duration or None.
     `crop_corner`: punch-in crop that drops a channel bug's corner — breakout clips are cut
-    directly from the source, so build_video's per-clip watermark crop never touches them."""
+    directly from the source, so build_video's per-clip watermark crop never touches them.
+    `quality_meta`, when supplied, receives the exact legibility grade applied for audit."""
     import json as _json10
     import re as _re10
     try:
@@ -908,13 +966,19 @@ def _extract_breakout(src_path: str, start: float, dur: float, vdest: Path,
         if _os10.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_VOICE_GUARD", "1").strip() \
                 not in ("0", "false", "no") and _is_narration(_bk_text):
             return None
-        _wmcrop = (_watermark_crop_filter(crop_corner) + ",") if crop_corner else ""
+        # Regular selected clips already receive this presentation-only shadow lift in cut.py.
+        # Breakouts bypass cut_selection and previously skipped it entirely, leaving the exact same
+        # dim source window much darker than a normal beat.  Probe the final, dialogue-adjusted
+        # window and apply the same grade before the 1080 normalization.  Any unexpected failure is
+        # caught by this function's outer guard and omits the optional breakout.
+        from .cut import legibility_filter as _legibility_filter
+        _legibility_vf, _legibility_note = _legibility_filter(src_path, start, dur)
+        if quality_meta is not None:
+            quality_meta["legibility_grade"] = _legibility_note or ""
         pv = subprocess.run(
             [ffmpeg_exe(), "-y", "-ss", f"{max(0.0, start):.3f}", "-i", str(src_path),
              "-t", f"{dur:.3f}", "-an",
-             "-vf", _wmcrop + (_upscale_filter(src_w) if src_w and src_w < 1280
-                     else f"scale=1920:1080:force_original_aspect_ratio=increase,"
-                          f"crop=1920:1080,setsar=1,{_CAS}") + ",fps=30",
+             "-vf", _breakout_video_filter(src_w, crop_corner, _legibility_vf),
              "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
              "-movflags", "+faststart", str(vdest)],
             capture_output=True, timeout=300)
@@ -1054,22 +1118,13 @@ def _verbatim_bypass_ok(qw: list, run: int) -> bool:
 def _asr_wav_words(wav_path) -> tuple:
     """Re-ASR an EXTRACTED breakout audio clip → (ordered_words, joined_text, speech_seconds).
     This is the GROUND TRUTH of what a breakout actually says (post-loudnorm), unlike the source's
-    indexed shot transcript. () on failure."""
+    indexed shot transcript.  Overlapping, EOF-anchored short windows prevent Whisper's plausible
+    prefix-only result from hiding the last several seconds of dialogue. () on failure."""
     try:
-        from faster_whisper import WhisperModel
-    except Exception:
-        return ([], "", 0.0)
-    try:
-        m = WhisperModel("base", device="cpu", compute_type="int8")
-        segs, _i = m.transcribe(str(wav_path), word_timestamps=True, vad_filter=False)
-        words, spk = [], 0.0
-        for s in segs:
-            for w in (s.words or []):
-                tk = str(w.word or "").strip()
-                if tk:
-                    words.append(tk)
-                    spk += max(0.0, float(w.end) - float(w.start))
-        return (words, " ".join(words), round(spk, 2))
+        from .breakout_asr import transcribe_breakout_words, speech_seconds
+        timed = transcribe_breakout_words(wav_path)
+        words = [w[0] for w in timed]
+        return (words, " ".join(words), speech_seconds(timed))
     except Exception:
         return ([], "", 0.0)
 
@@ -1513,6 +1568,31 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         if len(srcs) < _bk_n0:
             log(f"build: breakout wrong-show gate — dropped {_bk_n0 - len(srcs)} "
                 f"franchise-sibling source(s) (e.g. House of the Dragon in a {_bk_show9} video)")
+    # NATIVE-HD CONTRACT.  Probe the local bytes now, after download/recovery is complete, rather
+    # than trusting `SourceVideo.height`: that metadata can remain 1080 while a fallback file on
+    # disk is only 360p.  This filter is breakout-only.  Regular matching keeps its relevance-first
+    # behavior, while the optional full-picture/audio insert is omitted when no publishable source
+    # exists.  Unknown probe data fails closed for the same reason.
+    _bk_native_dims = {}
+    _bk_hd_srcs = []
+    for _s_hd9 in srcs:
+        _dim9 = _probe_breakout_native_dimensions(_s_hd9.local_path)
+        _bk_native_dims[_s_hd9.id] = _dim9
+        if _breakout_native_hd_ok(_dim9):
+            _bk_hd_srcs.append(_s_hd9)
+            continue
+        _w9 = int(_dim9.get("width") or 0)
+        _h9 = int(_dim9.get("height") or 0)
+        _why9 = (f"native {_w9}x{_h9} < {_BK_MIN_NATIVE_LONG_EDGE}x"
+                 f"{_BK_MIN_NATIVE_SHORT_EDGE}" if _w9 and _h9 else
+                 "native dimensions unknown")
+        log(f"build: breakout HD gate — omitted source {(_s_hd9.title or _s_hd9.id)[:52]!r} "
+            f"({_why9}; upscaling cannot create HD detail)")
+    _bk_lowres_excluded = len(srcs) - len(_bk_hd_srcs)
+    srcs = _bk_hd_srcs
+    if _bk_lowres_excluded:
+        log(f"build: breakout HD gate — {_bk_lowres_excluded} source(s) excluded; "
+            f"{len(srcs)} native-HD source(s) eligible")
     shots_of = {}
     for s in srcs:
         try:
@@ -2196,11 +2276,15 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
             log(f"build: breakout scene {idx} — the beat's promised line is NOT spoken in "
                 f"{(src.title or src.id)[:44]!r} ({_qtext[:60]!r}); the window is evidence-mined, "
                 f"so it must earn its place on relevance alone")
+        _bk_quality = {}
+        _native_dim = _bk_native_dims.get(src.id, {})
         real = _extract_breakout(src.local_path, _bk_start, dur, v, a,
-                                 int(getattr(src, "width", 0) or 0), crop_corner=_bk_corner,
-                                 min_dur=_bk_min)
+                                 int(_native_dim.get("width") or 0), crop_corner=_bk_corner,
+                                 min_dur=_bk_min, quality_meta=_bk_quality)
         if not (real and real > 1.5):
             continue
+        if _bk_quality.get("legibility_grade"):
+            log(f"build: breakout scene {idx} — {_bk_quality['legibility_grade']}")
         # POST-EXTRACTION WINDOW-AUDIO gate — the matched SHOT line passed the commentary gate, but
         # _extract_breakout extends the window to a full spoken line (3-10s), which can BLEED into
         # adjacent essay/commentary narration from the SAME source (observed: a 'Cersei's Fatal
@@ -2382,6 +2466,9 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         # line), not the shot boundary — it is provenance, and it is also the dedup/identity key
         _entry["_audit"] = {"seg_index": idx, "cold_open": _is_cold, "dur_s": round(real, 2),
                             "source_id": src.id, "source_title": (src.title or "")[:120],
+                            "source_native_width": int(_native_dim.get("width") or 0),
+                            "source_native_height": int(_native_dim.get("height") or 0),
+                            "legibility_grade": _bk_quality.get("legibility_grade", ""),
                             "source_t": round(float(_bk_start), 1), "line": _q[:160],
                             "shot_t": round(float(sh.start), 1),
                             "quote_anchored": bool(_span),
@@ -2406,6 +2493,7 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
             "candidates": len(cands),
             "rejected_counts": dict(_rej),
             "pre_filtered_essay_or_foreign_sources": _src_excluded,
+            "pre_filtered_low_resolution_sources": _bk_lowres_excluded,
             "accepted": [e["_audit"] for e in out],
             # every admission verdict, kept or rejected — so "why did THAT breakout air?" is
             # answerable offline, without re-calling the judge
@@ -2925,21 +3013,74 @@ def _apply_breakouts(proj, segments, scenes, narration, picks, work, log):
     return new_segs, new_scs, narration, bmap, idx_map
 
 
-def _split_clip_sequential(clip: Path, lens: list, out_dir: Path, idx: int) -> list:
-    """Split a breakout clip into sequential sub-clips matching the planned beat lengths
-    (continuous scene playing through — never a replay)."""
+def _split_clip_sequential(clip: Path, lens: list, out_dir: Path, idx: int,
+                           *, suffix: str = "bk") -> list:
+    """Split one owned clip into sequential sub-clips matching planned beat lengths.
+
+    ``suffix`` is only a filename/audit label.  Provenance stays with ``clip``; callers must
+    register every returned derivative against that root before it can enter assembly.
+    """
     parts, cum = [], 0.0
     for m, L in enumerate(lens):
-        dest = out_dir / f"beat_{idx:03d}_{m}_bk.mp4"
+        dest = out_dir / f"beat_{idx:03d}_{m}_{suffix}.mp4"
         p = subprocess.run([ffmpeg_exe(), "-y", "-ss", f"{cum:.3f}", "-i", str(clip),
                             "-t", f"{max(0.6, L):.3f}", "-an", "-c:v", "libx264",
                             "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
                             str(dest)], capture_output=True, timeout=120)
-        if p.returncode != 0 or not dest.exists():
+        if p.returncode != 0 or not dest.exists() or dest.stat().st_size <= 0:
             return []
         parts.append(dest)
         cum += max(0.6, L)
     return parts
+
+
+def _fit_verified_selection_clip(clip: Path, dest: Path, duration: float,
+                                 *, crop_filter: str = "", zoom_to: float = 1.055) -> Optional[Path]:
+    """Make a time-safe 1080p derivative of *the verified cut clip only*.
+
+    The old build reopened the long source and selected another ``beat_window`` (or a mechanical
+    shot-walk) after verification.  That is the scene-34 defect: ``seg_034.mp4`` contained Varys,
+    while ``beat_034_0.mp4`` was independently cut from an Olenna alternate.  This helper never
+    sees a source id or source timeline.  It can trim, grade, crop and gently move the selected
+    clip, and when narration needs longer than the selected window it holds the selected clip's
+    final decoded frame.  It therefore cannot cross a shot/source/scene boundary.
+
+    Duration is checked after encoding.  A failed/short derivative returns ``None`` so the caller
+    blocks the build; it must never fall through to an unrelated source window or placeholder.
+    """
+    clip, dest = Path(clip), Path(dest)
+    need = max(0.6, float(duration))
+    if not clip.exists() or clip.stat().st_size <= 0:
+        return None
+    # tpad is applied *after* the selection-only motion/normalisation chain.  Its cloned frames
+    # are still decoded pixels from this root.  A generous pad plus an exact output frame count
+    # avoids stream looping and prevents the encoder from reading beyond the verified clip.
+    vf = []
+    if crop_filter:
+        vf.append(crop_filter)
+    vf.append(_ken_burns_filter(need, zoom_to=zoom_to))
+    vf.append(f"tpad=stop_mode=clone:stop_duration={need + 1.0:.3f}")
+    frames = max(1, int(round(need * 30)))
+    cmd = [
+        ffmpeg_exe(), "-y", "-i", str(clip), "-an", "-vf", ",".join(vf),
+        "-frames:v", str(frames), "-r", "30",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(dest),
+    ]
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=300)
+    except Exception:
+        return None
+    if p.returncode != 0 or not dest.exists() or dest.stat().st_size <= 0:
+        return None
+    got = _ffprobe_duration(dest)
+    if got + (2.0 / 30.0) < need:
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+    return dest
 
 
 # ── BREAKOUT ARTIFACT COMPOSITION ──────────────────────────────────────────────────────────
@@ -3906,7 +4047,7 @@ def _narration_from_hyp(hyp, n_scenes, total, master, workdir):
     import math as _math
     from vidlore.tts import Narration, NarratedScene, WordTiming, _slice_scene
     ws = [(str(w), float(s), float(e)) for (w, s, e) in (hyp or [])
-          if w and _math.isfinite(s) and _math.isfinite(e) and e >= s]
+          if w and _math.isfinite(s) and _math.isfinite(e) and e > s]
     if not ws:
         return None
     n_scenes = max(1, int(n_scenes))
@@ -3918,11 +4059,25 @@ def _narration_from_hyp(hyp, n_scenes, total, master, workdir):
             continue
         start = prev_end
         end = total if (i == n_scenes - 1 or b >= len(ws)) else min(total, max(start + 0.2, ws[b][1]))
-        end = min(max(end, start + 0.2), total)
+        # Reserve a positive slice for every remaining scene.  A ballooned alignment used to
+        # consume the whole master here, forcing all later words to ``start == end == total`` and
+        # creating the zero-duration cues found in the delivered render.
+        _remain = max(0, n_scenes - i - 1)
+        _latest = max(start + 0.2, total - 0.2 * _remain)
+        end = min(max(end, start + 0.2), total, _latest)
         words = []
         for k in range(a, b):
             wstart = min(max(start, ws[k][1]), end)
             wend = min(max(wstart, ws[k][2]), end)
+            if wend <= wstart:
+                # The source timestamp fell outside a scene slice reserved after a ballooned
+                # neighbour.  Allocate a tiny ordered slot inside this scene instead of emitting
+                # a zero-duration word; the publish CPS gate later decides whether such compressed
+                # speech is readable enough to ship.
+                _cnt = max(1, b - a)
+                _slot = max(0.01, (end - start) / _cnt)
+                wstart = min(end - 0.01, start + (k - a) * _slot)
+                wend = min(end, max(wstart + 0.01, start + (k - a + 1) * _slot))
             words.append(WordTiming(ws[k][0], wstart, wend))
         wav = workdir / f"scene_{i:03d}.wav"
         _slice_scene(master, start, end, total, wav)
@@ -3988,6 +4143,9 @@ def _synced_narration_from_file(script, audio_path: str, workdir: Path, log=None
     aligned = _align_words_to_hyp(flat, hyp)
     _align_ok = (bool(aligned) and len(aligned) == len(flat)
                  and all(math.isfinite(s) and math.isfinite(e) for s, e in aligned)
+                 and all(e > s for s, e in aligned)
+                 and all(aligned[i][0] >= aligned[i - 1][0] - 0.25
+                         for i in range(1, len(aligned)))
                  and aligned[-1][1] >= 0.5 * total)
     if not _align_ok:
         # The pasted script does NOT align to the uploaded voiceover (far too few sequence anchors —
@@ -4001,7 +4159,14 @@ def _synced_narration_from_file(script, audio_path: str, workdir: Path, log=None
                  "(verify the script and voiceover are the same content)")
             _nar = _narration_from_hyp(hyp, n, total, master, workdir)
             if _nar is not None:
-                return _nar
+                try:
+                    from vidlore.captions import _caption_schedule, caption_schedule_problems
+                    _hp = caption_schedule_problems(
+                        _caption_schedule(_nar.all_words()), hard_cps=float("inf"))
+                except Exception:
+                    _hp = [{"reason": "caption timing validation failed"}]
+                if not _hp:
+                    return _nar
         return None
 
     wcount = [max(1, bounds[i + 1] - bounds[i]) for i in range(n)]
@@ -4023,19 +4188,51 @@ def _synced_narration_from_file(script, audio_path: str, workdir: Path, log=None
         if end - start > cap:
             end = start + cap
             clamped += 1
-        end = min(max(end, start + 0.2), total)
+        # Keep enough timeline for every later script scene; otherwise one ballooned alignment
+        # consumes the master and clamps all subsequent word spans to zero at EOF.
+        _remain = max(0, n - i - 1)
+        _latest = max(start + 0.2, total - 0.2 * _remain)
+        end = min(max(end, start + 0.2), total, _latest)
         w_times = []
         for k in range(a, b):
             ws = min(max(start, aligned[k][0]), end)
             we = min(max(ws, aligned[k][1]), end)
+            if we <= ws:
+                _cnt = max(1, b - a)
+                _slot = max(0.01, (end - start) / _cnt)
+                ws = min(end - 0.01, start + (k - a) * _slot)
+                we = min(end, max(ws + 0.01, start + (k - a + 1) * _slot))
             w_times.append(WordTiming(flat[k], ws, we))
         wav = workdir / f"scene_{sc.index:03d}.wav"
         _slice_scene(master, start, end, total, wav)
         scenes.append(NarratedScene(sc.index, wav, max(0.2, end - start), w_times))
         prev_end = end
+    _nar = Narration(scenes=scenes, audio=master, reused=0)
+    # Scene balloon clamps can still squeeze a late aligned word to zero even when the raw aligner
+    # stream was valid.  Validate the constructed viewer-facing stream, then use Whisper's own
+    # timings as the only safe fallback; never hand a zero-duration cue to the renderer.
+    try:
+        from vidlore.captions import _caption_schedule, caption_schedule_problems
+        _timing_problems = caption_schedule_problems(
+            _caption_schedule(_nar.all_words()), hard_cps=float("inf"))
+    except Exception:
+        _timing_problems = [{"reason": "caption timing validation failed"}]
+    if _timing_problems:
+        _log(f"[caption-sync] aligned script produced {len(_timing_problems)} invalid timing "
+             f"issue(s); trying the voiceover's own timestamped transcription")
+        _hyp_nar = _narration_from_hyp(hyp, n, total, master, workdir) if hyp else None
+        if _hyp_nar is not None:
+            try:
+                _hp = caption_schedule_problems(
+                    _caption_schedule(_hyp_nar.all_words()), hard_cps=float("inf"))
+            except Exception:
+                _hp = [{"reason": "caption timing validation failed"}]
+            if not _hp:
+                return _hyp_nar
+        return None
     _log(f"build: captions word-synced to voiceover — {len(flat)} words"
          + (f", {clamped} scene(s) clamped" if clamped else ""))
-    return Narration(scenes=scenes, audio=master, reused=0)
+    return _nar
 
 
 import re as _re
@@ -5205,40 +5402,364 @@ def _frame_luma_hi(img_path):
         return None                                    # explicit failure → unverified
 
 
-def _rescue_still_fullres(proj, sel, img_path: str, log) -> str:
-    """Re-extract an aired still at the SOURCE's own resolution instead of the CLIP thumbnail.
+_IMAGE_MIN_SHORT_EDGE = 720
+_IMAGE_MIN_LONG_EDGE = 1280
 
-    Only applies to a source-frame still (one taken from footage we already have). A web image has
-    no source file and is returned untouched. Returns "" when nothing better is available, so the
-    caller keeps today's file — this can only improve a still, never lose one."""
+
+def _image_pixel_dimensions(path) -> tuple[int, int]:
+    """Decode an image and return its real pixel dimensions; metadata/extension is not proof."""
     try:
-        meta = (getattr(sel, "image_meta", None) or {})
-        sid = meta.get("source_id") or getattr(sel, "source_id", "") or ""
-        if not sid or "source-frame" not in str(meta.get("source", "")):
-            return ""
-        src = proj.source(sid)
-        if not src or not src.local_path or not Path(src.local_path).exists():
-            return ""
-        # the keyframe's instant: the still pass records it, else the selection's own in-point
+        from PIL import Image
+        with Image.open(path) as im:
+            im.load()
+            return int(im.width), int(im.height)
+    except Exception:                                    # noqa: BLE001 — caller fails closed
+        return 0, 0
+
+
+def _publishable_still_pixels(width: int, height: int) -> bool:
+    """True for a native 1280x720-or-better still in either orientation.
+
+    A narrow 400x1000 image has a nominal 720+ height but still needs a destructive upscale to fill
+    a video frame.  Requiring both a 720 short edge and 1280 long edge admits landscape and portrait
+    originals symmetrically and never mistakes an enlarged output container for source detail.
+    """
+    try:
+        short, long = sorted((int(width), int(height)))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return short >= _IMAGE_MIN_SHORT_EDGE and long >= _IMAGE_MIN_LONG_EDGE
+
+
+def _image_file_sha256(path) -> str:
+    import hashlib
+    try:
+        p = Path(path)
+        return hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else ""
+    except Exception:                                    # noqa: BLE001 — missing proof fails later
+        return ""
+
+
+def _source_frame_meta(sel) -> tuple[dict, bool]:
+    meta = dict(getattr(sel, "image_meta", None) or {})
+    return meta, "source-frame" in str(meta.get("source", ""))
+
+
+def _resolve_indexed_still_owner(proj, sel) -> Optional[dict]:
+    """Resolve ``image_meta.src`` + ``shot`` against the persisted index.
+
+    ``None`` means both ownership fields are absent (an older verified-file record).  A partial,
+    malformed, or stale ownership claim is an error: it must never quietly become ``sel.source_id``
+    or ``sel.in_point``, because those describe the rejected moving selection, not the still.
+    """
+    import json
+    meta, is_source_frame = _source_frame_meta(sel)
+    if not is_source_frame:
+        return None
+    raw_sid, raw_shot = meta.get("src"), meta.get("shot")
+    if raw_sid in (None, "") and raw_shot in (None, ""):
+        return None
+    from .verify import NonRetryableBuildError
+    if raw_sid in (None, "") or raw_shot in (None, ""):
+        raise NonRetryableBuildError(
+            "image-lineage gate: source-frame ownership metadata is partial; both image_meta.src "
+            "and image_meta.shot are required", kind="scene_lineage")
+    sid = str(raw_sid)
+    try:
+        shot_index = int(raw_shot)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise NonRetryableBuildError(
+            f"image-lineage gate: source-frame shot id {raw_shot!r} is malformed",
+            kind="scene_lineage") from exc
+    index_path = Path(proj.index_dir) / f"{sid}.shots.json"
+    try:
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+        row = next(d for d in data if int(d.get("index", -1)) == shot_index)
+        if row.get("source_id") not in (None, "", sid):
+            raise ValueError(f"shot row belongs to {row.get('source_id')!r}, not {sid!r}")
+        start, end = float(row["start"]), float(row["end"])
+    except Exception as exc:                             # noqa: BLE001 — bad claim fails closed
+        raise NonRetryableBuildError(
+            f"image-lineage gate: image_meta claims {sid!r} shot {shot_index}, but that exact "
+            f"shot is absent/unreadable in {index_path.name}", kind="scene_lineage") from exc
+    if not (end > start >= 0.0):
+        raise NonRetryableBuildError(
+            f"image-lineage gate: indexed owner {sid!r} shot {shot_index} has invalid bounds "
+            f"{start:.3f}-{end:.3f}", kind="scene_lineage")
+    raw_keyframe = str(row.get("keyframe_path") or "")
+    keyframe = Path(raw_keyframe).expanduser()
+    if raw_keyframe and not keyframe.is_absolute():
+        keyframe = index_path.parent / keyframe
+    declared = _require_declared_image_path(sel)
+    # The vision/relevance verifier approved the indexed thumbnail.  Re-extracting the claimed
+    # source midpoint is only safe when that approved file is demonstrably THIS shot's keyframe;
+    # otherwise valid-looking but wrong src/shot metadata could redirect the aired image.
+    if (not raw_keyframe or not keyframe.is_file() or keyframe.stat().st_size <= 0
+            or (keyframe.resolve() != declared.resolve()
+                and _image_file_sha256(keyframe) != _image_file_sha256(declared))):
+        raise NonRetryableBuildError(
+            f"image-lineage gate: declared verified still does not match indexed keyframe for "
+            f"{sid!r} shot {shot_index}", kind="scene_lineage")
+    src = proj.source(sid)
+    src_path = Path(str(getattr(src, "local_path", "") or "")) if src else Path("")
+    if not src or not src_path.is_file() or src_path.stat().st_size <= 0:
+        raise NonRetryableBuildError(
+            f"image-lineage gate: indexed owner source {sid!r} is missing/empty; refusing to use "
+            f"selection source {getattr(sel, 'source_id', '')!r} instead", kind="scene_lineage")
+    # Index keyframes are extracted at the exact shot midpoint (index.py).  Repeating that rule
+    # makes the full-resolution frame deterministic and keeps it tied to the verified still.
+    return {"source_id": sid, "shot_index": shot_index,
+            "time": round((start + end) / 2.0, 3), "start": start, "end": end,
+            "source_path": str(src_path.resolve()),
+            "keyframe_path": str(keyframe.resolve()),
+            "keyframe_sha256": _image_file_sha256(keyframe)}
+
+
+def _probe_image_owner_source(path) -> tuple[int, int]:
+    try:
+        from .ingest import probe
+        info = probe(Path(path)) or {}
+        return int(info.get("width") or 0), int(info.get("height") or 0)
+    except Exception:                                    # noqa: BLE001 — unknown fails closed
+        return 0, 0
+
+
+def _require_declared_image_path(sel) -> Path:
+    """Return a nonempty declared image or block; never fall through to rejected moving footage."""
+    raw = str(getattr(sel, "image_path", "") or "")
+    if not raw:
+        raise ValueError("selection does not declare an image")
+    p = Path(raw)
+    if not p.is_file() or p.stat().st_size <= 0:
+        from .verify import NonRetryableBuildError
+        raise NonRetryableBuildError(
+            f"image-lineage gate: beat {getattr(sel, 'segment_index', '?')} declares verified "
+            f"image {raw!r}, but it is missing/empty; refusing to fall through to moving footage",
+            kind="scene_lineage")
+    return p
+
+
+def _rescue_still_fullres(proj, sel, img_path: str, log) -> dict:
+    """Return the aired still plus independently checkable, actual ownership.
+
+    Source-frame stills with complete metadata are re-extracted from the exact indexed ``src`` and
+    ``shot`` midpoint.  The selection's moving-video source/time are deliberately never consulted.
+    If an older record has no source+shot metadata, its already verified image is preserved byte for
+    byte; build then binds lineage to that file hash.  Any contradictory metadata fails closed.
+    """
+    from .verify import NonRetryableBuildError
+    original = _require_declared_image_path(sel)
+    if Path(img_path).resolve() != original.resolve():
+        raise NonRetryableBuildError(
+            "image-lineage gate: rescue input is not the selection's declared verified image",
+            kind="scene_lineage")
+    meta, _is_source_frame = _source_frame_meta(sel)
+    _image_source = str(meta.get("source") or "")
+    if not (meta.get("still_verified") is True or meta.get("still_semantic_verified") is True
+            or _image_source == "web-exact-scene"):
+        raise NonRetryableBuildError(
+            f"image-lineage gate: declared image source {_image_source or '?'} has no explicit "
+            f"verifier proof; refusing to label it verified_image", kind="scene_lineage")
+    owner = _resolve_indexed_still_owner(proj, sel)
+    if owner is not None:
+        sw, sh = _probe_image_owner_source(owner["source_path"])
+        if not _publishable_still_pixels(sw, sh):
+            reason = f"{sw}x{sh}" if sw and sh else "unprobeable"
+            raise NonRetryableBuildError(
+                f"image native-resolution gate: source-frame owner {owner['source_id']!r} is "
+                f"{reason}; at least native 1280x720 is required and upscaling cannot create "
+                f"detail",
+                kind="native_resolution")
+        # Strict semantic evidence is bound to the exact declared bytes. Re-extracting another
+        # JPEG from the same owned instant would air pixels the semantic verifier never judged.
+        # Preserve the judged bytes when (and only when) the persisted SHA claim matches them;
+        # build does not perform or invent a new semantic verdict.
+        declared_hash = _image_file_sha256(original)
+        claimed_semantic_hash = str(meta.get("still_image_sha256") or "")
+        strict_semantic_bound = (meta.get("still_semantic_verified") is True
+                                 and bool(claimed_semantic_hash)
+                                 and claimed_semantic_hash == declared_hash)
+        if strict_semantic_bound:
+            iw, ih = _image_pixel_dimensions(original)
+            if not _publishable_still_pixels(iw, ih):
+                raise NonRetryableBuildError(
+                    f"image native-resolution gate: semantically judged still is {iw}x{ih}; "
+                    f"the exact judged bytes must already be real 1280x720-or-better",
+                    kind="native_resolution")
+            return {"path": str(original), "ownership_kind": "source_frame",
+                    "actual_source_id": owner["source_id"],
+                    "actual_shot_index": owner["shot_index"], "actual_time": owner["time"],
+                    "source_path": owner["source_path"], "source_width": sw,
+                    "source_height": sh, "image_width": iw, "image_height": ih,
+                    "preserved_original": True, "file_sha256": declared_hash,
+                    "semantic_binding_preserved": True,
+                    "semantic_image_sha256": claimed_semantic_hash}
+        # Include immutable owner facts in the filename and overwrite it every build.  The old
+        # generic `_fullres.jpg` could be a stale frame extracted by the pre-fix, wrong-source path.
+        import hashlib
+        token = hashlib.sha256(
+            f"{owner['source_id']}:{owner['shot_index']}:{owner['time']:.3f}".encode("utf-8")
+        ).hexdigest()[:12]
+        dest = original.with_name(f"{original.stem}_fullres_{token}.jpg")
+        dest.unlink(missing_ok=True)       # never let a pre-existing/stale rescue satisfy this run
+        proc = subprocess.run(
+            [ffmpeg_exe(), "-y", "-loglevel", "error", "-ss", f"{owner['time']:.3f}",
+             "-i", owner["source_path"], "-frames:v", "1", "-q:v", "2", str(dest)],
+            capture_output=True, timeout=60)
+        if proc.returncode != 0 or not dest.is_file() or dest.stat().st_size <= 0:
+            raise NonRetryableBuildError(
+                f"image-lineage gate: could not re-extract {owner['source_id']!r} shot "
+                f"{owner['shot_index']} at {owner['time']:.3f}s; refusing an unowned fallback",
+                kind="scene_lineage")
+        iw, ih = _image_pixel_dimensions(dest)
+        if not _publishable_still_pixels(iw, ih):
+            raise NonRetryableBuildError(
+                f"image native-resolution gate: extracted still {dest.name} is {iw}x{ih}; "
+                f"the aired source-frame itself must retain real 1280x720-or-better pixels",
+                kind="native_resolution")
+        log(f"build: still re-extracted from indexed owner {owner['source_id']} shot "
+            f"{owner['shot_index']} @{owner['time']:.3f}s ({sw}x{sh}) — {dest.name}")
+        return {"path": str(dest), "ownership_kind": "source_frame",
+                "actual_source_id": owner["source_id"],
+                "actual_shot_index": owner["shot_index"], "actual_time": owner["time"],
+                "source_path": owner["source_path"], "source_width": sw, "source_height": sh,
+                "image_width": iw, "image_height": ih, "preserved_original": False,
+                "file_sha256": _image_file_sha256(dest),
+                "semantic_binding_preserved": False, "semantic_image_sha256": ""}
+
+    # Web images and legacy source-frame records without ownership metadata remain the verified
+    # file that was selected.  They may not borrow sel.source_id/time.  Legacy source-frame records
+    # need explicit verifier evidence before this preservation path is allowed.
+    iw, ih = _image_pixel_dimensions(original)
+    if not _publishable_still_pixels(iw, ih):
+        raise NonRetryableBuildError(
+            f"image native-resolution gate: verified still is {iw}x{ih}; a real 1280x720-or-better "
+            f"source image is required and Ken Burns upscaling cannot create detail",
+            kind="native_resolution")
+    digest = _image_file_sha256(original)
+    if not digest:
+        raise NonRetryableBuildError(
+            f"image-lineage gate: verified still {original} could not be hashed",
+            kind="scene_lineage")
+    return {"path": str(original), "ownership_kind": "verified_file",
+            "actual_source_id": "", "actual_shot_index": None, "actual_time": None,
+            "source_path": "", "source_width": 0, "source_height": 0,
+            "image_width": iw, "image_height": ih, "preserved_original": True,
+            "file_sha256": digest,
+            "semantic_binding_preserved": bool(
+                meta.get("still_semantic_verified") is True
+                and str(meta.get("still_image_sha256") or "") == digest),
+            "semantic_image_sha256": (str(meta.get("still_image_sha256") or "")
+                                       if meta.get("still_semantic_verified") is True else "")}
+
+
+def _verified_image_lineage_root(proj, sel, rescue: dict, final_scene: int) -> dict:
+    """Validate expected image ownership against the rescue's actual root and bind it immutably."""
+    import hashlib
+    import json
+    from .verify import NonRetryableBuildError
+    meta, _is_source_frame = _source_frame_meta(sel)
+    expected = _resolve_indexed_still_owner(proj, sel)
+    actual_path = Path(str(rescue.get("path") or ""))
+    actual_hash = _image_file_sha256(actual_path)
+    actual_dims = _image_pixel_dimensions(actual_path)
+    reported_dims = (int(rescue.get("image_width") or 0), int(rescue.get("image_height") or 0))
+    if (not actual_hash or actual_hash != str(rescue.get("file_sha256") or "")
+            or actual_dims != reported_dims):
+        raise NonRetryableBuildError(
+            "image-lineage gate: rescued image bytes/dimensions disagree with their ownership "
+            "record", kind="scene_lineage")
+    if expected is not None:
+        source_dims = _probe_image_owner_source(expected["source_path"])
+        reported_source_dims = (int(rescue.get("source_width") or 0),
+                                int(rescue.get("source_height") or 0))
+        if (source_dims != reported_source_dims or not _publishable_still_pixels(*source_dims)
+                or not _publishable_still_pixels(*actual_dims)):
+            raise NonRetryableBuildError(
+                f"image native-resolution gate: source/air dimensions changed or are below "
+                f"native 1280x720 "
+                f"(source={source_dims}, aired={actual_dims})", kind="native_resolution")
+        declared = _require_declared_image_path(sel)
+        declared_hash = _image_file_sha256(declared)
+        claimed_semantic_hash = str(meta.get("still_image_sha256") or "")
+        strict_semantic_bound = (meta.get("still_semantic_verified") is True
+                                 and bool(claimed_semantic_hash)
+                                 and claimed_semantic_hash == declared_hash)
+        if strict_semantic_bound and (
+                rescue.get("semantic_binding_preserved") is not True
+                or str(rescue.get("semantic_image_sha256") or "") != claimed_semantic_hash
+                or actual_hash != claimed_semantic_hash
+                or actual_path.resolve() != declared.resolve()
+                or rescue.get("preserved_original") is not True):
+            raise NonRetryableBuildError(
+                "image-lineage gate: strict semantic evidence is not bound to the exact aired "
+                "source-frame bytes", kind="scene_lineage")
+        actual_tuple = (str(rescue.get("actual_source_id") or ""),
+                        rescue.get("actual_shot_index"), rescue.get("actual_time"))
+        expected_tuple = (expected["source_id"], expected["shot_index"], expected["time"])
         try:
-            t = float(meta.get("t", meta.get("time", getattr(sel, "in_point", 0.0))) or 0.0)
+            time_ok = abs(float(actual_tuple[2]) - float(expected_tuple[2])) <= 0.001
         except (TypeError, ValueError):
-            t = float(getattr(sel, "in_point", 0.0) or 0.0)
-        sw = int(getattr(src, "width", 0) or 0)
-        if sw and sw <= 640:
-            return ""                    # the upload is not sharper than the thumbnail
-        dest = Path(img_path).with_name(Path(img_path).stem + "_fullres.jpg")
-        if not dest.exists():
-            subprocess.run([ffmpeg_exe(), "-y", "-loglevel", "error",
-                            "-ss", f"{max(0.0, t):.3f}", "-i", str(src.local_path),
-                            "-frames:v", "1", "-q:v", "2", str(dest)],
-                           capture_output=True, timeout=60)
-        if not dest.exists() or dest.stat().st_size < 4096:
-            return ""
-        log(f"build: still re-extracted at source resolution ({sw or '?'}px wide) — {dest.name}")
-        return str(dest)
-    except Exception:
-        return ""                        # a still that cannot be improved is not a failure
+            time_ok = False
+        if (actual_tuple[:2] != expected_tuple[:2] or not time_ok
+                or rescue.get("ownership_kind") != "source_frame"):
+            raise NonRetryableBuildError(
+                f"image-lineage gate: expected owner {expected_tuple!r}, got {actual_tuple!r}",
+                kind="scene_lineage")
+        owner_payload = {"kind": "source_frame", "source_id": expected["source_id"],
+                         "shot_index": expected["shot_index"], "time": expected["time"]}
+    else:
+        expected_file = _require_declared_image_path(sel)
+        expected_hash = _image_file_sha256(expected_file)
+        actual_hash = str(rescue.get("file_sha256") or "")
+        # No ownership metadata means preservation, never a guessed source-frame extraction.
+        if (rescue.get("ownership_kind") != "verified_file" or not expected_hash
+                or actual_hash != expected_hash
+                or Path(str(rescue.get("path") or "")).resolve() != expected_file.resolve()):
+            raise NonRetryableBuildError(
+                "image-lineage gate: metadata-free verified image was not preserved byte-for-byte",
+                kind="scene_lineage")
+        owner_payload = {"kind": "verified_file", "sha256": expected_hash,
+                         "source": str(meta.get("source") or "")}
+    payload = {"original_beat": int(getattr(sel, "segment_index", final_scene)), **owner_payload}
+    binding = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8")).hexdigest()
+    iw, ih = int(rescue.get("image_width") or 0), int(rescue.get("image_height") or 0)
+    return {
+        "kind": "verified_image", "original_beat": payload["original_beat"],
+        "owner_beat": payload["original_beat"], "via": "verified_image", "validated": True,
+        "root_binding": binding, "image_owner_kind": owner_payload["kind"],
+        "expected_image_source_id": (expected or {}).get("source_id", ""),
+        "expected_image_shot_index": (expected or {}).get("shot_index"),
+        "actual_image_source_id": str(rescue.get("actual_source_id") or ""),
+        "actual_image_shot_index": rescue.get("actual_shot_index"),
+        "actual_image_time": rescue.get("actual_time"),
+        "source_native_width": int(rescue.get("source_width") or 0),
+        "source_native_height": int(rescue.get("source_height") or 0),
+        "image_width": iw, "image_height": ih,
+        "image_sha256": str(rescue.get("file_sha256") or ""),
+        "preserved_original": bool(rescue.get("preserved_original")),
+        "semantic_binding_preserved": bool(rescue.get("semantic_binding_preserved")),
+        "semantic_image_sha256": str(rescue.get("semantic_image_sha256") or ""),
+    }
+
+
+def _persist_image_lineage_audit(proj, entries: list[dict], failures: list[dict]) -> Path:
+    """Atomically persist image ownership and native dimensions; audit failure blocks build."""
+    import json
+    path = Path(proj.output_dir) / "image_lineage_audit.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"schema": "image_lineage/1", "passed": not failures,
+               "minimum_source_video_height": 720,
+               "minimum_source_video_short_edge": 720,
+               "minimum_source_video_long_edge": 1280,
+               "minimum_still_short_edge": _IMAGE_MIN_SHORT_EDGE,
+               "minimum_still_long_edge": _IMAGE_MIN_LONG_EDGE,
+               "entries": entries, "failures": failures}
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+    tmp.replace(path)
+    return path
 
 
 _SRCDARK_MEMO: dict = {}
@@ -5552,8 +6073,9 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None, *, preset=None) -
         from faster_whisper import WhisperModel
     except Exception:
         return None
-    import re as _re
     lines = []
+    _coverage_rows = []
+    _coverage_failed = False
     try:
         m = WhisperModel("base", device="cpu", compute_type="int8")
     except Exception:
@@ -5582,17 +6104,19 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None, *, preset=None) -
                 + _est_px(" ", _bk_size) * max(0, len(ws_) - 1))
     for cap in caps:
         try:
-            segs, _i = m.transcribe(str(cap["audio"]), word_timestamps=True, vad_filter=False)
+            from .breakout_asr import transcribe_breakout_words, caption_coverage
+            words = transcribe_breakout_words(
+                str(cap["audio"]), model=m, duration=float(cap.get("dur") or 0.0))
         except Exception:
-            continue
-        words = []
-        for s in segs:
-            for w in (s.words or []):
-                wt = (w.word or "").strip()
-                if wt:
-                    words.append((wt, float(w.start), float(w.end),
-                                  float(getattr(w, "probability", 1.0) or 1.0)))
+            words = []
+        _spoken_words = list(words)
         if not words:
+            _cov0 = {"spoken_words": 0, "captioned_words": 0, "coverage": 0.0,
+                     "asr_last_word_s": 0.0, "caption_last_word_s": 0.0,
+                     "uncaptioned_tail_s": 0.0, "passed": False}
+            cap["caption_coverage"] = _cov0
+            _coverage_rows.append({"seg_index": cap.get("seg_index"), **_cov0})
+            _coverage_failed = True
             continue
         words, _bk_align, _bk_srcok, _bk_ops, _bk_kw = _correct_breakout_words(
             words, cap.get("line", ""), log=log, return_meta=True)
@@ -5728,6 +6252,19 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None, *, preset=None) -
                         f"reads as a non-sequitur")
                 _kept = []
         grp = _kept
+        _captioned_words = [w for _line in grp for w in _line]
+        _cov = caption_coverage(_spoken_words, _captioned_words)
+        cap["caption_coverage"] = _cov
+        _coverage_rows.append({"seg_index": cap.get("seg_index"),
+                               "final_index": cap.get("final_index"), **_cov})
+        if not _cov["passed"]:
+            _coverage_failed = True
+            if log:
+                log(f"build: ⛔ breakout caption coverage — scene {cap.get('seg_index')} "
+                    f"{_cov['captioned_words']}/{_cov['spoken_words']} words "
+                    f"({_cov['coverage']:.0%}), uncaptioned tail "
+                    f"{_cov['uncaptioned_tail_s']:.2f}s; breakout cannot publish")
+            continue
         for line in grp:
             ws = base + line[0][1]
             we = min(base + dur, base + line[-1][2] + 0.10)
@@ -5759,7 +6296,19 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None, *, preset=None) -
             _sq = f"\\fscx{_squeeze}" if _squeeze < 100 else ""
             lines.append(f"Dialogue: 0,{_ass_ts(ws)},{_ass_ts(we)},BK,,0,0,0,,"
                          f"{{\\fad(120,120){_fs}{_sq}}}{body}")
-    if not lines:
+    # Completeness evidence is mandatory and is written even when the gate fails.  A dialogue
+    # Breakout with a plausible caption prefix but an uncaptained tail is not publishable.
+    try:
+        import json as _json_bkcov
+        _cov_path = Path(out_ass).parent / "breakout_caption_coverage.json"
+        _cov_path.write_text(_json_bkcov.dumps({
+            "schema": "breakout_caption_coverage/2", "passed": not _coverage_failed,
+            "minimum_word_coverage": 1.0, "maximum_uncaptioned_tail_s": 0.50,
+            "breakouts": _coverage_rows,
+        }, indent=1), encoding="utf-8")
+    except Exception:
+        return None
+    if _coverage_failed or not lines:
         return None
     # BK Style line from the (already-resolved) preset — karaoke fill sweeps unsung → sung.
     _bk_style = preset.breakout_style_line()
@@ -5780,12 +6329,14 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None, *, preset=None) -
         return None
 
 
-def _burn_breakout_captions(video: Path, caps: list, work: Path, log=None, *, preset=None) -> bool:
+def _burn_breakout_captions(video: Path, caps: list, work: Path, log=None, *, preset=None,
+                            ass_path: Optional[Path] = None) -> bool:
     """Burn the word-by-word breakout captions onto the final video (engine untouched). `preset`
     (a CaptionPreset) styles the burn to match the selected design family."""
     if not caps:
         return False
-    ass = _breakout_caption_ass(caps, work / "breakout_caps.ass", log, preset=preset)
+    ass = (Path(ass_path) if ass_path and Path(ass_path).exists() else
+           _breakout_caption_ass(caps, work / "breakout_caps.ass", log, preset=preset))
     if ass is None:
         return False
     out = video.with_name(video.stem + "_bkcap.mp4")
@@ -5962,6 +6513,15 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     out_path = proj.output_dir / "final.mp4"
     sel_by_idx = {s.segment_index: s for s in proj.selections}
 
+    # SEMANTIC PUBLICATION CONTRACT — run before caption setup, narration, breakouts, recuts or
+    # encoding. Resume/rerender and --no-verify paths can otherwise consume stale project.json
+    # selections whose persisted verifier explicitly says mismatch/insufficient/wrong/unverified.
+    # The audit is atomic and the gate never ranks or mutates footage; generic/abstract filler is
+    # deliberately outside its strict scope.
+    from .relevance_contract import assert_selection_relevance as _assert_selection_relevance
+    _assert_selection_relevance(
+        proj, segments, proj.output_dir / "selection_relevance_audit.json")
+
     # CAPTION PRESET + ON/OFF — the single resolution point for the whole render (every downstream
     # caption gate reads _cap_on / _cap_preset, never the raw args). Precedence via the centralized
     # resolvers: an EXPLICIT value wins; the env var is a fallback only when nothing was supplied
@@ -6010,9 +6570,11 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             if narration is not None:
                 log(f"build: narration {narration.total:.1f}s (user voiceover, word-synced captions)")
             else:
-                from vidlore.tts import narrate_from_file
-                narration = narrate_from_file(script, str(Path(voiceover).resolve()), work / "vo")
-                log(f"build: narration {narration.total:.1f}s (user voiceover, forced-aligned)")
+                from .verify import NonRetryableBuildError
+                raise NonRetryableBuildError(
+                    "uploaded voiceover could not produce a complete positive-duration word "
+                    "alignment; refusing proportional/drifting captions or a substituted TTS "
+                    "voice", kind="voiceover_alignment")
             if narration is not None:
                 # mark word-aligned uploaded VO — the cold-open VO word-cut needs REAL word
                 # boundaries (whisper-aligned), never the proportional estimates of a TTS render.
@@ -6021,8 +6583,13 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 except Exception:
                     pass
         except Exception as e:                            # noqa: BLE001
-            log(f"build: voiceover align failed ({str(e)[:90]}) — falling back to TTS")
-            narration = None
+            from .verify import NonRetryableBuildError
+            if isinstance(e, NonRetryableBuildError):
+                raise
+            log(f"build: ⛔ voiceover alignment failed ({str(e)[:90]}) — render blocked")
+            raise NonRetryableBuildError(
+                f"voiceover alignment failed: {e}; refusing to replace the supplied voice or "
+                f"publish drifting/invalid captions", kind="voiceover_alignment") from e
     if narration is None and use_tts:
         # voice provider: AI neural (chatterbox/kokoro, local, no key) > ElevenLabs (cloud,
         # needs key) > edge (free). Any failure degrades to edge, then to silent — a run
@@ -6103,6 +6670,13 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             sel_by_idx = {_bidx[s.segment_index]: s for s in proj.selections
                           if s.segment_index in _bidx}
 
+    # NATIVE-HD PUBLICATION CONTRACT.  This probes the bytes on disk, not requested/download
+    # metadata: a 640x360 fallback inside a 1080p container is still 360p.  Matching may continue
+    # to value relevance first, but build may only publish when every selected moving-video root is
+    # at least 720p.  A verified full-resolution still has its own rescue/validation path below.
+    from .quality_contract import assert_native_hd_selections as _assert_native_hd
+    _assert_native_hd(proj, proj.selections, proj.output_dir / "native_resolution_audit.json")
+
     # 3) MULTI-CLIP-PER-SCENE — supply ONE distinct clip per engine sub-beat so an energetic scene
     #    cuts between DIFFERENT relevant clips instead of looping one (the old loop bug). The beat
     #    count k per scene is computed with the SAME energies/roles passed to assemble() below.
@@ -6135,6 +6709,63 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                   if _wm_mode == "crop" else {})
 
     footage, beat_clips = [], {}
+    # IMMUTABLE ROOT OWNERSHIP.  Every file that can enter ``beat_clips`` must be registered here,
+    # then every derivative inherits the same root.  The final manifest is independently checked
+    # before assemble, and assemble additionally fingerprints decoded frames before/after concat.
+    # A filename or a truthful-looking audit label is never accepted as provenance.
+    from .scene_lineage import (assert_scene_lineage as _assert_scene_lineage,
+                                selection_binding as _selection_binding)
+    _lineage_roots: dict[str, dict] = {}
+    _image_lineage_entries: list[dict] = []
+    _image_lineage_failures: list[dict] = []
+    _final_to_orig_lineage = {v: k for k, v in (_bidx or {}).items()}
+    _breakout_cap_by_final = {
+        int(c["final_index"]): c for c in
+        (getattr(narration, "_breakout_caps", None) or [])
+        if c.get("final_index") is not None
+    }
+
+    def _lineage_key(path) -> str:
+        return str(Path(path).expanduser().resolve())
+
+    def _lineage_register(path, root: dict) -> None:
+        if path:
+            _lineage_roots[_lineage_key(path)] = dict(root)
+
+    def _lineage_derive(path, parent, *, via: str = "selection_derivative") -> bool:
+        """Register ``path`` as a derivative of ``parent``; unknown roots fail later, never infer."""
+        inherited = _lineage_roots.get(_lineage_key(parent)) if parent else None
+        if not inherited or not path:
+            return False
+        _lineage_register(path, {**inherited, "via": via})
+        return True
+
+    def _selection_root(sel, final_scene: int) -> dict:
+        orig = int(getattr(sel, "segment_index", _final_to_orig_lineage.get(
+            final_scene, final_scene)))
+        selected = [str(getattr(sel, "source_id", "") or ""),
+                    round(float(getattr(sel, "in_point", 0.0) or 0.0), 3),
+                    round(float(getattr(sel, "out_point", 0.0) or 0.0), 3)]
+        binding = _selection_binding(
+            orig, selected[0], selected[1], selected[2],
+            getattr(sel, "verifier", None) or {})
+        _src_owner = proj.source(selected[0]) if selected[0] else None
+        _src_owner_path = Path(str(getattr(_src_owner, "local_path", "") or "")) \
+            if _src_owner is not None else Path("")
+        _src_owner_file = (str(_src_owner_path.expanduser().resolve())
+                           if _src_owner_path.is_file() and _src_owner_path.stat().st_size > 0
+                           else "")
+        return {
+            "kind": "selection_video", "original_beat": orig, "owner_beat": orig,
+            "selected_source_id": selected[0], "actual_source_id": selected[0],
+            "selected_window": selected, "actual_window": selected,
+            # The derivative path alone is not proof: a stale beat_034_owned.mp4
+            # can carry foreign bytes under the expected filename.  The renderer
+            # independently compares it with this exact source window at bind time.
+            "selection_source_path": _src_owner_file,
+            "selection_binding": binding, "root_binding": binding,
+            "via": "selection", "validated": True,
+        }
     total_clips, padded, sm_n = 0, 0, 0
     # GLOBAL anti-repetition: the multi-clip beat_windows (chosen + alternates) are deduped only
     # WITHIN a scene, but the SAME high-scoring (source,moment) window appears in many scenes'
@@ -6587,11 +7218,22 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             # breakout scene: the prepared clip plays through (split sequentially if the plan
             # wants multiple beats) — its REAL audio is already spliced into the narration
             _bclip = _breakout_clip[seg.index]
+            _bcap = _breakout_cap_by_final.get(int(seg.index), {})
+            _bowner = int(_bcap.get("seg_index", seg.index))
+            _lineage_register(_bclip, {
+                "kind": "breakout", "original_beat": _bowner, "owner_beat": _bowner,
+                "via": "breakout", "validated": True,
+                "root_binding": (f"breakout:{_bcap.get('source_id', '')}:"
+                                 f"{_bcap.get('source_t', '')}:{_bcap.get('line', '')}"),
+            })
             # register the breakout's look in the air-guard so the SAME shot can't re-air
             # as ordinary footage a few beats later (breakouts bypass the windows walk)
             _aired_hashes.append(_frame_hash(str(_bclip), 1.0))
             clips_for_scene = (_split_clip_sequential(_bclip, _lens, proj.clips_dir, seg.index)
                                if k > 1 else [_bclip]) or [_bclip]
+            for _bp in clips_for_scene:
+                if _lineage_key(_bp) != _lineage_key(_bclip):
+                    _lineage_derive(_bp, _bclip, via="breakout")
             while len(clips_for_scene) < k:
                 clips_for_scene.append(clips_for_scene[-1])
             total_clips += len(clips_for_scene)
@@ -6607,11 +7249,41 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         # to Ken-Burns, which upscales it 3.75x to 1080p and then zooms a further 1.08-1.10x on top.
         # Measured against a full-res re-extract of the identical instant, the shipped version loses
         # ~8.7x power at 0.30 Nyquist and ~29x at 0.42 — 18 of 21 aired stills on one render.
-        # The source file and the timestamp are both still on disk, so the fix is one ffmpeg call
-        # per still: no re-download, no API spend, and it silently no-ops when the re-extract is not
-        # actually sharper (two of those 18 came from 854x478 and 640x360 uploads).
-        if _img and Path(_img).exists():
-            _img = _rescue_still_fullres(proj, sel, _img, log) or _img
+        # The exact owner source + indexed shot are still on disk, so the repair is one deterministic
+        # midpoint extraction per still: no re-download or API spend.  A low-resolution/unprobeable
+        # owner now blocks publication; silently retaining a 512px thumbnail would only disguise the
+        # defect inside a 1080p container.
+        # A declared image is a semantic replacement for the moving selection.  Missing/empty or
+        # unverifiable image bytes must therefore BLOCK; falling through would air the very moving
+        # clip this fallback replaced (often a verifier rejection).
+        if _img:
+            try:
+                _declared_img = _require_declared_image_path(sel)
+                _img_rescue = _rescue_still_fullres(proj, sel, str(_declared_img), log)
+                _img = str(_img_rescue["path"])
+                _img_root = _verified_image_lineage_root(proj, sel, _img_rescue, seg.index)
+                _img_audit_row = {
+                    **_img_root, "final_scene": int(seg.index),
+                    "declared_path": str(_declared_img.resolve()),
+                    "aired_image_path": _lineage_key(_img),
+                }
+                _image_lineage_entries.append(_img_audit_row)
+                _persist_image_lineage_audit(
+                    proj, _image_lineage_entries, _image_lineage_failures)
+            except Exception as _img_exc:                 # noqa: BLE001 — persist then fail closed
+                _image_lineage_failures.append({
+                    "final_scene": int(seg.index),
+                    "original_beat": int(getattr(sel, "segment_index", seg.index)),
+                    "declared_path": str(_img or ""),
+                    "expected_source_id": str((getattr(sel, "image_meta", {}) or {}).get(
+                        "src", "") or ""),
+                    "expected_shot_index": (getattr(sel, "image_meta", {}) or {}).get("shot"),
+                    "reason": str(_img_exc),
+                })
+                _persist_image_lineage_audit(
+                    proj, _image_lineage_entries, _image_lineage_failures)
+                raise
+            _lineage_register(_img, _img_root)
             clips_for_scene = []
             for m in range(k):
                 per_beat = max(cfg.min_clip_sec, _lens[m]) + 0.5
@@ -6619,6 +7291,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 _z = 1.08 + 0.02 * (m % 2)            # alternate push-in so multi-beat stills vary
                 got = _image_kenburns_clip(_img, _kc, per_beat, zoom_to=_z)
                 if got:
+                    _lineage_derive(got, _img, via="verified_image")
                     clips_for_scene.append(Path(got))
             if clips_for_scene:
                 while len(clips_for_scene) < k:
@@ -6629,6 +7302,77 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 gbeat += k
                 log(f"build: 🖼 image-still beat {seg.index} ({(sel.image_meta or {}).get('source','web')})")
                 continue
+            from .verify import NonRetryableBuildError
+            raise NonRetryableBuildError(
+                f"scene-lineage gate: verified image derivative failed for beat "
+                f"{getattr(sel, 'segment_index', seg.index)}; refusing to fall through to an "
+                f"unchecked moving-video or placeholder root", kind="scene_lineage")
+
+        # VERIFIED-SELECTION LOCK.  From this point ordinary footage is derived ONLY from the
+        # already-cut ``seg_NNN.mp4`` that belongs to this selection.  The legacy alternate-window
+        # sorter / playhead walk remains below solely so old audit tests can describe the defect;
+        # this fail-closed path always continues before it and has no opt-out switch.
+        if sel is None:
+            from .verify import NonRetryableBuildError
+            raise NonRetryableBuildError(
+                f"scene-lineage gate: final scene {seg.index} has no ClipSelection; refusing an "
+                f"unowned placeholder/neighbor frame", kind="scene_lineage")
+        _selected_clip = Path(str(getattr(sel, "clip_path", "") or ""))
+        if not _selected_clip.exists() or _selected_clip.stat().st_size <= 0:
+            from .verify import NonRetryableBuildError
+            raise NonRetryableBuildError(
+                f"scene-lineage gate: beat {sel.segment_index} selected clip is missing/empty "
+                f"({_selected_clip}); re-cut the selection before build", kind="scene_lineage")
+        _root = _selection_root(sel, seg.index)
+        _lineage_register(_selected_clip, _root)
+        _owned_lens = [max(cfg.min_clip_sec, float(L)) + 0.5 for L in _lens]
+        _owned_full = proj.clips_dir / f"beat_{seg.index:03d}_owned.mp4"
+        _owned_crop = (_watermark_crop_filter(wm_corners[sel.source_id])
+                       if sel.source_id in wm_corners else "")
+        _owned_zoom = 1.12 if pos < _hook_n else (1.10 if pos in hold_pos else 1.055)
+        _owned = _fit_verified_selection_clip(
+            _selected_clip, _owned_full, sum(_owned_lens),
+            crop_filter=_owned_crop, zoom_to=_owned_zoom)
+        if _owned is None or not _lineage_derive(_owned, _selected_clip):
+            from .verify import NonRetryableBuildError
+            raise NonRetryableBuildError(
+                f"scene-lineage gate: could not make a complete owned derivative for beat "
+                f"{sel.segment_index}; no alternate/walk/placeholder fallback is permitted",
+                kind="scene_lineage")
+        if k > 1:
+            clips_for_scene = _split_clip_sequential(
+                _owned, _owned_lens, proj.clips_dir, seg.index, suffix="sel")
+            if len(clips_for_scene) != k:
+                from .verify import NonRetryableBuildError
+                raise NonRetryableBuildError(
+                    f"scene-lineage gate: owned derivative split failed for beat "
+                    f"{sel.segment_index} ({len(clips_for_scene)}/{k}); refusing a repeated or "
+                    f"foreign fill", kind="scene_lineage")
+            for _part in clips_for_scene:
+                if not _lineage_derive(_part, _owned):
+                    from .verify import NonRetryableBuildError
+                    raise NonRetryableBuildError(
+                        f"scene-lineage gate: unregistered split derivative {_part.name}",
+                        kind="scene_lineage")
+        else:
+            clips_for_scene = [Path(_owned)]
+        total_clips += len(clips_for_scene)
+        footage.append(FootageItem(index=seg.index, path=clips_for_scene[0], is_video=True))
+        beat_clips[seg.index] = clips_for_scene
+        for m, (_cp, _need) in enumerate(zip(clips_for_scene, _owned_lens)):
+            _aired_windows.append({
+                "beat": seg.index, "original_beat": int(sel.segment_index), "clip": m,
+                "file": Path(_cp).name, "root_file": _selected_clip.name,
+                "source_id": sel.source_id,
+                "source_title": ((proj.source(sel.source_id).title or "")[:120]
+                                 if proj.source(sel.source_id) else ""),
+                "in": round(float(sel.in_point), 3), "need": round(float(_need), 3),
+                "via": "selection", "ok": True,
+                "selection_binding": _root["selection_binding"],
+            })
+        gbeat += k
+        continue
+
         windows_avail = list(getattr(sel, "beat_windows", []) or [])
         # snapshot the VERIFIED first choice: windows_avail is consumed as windows air, so by the
         # time provenance is recorded its [0] is no longer the beat's top-ranked window
@@ -6983,6 +7727,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                         _fr = proj.clips_dir / f"beat_{seg.index:03d}_{m}_nobrand.mp4"
                         _got = _freeze_replace(Path(_donor), _fr, _d)
                         if _got:
+                            _lineage_derive(_got, _donor)
                             clips[m] = Path(_got)
                             _replaced += 1
                             continue
@@ -7055,6 +7800,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                     _fr = proj.clips_dir / f"beat_{seg.index:03d}_{m}_nodark.mp4"
                     _got = _freeze_replace(Path(_donor), _fr, _d)
                     if _got:
+                        _lineage_derive(_got, _donor)
                         clips[m] = Path(_got)
                         _drep += 1
                         log(f"build: unreadable-clip removal — scene {seg.index} clip {m} "
@@ -7184,6 +7930,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 _got = (_kenburns_hold(Path(_last_clean_r), _fr, _d) if _motion_hold
                         else _freeze_replace(Path(_last_clean_r), _fr, _d))
                 if _got:
+                    _lineage_derive(_got, _last_clean_r)
                     clips[m] = Path(_got)
                     _rrep += 1
                     _rf_audit.append({"seg_index": _orig(seg.index), "final_index": seg.index,
@@ -7394,6 +8141,78 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             log(f"build: caption-suppress over {_bk_added} real-audio breakout window(s) "
                 f"(breakout dialogue captioned separately; main caption stays voice-locked)")
 
+    # FINAL BUILD-SIDE LINEAGE MANIFEST.  Construct this only after every crop/freeze/QA repair has
+    # mutated ``beat_clips``; the exact paths below are the inputs assemble will read.  The expected
+    # owner comes from the scene's ClipSelection, while the actual owner comes from the immutable
+    # derivative registry.  That asymmetry is intentional: a previous-scene donor cannot make
+    # itself look valid merely by carrying its own internally consistent metadata.
+    _scene_lineage: list[dict] = []
+    _aired_by_key = {(int(r.get("beat", -1)), int(r.get("clip", -1))): dict(r)
+                     for r in _aired_windows}
+    _aired_final: list[dict] = []
+    for _seg_l in segments:
+        _sel_l = sel_by_idx.get(_seg_l.index)
+        _expected_orig = (int(getattr(_sel_l, "segment_index")) if _sel_l is not None
+                          else _final_to_orig_lineage.get(_seg_l.index, _seg_l.index))
+        for _m_l, _cp_l in enumerate(beat_clips.get(_seg_l.index) or []):
+            _root_l = _lineage_roots.get(_lineage_key(_cp_l))
+            if _root_l is None:
+                _root_l = {
+                    "kind": "unknown", "owner_beat": None, "via": "untracked",
+                    "validated": False, "root_binding": "",
+                }
+            _kind_l = str(_root_l.get("kind") or "unknown")
+            if _kind_l == "selection_video":
+                _kind_l = "selection_derivative"
+            # A breakout is an explicit pseudo-scene anchored to the original beat it evidences;
+            # it is not a substitute for an ordinary narration scene.  Its own stable owner is the
+            # expected owner.  Ordinary/image scenes must agree with their ClipSelection owner.
+            _row_orig = (int(_root_l.get("owner_beat"))
+                         if _kind_l == "breakout" and _root_l.get("owner_beat") is not None
+                         else int(_expected_orig))
+            _row_l = {
+                **_root_l, "kind": _kind_l, "final_scene": int(_seg_l.index),
+                "original_beat": _row_orig, "clip": int(_m_l),
+                "file": _lineage_key(_cp_l), "media_kind": "video",
+            }
+            _scene_lineage.append(_row_l)
+            _aw_l = _aired_by_key.get((int(_seg_l.index), int(_m_l)), {})
+            _aw_l.update({
+                "beat": int(_seg_l.index), "original_beat": _row_orig, "clip": int(_m_l),
+                "file": Path(_cp_l).name, "lineage_kind": _kind_l,
+                "root_owner_beat": _root_l.get("owner_beat"),
+                "via": str(_root_l.get("via") or "untracked"),
+                "lineage_validated": bool(_root_l.get("validated")),
+            })
+            _aired_final.append(_aw_l)
+    _aired_windows = _aired_final
+    # Persistence is part of both invariants.  If either audit cannot be written, publication is
+    # blocked rather than silently proceeding with unverifiable output.
+    import json as _json_lineage
+    (proj.output_dir / "aired_windows.json").write_text(
+        _json_lineage.dumps({"schema": "aired_windows/2", "clips": _aired_windows}, indent=1),
+        encoding="utf-8")
+    _assert_scene_lineage(
+        _scene_lineage, proj.output_dir / "scene_lineage_manifest.json")
+    log(f"build: scene-lineage manifest PASS — {len(_scene_lineage)} aired input(s), "
+        f"all owned by their own verified selection")
+
+    # Breakout captions are validated BEFORE the expensive assembly.  The same ASS is reused by
+    # the post-render burn, so the exact 100%-coverage / 0.5s-tail evidence is what actually airs.
+    _breakout_ass_preflight = None
+    _breakout_caps_enabled = (_cap_on and os.environ.get(
+        "VIDLORE_CLIPSTUDIO_BREAKOUT_CAPS", "1").strip() not in ("0", "false", "no"))
+    _caps_pre = list(getattr(narration, "_breakout_caps", None) or [])
+    if _breakout_caps_enabled and _caps_pre:
+        _breakout_ass_preflight = _breakout_caption_ass(
+            _caps_pre, work / "breakout_caps.ass", log, preset=_cap_preset)
+        if _breakout_ass_preflight is None:
+            from .verify import NonRetryableBuildError
+            raise NonRetryableBuildError(
+                "breakout-caption gate: dialogue could not be captioned at 100% word coverage "
+                "through its final spoken word; refusing a partial-caption render. See "
+                "breakout_caption_coverage.json", kind="breakout_caption")
+
     # 4) theme + 5) render
     th = get_theme(theme_name)
     # CAPTION PRESET — the selected preset OWNS the narration caption look (font / size / weight /
@@ -7495,6 +8314,10 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         # tell the black-frame repair to freeze-fill (not preserve) any it finds there.
         breakout_windows=[(float(c["start"]), round(float(c["start"]) + float(c["dur"]), 2))
                           for c in (getattr(narration, "_breakout_caps", None) or [])],
+        # Independent renderer invariant: bind every encode-plan beat to the exact owned file,
+        # fingerprint decoded encoded segments, then verify those beats remain in order after
+        # concat/conform.  Construction metadata alone is not accepted as proof.
+        scene_lineage={"entries": _scene_lineage},
     )
     result = Path(result)
     if cinematic:
@@ -7509,7 +8332,21 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     if _cap_on and os.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_CAPS", "1").strip() \
             not in ("0", "false", "no"):
         _caps = list(getattr(narration, "_breakout_caps", None) or [])
-        if _caps and _burn_breakout_captions(result, _caps, work, log, preset=_cap_preset):
+        if _caps:
+            _bk_burn_ok = _burn_breakout_captions(
+                result, _caps, work, log, preset=_cap_preset,
+                ass_path=_breakout_ass_preflight)
+            if not _bk_burn_ok:
+                _qbk = result.with_name(
+                    result.stem + ".FAILED_BREAKOUT_CAPTION" + result.suffix)
+                try:
+                    result.replace(_qbk)
+                except Exception:
+                    _qbk = result
+                from .verify import NonRetryableBuildError
+                raise NonRetryableBuildError(
+                    f"breakout-caption burn failed; incomplete/absent dialogue captions cannot "
+                    f"publish (quarantined at {_qbk.name})", kind="breakout_caption")
             log(f"build: word-by-word breakout captions burned ({len(_caps)} scene-line(s), "
                 f"style={_cap_preset.name})")
     # POST-RENDER BREAKOUT VISUAL QA — the HARD publication gate (see _breakout_qa_gate).
@@ -7527,6 +8364,16 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # regions block publication.
     result = _final_video_black_gate(result, work, log=log)
 
+    # LAST MUTATING-PASS PROVENANCE CHECK.  assemble() proved its own mux, but
+    # ClipStudio subsequently bakes letterbox bars, Breakout captions and final
+    # QA filters.  Re-run the persisted bind-time canaries on the exact artifact
+    # returned to the portal so a post-pass swap/reorder cannot inherit an old
+    # PASS sidecar.
+    from ..scene_lineage_canary import verify_delivered_output as _verify_delivered_lineage
+    _verify_delivered_lineage(
+        result, proj.output_dir / "scene_lineage_audit.json", stage="delivered_output")
+    log(f"build: delivered scene-lineage canary PASS — {Path(result).name}")
+
     # DELIVERED A/V SYNC — measured on the artifact the viewer actually receives, after everything
     # above has re-encoded it: letterbox bake, caption burn, breakout QA, ad + black gates, mux.
     # The pre-mux check in assemble() proves the concat matched the composed audio; it cannot speak
@@ -7536,12 +8383,14 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     try:
         import json as _json_aw
         (proj.output_dir / "aired_windows.json").write_text(
-            _json_aw.dumps({"schema": "aired_windows/1", "clips": _aired_windows}, indent=1),
+            _json_aw.dumps({"schema": "aired_windows/2", "clips": _aired_windows}, indent=1),
             encoding="utf-8")
         _n_alt = sum(1 for a in _aired_windows if a.get("via") == "window[alt]")
         _n_walk = sum(1 for a in _aired_windows if a.get("via") == "walk")
+        _n_owned = sum(1 for a in _aired_windows
+                       if a.get("via") in ("selection", "selection_derivative"))
         log(f"build: aired-window record — {len(_aired_windows)} clip(s) "
-            f"({_n_alt} from an alternate window, {_n_walk} from the shot walk) "
+            f"({_n_owned} owned selection derivative(s), {_n_alt} alternate, {_n_walk} walk) "
             f"→ aired_windows.json")
     except Exception as _e_aw:                            # noqa: BLE001
         log(f"build: aired-window record skipped ({type(_e_aw).__name__})")

@@ -1978,9 +1978,10 @@ def test_caption_sync_per_scene_tolerant():
 
     bsrc = (Path(__file__).resolve().parent.parent / "vidlore" / "clipstudio" /
             "build.py").read_text(encoding="utf-8")
-    check("build tries word-sync BEFORE the engine narrate_from_file fallback",
-          bsrc.index("_synced_narration_from_file(script") <
-          bsrc.index("narrate_from_file(script, str(Path(voiceover)"))
+    check("build blocks invalid uploaded-VO timing (no proportional/TTS substitution)",
+          "_synced_narration_from_file(script" in bsrc
+          and "narrate_from_file(script, str(Path(voiceover)" not in bsrc
+          and 'kind="voiceover_alignment"' in bsrc)
     # Real-audio breakouts pause narration. They STAY ON (the feature is wanted, incl. on uploaded
     # voiceovers); caption sync is held by (a) _group cutting a cue at the breakout's silent gap and
     # (b) suppressing the main caption over the breakout window — NOT by disabling breakouts.
@@ -2136,7 +2137,7 @@ def test_image_policy_edge_gaps():
     ifsrc = (Path(__file__).resolve().parent.parent / "vidlore" / "clipstudio" /
              "image_fallback.py").read_text(encoding="utf-8")
     check("character web still needs a higher floor + confirmed actor (no generic portrait)",
-          "IMAGE_MIN_SCORE_CHAR" in ifsrc and 'best["face"] != "match"' in ifsrc)
+          "IMAGE_MIN_SCORE_CHAR" in ifsrc and 'cand["face"] != "match"' in ifsrc)
 
     # --- req 2: ledger treats image coverage correctly (not no_candidate) ---
     cfg = ClipConfig()
@@ -2295,7 +2296,7 @@ def test_generic_beat_filler_leniency():
     tmp = tempfile.mkdtemp(prefix="csgen_")
     proj = M.ClipProject(name="t", root=tmp)
     # beat 0 = GENERIC narration (non-exact, on-topic filler ok);
-    # beat 1 = EXACT beat, REQUIRED SUBJECT confirmed on screen → exact→contextual downgrade;
+    # beat 1 = EXACT beat whose own verdict says mismatch+insufficient → never downgraded;
     # beat 2 = EXACT beat, WRONG subject (correct_subject_visible False) → contradictory, NOT downgraded
     gen = M.ClipSelection(segment_index=0, source_id="srcA", shot_index=1,
                           in_point=1.0, out_point=4.0, confidence=0.8)
@@ -2337,11 +2338,11 @@ def test_generic_beat_filler_leniency():
 
     check("GENERIC beat: on-topic filler KEPT (not flagged)",
           gen.verifier.get("verdict") == "keep" and not gen.flagged)
-    # EXACT beat, right subject on screen (but META narration → matches_narration False): the
-    # downgrade keys on the SUBJECT, not literal narration match, so it is kept as contextual.
-    check("EXACT beat, right subject visible (meta narration) → DOWNGRADED to contextual",
-          ctx.verifier.get("verdict") == "keep" and ctx.verifier.get("downgraded") == "exact→contextual"
-          and not ctx.flagged and "verifier_failed" not in (ctx.flag_reasons or []))
+    # Exact footage cannot contradict its own strict judgment. Right-character presence alone does
+    # not rescue an explicit matches_narration=False + specific_enough=False verdict.
+    check("EXACT beat, explicit mismatch+insufficient → NOT downgraded (blocked)",
+          ctx.verifier.get("verdict") == "replace" and ctx.flagged
+          and "verifier_failed" in (ctx.flag_reasons or []))
     # EXACT character beat whose shot Face-IDs a CONFIRMED unrelated character (Cersei on a Jon Snow
     # beat) → contradictory → NOT downgraded (not contextual, not generic_filler) → flagged/blocked.
     check("EXACT character beat, CONFIRMED wrong character in Face-ID → NOT downgraded (blocked)",
@@ -2483,7 +2484,11 @@ def test_character_present_unconfirmed():
 
     joff = M.ScriptSegment(index=1, text="Joffrey is carried out screaming",
                            required_kind="character", required_entity="Joffrey Baratheon")
-    V0 = {"correct_subject_visible": False}   # rejected pick, subject not face-confirmed
+    # The vision pass positively affirms the moment; Face-ID supplies the subject evidence that the
+    # visual subject field could not. Without both positive fields an exact→contextual rewrite is
+    # forbidden, even when Face-ID finds the right person.
+    V0 = {"correct_subject_visible": False,
+          "matches_narration": True, "specific_enough": True}
 
     # --- CO-MENTIONED character guard (_confirmed_wrong_character) ---
     joff_tywin = M.ScriptSegment(index=2, text="Joffrey calls Tywin a coward", required_kind="character",
@@ -2825,7 +2830,8 @@ def test_intro_coldopen_breakout():
                     quote=(quote if i == 0 else "")) for i in range(n_segs)]
         _orig_ls = _idxmod.load_shots
         _orig = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
-                 B._asr_wav_words, B._breakout_window_admissible)
+                 B._asr_wav_words, B._breakout_window_admissible,
+                 B._probe_breakout_native_dimensions)
         _idxmod.load_shots = lambda p, sid: shots
         # These cases exercise COLD-OPEN mechanics (quote coverage, hook stitching, audit
         # provenance) on synthetic beats whose narration is deliberately nonsense filler. The
@@ -2833,6 +2839,7 @@ def test_intro_coldopen_breakout():
         # (tests/test_breakout_relevance.py) and would correctly refuse this fixture, so stub it
         # here exactly as the extraction pipeline above is stubbed.
         B._breakout_window_admissible = lambda *a, **k: (True, "stubbed for the cold-open cases", [])
+        B._probe_breakout_native_dimensions = lambda _p: {"width": 1920, "height": 1080}
         B._extract_breakout = lambda *a, **k: 5.0
         B._breakout_window_luma = lambda *a, **k: luma
         B._frame_has_burned_text = lambda *a, **k: burned
@@ -2847,7 +2854,8 @@ def test_intro_coldopen_breakout():
         finally:
             _idxmod.load_shots = _orig_ls
             (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
-             B._asr_wav_words, B._breakout_window_admissible) = _orig
+             B._asr_wav_words, B._breakout_window_admissible,
+             B._probe_breakout_native_dimensions) = _orig
         return out, "\n".join(logs)
 
     def _has0(out):
@@ -2936,10 +2944,12 @@ def test_intro_coldopen_breakout():
             index=i, quote="", text=f"narration filler beat {i} words here") for i in range(4, 9)]
         _ls = _idxmod.load_shots
         _o = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
-              B._asr_wav_words, B._breakout_window_admissible)
+              B._asr_wav_words, B._breakout_window_admissible,
+              B._probe_breakout_native_dimensions)
         _idxmod.load_shots = lambda p, sid: shots
         # same reasoning as _run above: this case is about HOOK STITCHING, not relevance
         B._breakout_window_admissible = lambda *a, **k: (True, "stubbed for the hook case", [])
+        B._probe_breakout_native_dimensions = lambda _p: {"width": 1920, "height": 1080}
         B._extract_breakout = lambda *a, **k: 6.0
         B._breakout_window_luma = lambda *a, **k: 80.0
         B._frame_has_burned_text = lambda *a, **k: False
@@ -2951,7 +2961,8 @@ def test_intro_coldopen_breakout():
         finally:
             _idxmod.load_shots = _ls
             (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
-             B._asr_wav_words, B._breakout_window_admissible) = _o
+             B._asr_wav_words, B._breakout_window_admissible,
+             B._probe_breakout_native_dimensions) = _o
         return o, "\n".join(lg)
     of, lf = _run_frag()
     check("fragmented hook airs as a scene-0 COLD-OPEN breakout",
@@ -3007,8 +3018,10 @@ def test_breakout_window_commentary_gate():
                 text=("chaos is a ladder climb the realm" if i == 5 else f"narration filler beat {i} words"),
                 quote=("Chaos isn't a pit. Chaos is a ladder." if i == 5 else "")) for i in range(10)]
     _orig_ls = _idxmod.load_shots
-    _orig = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text)
+    _orig = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
+             B._probe_breakout_native_dimensions)
     _idxmod.load_shots = lambda p, sid: shots
+    B._probe_breakout_native_dimensions = lambda _p: {"width": 1920, "height": 1080}
     B._extract_breakout = lambda *a, **k: 7.5            # window [581, 588.5] spans the commentary shot
     B._breakout_window_luma = lambda *a, **k: 80.0
     B._frame_has_burned_text = lambda *a, **k: False
@@ -3017,7 +3030,8 @@ def test_breakout_window_commentary_gate():
         out = B._select_breakouts(proj, segs, 800.0, _P("/tmp"), lambda m: logs.append(str(m)))
     finally:
         _idxmod.load_shots = _orig_ls
-        B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text = _orig
+        (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
+         B._probe_breakout_native_dimensions) = _orig
     lt = "\n".join(logs)
     check("aired-window commentary rejected post-extraction (matched line was clean)",
           not out and "window_commentary" in lt and "REJECTED post-extract" in lt)
@@ -4439,7 +4453,9 @@ def test_caption_presets():
           and "work, _cap_on, log=log)" in bsrc)
     check("selected preset drives BOTH narration theme caption AND breakout burn",
           '"caption": {**th.get("caption", {}), **_cap_dict}' in bsrc
-          and "_burn_breakout_captions(result, _caps, work, log, preset=_cap_preset)" in bsrc)
+          and "_burn_breakout_captions(" in bsrc
+          and "preset=_cap_preset" in bsrc
+          and "ass_path=_breakout_ass_preflight" in bsrc)
     # the active-word colour is caption-SCOPED (caption_accent) so it never recolours title/graphic
     # overlays or the key-phrase stabs (which fire only when captions are OFF).
     asmsrc = (Path(__file__).resolve().parents[1] / "vidlore" / "assemble.py").read_text(encoding="utf-8")
@@ -4742,6 +4758,7 @@ def test_breakout_caption_layout():
         check("breakout-layout: faster_whisper unavailable — skipped", True)
         return
     import vidlore.clipstudio.build as B
+    import vidlore.clipstudio.breakout_asr as BA
     from vidlore.clipstudio import caption_presets as CP
 
     class _FW:                                             # canned word timestamps (no audio/model)
@@ -4762,6 +4779,13 @@ def test_breakout_caption_layout():
             return _canned["segs"], _ty.SimpleNamespace()
 
     _orig, _fw.WhisperModel = _fw.WhisperModel, _FakeModel
+    _orig_tx = BA.transcribe_breakout_words
+
+    def _fake_tx(_audio, **_kwargs):
+        return [(w.word, float(w.start), float(w.end), float(w.probability))
+                for s in _canned["segs"] for w in (s.words or [])]
+
+    BA.transcribe_breakout_words = _fake_tx
     _tmp = _P(tempfile.mkdtemp(prefix="bkcap_"))
     _pre = CP.CAPTION_PRESETS["professional"]
     caps = [{"audio": str(_tmp / "a.wav"), "start": 10.0, "dur": 4.0}]
@@ -4794,6 +4818,7 @@ def test_breakout_caption_layout():
               _r3 is None)
     finally:
         _fw.WhisperModel = _orig
+        BA.transcribe_breakout_words = _orig_tx
 
 
 def test_era_policy_and_still_verification():
@@ -4878,7 +4903,8 @@ def test_verifier_context_and_fallback():
     check("action contact-sheet builder exists + multiframe wired",
           "_action_contact_sheet" in vsrc and "multiframe=is_mf" in vsrc)
     check("verify passes storyboard to both primary + alternate checks",
-          vsrc.count("expected_visual=getattr(_seg") >= 1 and "_verify_ctx(ashot.keyframe_path" in vsrc)
+          vsrc.count("expected_visual=getattr(_seg") >= 1
+          and "_cached_verify_ctx(\n                        ashot.keyframe_path" in vsrc)
 
     # (3) honest relevance_class in the ledger
     tmp = Path(tempfile.mkdtemp(prefix="rc_"))
@@ -5085,15 +5111,15 @@ def test_release_gate_recovery_alignment():
           _beat_is_unresolved(sel_of("replace"), seg_of("generic_filler"), _pol))
     check("kept character beat is NOT unresolved",
           not _beat_is_unresolved(sel_of("keep"), seg_of("character_specific"), _pol))
-    check("rejected character beat WITH a still is NOT unresolved (gate skips image beats)",
-          not _beat_is_unresolved(sel_of("replace", img="/x/a.jpg", img_src="web-portrait"),
-                                  seg_of("character_specific"), _pol))
+    check("rejected character beat WITH an unverifiable still IS unresolved (fail closed)",
+          _beat_is_unresolved(sel_of("replace", img="/x/a.jpg", img_src="web-portrait"),
+                              seg_of("character_specific"), _pol))
     check("exact beat requires a REAL still (web-portrait does not cover it)",
           _beat_is_unresolved(sel_of("replace", img="/x/a.jpg", img_src="web-portrait"),
                               seg_of("exact_scene"), _pol))
-    check("exact beat with a source-frame still is covered",
-          not _beat_is_unresolved(sel_of("replace", img="/x/a.jpg", img_src="source-frame"),
-                                  seg_of("exact_scene"), _pol))
+    check("exact beat with an unverifiable source-frame still stays unresolved",
+          _beat_is_unresolved(sel_of("replace", img="/x/a.jpg", img_src="source-frame"),
+                              seg_of("exact_scene"), _pol))
     check("missing selection: unresolved for exact only",
           _beat_is_unresolved(None, seg_of("exact_scene"), _pol)
           and not _beat_is_unresolved(None, seg_of("character_specific"), _pol))

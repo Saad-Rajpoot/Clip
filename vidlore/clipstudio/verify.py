@@ -163,9 +163,13 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         "For wrong_subject_visible: set true ONLY if a DIFFERENT specific character (clearly NOT the "
         "one this line is about) is the main subject of the frame; set false for a wide / crowd / "
         "reaction / establishing shot where the required person may be present off-centre or unclear.\n"
+        "For contradicts_narration: set true when what is visibly shown directly negates the line "
+        "(for example, the line says a named person is absent but that person is visibly present, "
+        "or it names one person's death while the clip shows another person's death). This is "
+        "stronger than merely being an inexact or contextual shot.\n"
         "Answer ONLY this JSON:\n"
         '{"matches_narration": true/false, "correct_subject_visible": true/false, '
-        '"wrong_subject_visible": true/false, '
+        '"wrong_subject_visible": true/false, "contradicts_narration": true/false, '
         + ('"target_visible": true/false, ' if must_see else "")
         # era_ok is asked whenever the beat declares an era. It gates the CONTEXTUAL FALLBACK, which
         # used to re-admit a clip on "the subject is visible" alone and shipped season-1 child Bran
@@ -211,11 +215,16 @@ _SEASON_RX = re.compile(
 # change that did NOT bump it would serve answers to a different question — the whole point of the
 # fingerprint. The cost is one cold verify pass on the next render (~$1); the alternative is a
 # silently stale cache, which is worse.
-PROMPT_VERSION = "v8-2026-07"          # v8: + behind-the-scenes/production clause; v7: non-show
-                                       # illustration hard rule; v6: venue-fallback
+PROMPT_VERSION = "v9-2026-08"          # v9: explicit contradiction judgment; v8: behind-the-scenes
+                                       # clause; v7: non-show illustration hard rule
 # Bump when the contact-sheet SAMPLING changes (frame count/positions/layout). The sheet is the
 # image the verifier judges, so a different sampling is a different question even for the same shot.
-SHEET_VERSION = "sheet-v1-startmidend"
+SHEET_VERSION = "sheet-v2-selected-window-15-50-85"
+# A persisted positive verdict is not publication evidence until it is bound to the selection that
+# will air.  The verdict-cache fingerprint identifies the vision QUESTION; this schema adds the
+# selected source/shot/trim tuple so a later project.json mutation cannot carry a stale `keep` onto
+# different footage.  Bump this whenever the persisted binding shape changes.
+SELECTION_EVIDENCE_SCHEMA = 1
 # Consecutive transient failures after which the vision backend is declared DOWN. Measured: over an
 # 11-hour run the verifier degraded 176 replaced -> 180 -> 55 -> 0, and at exactly 0 the release
 # gate passed and published. Nothing noticed, because "0 rejections" and "nothing checked" were the
@@ -283,7 +292,9 @@ def _file_fingerprint(path) -> str:
         return "missing"
     try:
         st = p.stat()
-        stamp = f"{st.st_size}:{int(st.st_mtime)}"
+        # Nanoseconds matter: project/source rewrites often happen in one burst, and the old
+        # whole-second stamp could hand back a pre-mutation content hash for a same-size rewrite.
+        stamp = f"{st.st_size}:{int(st.st_mtime_ns)}"
         side = p.with_suffix(p.suffix + ".fp.json")
         try:
             prev = json.loads(side.read_text(encoding="utf-8"))
@@ -365,6 +376,166 @@ def verdict_fingerprint(*, src_hash: str, source_id: str, shot_start: float, sho
     return h.hexdigest()[:32]
 
 
+def _project_beat_era(proj: ClipProject, seg: ScriptSegment) -> str:
+    """Re-derive the exact beat-local era string used by ``verify_and_repair``.
+
+    This is deliberately module-level so the pre-render relevance contract can ask the same
+    question without trusting a stale era string persisted beside the verdict.
+    """
+    analysis = (getattr(proj, "meta", {}) or {}).get("analysis", {}) or {}
+    single = str(analysis.get("video_type", "") or "") == "single_scene"
+    global_era = str(analysis.get("episode_hint", "") or "")
+    global_ok = bool(analysis.get("episode_hint_verified", False))
+    shim = type("A", (), {
+        "anchor_scenes": analysis.get("anchor_scenes"),
+        "movie_title": analysis.get("movie_title", ""),
+    })()
+    return _beat_era(
+        seg, global_era, single, global_verified=global_ok,
+        event_eras=_era.event_eras_from(shim), anchor_eras=_era.anchor_token_eras(shim))
+
+
+def _selection_evidence_image_id(
+        proj: ClipProject, shot, multiframe: bool, *, window_start: float = 0.0,
+        window_end: float = 0.0) -> str:
+    """Content identity of the actual single frame or deterministic contact sheet judged."""
+    if shot is None:
+        return ""
+    if multiframe:
+        src = proj.source(getattr(shot, "source_id", "") or "")
+        src_hash = _file_fingerprint(getattr(src, "local_path", "") or "") if src else "missing"
+        return f"sheet:{src_hash}:{float(window_start):.3f}-{float(window_end):.3f}"
+    keyframe = str(getattr(shot, "keyframe_path", "") or "")
+    return f"kf:{_file_fingerprint(keyframe)}" if keyframe else "kf:none"
+
+
+def selection_verifier_evidence_record(
+        proj: ClipProject, sel: ClipSelection, seg: ScriptSegment, *, shot=None,
+        model: str, is_specific: bool, multiframe: bool, faceid_names=(),
+        era: str, must_see: str) -> dict:
+    """Return the immutable identity of the moving-footage judgment that will be persisted.
+
+    ``verdict_fingerprint`` already covers source content, shot bounds, every prompt field, model,
+    face evidence and frame/contact-sheet identity.  The wrapper below additionally covers the
+    selected shot number and exact in/out window.  Those values are not part of the vision prompt,
+    but they are part of what the renderer airs and therefore must invalidate evidence when edited.
+    """
+    if shot is None:
+        try:
+            shot = _shot_lookup(proj)(getattr(sel, "source_id", ""),
+                                      getattr(sel, "shot_index", -1))
+        except Exception:
+            shot = None
+    sid = str(getattr(sel, "source_id", "") or "")
+    if (shot is None or not sid or str(getattr(shot, "source_id", "") or "") != sid
+            or int(getattr(shot, "index", -1)) != int(getattr(sel, "shot_index", -1))):
+        return {}
+    src = proj.source(sid)
+    source_fp = _file_fingerprint(getattr(src, "local_path", "") or "") if src else "missing"
+    selection_in = float(getattr(sel, "in_point", 0.0) or 0.0)
+    selection_out = float(getattr(sel, "out_point", 0.0) or 0.0)
+    image_id = _selection_evidence_image_id(
+        proj, shot, bool(multiframe), window_start=selection_in, window_end=selection_out)
+    if (source_fp in ("", "missing", "unreadable")
+            or image_id in ("", "kf:none", "kf:missing", "kf:unreadable")
+            or not (selection_out > selection_in >= 0.0)):
+        return {}
+    model_id = str(model or "").strip()
+    if not model_id:
+        return {}
+    faces = list(faceid_names or [])
+    question_fp = verdict_fingerprint(
+        src_hash=source_fp, source_id=sid,
+        shot_start=(selection_in if multiframe else getattr(shot, "start", 0.0)),
+        shot_end=(selection_out if multiframe else getattr(shot, "end", 0.0)),
+        beat_text=getattr(seg, "text", ""),
+        required_entity=getattr(seg, "required_entity", ""),
+        required_kind=getattr(seg, "required_kind", ""),
+        expected_visual=getattr(seg, "expected_visual", "") or "",
+        scene_query=getattr(seg, "scene_query", "") or "", era=str(era or ""),
+        visual_policy=_policy.policy_of(seg), is_specific=bool(is_specific),
+        faceid_names=faces, multiframe=bool(multiframe), image_id=image_id,
+        model=model_id, must_see=str(must_see or ""))
+    import hashlib as _hashlib_ev
+    parts = [
+        f"selection-evidence-v{SELECTION_EVIDENCE_SCHEMA}", question_fp, sid,
+        str(int(getattr(sel, "shot_index", -1))),
+        f"{selection_in:.6f}", f"{selection_out:.6f}",
+    ]
+    digest = _hashlib_ev.sha256("\x1f".join(parts).encode("utf-8", "replace")).hexdigest()
+    return {
+        "schema_version": SELECTION_EVIDENCE_SCHEMA,
+        "fingerprint": digest,
+        "question_fingerprint": question_fp,
+        "source_content_fingerprint": source_fp,
+        "source_id": sid,
+        "shot_index": int(getattr(sel, "shot_index", -1)),
+        "selection_in": round(selection_in, 6),
+        "selection_out": round(selection_out, 6),
+        "shot_start": round(float(getattr(shot, "start", 0.0) or 0.0), 6),
+        "shot_end": round(float(getattr(shot, "end", 0.0) or 0.0), 6),
+        "image_id": image_id,
+        "multiframe": bool(multiframe),
+        "model": model_id,
+        "is_specific": bool(is_specific),
+        "faceid_names": sorted({str(x).strip().lower() for x in faces if str(x).strip()}),
+        "era": str(era or ""),
+        "must_see": str(must_see or ""),
+        "prompt_version": PROMPT_VERSION,
+        "sheet_version": SHEET_VERSION,
+    }
+
+
+def bind_selection_verifier_evidence(
+        proj: ClipProject, sel: ClipSelection, seg: ScriptSegment, verdict: dict, *, shot=None,
+        model: str, is_specific: bool, multiframe: bool, faceid_names=(),
+        era: str, must_see: str) -> dict:
+    """Bind ``verdict`` in place to the current selection, dropping any stale prior binding."""
+    verdict.pop("selection_evidence", None)
+    record = selection_verifier_evidence_record(
+        proj, sel, seg, shot=shot, model=model, is_specific=is_specific,
+        multiframe=multiframe, faceid_names=faceid_names, era=era, must_see=must_see)
+    if record:
+        verdict["selection_evidence"] = record
+    return verdict
+
+
+def selection_verifier_evidence_reason(
+        proj: ClipProject, sel: ClipSelection, seg: ScriptSegment, verdict: dict) -> str:
+    """Return a stable blocker code when persisted moving-footage proof is stale or absent."""
+    record = (verdict or {}).get("selection_evidence")
+    if not isinstance(record, dict):
+        return "verifier_evidence_absent"
+    if int(record.get("schema_version", 0) or 0) != SELECTION_EVIDENCE_SCHEMA:
+        return "verifier_evidence_schema_mismatch"
+    if (_policy.policy_of(seg) in (_policy.EXACT, _policy.CHARACTER)
+            and record.get("multiframe") is not True):
+        return "verifier_evidence_window_not_sampled"
+    model = str(record.get("model", "") or "")
+    served = str((verdict or {}).get("vision_served_by", "") or "")
+    if not model or (served and served != "none" and served != model):
+        return "verifier_evidence_model_mismatch"
+    try:
+        shot = _shot_lookup(proj)(getattr(sel, "source_id", ""),
+                                  getattr(sel, "shot_index", -1))
+        faces = (getattr(shot, "face_ids", None) or
+                 ([getattr(sel, "identity", "")] if getattr(sel, "identity", "") else []))
+        expected = selection_verifier_evidence_record(
+            proj, sel, seg, shot=shot, model=model,
+            is_specific=bool(record.get("is_specific", False)),
+            multiframe=bool(record.get("multiframe", False)), faceid_names=faces,
+            era=_project_beat_era(proj, seg), must_see=str(record.get("must_see", "") or ""))
+    except Exception:
+        expected = {}
+    if not expected:
+        return "verifier_evidence_unrecomputable"
+    if (str(record.get("fingerprint", "") or "") != expected["fingerprint"]
+            or str(record.get("question_fingerprint", "") or "")
+            != expected["question_fingerprint"]):
+        return "verifier_evidence_mismatch"
+    return ""
+
+
 def _hit_provider_ok(entry, expected_model: str) -> bool:
     """A cached verdict may serve a lookup ONLY when the provider that actually produced it
     matches the model identity in the key it was found under. Verdicts now record
@@ -427,9 +598,13 @@ def _beat_era(seg, global_era: str, single_scene: bool, *, global_verified: bool
 
 
 def _action_contact_sheet(src_path: str, shot_start: float, shot_end: float, dest: Path):
-    """Build a START -> MIDDLE -> END horizontal contact sheet from a shot's source span, so an
-    ACTION beat is judged on whether the action actually happens (one keyframe can't prove motion —
-    'he catches her by the throat' verified fine on a single ambiguous frame). Returns dest or None."""
+    """Build a 15% -> 50% -> 85% sheet from the exact selected source window.
+
+    The caller used to pass the entire detected shot.  A target elsewhere in a long shot could then
+    earn ``keep`` even when the much shorter trim that actually aired omitted it.  All strict
+    publication evidence now calls this with the selected in/out window, and the persisted evidence
+    fingerprint binds that same window.  Returns ``dest`` or ``None``.
+    """
     import subprocess
     from .config import ffmpeg_exe
     if not src_path or not Path(src_path).exists():
@@ -437,14 +612,14 @@ def _action_contact_sheet(src_path: str, shot_start: float, shot_end: float, des
     a, b = float(shot_start), float(shot_end)
     if b - a < 0.5:
         return None
-    mid = (a + b) / 2.0
+    span = b - a
     ff = ffmpeg_exe()
     try:
         from PIL import Image
     except Exception:
         return None
     frames = []
-    for i, t in enumerate((a + 0.12, mid, max(a + 0.2, b - 0.12))):
+    for i, t in enumerate((a + span * 0.15, a + span * 0.50, a + span * 0.85)):
         fp = dest.with_name(f"{dest.stem}_{i}.jpg")
         subprocess.run([ff, "-y", "-loglevel", "error", "-ss", f"{max(0.0, t):.2f}", "-i", str(src_path),
                         "-frames:v", "1", "-vf", "scale=426:-1", str(fp)], capture_output=True, timeout=20)
@@ -492,6 +667,119 @@ def _shot_lookup(proj: ClipProject):
     return get
 
 
+_DIRECT_ABSENCE_RX = re.compile(
+    r"\b(?:(?:is|was|are|were)\s+not|isn['’]?t|wasn['’]?t|aren['’]?t|weren['’]?t)\s+"
+    r"(?:\w+\s+){0,3}(?:(?:in|inside|at)\s+(?:the\s+)?"
+    r"(?:room|chamber|hall|meeting|council|scene|castle|tent|garden|ship|battle|wedding|trial|feast)\b"
+    r"|(?:present|there)\b)", re.I)
+
+_DEATH_CLAIM_RX = re.compile(
+    r"\b(?:dies?|died|death|dead|killed|murdered|assassinated|executed|poisoned|slain)\b", re.I)
+_TITLE_DEATH_NOUN = r"(?:death|killing|murder|execution|assassination|poisoning)"
+_TITLE_DEATH_VERB = r"(?:dies|died|killed|murdered|assassinated|executed|poisoned|slain)"
+
+
+def _direct_negative_contradiction(seg, vd) -> str:
+    """Return a reason for the narrow, deterministic absence contradiction, else ``""``.
+
+    This deliberately does not interpret general negation ("Jon is not in control"). It only fires
+    for a named character/actor, an explicit room/place absence assertion, and positive visual
+    evidence that the required person is on screen. The measured case is "Baelish is not even in
+    the room" over a Baelish close-up.
+    """
+    if not isinstance(vd, dict) or vd.get("correct_subject_visible") is not True:
+        return ""
+    if (getattr(seg, "required_kind", "") or "").strip().lower() not in ("character", "actor"):
+        return ""
+    text = (getattr(seg, "text", "") or "").lower()
+    absence = _DIRECT_ABSENCE_RX.search(text)
+    if absence is None:
+        return ""
+    ent = (getattr(seg, "required_entity", "") or "").lower()
+    name_tokens = [t for t in re.findall(r"[a-z0-9]+", ent)
+                   if len(t) >= 4 and t not in {"king", "queen", "lord", "lady", "body", "death"}]
+    for token in name_tokens:
+        named = re.search(rf"\b{re.escape(token)}\b", text)
+        if named is not None and named.start() <= absence.start() \
+                and absence.start() - named.end() <= 80:
+            return (f"narration explicitly says {getattr(seg, 'required_entity', token)!r} is "
+                    "absent from the place, but the verifier confirms that subject on screen")
+    return ""
+
+
+def _source_title_named_death_conflict(seg, source_title: str, char2actor=None) -> str:
+    """Return a reason when a source title explicitly names a *different* roster member's death.
+
+    Titles are negative evidence only: this never proves that a clip is correct. It requires a
+    death claim in the beat, a character roster, and possessive/verb grammar that binds a different
+    roster name to death in the title. Thus "Joffrey reacts to Tywin's death" is not misread as
+    Joffrey's death, while "King Joffrey's Death" conflicts with a Jon Arryn death beat.
+    """
+    if not source_title or not char2actor:
+        return ""
+    # The NARRATION itself must make the death claim. A storyboard can mention a death merely as
+    # scene context for an object/action beat; treating that as the line's subject falsely blocked
+    # a necklace beat whose selected source was legitimately titled for Joffrey's death scene.
+    if not _DEATH_CLAIM_RX.search(getattr(seg, "text", "") or ""):
+        return ""
+    required_entity = (getattr(seg, "required_entity", "") or "").lower()
+    if not re.search(r"\b(?:death|body|corpse|remains)\b", required_entity):
+        return ""                 # cannot safely identify which mentioned person is the decedent
+    title = source_title.lower()
+    target_tokens = {t for t in re.findall(r"[a-z0-9]+", (
+        required_entity))
+                     if len(t) >= 4 and t not in {"body", "death", "scene"}}
+    for character in (char2actor or {}):
+        ctoks = [t for t in re.findall(r"[a-z0-9]+", str(character).lower()) if len(t) >= 3]
+        if not ctoks or target_tokens.intersection(ctoks):
+            continue                                      # title names the beat's own person
+        aliases = [r"\s+".join(re.escape(t) for t in ctoks)]
+        # A distinctive given/single name is safe; do not use a surname alone ("Stark"/"Lannister"
+        # would conflate relatives). Short first names such as Jon require the full name.
+        if len(ctoks[0]) >= 4:
+            aliases.append(re.escape(ctoks[0]))
+        for alias in dict.fromkeys(aliases):
+            owns_death = re.search(
+                rf"\b(?:{alias})(?:['’]s)?\s+{_TITLE_DEATH_NOUN}\b", title)
+            death_of = re.search(
+                rf"\b{_TITLE_DEATH_NOUN}\s+of\s+(?:king\s+|queen\s+|lord\s+|lady\s+)?"
+                rf"(?:{alias})\b", title)
+            dies = re.search(
+                rf"\b(?:{alias})\s+(?:is\s+|was\s+)?{_TITLE_DEATH_VERB}\b", title)
+            if owns_death or death_of or dies:
+                return (f"source title explicitly identifies {character!r} as the person who dies, "
+                        f"while the beat "
+                        f"requires {getattr(seg, 'required_entity', '')!r}")
+    return ""
+
+
+def _contradiction_reason(seg, vd, source_title: str = "", char2actor=None) -> str:
+    """Combine explicit vision evidence with narrowly deterministic contradiction checks."""
+    if isinstance(vd, dict) and vd.get("contradicts_narration") is True:
+        return "vision verifier explicitly marked the footage as contradicting the narration"
+    return (_direct_negative_contradiction(seg, vd)
+            or _source_title_named_death_conflict(seg, source_title, char2actor))
+
+
+def _exact_positive_evidence_ok(vd, seg=None, source_title: str = "", char2actor=None) -> bool:
+    """Positive evidence required before a rejected exact beat may enter a contextual rung."""
+    if not isinstance(vd, dict):
+        return False
+    if vd.get("matches_narration") is not True or vd.get("specific_enough") is not True:
+        return False
+    if vd.get("wrong_subject_visible") is True or vd.get("quality_ok") is False:
+        return False
+    if seg is not None and _contradiction_reason(seg, vd, source_title, char2actor):
+        return False
+    return True
+
+
+def _exact_contextual_ok(vd, seg=None, source_title: str = "", char2actor=None) -> bool:
+    """Exact→contextual acceptance: positive exact evidence plus the existing subject/era bar."""
+    return (_exact_positive_evidence_ok(vd, seg, source_title, char2actor)
+            and _contextual_subject_ok(vd))
+
+
 def _contextual_subject_ok(vd) -> bool:
     """Is a verifier-rejected clip a legitimate NON-CONTRADICTORY contextual fallback? The single
     reliable signal is the REQUIRED SUBJECT being confirmed on screen (correct_subject_visible is
@@ -513,6 +801,8 @@ def _contextual_subject_ok(vd) -> bool:
     import os as _os_era
     if vd.get("era_ok") is False and _os_era.environ.get(
             "VIDLORE_CLIPSTUDIO_ERA_FALLBACK_GATE", "1").strip() not in ("0", "false", "no"):
+        return False
+    if vd.get("contradicts_narration") is True:
         return False
     return (vd.get("correct_subject_visible") is True
             or (bool(vd.get("matches_narration"))
@@ -632,6 +922,9 @@ def _generic_filler_ok(vd, seg, src_title, faceid_names, beat_era, ok_tokens=fro
         return False, "lenient pass did not affirm the footage is on-topic"
     if vd.get("quality_ok") is False:
         return False, "lenient pass rejected the quality"
+    contradiction = _contradiction_reason(seg, vd, src_title, char2actor)
+    if contradiction:
+        return False, f"direct contradiction: {contradiction}"
     if vd.get("wrong_subject_visible") is True:
         return False, "a different character is the main subject (contradictory)"
     if _confirmed_wrong_character(seg, faceid_names, ok_tokens, char2actor):
@@ -655,10 +948,13 @@ def _present_unconfirmed_ok(vd, seg, src_title, faceid_names, beat_era, ok_token
     downgraded to contextual and kept, "honestly labeled", over whatever happened to be there.
 
     An empty Face-ID is UNKNOWN, never innocent. Requires ALL of:
-      (1) vision did not see a different main subject (wrong_subject_visible is a hard rejection);
-      (2) no DIFFERENT identified person in the shot;
-      (3) Face-ID POSITIVELY confirms the required entity — the evidence that was never demanded;
-      (4) a POSITIVE same-era signal (an unconstrained era proves nothing)."""
+      (1) vision positively affirms matches_narration AND specific_enough;
+      (2) vision did not see a different main subject or direct contradiction;
+      (3) no DIFFERENT identified person in the shot;
+      (4) Face-ID POSITIVELY confirms the required entity — the evidence that was never demanded;
+      (5) a POSITIVE same-era signal (an unconstrained era proves nothing)."""
+    if not _exact_positive_evidence_ok(vd, seg, src_title, char2actor):
+        return False                                   # explicit mismatch/insufficiency cannot downgrade
     if vd.get("wrong_subject_visible") is True:
         return False                                   # vision saw a different main subject
     if _confirmed_wrong_character(seg, faceid_names, ok_tokens, char2actor):
@@ -894,17 +1190,29 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
     _mf_on = _os_ms.environ.get("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "1").strip() \
         not in ("0", "false", "no")
 
-    def _will_sheet(ashot, _exact) -> bool:
+    def _selected_window(window, ashot) -> tuple[float, float]:
+        try:
+            a, b = float(window[0]), float(window[1])
+        except Exception:
+            a = float(getattr(ashot, "start", 0.0) or 0.0)
+            b = float(getattr(ashot, "end", 0.0) or 0.0)
+        return a, b
+
+    def _will_sheet(ashot, _seg, window) -> bool:
         """Predict, WITHOUT building it, whether this call uses a contact sheet. Must mirror
         _verify_ctx's own condition — the prediction is part of the cache key, and _verify_ctx
         reports what actually happened so a wrong prediction can never be stored."""
-        if not (_mf_on and _exact and ashot is not None):
+        if (not _mf_on or ashot is None
+                or _policy.policy_of(_seg) not in (_policy.EXACT, _policy.CHARACTER)):
+            return False
+        a, b = _selected_window(window, ashot)
+        if not (b - a >= 0.5 and a >= 0.0):
             return False
         _sid = getattr(ashot, "source_id", "") or ""
         _src = proj.source(_sid) if _sid else None
         return bool(getattr(_src, "local_path", "") if _src else "")
 
-    def _image_id(kf_path, ashot, want_sheet: bool) -> str:
+    def _image_id(kf_path, ashot, want_sheet: bool, window=None) -> str:
         """Identity of the PIXELS the verifier will judge.
 
         Shot bounds do not pin this: a re-index can rewrite a keyframe while start/end stay put, and
@@ -913,16 +1221,19 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         work — the sheet is a pure function of those inputs."""
         if want_sheet and ashot is not None:
             _src = proj.source(getattr(ashot, "source_id", "") or "")
-            return (f"sheet:{_src_hash_of(_src)}:{float(getattr(ashot, 'start', 0.0)):.3f}"
-                    f"-{float(getattr(ashot, 'end', 0.0)):.3f}")
+            a, b = _selected_window(window, ashot)
+            return f"sheet:{_src_hash_of(_src)}:{a:.3f}-{b:.3f}"
         return f"kf:{_file_fingerprint(kf_path)}" if kf_path else "kf:none"
 
-    def _verify_ctx(kf_path, ashot, _seg, _exact, faceids):
-        """verify one candidate with the beat's storyboard context + (for specific action beats) a
-        start/mid/end contact sheet built from the shot's source span.
+    def _verify_ctx(kf_path, ashot, _seg, _exact, faceids, window=None):
+        """Verify one candidate against pixels sampled from the exact selected window.
+
+        Exact/concrete character beats use a 15/50/85 contact sheet of that trim, never the wider
+        detected shot.  If sheet generation fails the call remains a single-frame judgment, but its
+        persisted binding says ``multiframe=false`` and the publication contract blocks it.
         -> (verdict|None, actually_used_a_sheet)"""
         sheet, is_mf = kf_path, False
-        if _mf_on and _exact and ashot is not None:
+        if _will_sheet(ashot, _seg, window):
             try:
                 _sid = getattr(ashot, "source_id", "") or ""
                 _src = proj.source(_sid) if _sid else None
@@ -936,8 +1247,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         f"_vsheet_{_seg.index}_"
                         f"{(getattr(ashot, 'source_id', '') or 'x')[:10]}_"
                         f"{getattr(ashot, 'index', 0)}_{_uuid_vs.uuid4().hex[:6]}.jpg")
-                    _got = _action_contact_sheet(_sp, getattr(ashot, "start", 0.0),
-                                                 getattr(ashot, "end", 0.0), _dest)
+                    _wa, _wb = _selected_window(window, ashot)
+                    _got = _action_contact_sheet(_sp, _wa, _wb, _dest)
                     if _got:
                         sheet, is_mf = str(_got), True
             except Exception:
@@ -982,7 +1293,16 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         _sb = str((v or {}).get("vision_served_by") or "")
         return _sb if _sb and _sb != "none" else _vmodel
 
-    def _rung_fingerprint(ashot, _seg, strict_flag: bool, faceids, model_id: str = ""):
+    def _bind_evidence(vv, _sel, _seg, _shot, strict_flag: bool, faces, used_sheet: bool,
+                       actual_must_see: str) -> None:
+        """Persist proof of exactly which selection/window/pixels the verdict judged."""
+        bind_selection_verifier_evidence(
+            proj, _sel, _seg, vv, shot=_shot, model=_served_model_of(vv),
+            is_specific=strict_flag, multiframe=used_sheet, faceid_names=list(faces or []),
+            era=_era_of(_seg), must_see=actual_must_see)
+
+    def _rung_fingerprint(
+            ashot, _seg, strict_flag: bool, faceids, window, model_id: str = ""):
         """Fingerprint of a FALLBACK-RUNG question — the exact same derivation as the primary
         path (keep the two in sync), parameterized on the candidate shot and the rung's
         strictness. `faceids` must be the SAME list the prompt will carry (the caller may
@@ -992,11 +1312,13 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         if ashot is None:
             return "", False
         _src_a = proj.source(getattr(ashot, "source_id", "") or "")
-        _ws = _will_sheet(ashot, strict_flag)
+        _ws = _will_sheet(ashot, _seg, window)
         _kf_a = getattr(ashot, "keyframe_path", "") or ""
+        _wa, _wb = _selected_window(window, ashot)
         return verdict_fingerprint(
             src_hash=_src_hash_of(_src_a), source_id=getattr(ashot, "source_id", "") or "",
-            shot_start=getattr(ashot, "start", 0.0), shot_end=getattr(ashot, "end", 0.0),
+            shot_start=(_wa if _ws else getattr(ashot, "start", 0.0)),
+            shot_end=(_wb if _ws else getattr(ashot, "end", 0.0)),
             beat_text=getattr(_seg, "text", ""),
             required_entity=getattr(_seg, "required_entity", ""),
             required_kind=getattr(_seg, "required_kind", ""),
@@ -1004,10 +1326,11 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             scene_query=getattr(_seg, "scene_query", "") or "",
             era=_era_of(_seg), visual_policy=_policy.policy_of(_seg),
             is_specific=strict_flag, faceid_names=list(faceids or []),
-            multiframe=_ws, image_id=_image_id(_kf_a, ashot, _ws),
+            multiframe=_ws, image_id=_image_id(_kf_a, ashot, _ws, window),
             model=(model_id or _vmodel), must_see=_must_see(_seg)), _ws
 
-    def _cached_verify_ctx(kf_path, ashot, _seg, strict_flag: bool, faceids, rung: str):
+    def _cached_verify_ctx(
+            kf_path, ashot, _seg, strict_flag: bool, faceids, window, rung: str):
         """One cache layer for every fallback-rung verdict (strict promotion, contextual
         downgrade, venue-contextual promotion, lenient generic-filler re-ask). A rung verdict
         is reusable ONLY when its complete fingerprint — content hash, shot bounds, judged
@@ -1018,20 +1341,21 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         Returns (verdict|None, used_sheet) exactly like _verify_ctx."""
         nonlocal _vcache_dirty
         from . import perf_metrics as _pm_r
-        _fp_r, _ws_r = _rung_fingerprint(ashot, _seg, strict_flag, faceids)
+        _fp_r, _ws_r = _rung_fingerprint(ashot, _seg, strict_flag, faceids, window)
         _hit = _vcache.get(_fp_r) if _fp_r else None
         if _hit is not None and _verdict_schema_ok(_hit) and _hit_provider_ok(_hit, _vmodel):
             _pm_r.incr(f"verify.rung.{rung}.cache_hit")
             return dict(_hit), _ws_r                     # copy: callers mutate their verdict
         _pm_r.incr(f"verify.rung.{rung}.call")
-        v_r, used_r = _verify_ctx(kf_path, ashot, _seg, strict_flag, faceids)
+        v_r, used_r = _verify_ctx(kf_path, ashot, _seg, strict_flag, faceids, window)
         if _fp_r and v_r is not None and used_r == _ws_r \
                 and _verdict_schema_ok({**v_r, "status": "ok"}):
             # store under the ACTUAL server's key — a Claude fallback answer must never sit
             # under a Gemini-predicted fingerprint (and vice versa)
             _served_r = _served_model_of(v_r)
             _fp_store = _fp_r if _served_r == _vmodel else \
-                _rung_fingerprint(ashot, _seg, strict_flag, faceids, model_id=_served_r)[0]
+                _rung_fingerprint(
+                    ashot, _seg, strict_flag, faceids, window, model_id=_served_r)[0]
             if _fp_store:
                 _vcache[_fp_store] = {k: val for k, val in v_r.items() if k != "reused"}
                 _vcache_dirty += 1
@@ -1077,10 +1401,13 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             faceid_names = (shot.face_ids if shot else []) or ([sel.identity] if sel.identity else [])
             _exact = _policy.verify_strict(seg)
             _src_obj = proj.source(sel.source_id)
-            _want_sheet = _will_sheet(shot, _exact)
+            _window = (sel.in_point, sel.out_point)
+            _want_sheet = _will_sheet(shot, seg, _window)
+            _wa, _wb = _selected_window(_window, shot)
             _fp = verdict_fingerprint(
                 src_hash=_src_hash_of(_src_obj), source_id=sel.source_id or "",
-                shot_start=getattr(shot, "start", 0.0), shot_end=getattr(shot, "end", 0.0),
+                shot_start=(_wa if _want_sheet else getattr(shot, "start", 0.0)),
+                shot_end=(_wb if _want_sheet else getattr(shot, "end", 0.0)),
                 beat_text=getattr(seg, "text", ""),
                 required_entity=getattr(seg, "required_entity", ""),
                 required_kind=getattr(seg, "required_kind", ""),
@@ -1088,23 +1415,24 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 scene_query=getattr(seg, "scene_query", "") or "",
                 era=_era_of(seg), visual_policy=_policy.policy_of(seg), is_specific=_exact,
                 faceid_names=faceid_names, multiframe=_want_sheet,
-                image_id=_image_id(kf, shot, _want_sheet), model=_vmodel,
+                image_id=_image_id(kf, shot, _want_sheet, _window), model=_vmodel,
                 must_see=_must_see(seg))
             _c0 = _vcache.get(_fp)
             if _fp:
-                _prim_items.append((_fp, sel, seg, shot, kf, faceid_names, _exact))
+                _prim_items.append((_fp, sel, seg, shot, kf, faceid_names, _exact, _window))
             if _fp and (_c0 is None or not _verdict_schema_ok(_c0)
                         or not _hit_provider_ok(_c0, _vmodel)):
-                _pending.append((_fp, seg, shot, kf, faceid_names, _exact, _want_sheet))
+                _pending.append(
+                    (_fp, seg, shot, kf, faceid_names, _exact, _want_sheet, _window))
         if _pending:
             log(f"verify: prefetching {len(_pending)} fresh verdict(s) "
                 f"({_pf_workers} workers; serial decisions unchanged)")
             import concurrent.futures as _cf
             _pf_fail = _pf_ok = 0
             with _cf.ThreadPoolExecutor(max_workers=_pf_workers) as _ex:
-                _futs = {_ex.submit(_verify_ctx, kf9, shot9, seg9, ex9, fids9):
+                _futs = {_ex.submit(_verify_ctx, kf9, shot9, seg9, ex9, fids9, win9):
                          (fp9, ws9)
-                         for (fp9, seg9, shot9, kf9, fids9, ex9, ws9) in _pending}
+                         for (fp9, seg9, shot9, kf9, fids9, ex9, ws9, win9) in _pending}
                 for _fu in _cf.as_completed(_futs):
                     _fp9, _ws9 = _futs[_fu]
                     try:
@@ -1117,14 +1445,15 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         _fp_store9 = _fp9
                         if _served9 != _vmodel:
                             # a fallback provider answered — key by the ACTUAL server
-                            (_, _seg9, _shot9, _kf9, _fids9, _ex9b, _ws9b) = \
+                            (_, _seg9, _shot9, _kf9, _fids9, _ex9b, _ws9b, _win9) = \
                                 next(p for p in _pending if p[0] == _fp9)
                             _src9 = proj.source(getattr(_shot9, "source_id", "") or "")
+                            _wa9, _wb9 = _selected_window(_win9, _shot9)
                             _fp_store9 = verdict_fingerprint(
                                 src_hash=_src_hash_of(_src9),
                                 source_id=getattr(_shot9, "source_id", "") or "",
-                                shot_start=getattr(_shot9, "start", 0.0),
-                                shot_end=getattr(_shot9, "end", 0.0),
+                                shot_start=(_wa9 if _ws9b else getattr(_shot9, "start", 0.0)),
+                                shot_end=(_wb9 if _ws9b else getattr(_shot9, "end", 0.0)),
                                 beat_text=getattr(_seg9, "text", ""),
                                 required_entity=getattr(_seg9, "required_entity", ""),
                                 required_kind=getattr(_seg9, "required_kind", ""),
@@ -1132,8 +1461,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                                 scene_query=getattr(_seg9, "scene_query", "") or "",
                                 era=_era_of(_seg9), visual_policy=_policy.policy_of(_seg9),
                                 is_specific=_ex9b, faceid_names=_fids9,
-                                multiframe=_ws9b, image_id=_image_id(_kf9, _shot9, _ws9b),
-                                model=_served9)
+                                multiframe=_ws9b,
+                                image_id=_image_id(_kf9, _shot9, _ws9b, _win9),
+                                model=_served9, must_see=_must_see(_seg9))
                         _vcache[_fp_store9] = {k: val for k, val in _v9.items()
                                                if k != "reused"}
                         _pf_ok += 1
@@ -1178,7 +1508,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             # Warming FEWER questions can never change a decision: anything unwarmed is simply
             # asked fresh by the serial loop, exactly as it behaves today.
             _beat_alts, _len_jobs = [], []
-            for (_fpP, selP, segP, shotP, kfP, fidsP, _exP) in _prim_items:
+            for (_fpP, selP, segP, shotP, kfP, fidsP, _exP, _winP) in _prim_items:
                 _v0 = _vcache.get(_fpP)
                 if not (_v0 is not None and _verdict_schema_ok(_v0)
                         and _hit_provider_ok(_v0, _vmodel)):
@@ -1200,23 +1530,24 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     _ashP = get_shot(_altP.source_id, _altP.shot_index)
                     if _ashP is None:
                         continue
-                    _chain.append((_ashP, segP))
+                    _chain.append((_ashP, segP, (_altP.in_point, _altP.out_point)))
                 _bi_here = len(_beat_alts)
                 if _chain:
                     _beat_alts.append(_chain)
                 # The lenient re-ask fires serially ONLY at the generic-filler rung, which is
                 # reached only when nothing swapped. A primary verdict that satisfies
-                # _contextual_subject_ok routes the beat to a keep-contextual downgrade (both
+                # _exact_contextual_ok routes the beat to a keep-contextual downgrade (both
                 # branches set swapped=True), so that question is provably never asked — and it
                 # is the single largest unread-warm bucket. Env gates mirrored so the warm never
                 # asks a question the serial loop cannot reach.
-                if (_contextual_subject_ok(_v0)
+                if (_exact_contextual_ok(_v0, segP, _src_title_of(selP), _char2actor)
                         or _os_pf.environ.get("VIDLORE_CLIPSTUDIO_EXACT_CONTEXTUAL_DOWNGRADE",
                                               "1").strip() in ("0", "false", "no")
                         or _os_pf.environ.get("VIDLORE_CLIPSTUDIO_GENERIC_FILLER_DOWNGRADE",
                                               "1").strip() in ("0", "false", "no")):
                     continue
-                _len_jobs.append((_bi_here if _chain else -1, (kfP, shotP, segP, fidsP)))
+                _len_jobs.append(
+                    (_bi_here if _chain else -1, (kfP, shotP, segP, fidsP, _winP)))
             _alt_waves = []
             for _d in range(max_replacements):           # wave d = every beat's alternate #d
                 _alt_waves.append([(c[_d], i) for i, c in enumerate(_beat_alts) if _d < len(c)])
@@ -1252,9 +1583,10 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 _alt_done = {}                           # beat idx -> True once a warm said 'keep'
 
                 def _warm_alt(j):
-                    (_a, _s), _bi = j
+                    (_a, _s, _win_a), _bi = j
                     _v_w, _ = _cached_verify_ctx(_a.keyframe_path, _a, _s, True,
-                                                 _a.face_ids or [], rung="strict_promote")
+                                                 _a.face_ids or [], _win_a,
+                                                 rung="strict_promote")
                     if _v_w is not None and str(_v_w.get("verdict")) == "keep":
                         # the serial loop may still refuse this alternate on the reuse cap or
                         # window-QC and walk on — then the next alternate is simply unwarmed and
@@ -1263,8 +1595,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     return _v_w is not None
 
                 def _warm_len(j):
-                    _kf_w, _sh_w, _s_w, _fi_w = j
+                    _kf_w, _sh_w, _s_w, _fi_w, _win_w = j
                     _v_w, _ = _cached_verify_ctx(_kf_w, _sh_w, _s_w, False, _fi_w,
+                                                 _win_w,
                                                  rung="lenient_filler")
                     return _v_w is not None
 
@@ -1310,10 +1643,13 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         _fp, _want_sheet = "", False
         if shot is not None:
             _src_obj = proj.source(sel.source_id)
-            _want_sheet = _will_sheet(shot, _exact)
+            _window = (sel.in_point, sel.out_point)
+            _want_sheet = _will_sheet(shot, seg, _window)
+            _wa, _wb = _selected_window(_window, shot)
             _fp = verdict_fingerprint(
                 src_hash=_src_hash_of(_src_obj), source_id=sel.source_id or "",
-                shot_start=getattr(shot, "start", 0.0), shot_end=getattr(shot, "end", 0.0),
+                shot_start=(_wa if _want_sheet else getattr(shot, "start", 0.0)),
+                shot_end=(_wb if _want_sheet else getattr(shot, "end", 0.0)),
                 beat_text=getattr(seg, "text", ""),
                 required_entity=getattr(seg, "required_entity", ""),
                 required_kind=getattr(seg, "required_kind", ""),
@@ -1321,7 +1657,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 scene_query=getattr(seg, "scene_query", "") or "",
                 era=_era_of(seg), visual_policy=_policy.policy_of(seg), is_specific=_exact,
                 faceid_names=faceid_names, multiframe=_want_sheet,
-                image_id=_image_id(kf, shot, _want_sheet), model=_vmodel,
+                image_id=_image_id(kf, shot, _want_sheet, _window), model=_vmodel,
                 must_see=_must_see(seg))
         # only a SUCCESSFUL, schema-valid verdict is reusable — never an error stub or a malformed
         # reply whose missing "verdict" key would read as falsy and quietly pass
@@ -1344,7 +1680,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 # backend is down, and every further call is latency spent to learn that again.
                 v, _used_sheet = None, _want_sheet
             else:
-                v, _used_sheet = _verify_ctx(kf, shot, seg, _exact, faceid_names)
+                v, _used_sheet = _verify_ctx(
+                    kf, shot, seg, _exact, faceid_names, (sel.in_point, sel.out_point))
         if v is None:
             # FAIL CLOSED. "No judgment" is not a synonym for "acceptable". The old code set
             # status=error and `continue`d, so a beat nobody could check looked exactly like a beat
@@ -1384,10 +1721,12 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 _fp_store_p = _fp
                 if _served_p != _vmodel and shot is not None:
                     _src_obj = proj.source(sel.source_id)
+                    _window = (sel.in_point, sel.out_point)
+                    _wa, _wb = _selected_window(_window, shot)
                     _fp_store_p = verdict_fingerprint(
                         src_hash=_src_hash_of(_src_obj), source_id=sel.source_id or "",
-                        shot_start=getattr(shot, "start", 0.0),
-                        shot_end=getattr(shot, "end", 0.0),
+                        shot_start=(_wa if _want_sheet else getattr(shot, "start", 0.0)),
+                        shot_end=(_wb if _want_sheet else getattr(shot, "end", 0.0)),
                         beat_text=getattr(seg, "text", ""),
                         required_entity=getattr(seg, "required_entity", ""),
                         required_kind=getattr(seg, "required_kind", ""),
@@ -1395,20 +1734,38 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         scene_query=getattr(seg, "scene_query", "") or "",
                         era=_era_of(seg), visual_policy=_policy.policy_of(seg),
                         is_specific=_exact, faceid_names=faceid_names,
-                        multiframe=_want_sheet, image_id=_image_id(kf, shot, _want_sheet),
-                        model=_served_p)
+                        multiframe=_want_sheet,
+                        image_id=_image_id(kf, shot, _want_sheet, _window),
+                        model=_served_p, must_see=_must_see(seg))
                 _vcache[_fp_store_p] = {k: val for k, val in v.items() if k != "reused"}
                 _vcache_dirty += 1
             else:
                 _fp_mismatch += 1
         v["status"] = "ok"
         v["visual_policy"] = _policy.policy_of(seg)
+        # Deterministic contradiction evidence is negative-only and therefore safe to combine with
+        # vision: it never proves a source correct. An exact verdict that explicitly says mismatch/
+        # insufficient, or whose footage directly contradicts the line, cannot enter the repair
+        # ladder as a keep. Non-exact leniency below remains unchanged.
+        _primary_conflict = _contradiction_reason(seg, v, _src_title_of(sel), _char2actor)
+        if _primary_conflict:
+            v["contradicts_narration"] = True
+            v["contradiction_reason"] = _primary_conflict
+        if _exact and v.get("verdict") == "keep" and (
+                v.get("matches_narration") is False
+                or v.get("specific_enough") is False
+                or bool(_primary_conflict)):
+            v["verdict"] = "replace"
+            v["contract_rejected"] = (
+                _primary_conflict or
+                "exact footage lacks positive narration-match/specificity evidence")
         # NON-EXACT LENIENCY (user rule: exact clip only for a SPECIFIC scene; a relevant FILLER is
         # fine for generic/character/abstract beats). Don't replace an on-topic, right-subject clip on
         # a non-exact beat just because it isn't the exact scene — only off-topic / wrong-character.
         if not _exact and v.get("verdict") == "replace" and _contextual_subject_ok(v):
             v["verdict"] = "keep"
             v["relaxed"] = "non-exact beat: relevant right-subject filler accepted"
+        _bind_evidence(v, sel, seg, shot, _exact, faceid_names, _used_sheet, _must_see(seg))
         sel.verifier = v
 
         # FLAG-ON-ANY-VERDICT: a keep (or leniency-flipped) verdict with the named look-target
@@ -1466,18 +1823,49 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     if ashot is None:
                         continue
                     anames = ashot.face_ids or []
+                    # Finalize/validate the candidate trim BEFORE vision.  Window-QC may shorten
+                    # ``alt.in_point/out_point``; judging first and then binding the verdict to the
+                    # shortened tuple would falsely claim the verifier saw pixels it never saw.
+                    import os as _os_w
+                    if _os_w.environ.get("VIDLORE_CLIPSTUDIO_WINDOW_QC", "1").strip() \
+                            not in ("0", "false", "no"):
+                        from .match import validate_candidate_window, _wqc_log_line
+                        _wshots = getattr(get_shot, "all_shots", lambda _s: [])(alt.source_id)
+                        _wact, _wwhy, _wmeta = validate_candidate_window(
+                            alt, ashot, _wshots, cfg, seg)
+                        if _wact == "rejected":
+                            log(f"window-qc: rejected verify-promotion seg{sel.segment_index} "
+                                f"alt={alt.source_id[:28]} "
+                                f"{_wqc_log_line(_wact, _wmeta, _wwhy)}")
+                            failed_wins.append((alt.source_id, float(alt.in_point)))
+                            continue
+                        if _wact == "shortened":
+                            log(f"window-qc: shortened verify-promotion seg{sel.segment_index} "
+                                f"{_wqc_log_line(_wact, _wmeta, _wwhy)}")
                     if _breaker_open:
                         break                           # backend is down — promotion cannot verify
-                    av, _ = _cached_verify_ctx(ashot.keyframe_path, ashot, seg,
-                                               (False if downgrade else _exact), anames,
-                                               rung=("venue" if pool is not None else
-                                                     ("contextual" if downgrade else "strict_promote")))
+                    _alt_strict = False if downgrade else _exact
+                    av, _av_used_sheet = _cached_verify_ctx(
+                        ashot.keyframe_path, ashot, seg, _alt_strict, anames,
+                        (alt.in_point, alt.out_point),
+                        rung=("venue" if pool is not None else
+                              ("contextual" if downgrade else "strict_promote")))
                     if av is None:
                         continue                        # transport error, NOT a judgment
+                    _asrc = proj.source(alt.source_id)
+                    _atitle = ((getattr(_asrc, "title", "") or "") + " " +
+                               (alt.source_id or ""))
+                    _aconflict = _contradiction_reason(seg, av, _atitle, _char2actor)
+                    if _aconflict:
+                        av["contradicts_narration"] = True
+                        av["contradiction_reason"] = _aconflict
                     if downgrade:
-                        _accept = _contextual_subject_ok(av)
+                        _accept = _exact_contextual_ok(av, seg, _atitle, _char2actor)
                     else:
-                        _accept = av.get("verdict") == "keep"
+                        _accept = (av.get("verdict") == "keep" and not _aconflict
+                                   and not (_exact and (
+                                       av.get("matches_narration") is False
+                                       or av.get("specific_enough") is False)))
                     if not _accept:
                         # an explicit non-keep judgment (av None = transport error, handled above)
                         failed_wins.append((alt.source_id, float(alt.in_point)))
@@ -1488,29 +1876,6 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     if _reuse[(alt.source_id, alt.shot_index)] >= _reuse_cap:
                         failed_wins.append((alt.source_id, float(alt.in_point)))
                         continue
-                    # CUT-WINDOW FLAG VALIDATION on the promotion — the repair must not swap a
-                    # rejected clip for one whose PADDED render window airs an adjacent shot's
-                    # burned subs / logo / murk. Same PRODUCTION validator as match selections:
-                    # moment-locked beats (exact/quote/character) may only shorten around the
-                    # alternate's own selected moment — never slide to a different moment —
-                    # else this alternate is skipped for the next relevance-ranked one.
-                    import os as _os_w
-                    if _os_w.environ.get("VIDLORE_CLIPSTUDIO_WINDOW_QC", "1").strip() \
-                            not in ("0", "false", "no"):
-                        from .match import validate_candidate_window, _wqc_log_line
-                        # stub-tolerant: tests monkeypatch _shot_lookup with a bare function —
-                        # no shot list then means nothing to validate (fail-open)
-                        _wshots = getattr(get_shot, "all_shots", lambda _s: [])(alt.source_id)
-                        _wact, _wwhy, _wmeta = validate_candidate_window(
-                            alt, ashot, _wshots, cfg, seg)
-                        if _wact == "rejected":
-                            log(f"window-qc: rejected verify-promotion seg{sel.segment_index} "
-                                f"alt={alt.source_id[:28]} {_wqc_log_line(_wact, _wmeta, _wwhy)}")
-                            failed_wins.append((alt.source_id, float(alt.in_point)))
-                            continue
-                        if _wact == "shortened":
-                            log(f"window-qc: shortened verify-promotion seg{sel.segment_index} "
-                                f"{_wqc_log_line(_wact, _wmeta, _wwhy)}")
                     # promote the alternate into the selection
                     old_sid, old_in = sel.source_id, sel.in_point
                     _old_key = (sel.source_id, sel.shot_index)
@@ -1539,6 +1904,11 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         av["verdict"] = "keep"
                         av["downgraded"] = label or "exact→contextual"
                         av["relevance_class"] = "contextual_fallback"
+                    # _look_scope is intentionally off for alternates, so the actual prompt carried
+                    # no look-target clause.  The release contract still independently demands
+                    # target_visible for a deictic beat; this binding records the question honestly.
+                    _bind_evidence(av, sel, seg, ashot, _alt_strict, anames,
+                                   _av_used_sheet, "")
                     sel.verifier = av
                     _cut.cut_selection(proj, sel, cfg)     # re-cut the new in/out
                     _reuse[(alt.source_id, alt.shot_index)] += 1   # this look now airs one more time
@@ -1626,7 +1996,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     sel.verifier = v
                     log(f"verify: seg{sel.segment_index} exact→contextual downgrade ({why})")
 
-                _orig_ok = _contextual_subject_ok(v)
+                _orig_ok = _exact_contextual_ok(v, seg, _src_title_of(sel), _char2actor)
                 if _look_missed and _orig_ok:
                     # The named thing is not on screen — but the pick is otherwise usable, so it is
                     # NOT thrown away. Measured twice: routing these beats to the deep bench moved 4
@@ -1725,9 +2095,12 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 not in ("0", "false", "no")
             if not swapped and _exact and _downgrade_on and _filler_on:
                 _fresh = None
+                _fresh_used_sheet = False
                 if not _breaker_open:
-                    _fresh, _ = _cached_verify_ctx(kf, shot, seg, False, faceid_names,
-                                                   rung="lenient_filler")         # LENIENT re-ask
+                    _fresh, _fresh_used_sheet = _cached_verify_ctx(
+                        kf, shot, seg, False, faceid_names,
+                        (sel.in_point, sel.out_point),
+                        rung="lenient_filler")                               # LENIENT re-ask
                 _ok_f, _why_f = _generic_filler_ok(
                     _fresh, seg, _src_title_of(sel), faceid_names, _era_of(seg),
                     _ok_toks, _char2actor)
@@ -1738,6 +2111,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     v["downgraded"] = "exact→generic_filler"
                     v["relevance_class"] = "generic_filler"
                     v["filler_evidence"] = _why_f
+                    _bind_evidence(v, sel, seg, shot, False, faceid_names,
+                                   _fresh_used_sheet, _must_see(seg))
                     sel.verifier = v
                     replaced += 1
                     swapped = True

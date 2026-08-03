@@ -263,6 +263,11 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
     from . import image_fallback as _imgfb
     from . import index as _index
     from . import policy as _policy
+    from .relevance_contract import (
+        verified_still_coverage as _verified_still_coverage,
+        strict_still_evidence_reason as _strict_still_evidence_reason,
+        image_sha256 as _still_image_sha256,
+    )
     from .models import FLAG_EXACT_MISSING, SOURCE_OK, ClipSelection
     sel_by_idx = {s.segment_index: s for s in proj.selections}
     char2actor = analysis.char_to_actor() if analysis is not None else {}
@@ -276,10 +281,10 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
 
     # SEMANTIC recovery-still verification (Gap 2): a recovery still is a real source keyframe, but it
     # must still be SEMANTICALLY correct — never a wrong character / wrong show / wrong era / an action
-    # contradicting the narration. We verify it with the vision verifier in LENIENT mode (contextual
-    # acceptance: a relevant same-character/scene still is fine; only off-topic / wrong-character /
-    # wrong-era is rejected). Honest labeling ('contextual_fallback') is NOT a substitute for passing
-    # these guards. Verification runs only when an LLM is available; env disables.
+    # contradicting the narration. Candidate ranking may be contextual, but publication evidence is
+    # STRICT on the actual keyframe: matches+specific+quality must be positive, required subject must
+    # be present, and wrong/contradiction must be negative. Honest labeling is not proof.
+    # Verification runs only when an LLM is available; without it the publication gate blocks.
     from . import verify as _verify_mod
     from . import llm as _llm_mod
     _still_verify_on = (eng_cfg is not None and _llm_mod.has_llm(eng_cfg)
@@ -333,12 +338,11 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
         return []
 
     def _still_verdict(kf_path, seg, sid, sidx):
-        """LENIENT semantic verdict on a recovery still: 'ok' | 'reject' | 'unverified' | 'disabled'.
+        """STRICT actual-image verdict: 'ok' | 'reject' | 'unverified' | 'disabled'.
         Passes the SHOT's real face_ids. A transport error / timeout / malformed response (while the
-        verifier IS configured) → 'unverified' (NOT silently 'ok'). 'disabled' means NO verifier is
-        configured at all — the caller may still install to avoid a black gap, but labels the still
-        'unverified_fallback' (never 'contextual_fallback', which implies a real verdict). Retries
-        once on a transient error."""
+        verifier IS configured) → 'unverified' (NOT silently 'ok'). A label, CLIP score, source title,
+        or deterministic Face-ID check can never manufacture this positive verdict. Retries once on
+        a transient error."""
         if not _still_verify_on:
             return "disabled"
         if not kf_path:
@@ -372,12 +376,13 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
 
     # STILL-VERDICT CACHE — the same verdict_cache.json and the same full-fingerprint doctrine as
     # verify.py's rungs: a still verdict is reusable ONLY when the complete question (source content
-    # hash, shot bounds, judged frame identity, every prompt field, the venue_fallback question
+    # hash, shot bounds, judged frame identity, every prompt field, the strictness/question
     # variant, real vision model, prompt/sheet versions) is byte-identical. Reuse is NEVER keyed on
     # the image path alone — the same frame judged for a different beat is a different question.
     # Only successful schema-valid verdicts are stored ('unverified' transport outcomes never are),
     # so the 2-attempt retry and the vision-outage backoff behavior are unchanged.
     _still_vcache = _verify_mod._load_verdict_cache(proj)
+    _still_evidence: dict[tuple[str, int], dict] = {}
     try:
         _vmodel_sv = _llm_mod.vision_config(eng_cfg)
     except Exception:
@@ -412,10 +417,11 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                 scene_query=getattr(seg, "scene_query", "") or "",
                 era=_verify_mod._beat_era(seg, _global_era_sv, _vtype_sv == "single_scene",
                                           anchor_eras=_anchor_eras_sv),
-                visual_policy=_policy.policy_of(seg), is_specific=False,
+                visual_policy=_policy.policy_of(seg), is_specific=True,
                 faceid_names=list(faces or []), multiframe=False,
                 image_id=f"kf:{_verify_mod._file_fingerprint(kf_path)}",
-                model=(model_id or _vmodel_sv), venue_fallback=True)
+                model=(model_id or _vmodel_sv), venue_fallback=False,
+                must_see=_policy.deictic_target(seg))
         except Exception:
             return ""                                    # no key → baseline uncached call
 
@@ -427,23 +433,25 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
         if _hit is not None and _verify_mod._verdict_schema_ok(_hit) \
                 and _verify_mod._hit_provider_ok(_hit, _vmodel_sv):
             _pm_sv.incr("still.verdict.cache_hit")
-            return "reject" if _hit.get("verdict") == "replace" else "ok"
+            _ev = {**dict(_hit), "status": "ok"}
+            _still_evidence[(str(kf_path), int(seg.index))] = _ev
+            return "reject" if _strict_still_evidence_reason(_ev, seg) else "ok"
         for _attempt in (1, 2):
             try:
                 _pm_sv.incr("still.verdict.call")
                 v = _verify_mod.verify_frame(
                     str(kf_path), seg.text, getattr(seg, "required_entity", ""),
                     getattr(seg, "required_kind", ""), faces, eng_cfg,
-                    getattr(eng_cfg, "anthropic_model", ""), is_specific=False,
+                    getattr(eng_cfg, "anthropic_model", ""), is_specific=True,
                     expected_visual=getattr(seg, "expected_visual", "") or "",
                     scene_query=getattr(seg, "scene_query", "") or "",
                     era_hint=_verify_mod._beat_era(seg, _global_era_sv, _vtype_sv == "single_scene",
                                                    anchor_eras=_anchor_eras_sv),
-                    # every strict layer already refused this beat — ask the still layer's real
-                    # question (right scene/venue, no contradiction), not the micro-action's
-                    venue_fallback=True)
+                    venue_fallback=False, must_see=_policy.deictic_target(seg))
                 if v is None:
                     continue                              # transport error → retry, then unverified
+                v = {**v, "status": "ok"}
+                _still_evidence[(str(kf_path), int(seg.index))] = dict(v)
                 if _fp and _verify_mod._verdict_schema_ok({**v, "status": "ok"}):
                     _sb = str(v.get("vision_served_by") or "")
                     _fp_store = _fp if (not _sb or _sb == _vmodel_sv) else \
@@ -451,7 +459,7 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                     if _fp_store:
                         _still_vcache[_fp_store] = dict(v)
                         _verify_mod._save_verdict_cache(proj, _still_vcache)   # atomic
-                return "reject" if v.get("verdict") == "replace" else "ok"
+                return "reject" if _strict_still_evidence_reason(v, seg) else "ok"
             except Exception:
                 continue
         return "unverified"                               # no real verdict after retries
@@ -710,15 +718,27 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                 # scene/era, but the exact moment is not verifier-confirmed), and thematic FILLER for
                 # a generic/abstract beat. Never labelled 'exact' — only verifier-kept moving footage
                 # or a validated web-exact-scene still earns that.
-                if pol in (_policy.EXACT, _policy.CHARACTER):
+                _sev = dict(_still_evidence.get((str(kf), int(seg.index)), {}) or {})
+                _semantic_ok = bool(_sev and not _strict_still_evidence_reason(_sev, seg))
+                if pol == _policy.EXACT and _semantic_ok:
+                    _rclass = "exact_scene"
+                elif pol in (_policy.EXACT, _policy.CHARACTER):
                     _rclass = "contextual_fallback" if _still_verified else "unverified_fallback"
                 else:
                     _rclass = "generic_filler"
                 sel.image_meta = {"source": _src, "score": round(float(score), 3),
                                   "src": sid, "shot": sidx, "relevance_class": _rclass,
                                   "still_verified": bool(_still_verified),
+                                  "still_semantic_verified": bool(_semantic_ok),
+                                  "still_verifier": _sev,
+                                  "still_image_sha256": (_still_image_sha256(kf)
+                                                         if _semantic_ok else ""),
+                                  "exact_still_verified": bool(
+                                      pol == _policy.EXACT and _semantic_ok),
+                                  "exact_still_verifier": (_sev if pol == _policy.EXACT else {}),
                                   "lowres_still": bool(_lowres_pick),
-                                  "exact_scene_missing": bool(pol == _policy.EXACT and (weak or no_clip))}
+                                  "exact_scene_missing": bool(
+                                      pol == _policy.EXACT and not _semantic_ok)}
                 used_keys.add((sid, sidx))
                 if sph:
                     used_phash.add(sph)
@@ -738,12 +758,21 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
             sel = sel_by_idx.get(seg.index)
             _isrc = (getattr(sel, "image_meta", {}) or {}).get("source", "") if sel else ""
             _has_img = bool(sel and getattr(sel, "image_path", ""))
+            _strict_policy = _policy.policy_of(seg) in (_policy.EXACT, _policy.CHARACTER)
+            _strict_img_confirmed = bool(
+                _has_img and _strict_policy and _verified_still_coverage(sel, seg)[0])
             if sel is not None and sel.source_id and not _has_img:
                 continue                               # airs real moving footage — leave it
-            # an exact beat covered only by an unconfirmed source-frame-RECOVERY still TRIES web: a
-            # validated web-exact-scene is a better exact match and REPLACES the recovery (req. 1).
-            if _has_img and _isrc != "source-frame-recovery":
-                continue                               # already has a confirmed still
+            # An EXACT beat covered by ANY merely-contextual source frame still TRIES web. The old
+            # source-name shortcut treated `source-frame` as confirmed while the publication gate
+            # correctly rejected it, creating a deterministic recovery/build dead end. Only a
+            # validated web exact-scene or future strict exact-still evidence may suppress recovery.
+            if _has_img:
+                if _strict_policy:
+                    if _strict_img_confirmed:
+                        continue
+                elif _isrc != "source-frame-recovery":
+                    continue                           # concrete contextual still is confirmed
             if not _policy.allows_web_image(seg):      # filler/abstract → no random web decoration
                 continue
             # A web-exact-scene still for an EXACT beat with NO real footage and NO confirmed still is
@@ -752,14 +781,16 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
             # its first iteration, so footage-gap beats (barely-filmed backstory characters) get NO
             # real still and the render re-airs verifier-REJECTED footage on them instead. Only the
             # OPTIONAL web fills (a beat that already has some coverage) stay capped.
-            _essential_web = _policy.is_exact(seg) and not _has_img and not (
-                sel is not None and getattr(sel, "source_id", ""))
+            _essential_web = (
+                (_strict_policy and _has_img and not _strict_img_confirmed)
+                or (_policy.is_exact(seg) and not _has_img
+                    and not (sel is not None and getattr(sel, "source_id", ""))))
             if not _essential_web and (src_filled + web_filled) >= cap:
                 continue
             try:
                 res = _imgfb.fetch_scene_image(seg, analysis, img_dir, faceid_obj=faceid_obj,
                                                refs=refs, char2actor=char2actor, log=log,
-                                               seen_hashes=seen_hashes)
+                                               seen_hashes=seen_hashes, eng_cfg=eng_cfg)
             except Exception as e:
                 log(f"image-fallback: beat {seg.index} web error ({type(e).__name__})")
                 res = None
@@ -771,11 +802,21 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                 proj.selections.append(sel)
                 sel_by_idx[seg.index] = sel
             sel.image_path = str(res["path"])
-            # validated real live-action still → tag explicitly (never the raw host / 'web' / 'ai').
-            # A CLIP+Face-ID-validated exact-scene web still is confirmed exact coverage.
+            _web_ev = dict(res.get("strict_verifier") or {})
+            _web_semantic = bool(_web_ev and not _strict_still_evidence_reason(_web_ev, seg))
+            # Candidate-source/CLIP/Face-ID gates are not publication proof. Persist the strict
+            # verdict on the actual downloaded image and bind it to those exact bytes.
             sel.image_meta = {"source": "web-exact-scene", "score": res.get("score"),
                               "clip": res.get("clip"), "face": res.get("face"), "query": res.get("query"),
-                              "relevance_class": "exact_scene"}
+                              "relevance_class": ("exact_scene" if _policy.is_exact(seg)
+                                                  else "contextual_fallback"),
+                              "still_verified": bool(_web_semantic),
+                              "still_semantic_verified": bool(_web_semantic),
+                              "still_verifier": _web_ev,
+                              "still_image_sha256": str(res.get("image_sha256") or ""),
+                              "exact_still_verified": bool(
+                                  _policy.is_exact(seg) and _web_semantic),
+                              "exact_still_verifier": (_web_ev if _policy.is_exact(seg) else {})}
             web_filled += 1
 
     # ---- PASS 3 — exact_scene still uncovered/unconfirmed → MANUAL REVIEW (never silent weak filler
@@ -786,8 +827,11 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
         if not _policy.is_exact(seg):
             continue
         sel = sel_by_idx.get(seg.index)
-        img_src = (getattr(sel, "image_meta", {}) or {}).get("source", "") if sel else ""
-        confirmed = (sel is not None and _verifier_kept(sel)) or img_src == "web-exact-scene"
+        has_img = bool(sel and getattr(sel, "image_path", ""))
+        # If an image overlays the clip, audit the image actually shown. A keep verdict for the
+        # hidden moving selection cannot make a contextual exact still publishable.
+        confirmed = (_verified_still_coverage(sel, seg)[0] if has_img
+                     else bool(sel is not None and _verifier_kept(sel)))
         if confirmed:
             continue
         if sel is None:
@@ -851,11 +895,11 @@ def recovery_pick(unresolved: list, seg_by_idx: dict, policy_mod, tried: set,
     return sorted(have_query, key=_rank)[:max_beats]
 
 
-def _write_recovery_audit(proj, audit: dict) -> None:
+def _write_recovery_audit(proj, audit: dict,
+                          filename: str = "recovery_audit.json") -> None:
     import json as _json
     try:
-        (proj.output_dir / "recovery_audit.json").write_text(_json.dumps(audit, indent=1),
-                                                             encoding="utf-8")
+        (proj.output_dir / filename).write_text(_json.dumps(audit, indent=1), encoding="utf-8")
     except Exception:
         pass
 
@@ -998,11 +1042,14 @@ def _beat_is_unresolved(sel, seg, _policy) -> bool:
     exact = _policy.is_exact(seg)
     if sel is None:
         return exact                      # a discovery gap: only exact beats demand footage here
-    _im = getattr(sel, "image_meta", {}) or {}
     if getattr(sel, "image_path", ""):
-        # exact beats accept only a REAL still as coverage; the gate skips any beat with an
-        # image_path, so for non-exact beats any still resolves it
-        if not exact or _im.get("source") in ("source-frame", "web-exact-scene"):
+        # Judge the image that will actually air, never its source label. Concrete/exact stills
+        # require strict actual-image evidence bound to the bytes; legacy `still_verified` and
+        # `web-exact-scene` labels are candidates, not coverage.
+        if _policy.policy_of(seg) not in (_policy.EXACT, _policy.CHARACTER):
+            return False
+        from .relevance_contract import verified_still_coverage
+        if verified_still_coverage(sel, seg)[0]:
             return False
     v = getattr(sel, "verifier", {}) or {}
     verifier_failed = v.get("status") == "ok" and v.get("verdict") == "replace"
@@ -1361,7 +1408,8 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
 
 
 def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, refs, roster,
-                              policy, log) -> int:
+                              policy, log, only_indices=None,
+                              audit_filename: str = "recovery_audit.json") -> int:
     """R4-5 BOUNDED AUTONOMOUS RECOVERY. For EXACT beats still unresolved after match + verify, run
     ONE bounded round of targeted rediscovery → download → index → rematch → (re-cut) → reverify
     BEFORE the render can fall back to a deterministic still / editorial hold / release-block.
@@ -1374,8 +1422,11 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
         an EXACT (even low-res) clip that verifies is preferred over an irrelevant HD one.
       • Fail-closed: any error, no-LLM, or empty discovery leaves the beats unresolved for the
         downstream still/hold/block to handle honestly. Cheap no-op when there is nothing to recover.
+      • ``only_indices`` lets the final semantic contract request a bounded retry for ONLY its
+        blockers. Match may score the full project internally, but snapshot reconciliation restores
+        every non-target selection byte-for-byte, so the retry cannot churn already-approved beats.
       • Every attempt (queries, candidates, new sources, per-beat outcome) is audited to
-        recovery_audit.json.
+        ``audit_filename`` (the contract retry uses a separate file, preserving round one).
     Returns the number of beats recovered with real verified footage."""
     import os as _os
     import copy as _copy
@@ -1389,12 +1440,14 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
 
     seg_by_idx = {s.index: s for s in segs}
     sel_by_idx = {s.segment_index: s for s in proj.selections}
+    _scope = set(only_indices) if only_indices is not None else None
     unresolved = [s.index for s in segs
-                  if _beat_is_unresolved(sel_by_idx.get(s.index), s, _policy)]
+                  if (_scope is None or s.index in _scope)
+                  and _beat_is_unresolved(sel_by_idx.get(s.index), s, _policy)]
     audit = {"unresolved_before": list(unresolved), "caps": {"beats": max_beats, "sources": max_sources},
              "attempts": [], "new_sources": [], "recovered": [], "still_unresolved": []}
     if not unresolved:
-        _write_recovery_audit(proj, audit)
+        _write_recovery_audit(proj, audit, audit_filename)
         return 0
     # GATE-VULNERABLE beats first when the cap trims. Evidence across four blocked renders:
     # every blocker was a CHARACTER beat (their stills need a verified face — the hardest
@@ -1427,6 +1480,7 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
         _lm = [s.segment_index for s in proj.selections
                if "look_target_missing" in (getattr(s, "flag_reasons", None) or [])
                and s.segment_index not in unresolved
+               and (_scope is None or s.segment_index in _scope)
                and s.segment_index in seg_by_idx]
         _room = max(0, min(max_beats - len(unresolved), 3))
         for i in _lm[:_room]:
@@ -1439,7 +1493,7 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
                 f"acquisition {sorted(_look_aug)} (targets: "
                 f"{', '.join(repr(t) for t in _look_aug.values())})")
     if not unresolved:
-        _write_recovery_audit(proj, audit)
+        _write_recovery_audit(proj, audit, audit_filename)
         return 0
     #  Recorded BEFORE the attempt: a round that dies mid-way must still count as this beat's
     #  turn, otherwise a beat whose search reliably crashes monopolises the cap forever.
@@ -1510,7 +1564,7 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
             "candidates_found": len(cands), "new_candidates": len(new_cands)})
         if not new_cands:
             log("recovery: targeted rediscovery found no NEW source — leaving beats for downstream fallback")
-            _write_recovery_audit(proj, audit)
+            _write_recovery_audit(proj, audit, audit_filename)
             return 0
 
         before_ok = {s.id for s in proj.sources if s.status == SOURCE_OK}
@@ -1520,7 +1574,7 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
                                  "height": getattr(s, "height", 0)} for s in newly]
         if not newly:
             log(f"recovery: no NEW source downloaded under policy={policy} — leaving beats unresolved")
-            _write_recovery_audit(proj, audit)
+            _write_recovery_audit(proj, audit, audit_filename)
             return 0
 
         # index the new sources, rematch, cut, then reverify. proj.selections is fully rebuilt here;
@@ -1574,13 +1628,256 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
 
     audit["recovered"] = sorted(recovered)
     audit["still_unresolved"] = [i for i in unresolved if i not in recovered]
-    _write_recovery_audit(proj, audit)
+    _write_recovery_audit(proj, audit, audit_filename)
     if recovered:
         log(f"recovery: ✓ recovered {len(recovered)} beat(s) with real verified footage {sorted(recovered)}")
     if audit["still_unresolved"]:
         log(f"recovery: {len(audit['still_unresolved'])} beat(s) still unresolved → deterministic still / "
             f"editorial hold / honest release-block downstream {audit['still_unresolved']}")
     return len(recovered)
+
+
+def _selection_relevance_retry_fingerprint(proj, segs, audit: dict) -> str:
+    """State fingerprint that makes the final semantic retry bounded across Resume.
+
+    A retry is useful again only when its actual inputs changed: blocker facts, selection window/
+    still/verifier state, beat contract, or available source bytes. Recording the *post-attempt*
+    fingerprint means an unchanged content failure immediately returns to the authoritative gate on
+    Resume instead of repeatedly downloading/re-verifying the same material.
+    """
+    import hashlib as _hashlib_sr
+    import json as _json_sr
+
+    blocked = {int(e.get("segment_index", -1)) for e in (audit.get("blockers") or [])}
+
+    def _stat(path):
+        try:
+            p = Path(str(path or ""))
+            st = p.stat()
+            return [str(p), int(st.st_size), int(st.st_mtime_ns)]
+        except Exception:                                # noqa: BLE001 — missing is meaningful state
+            return [str(path or ""), 0, 0]
+
+    sels = []
+    for s in sorted((x for x in (proj.selections or [])
+                     if int(getattr(x, "segment_index", -1)) in blocked),
+                    key=lambda x: int(getattr(x, "segment_index", -1))):
+        sels.append({
+            "index": int(getattr(s, "segment_index", -1)),
+            "source_id": str(getattr(s, "source_id", "") or ""),
+            "shot_index": int(getattr(s, "shot_index", -1)),
+            "in": round(float(getattr(s, "in_point", 0.0) or 0.0), 3),
+            "out": round(float(getattr(s, "out_point", 0.0) or 0.0), 3),
+            "image": _stat(getattr(s, "image_path", "")),
+            "image_meta": getattr(s, "image_meta", {}) or {},
+            "verifier": getattr(s, "verifier", {}) or {},
+        })
+    seg_state = [{
+        "index": int(getattr(s, "index", -1)),
+        "text": str(getattr(s, "text", "") or ""),
+        "policy": str(getattr(s, "visual_policy", "") or ""),
+        "entity": str(getattr(s, "required_entity", "") or ""),
+        "kind": str(getattr(s, "required_kind", "") or ""),
+        "scene_query": str(getattr(s, "scene_query", "") or ""),
+    } for s in (segs or []) if int(getattr(s, "index", -1)) in blocked]
+    src_state = [{
+        "id": str(getattr(s, "id", "") or ""),
+        "status": str(getattr(s, "status", "") or ""),
+        "file": _stat(getattr(s, "local_path", "")),
+    } for s in sorted((proj.sources or []), key=lambda x: str(getattr(x, "id", "") or ""))]
+    payload = {
+        "schema": int(audit.get("schema_version", 0) or 0),
+        "blockers": audit.get("blockers") or [],
+        "selections": sels,
+        "segments": seg_state,
+        "sources": src_state,
+    }
+    raw = _json_sr.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return _hashlib_sr.sha256(raw.encode("utf-8", "replace")).hexdigest()
+
+
+def _unverifiable_relevance_indices(audit: dict) -> set[int]:
+    """Strict blockers where a scoped re-verification can add missing evidence.
+
+    Explicit semantic negatives are deliberately excluded: asking the identical cached question
+    again is neither recovery nor evidence. Those go straight to new-footage recovery.
+    """
+    prefixes = (
+        "verifier_absent", "verifier_error", "verifier_breaker", "verifier_unavailable",
+        "verdict_absent", "matches_narration_absent", "specific_enough_absent",
+        "quality_ok_absent", "wrong_subject_visible_absent",
+        "correct_subject_visible_absent", "target_visible_absent",
+        "verifier_evidence_absent", "verifier_evidence_schema_mismatch",
+        "verifier_evidence_model_mismatch", "verifier_evidence_mismatch",
+        "verifier_evidence_unrecomputable", "verifier_evidence_window_not_sampled",
+    )
+    explicit_negative = (
+        "verdict_replace", "matches_narration_false", "specific_enough_false",
+        "quality_ok_false", "wrong_subject_visible_true", "correct_subject_visible_false",
+        "target_visible_false", "contradicts_narration_true", "era_ok_false",
+        "deterministic_contradiction",
+    )
+    return {
+        int(e.get("segment_index", -1))
+        for e in (audit.get("blockers") or [])
+        if any(str(r).startswith(prefixes) for r in (e.get("reasons") or []))
+        and not any(str(r).startswith(explicit_negative) for r in (e.get("reasons") or []))
+    }
+
+
+def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, refs,
+                               roster, policy, log) -> dict:
+    """One scoped, strictly-positive repair chance after the publication contract blocks.
+
+    This is intentionally NOT the legacy self-heal path: that path may demote an unreachable exact
+    beat to character/abstract. Here policies and requirements are immutable. Missing verifier facts
+    get one scoped re-check; remaining blockers get one bounded acquisition/rematch/reverify round;
+    then only those blockers retry exact image recovery. The same semantic contract decides the
+    result, so failure remains a NonRetryable content stop.
+    """
+    from . import relevance_contract as _R_sr
+    audit_path = proj.output_dir / _R_sr.AUDIT_FILENAME
+    audit = _R_sr.evaluate_selection_relevance(proj, segs)
+    _R_sr.write_selection_relevance_audit(audit_path, audit)
+    if not audit.get("blockers"):
+        return audit
+
+    initial_fp = _selection_relevance_retry_fingerprint(proj, segs, audit)
+    previous = (getattr(proj, "meta", {}) or {}).get("selection_relevance_recovery") or {}
+    if previous.get("post_fingerprint") == initial_fp:
+        log(f"semantic-recovery: unchanged content failure already exhausted for "
+            f"{audit['blocked_count']} beat(s) — skipping duplicate download/verification")
+        return audit
+
+    before = sorted(int(e["segment_index"]) for e in audit["blockers"])
+    log(f"semantic-recovery: publication contract blocked {len(before)} beat(s) {before}; "
+        f"running one scoped strict recovery chance (no policy downgrade)")
+    backend_down = False
+
+    # Legacy source/web stills may be genuinely correct but predate persisted actual-image evidence.
+    # Judge those exact bytes once before buying new footage. Persist NEGATIVE verdicts too, so the
+    # audit says what the image showed rather than merely "old metadata"; only a complete positive
+    # verdict flips the semantic flag.
+    image_blockers = {
+        int(e["segment_index"]) for e in audit.get("blockers") or []
+        if any(str(r).startswith("invalid_still:") for r in (e.get("reasons") or []))
+    }
+    if image_blockers:
+        from . import verify as _verify_img_sr
+        from . import policy as _policy_img_sr
+        by_seg = {int(getattr(s, "index", -1)): s for s in segs}
+        by_sel = {int(getattr(s, "segment_index", -1)): s for s in (proj.selections or [])}
+        if isinstance(analysis, dict):
+            _era_img = str(analysis.get("episode_hint", "") or "")
+        else:
+            _era_img = str(getattr(analysis, "episode_hint", "") or "")
+        for idx in sorted(image_blockers):
+            seg, sel = by_seg.get(idx), by_sel.get(idx)
+            path = str(getattr(sel, "image_path", "") or "") if sel is not None else ""
+            if seg is None or not path or not Path(path).is_file():
+                continue
+            try:
+                verdict = _verify_img_sr.verify_frame(
+                    path, getattr(seg, "text", "") or "",
+                    getattr(seg, "required_entity", "") or "",
+                    getattr(seg, "required_kind", "") or "", [], eng,
+                    getattr(eng, "anthropic_model", ""), is_specific=True,
+                    expected_visual=getattr(seg, "expected_visual", "") or "",
+                    scene_query=getattr(seg, "scene_query", "") or "", era_hint=_era_img,
+                    venue_fallback=False, must_see=_policy_img_sr.deictic_target(seg))
+            except Exception:                            # noqa: BLE001 — absence stays a blocker
+                verdict = None
+            if not isinstance(verdict, dict):
+                continue
+            verdict = {**verdict, "status": "ok"}
+            why = _R_sr.strict_still_evidence_reason(verdict, seg)
+            meta = dict(getattr(sel, "image_meta", {}) or {})
+            exact = _policy_img_sr.is_exact(seg)
+            meta.update({
+                "still_verification_attempted": True,
+                "still_verified": not bool(why),
+                "still_semantic_verified": not bool(why),
+                "still_verifier": verdict,
+                "still_image_sha256": _R_sr.image_sha256(path),
+                "exact_still_verified": bool(exact and not why),
+                "exact_still_verifier": (verdict if exact else {}),
+            })
+            if not why:
+                meta["relevance_class"] = ("exact_scene" if exact else "contextual_fallback")
+            sel.image_meta = meta
+            log(f"semantic-recovery: beat {idx} legacy still actual-image reverify "
+                f"{'passed' if not why else 'failed — ' + why}")
+        proj.save()
+        audit = _R_sr.evaluate_selection_relevance(proj, segs)
+
+    # Missing/old evidence can be repaired without changing selection order. Explicit `false` facts
+    # never enter this branch; they require genuinely different footage.
+    unverified = _unverifiable_relevance_indices(audit)
+    if unverified:
+        try:
+            from . import verify as _verify_sr
+            result = _verify_sr.verify_and_repair(
+                proj, segs, cfg, eng, only_indices=unverified, progress=None) or {}
+            backend_down = bool(result.get("verifier_down"))
+            proj.save()
+            log(f"semantic-recovery: scoped reverify completed for {sorted(unverified)}"
+                + (" (vision backend down; acquisition skipped)" if backend_down else ""))
+            if backend_down:
+                raise _verify_sr.VisionBackendError(
+                    "vision backend unavailable during scoped semantic re-verification; "
+                    "restore it and Resume (the semantic recovery attempt was not exhausted)",
+                    kind="down")
+        except _verify_sr.VisionBackendError:
+            raise
+        except Exception as exc:                         # noqa: BLE001 — final gate remains fail-closed
+            log(f"semantic-recovery: scoped reverify failed ({type(exc).__name__}: "
+                f"{str(exc)[:90]}); publication gate remains authoritative")
+
+    audit = _R_sr.evaluate_selection_relevance(proj, segs)
+    blockers = {int(e["segment_index"]) for e in audit.get("blockers") or []}
+    if blockers and not backend_down:
+        try:
+            _recover_unresolved_beats(
+                proj, segs, analysis, cfg, eng, faceid_obj=faceid_obj, refs=refs,
+                roster=roster, policy=policy, log=log, only_indices=blockers,
+                audit_filename="semantic_recovery_audit.json")
+        except Exception as exc:                         # noqa: BLE001 — gate still blocks bad media
+            log(f"semantic-recovery: acquisition failed ({type(exc).__name__}: {str(exc)[:90]})")
+        proj.save()
+
+        # Re-evaluate before the still pass: recovered moving footage needs no image, and passing a
+        # subset keeps the second still pass from decorating/changing any already-approved beat.
+        audit = _R_sr.evaluate_selection_relevance(proj, segs)
+        blockers = {int(e["segment_index"]) for e in audit.get("blockers") or []}
+        if blockers:
+            import os as _os_sr
+            if _os_sr.environ.get("VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK", "1").strip().lower() \
+                    not in ("0", "false", "no"):
+                target_segs = [s for s in segs if int(getattr(s, "index", -1)) in blockers]
+                try:
+                    _fill_image_fallbacks(
+                        proj, target_segs, analysis, faceid_obj, refs, log, eng_cfg=eng)
+                except Exception as exc:                 # noqa: BLE001 — final gate remains the word
+                    log(f"semantic-recovery: exact-image retry failed ({type(exc).__name__}: "
+                        f"{str(exc)[:90]})")
+                proj.save()
+
+    final = _R_sr.evaluate_selection_relevance(proj, segs)
+    _R_sr.write_selection_relevance_audit(audit_path, final)
+    after = sorted(int(e["segment_index"]) for e in final.get("blockers") or [])
+    proj.meta["selection_relevance_recovery"] = {
+        "schema_version": _R_sr.SCHEMA_VERSION,
+        "before": before,
+        "after": after,
+        "post_fingerprint": _selection_relevance_retry_fingerprint(proj, segs, final),
+    }
+    proj.save()
+    if after:
+        log(f"semantic-recovery: {len(after)} beat(s) still fail positive semantic evidence "
+            f"{after}; stopping before render")
+    else:
+        log("semantic-recovery: publication contract CLEAR after scoped strict recovery")
+    return final
 
 
 def produce_auto_resilient(project_dir, **kw):
@@ -2198,7 +2495,35 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
             # once and rebuild — same bounded machinery, gate stays the final word.
             import os as _os_bh
             from .verify import NonRetryableBuildError as _NRBE
-            if (isinstance(_be, _NRBE) and getattr(_be, "kind", "") == "rejected_footage"
+            if (isinstance(_be, _NRBE)
+                    and getattr(_be, "kind", "") == "selection_relevance"
+                    and _os_bh.environ.get("VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY", "1")
+                    .strip().lower() not in ("0", "false", "no")):
+                # The semantic gate is the FIRST operation in build_video, so no render work has
+                # happened. Give only its blockers one final bounded chance: missing evidence is
+                # reverified, explicit negatives acquire different footage, and exact-image
+                # recovery reruns for that subset. No self-heal policy demotion is permitted here.
+                try:
+                    _saudit = _retry_selection_relevance(
+                        proj, segs, cfg, analysis, eng, faceid_obj=faceid_obj, refs=refs,
+                        roster=roster, policy=policy, log=log)
+                except _verify.VisionBackendError:
+                    raise                                # retryable infrastructure failure, no marker
+                except Exception as _se:                 # technical repair fault cannot bypass gate
+                    log(f"semantic-recovery: technical failure ({type(_se).__name__}: "
+                        f"{str(_se)[:100]}); original publication block preserved")
+                    raise _be
+                if _saudit.get("blockers"):
+                    from .relevance_contract import assert_selection_relevance as _assert_sr
+                    _assert_sr(proj, segs, proj.output_dir / "selection_relevance_audit.json")
+                out = build_video(proj, segs, cfg, voice=voice, captions=captions,
+                                  caption_style=caption_style,
+                                  title=title or analysis.movie_title or proj.name,
+                                  theme_name=theme, voiceover=voiceover,
+                                  voice_provider=voice_provider,
+                                  voice_preset=voice_preset, use_tts=use_tts,
+                                  progress=progress)
+            elif (isinstance(_be, _NRBE) and getattr(_be, "kind", "") == "rejected_footage"
                     and _os_bh.environ.get("VIDLORE_CLIPSTUDIO_SELFHEAL", "1").strip().lower()
                     not in ("0", "false", "no")
                     and _os_bh.environ.get("VIDLORE_CLIPSTUDIO_SELFHEAL_BUILD_RETRY", "1")

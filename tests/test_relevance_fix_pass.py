@@ -496,9 +496,12 @@ def test_empty_faceid_is_unknown_not_innocent():
 
 def test_positive_faceid_confirmation_allows_the_contextual_downgrade():
     from vidlore.clipstudio import verify as V
-    got = V._present_unconfirmed_ok({"correct_subject_visible": False}, _SEG_J, _TITLE,
+    got = V._present_unconfirmed_ok({"correct_subject_visible": False,
+                                     "matches_narration": True, "specific_enough": True},
+                                    _SEG_J, _TITLE,
                                     ["jack gleeson"], "season 3", frozenset(), char2actor=_C2A)
-    assert got is True, "Face-ID positively placing the required entity IS positive evidence"
+    assert got is True, ("Face-ID placing the entity plus an affirmative narration/specificity "
+                         "judgment IS positive evidence")
 
 
 def test_wrong_subject_visible_is_a_hard_rejection():

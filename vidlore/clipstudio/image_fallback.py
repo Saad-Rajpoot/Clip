@@ -574,9 +574,13 @@ def _web_candidate_ok(c: dict, analysis) -> bool:
 
 def fetch_scene_image(seg, analysis, dest_dir: Path, *, faceid_obj=None, refs: dict | None = None,
                       char2actor: dict | None = None, log=None, budget: int = 12,
-                      seen_hashes: set | None = None) -> Optional[dict]:
+                      seen_hashes: set | None = None, eng_cfg=None) -> Optional[dict]:
     """Search + validate an exact-scene still for one beat. Returns
-    {path, score, query, source, clip, face} or None if nothing verified out.
+    {path, score, query, source, clip, face, strict_verifier, image_sha256} or None.
+
+    CLIP/Face-ID/source-domain checks only rank candidates. Publication requires a strict vision
+    verdict on the ACTUAL downloaded image, bound to those bytes by sha256. A provider label such as
+    ``web-exact-scene`` is never semantic proof by itself.
     `seen_hashes` (shared across beats) prevents the SAME image being used at two beats."""
     refs = refs or {}
     char2actor = char2actor or {}
@@ -670,30 +674,62 @@ def fetch_scene_image(seg, analysis, dest_dir: Path, *, faceid_obj=None, refs: d
             log(f"image-fallback: 0/{tried} candidates usable for {q!r}")
         return None
     scored.sort(key=lambda d: -d["score"])
-    best = scored[0]
-    # ACCEPTANCE BAR — strict on purpose. A person-beat needs the face OR very high CLIP;
-    # a scene/location/event beat needs solid CLIP relevance.
+    # DETERMINISTIC CANDIDATE BAR — still only a prefilter. The actual-image semantic verdict below
+    # is the publication decision.
     floor = float(os.environ.get("VIDLORE_CLIPSTUDIO_IMAGE_MIN_SCORE", "0.42"))
-    # CHARACTER-beat (non-exact) web stills must clear a HIGHER bar AND show the CONFIRMED target
-    # actor — no generic portrait / random character still slipping in (req. 3).
     from . import policy as _pol
     _exact = _pol.is_exact(seg)
     if not _exact:
         floor = max(floor, float(os.environ.get("VIDLORE_CLIPSTUDIO_IMAGE_MIN_SCORE_CHAR", "0.60")))
-    ok = best["score"] >= floor
-    if not _exact and best["face"] != "match":
-        ok = False                                    # non-exact web still needs the confirmed actor
-    if target_actors and best["face"] not in ("match", "skip") and best["clip"] < 0.55:
-        ok = False
-    # keep only the winner; clean the rest
+    from .relevance_contract import strict_still_evidence_reason, image_sha256
+    from .verify import verify_frame
+    era_hint = str(getattr(seg, "era", "") or getattr(analysis, "episode_hint", "") or "")
+    best = None
+    for cand in scored:
+        ok = cand["score"] >= floor
+        if not _exact and cand["face"] != "match":
+            ok = False                                 # concrete character still needs target face
+        if target_actors and cand["face"] not in ("match", "skip") and cand["clip"] < 0.55:
+            ok = False
+        if not ok:
+            continue
+        if eng_cfg is None:
+            continue                                  # no actual-image judgment → fail closed
+        try:
+            verdict = verify_frame(
+                str(cand["path"]), getattr(seg, "text", "") or "",
+                getattr(seg, "required_entity", "") or "",
+                getattr(seg, "required_kind", "") or "", [], eng_cfg,
+                getattr(eng_cfg, "anthropic_model", ""), is_specific=True,
+                expected_visual=getattr(seg, "expected_visual", "") or "",
+                scene_query=getattr(seg, "scene_query", "") or "", era_hint=era_hint,
+                venue_fallback=False, must_see=_pol.deictic_target(seg))
+        except Exception:
+            verdict = None
+        if verdict is None:
+            continue
+        verdict = {**verdict, "status": "ok"}
+        why = strict_still_evidence_reason(verdict, seg)
+        if why:
+            if log:
+                log(f"image-fallback: candidate rejected by actual-image semantic gate "
+                    f"({why}) for {q!r}")
+            continue
+        cand["strict_verifier"] = verdict
+        cand["image_sha256"] = image_sha256(cand["path"])
+        if not cand["image_sha256"]:
+            continue
+        best = cand
+        break
+
+    # keep only the strictly verified winner; clean every other downloaded candidate
     for d in scored:
-        if d["path"] != best["path"]:
+        if best is None or d["path"] != best["path"]:
             Path(d["path"]).unlink(missing_ok=True)
-    if not ok:
-        Path(best["path"]).unlink(missing_ok=True)
+    if best is None:
         if log:
-            log(f"image-fallback: best below bar ({best['score']:.2f}, face={best['face']}, "
-                f"clip={best['clip']}) for {q!r} — skipped")
+            log(f"image-fallback: no candidate passed strict actual-image semantic verification "
+                f"for {q!r} — skipped")
         return None
     final = dest_dir / f"scene_img_{seg.index:03d}.jpg"
     Path(best["path"]).replace(final)

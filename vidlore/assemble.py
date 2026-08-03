@@ -17,6 +17,16 @@ from pathlib import Path
 from .captions import write_ass
 from .ffmpeg_tool import ffmpeg_exe, run
 from .footage import FootageItem
+from .scene_lineage_canary import (
+    SceneLineageError,
+    bind_encode_plan as _bind_scene_lineage,
+    fail_audit as _fail_scene_lineage_audit,
+    new_audit as _new_scene_lineage_audit,
+    verify_encoded_plan as _verify_lineage_encoded_plan,
+    verify_delivered_output as _verify_lineage_delivered_output,
+    verify_timeline_order as _verify_lineage_timeline_order,
+    write_audit as _write_scene_lineage_audit,
+)
 
 
 def _probe_encoder(name: str) -> bool:
@@ -7299,7 +7309,8 @@ def _scene_video(
     item: FootageItem, dur: float, grade: str, out: Path, energy: int = 2,
     kb_mode: int | None = None, kb_seed: int = 0, kb_impact: bool = False,
     kb_hold: bool = False, kb_drift: float = 1.0, archival: bool = False,
-) -> None:
+) -> bool:
+    """Render one scene; return ``True`` only when a fallback slate aired."""
     # Frame count is the single source of truth so the visual length matches
     # the narration exactly (avoids audio being cut by -shortest).
     nframes = max(1, int(round(max(0.2, dur) * FPS)))
@@ -7328,7 +7339,7 @@ def _scene_video(
     _LX = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
            "-pix_fmt", "yuv420p"]
 
-    def _enc(pre: list[str], vf: str) -> None:
+    def _enc(pre: list[str], vf: str) -> bool:
         """Encode a segment with graceful degradation so a SINGLE broken
         clip never kills the whole render:
           1) the chosen (hardware) encoder,
@@ -7345,12 +7356,12 @@ def _scene_video(
         # of stalling the entire render.
         try:
             run(base + _venc() + _CTAG + [str(out)], timeout=150)
-            return
+            return False
         except Exception:                                  # noqa: BLE001
             pass
         try:
             run(base + _LX + _CTAG + [str(out)], timeout=150)
-            return
+            return False
         except Exception:                                  # noqa: BLE001
             pass
         # 3) sanitise the source clip: tolerant decode -> clean intermediate
@@ -7367,7 +7378,7 @@ def _scene_video(
                      "-r", str(FPS), "-frames:v", str(nframes), "-an"]
                     + _LX + _CTAG + [str(out)])
                 clean.unlink(missing_ok=True)
-                return
+                return False
             except Exception:                              # noqa: BLE001
                 pass
         # 4) guaranteed graded slate (never touches the bad clip). This is
@@ -7382,6 +7393,7 @@ def _scene_video(
             raise RuntimeError(
                 f"slate write failed for {Path(out).name} "
                 f"(src={Path(item.path).name})")
+        return True
 
     # ── READINESS GATE (encode-pool reliability). A partially-written /
     # zero-byte / corrupt clip would otherwise fail all three encode tiers
@@ -7436,7 +7448,7 @@ def _scene_video(
               f"{Path(item.path).name}, {_why}); graded slate", flush=True)
         if not _safe_slate(out, nframes, grade, _CS):
             raise RuntimeError(f"slate write failed: {Path(out).name} ({_why})")
-        return
+        return True
 
     if item.is_video:
         if archival:
@@ -7463,7 +7475,7 @@ def _scene_video(
                 "crop=1920:1080,setsar=1,fps=%d,%s,format=yuv420p%s"
                 % (_CSIN, FPS, grade, _CS)
             )
-        _enc(["-stream_loop", "-1", "-i", str(item.path)], vf)
+        return _enc(["-stream_loop", "-1", "-i", str(item.path)], vf)
     else:
         mode = item.index if kb_mode is None else kb_mode
         z, x, y = _kenburns(mode, max(1, nframes - 1), energy, kb_seed,
@@ -7479,23 +7491,27 @@ def _scene_video(
             "d=1:s=1920x1080:fps=%d,%s,setsar=1,format=yuv420p%s"
             % (_CSIN, z, x, y, FPS, grade, _CS)
         )
-        _enc(["-loop", "1", "-i", str(item.path)], vf)
+        return _enc(["-loop", "1", "-i", str(item.path)], vf)
 
 
 def _srt(words: list[WordTiming], path: Path) -> None:
-    from .captions import _group
+    from .captions import assert_caption_schedule
 
     def ts(t: float) -> str:
-        t = max(0.0, t)
-        h, rem = divmod(t, 3600)
-        m, s = divmod(rem, 60)
-        ms = int(round((s - int(s)) * 1000))
-        return f"{int(h):02d}:{int(m):02d}:{int(s):02d},{ms:03d}"
+        total_ms = max(0, int(round(float(t) * 1000.0)))
+        h, rem_ms = divmod(total_ms, 3_600_000)
+        m, rem_ms = divmod(rem_ms, 60_000)
+        s, ms = divmod(rem_ms, 1_000)
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
+    # SRT and burned ASS must consume the same schedule.  Persist the viewer-facing metrics before
+    # serialising anything and fail the render on zero/backwards/overlapping or >20-CPS cues
+    # (the official adult timed-text publish ceiling, with spaces/punctuation counted).
+    schedule = assert_caption_schedule(
+        words, path.with_name("caption_readability_audit.json"))
     lines = []
-    for i, cue in enumerate(_group(words), 1):
-        text = " ".join(w.word for w in cue).strip()
-        lines += [str(i), f"{ts(cue[0].start)} --> {ts(cue[-1].end)}", text, ""]
+    for i, cue in enumerate(schedule, 1):
+        lines += [str(i), f"{ts(cue['start'])} --> {ts(cue['end'])}", cue["text"], ""]
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -8088,7 +8104,8 @@ def _write_export_metrics(final_mp4: Path, fps: int) -> dict:
 
 
 def _repair_black_frames(video_in: Path, workdir: Path, fps: int,
-                         breakout_windows: list | None = None) -> Path:
+                         breakout_windows: list | None = None,
+                         lineage_windows: list | None = None) -> Path:
     """Iterate-until-clean driver around `_repair_black_frames_once`.
 
     `breakout_windows` = [(start_s, end_s), ...] real-audio breakout windows. A black span
@@ -8115,7 +8132,9 @@ def _repair_black_frames(video_in: Path, workdir: Path, fps: int,
     cur = video_in
     sidecar = workdir.parent / "render_black_frame_metrics.json"
     for _pass in range(3):
-        out = _repair_black_frames_once(cur, workdir, fps, breakout_windows=breakout_windows)
+        out = _repair_black_frames_once(
+            cur, workdir, fps, breakout_windows=breakout_windows,
+            lineage_windows=lineage_windows)
         if out is cur:
             break                       # nothing detected this pass → clean
         cur = out
@@ -8133,8 +8152,32 @@ def _repair_black_frames(video_in: Path, workdir: Path, fps: int,
     return cur
 
 
+def _assert_lineage_repair_owner(span_start: float, span_end: float, anchor_t: float,
+                                 lineage_windows: list, fps: int) -> None:
+    """Block a freeze whose donor is outside the black span's own aired beat."""
+    eps = 1.0 / max(1, int(fps)) + 1e-4
+    owners = []
+    for rec in lineage_windows or []:
+        try:
+            a, b = float(rec[0]), float(rec[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if span_start >= a - eps and span_end <= b + eps:
+            owners.append((a, b, rec[2] if len(rec) > 2 else None))
+    if len(owners) != 1:
+        raise SceneLineageError(
+            f"black-frame repair span {span_start:.3f}-{span_end:.3f}s crosses or lacks an "
+            f"owned beat; a neighbour freeze is forbidden")
+    a, b, owner = owners[0]
+    if anchor_t < a - eps or anchor_t >= b + eps:
+        raise SceneLineageError(
+            f"black-frame repair for beat {owner!r} would use neighbour donor "
+            f"{anchor_t:.3f}s outside {a:.3f}-{b:.3f}s")
+
+
 def _repair_black_frames_once(video_in: Path, workdir: Path, fps: int,
-                              breakout_windows: list | None = None) -> Path:
+                              breakout_windows: list | None = None,
+                              lineage_windows: list | None = None) -> Path:
     """Eliminate black/blank spans from a video-only stream by FREEZE-
     HOLDING the nearest VALID (non-dark) frame across each gap (total
     duration + frame count preserved, so downstream audio stays in sync).
@@ -8247,6 +8290,9 @@ def _repair_black_frames_once(video_in: Path, workdir: Path, fps: int,
                     "anchor_is_dark": True,
                 })
                 continue
+
+            if lineage_windows is not None:
+                _assert_lineage_repair_owner(s, e, anchor_t, lineage_windows, fps)
 
             # REPAIR (unintended_empty_gap | dark_boundary_repairable):
             # 1) good footage [cursor .. s]
@@ -8462,8 +8508,28 @@ def assemble(
     motion_graphics_primitives: dict | None = None,
     caption_suppress_windows: list | None = None,
     breakout_windows: list | None = None,
+    scene_lineage: object | None = None,
+    lineage_expectations: object | None = None,
 ) -> Path:
     workdir.mkdir(parents=True, exist_ok=True)
+    # ASSEMBLY LINEAGE CONTRACT.  Generic engine callers remain unchanged
+    # (None = disabled), but a caller that supplies provenance gets a strict,
+    # fail-closed contract.  ``lineage_expectations`` is a compatibility alias
+    # for integrations that use the more explicit name; accepting both at once
+    # would make ownership ambiguous and is therefore rejected.
+    if scene_lineage is not None and lineage_expectations is not None:
+        raise SceneLineageError(
+            "pass either scene_lineage or lineage_expectations, not both")
+    _lineage_contract = (scene_lineage if scene_lineage is not None
+                         else lineage_expectations)
+    _lineage_enabled = _lineage_contract is not None
+    _lineage_audit_path = Path(out_path).parent / "scene_lineage_audit.json"
+    _lineage_audit = _new_scene_lineage_audit(Path(out_path)) if _lineage_enabled else None
+    _lineage_encoded_banks: dict = {}
+    if _lineage_enabled:
+        # Persistence is itself part of the invariant: a render may not claim
+        # lineage protection when its evidence sidecar cannot be written.
+        _write_scene_lineage_audit(_lineage_audit_path, _lineage_audit)
     # STYLE MODE (cinematic personality) — biases pacing, transitions,
     # camera restraint and atmosphere. Defaults to the neutral baseline.
     if style is None:
@@ -9293,6 +9359,9 @@ def assemble(
                 _mgc = None
         encode_plan.append({
             "bi": bi, "j": j, "m": m, "bd": bd, "pad": pad,
+            # ``j`` is the positional scene slot; ``ns.index`` is the stable
+            # owner used by beat_clips and by ClipStudio's aired manifest.
+            "scene_index": ns.index,
             "item": item, "seg": seg, "sgrade": sgrade, "mode": mode,
             "kb_seed":   j * 97 + m * 13 + 7,
             "kb_impact": _impact(j) * _mfact["impact"],
@@ -9302,6 +9371,28 @@ def assemble(
             "mg_clip":   _mgc, "mg_off": _mgoff, "mg_window": _win,
         })
         segs.append(seg)
+
+    # Bind BEFORE any ffmpeg work.  The decoded checks below are independent
+    # canaries, but path/kind ownership is primary: a visually similar clip is
+    # still wrong when it belongs to another selection.
+    if _lineage_enabled:
+        try:
+            _bind_rows, _bind_failures = _bind_scene_lineage(
+                encode_plan, _lineage_contract)
+            _lineage_audit["binding"] = _bind_rows
+            if _bind_failures:
+                _fail_scene_lineage_audit(
+                    _lineage_audit_path, _lineage_audit, "binding", _bind_failures)
+            _lineage_audit["stage"] = "binding"
+            _write_scene_lineage_audit(_lineage_audit_path, _lineage_audit)
+        except SceneLineageError:
+            raise
+        except Exception as _lineage_exc:                       # noqa: BLE001
+            _fail_scene_lineage_audit(
+                _lineage_audit_path, _lineage_audit, "binding", [{
+                    "stage": "binding",
+                    "reason": f"lineage binding could not be checked: {_lineage_exc}",
+                }])
 
     # PARALLEL ENCODE: ffmpeg subprocesses fire concurrently. Default 4
     # workers (good for an 8-core Mac); env override for tuning. Each
@@ -9381,11 +9472,18 @@ def assemble(
             _beat = max(0.2, p["bd"] + p["pad"])
             _mg_slice(p["seg"].name, _beat, p["mg_off"])
             return p["bi"]
-        _scene_video(p["item"], p["bd"] + p["pad"], p["sgrade"], p["seg"],
-                      _en(p["j"]), p["mode"],
-                      kb_seed=p["kb_seed"], kb_impact=p["kb_impact"],
-                      kb_hold=p["kb_hold"], kb_drift=p["kb_drift"],
-                      archival=p.get("archival", False))   # IMP_011
+        _slated = _scene_video(
+            p["item"], p["bd"] + p["pad"], p["sgrade"], p["seg"],
+            _en(p["j"]), p["mode"],
+            kb_seed=p["kb_seed"], kb_impact=p["kb_impact"],
+            kb_hold=p["kb_hold"], kb_drift=p["kb_drift"],
+            archival=p.get("archival", False))   # IMP_011
+        if _slated:
+            # `_scene_video` owns its own final slate fallback and historically
+            # returned silently, so the outer pool classified it as a normal
+            # success.  Surface it on the plan row: strict lineage rejects it,
+            # and reliability accounting finally tells the truth.
+            p["_lineage_emergency_slate"] = True
         return p["bi"]
 
     # ── HARDENED EXECUTION (encode-pool reliability, 2026-05-31). A single
@@ -9435,7 +9533,10 @@ def assemble(
         try:
             r = _encode_one(p)
             with _enc_lock:
-                _enc_stats["ok"] += 1
+                if p.get("_lineage_emergency_slate"):
+                    _enc_stats["slated"] += 1
+                else:
+                    _enc_stats["ok"] += 1
             return r
         except Exception:                                  # noqa: BLE001
             _log_fail(p, "first")
@@ -9451,6 +9552,7 @@ def assemble(
         except Exception:                                  # noqa: BLE001
             _log_fail(p, "retry")
         if _emergency_slate(p):                            # guaranteed frame
+            p["_lineage_emergency_slate"] = True
             with _enc_lock:
                 _enc_stats["slated"] += 1
             print(f"  [5/5] beat {p.get('bi')} (scene {p.get('j')}) "
@@ -9477,6 +9579,25 @@ def assemble(
         print(f"  [5/5] encode reliability: {_enc_stats['ok']} ok · "
               f"{_enc_stats['retried']} retried · {_enc_stats['slated']} "
               f"emergency-slate · {_enc_stats['failed']} failed", flush=True)
+    if _lineage_enabled:
+        try:
+            _enc_rows, _enc_failures, _lineage_encoded_banks = \
+                _verify_lineage_encoded_plan(encode_plan)
+            _lineage_audit["encoded_segments"] = _enc_rows
+            if _enc_failures:
+                _fail_scene_lineage_audit(
+                    _lineage_audit_path, _lineage_audit,
+                    "encoded_segments", _enc_failures)
+            _lineage_audit["stage"] = "encoded_segments"
+            _write_scene_lineage_audit(_lineage_audit_path, _lineage_audit)
+        except SceneLineageError:
+            raise
+        except Exception as _lineage_exc:                       # noqa: BLE001
+            _fail_scene_lineage_audit(
+                _lineage_audit_path, _lineage_audit, "encoded_segments", [{
+                    "stage": "encoded_segments",
+                    "reason": f"encoded lineage could not be checked: {_lineage_exc}",
+                }])
     if not use_x:
         bmin, bmax = min(beat_durs), max(beat_durs)
         print(f"  [5/5] {nb} beats from {n_sc} scenes · hard cuts, "
@@ -9559,6 +9680,30 @@ def assemble(
         _conform_video_to_audio(video_only, narration, workdir)
         _assert_video_audio_sync(video_only, narration, workdir)
 
+    if _lineage_enabled:
+        try:
+            _timeline_rows, _timeline_failures = _verify_lineage_timeline_order(
+                video_only, encode_plan, beat_durs, trans_tails,
+                _lineage_encoded_banks, FPS)
+            _lineage_audit["timeline_order"] = _timeline_rows
+            if _timeline_failures:
+                _fail_scene_lineage_audit(
+                    _lineage_audit_path, _lineage_audit,
+                    "timeline_order", _timeline_failures)
+            _lineage_audit["status"] = "passed"
+            _lineage_audit["stage"] = "timeline_order"
+            _write_scene_lineage_audit(_lineage_audit_path, _lineage_audit)
+            print(f"  [5/5] scene-lineage canary: {len(encode_plan)} beat(s) "
+                  f"bound + decoded in order → {_lineage_audit_path.name}", flush=True)
+        except SceneLineageError:
+            raise
+        except Exception as _lineage_exc:                       # noqa: BLE001
+            _fail_scene_lineage_audit(
+                _lineage_audit_path, _lineage_audit, "timeline_order", [{
+                    "stage": "timeline_order",
+                    "reason": f"timeline lineage could not be checked: {_lineage_exc}",
+                }])
+
     words = narration.all_words()
     _srt(words, out_path.with_suffix(".srt"))
 
@@ -9623,9 +9768,22 @@ def assemble(
     # BLACK-FRAME REPAIR (v13.2) — last-line guarantee against any black
     # span that slipped through the footage ladder / bake. Freeze-holds
     # the previous frame across the gap; no-op when the video is clean.
+    _lineage_repair_windows = None
+    if _lineage_enabled:
+        _lineage_repair_windows = []
+        _lrw_start = 0.0
+        for _lrw_pos, _lrw_plan in enumerate(encode_plan):
+            _lrw_dur = (beat_durs[_lrw_pos] if _lrw_pos < len(beat_durs)
+                        else float(_lrw_plan.get("bd") or 0.0))
+            _lineage_repair_windows.append((
+                _lrw_start, _lrw_start + _lrw_dur, _lrw_plan.get("bi")))
+            _lrw_start += _lrw_dur
     try:
         _video_for_final = _repair_black_frames(
-            _video_for_final, workdir, FPS, breakout_windows=breakout_windows)
+            _video_for_final, workdir, FPS, breakout_windows=breakout_windows,
+            lineage_windows=_lineage_repair_windows)
+    except SceneLineageError:
+        raise
     except Exception as _e:                                # noqa: BLE001
         print(f"  [5/5] black-frame repair skipped ({str(_e)[:60]})",
               flush=True)
@@ -10362,6 +10520,17 @@ def assemble(
     # muxes have consumed them.
     _tmp_audio.unlink(missing_ok=True)
     _tmp_video_nocap.unlink(missing_ok=True)
+
+    # The earlier timeline check runs before overlay bake, black-frame repair,
+    # caption burn and mux.  Recheck the actual assembled artifact after every
+    # one of those mutating passes; only this stage may call the assembly audit
+    # passed.  ClipStudio performs one more identical check after its own
+    # letterbox/breakout/final-QA post-passes.
+    if _lineage_enabled:
+        _verify_lineage_delivered_output(
+            out_path, _lineage_audit_path, stage="assembled_output")
+        print(f"  [5/5] scene-lineage delivered canary PASS → {out_path.name}",
+              flush=True)
 
     # MNT_1 — render_meta.json sidecar: the pipeline's OWN authoritative
     # pacing/beat numbers, written beside the final MP4 so the benchmark scores

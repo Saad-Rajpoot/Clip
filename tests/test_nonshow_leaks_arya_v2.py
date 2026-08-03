@@ -112,7 +112,8 @@ class TestBehindTheScenesIsNotTheShow(unittest.TestCase):
     def test_the_prompt_version_was_bumped_with_it(self):
         """The verdict cache keys on PROMPT_VERSION. Changing the prompt without bumping it serves
         answers to a different question — the whole point of the fingerprint."""
-        self.assertTrue(V.PROMPT_VERSION.startswith("v8"), V.PROMPT_VERSION)
+        major = int(V.PROMPT_VERSION.split("-", 1)[0].lstrip("v"))
+        self.assertGreaterEqual(major, 8, V.PROMPT_VERSION)
         self.assertIn("PROMPT_VERSION", (SRC / "verify.py").read_text())
 
 

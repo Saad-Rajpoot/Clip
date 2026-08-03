@@ -44,8 +44,11 @@ def evaluate_flags(
     _img_src = (getattr(sel, "image_meta", {}) or {}).get("source", "")
     _has_img = bool(getattr(sel, "image_path", "")) and bool(_img_src)
     if _has_img:        # an image still AIRS for this beat (build renders image_path over the clip)
-        if _img_src == "source-frame-recovery" and _policy.is_exact(segment):
-            return [FLAG_EXACT_MISSING]
+        if _policy.policy_of(segment) in (_policy.EXACT, _policy.CHARACTER):
+            from .relevance_contract import verified_still_coverage
+            if not verified_still_coverage(sel, segment)[0]:
+                return ([FLAG_EXACT_MISSING] if _policy.is_exact(segment)
+                        else [FLAG_VERIFIER_FAILED])
         return []
     if not sel.source_id or sel.confidence <= 0.0:
         return [FLAG_NO_CANDIDATE]
@@ -123,6 +126,11 @@ def write_ledger(proj: ClipProject, segments: list[ScriptSegment]) -> Path:
         # missing (an exact beat with no confirmed footage) · unverified.
         _imeta = getattr(sel, "image_meta", {}) or {}
         _rclass = _imeta.get("relevance_class", "")
+        if _rclass and seg is not None and getattr(sel, "image_path", "") \
+                and _policy.policy_of(seg) in (_policy.EXACT, _policy.CHARACTER):
+            from .relevance_contract import verified_still_coverage
+            if not verified_still_coverage(sel, seg)[0]:
+                _rclass = ("exact_scene_missing" if _policy.is_exact(seg) else "unverified")
         if not _rclass:
             _v = getattr(sel, "verifier", {}) or {}
             _kept = _v.get("verdict") == "keep" and _v.get("status") == "ok"

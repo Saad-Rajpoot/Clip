@@ -25,6 +25,8 @@ shadows — it opens crushed blacks instead of flattening the picture, and it ca
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from vidlore.clipstudio import cut as C
@@ -120,3 +122,50 @@ def test_the_grade_cannot_change_which_footage_airs():
     src = inspect.getsource(C.cut_selection)
     for forbidden in ("sel.source_id =", "sel.shot_index =", "sel.in_point =", "sel.out_point ="):
         assert forbidden not in src, f"cut must not reassign {forbidden.split()[0]}"
+
+
+def test_breakout_extraction_applies_the_same_grade_and_reports_it(monkeypatch, tmp_path):
+    """Breakouts bypass cut_selection, so _extract_breakout itself must grade its exact window."""
+    from types import SimpleNamespace as NS
+    from vidlore.clipstudio import build as B
+    from vidlore.clipstudio import ingest as I
+
+    source = tmp_path / "source.mp4"
+    video = tmp_path / "breakout.mp4"
+    audio = tmp_path / "breakout.wav"
+    source.write_bytes(b"source")
+    commands = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(list(cmd))
+        target = str(cmd[-1])
+        if target == str(video):
+            video.write_bytes(b"video")
+        elif target == str(audio):
+            audio.write_bytes(b"audio")
+        return NS(returncode=0, stdout=b"", stderr=b"")
+
+    def fake_probe(path):
+        path = Path(path)
+        if path == source:
+            return {"duration": 20.0, "width": 1920, "height": 1080}
+        return {"duration": 3.0, "width": 1920, "height": 1080}
+
+    note = "legibility grade gamma=1.259 (YAVG29.5, spread19.9)"
+    monkeypatch.setattr(B.subprocess, "run", fake_run)
+    monkeypatch.setattr(B, "_dialogue_aware_dur", lambda *a, **k: (3.0, "spoken line"))
+    monkeypatch.setattr(I, "probe", fake_probe)
+    monkeypatch.setattr(C, "legibility_filter", lambda *a, **k: ("eq=gamma=1.259", note))
+
+    quality = {}
+    got = B._extract_breakout(str(source), 2.0, 4.0, video, audio, src_w=1920,
+                              quality_meta=quality)
+
+    assert got == 3.0
+    video_cmd = next(c for c in commands if c[-1] == str(video))
+    vf = video_cmd[video_cmd.index("-vf") + 1]
+    assert "eq=gamma=1.259" in vf
+    assert vf.index("eq=gamma=1.259") < vf.index("scale=1920:1080"), \
+        "the shadow lift must run on the native window before normalization/upscale"
+    assert quality["legibility_grade"] == note, \
+        "the accepted breakout audit must be able to explain its presentation grade"

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import os
 import re
+import math
+import json
 from pathlib import Path
 
 from .tts import WordTiming
@@ -108,9 +110,18 @@ def _group(words: list[WordTiming], max_words: int = 6, max_dur: float = 3.4):
         if buf:
             cues.append(buf)
         return cues
-    # Latin / RTL: original rule + a HARD CUT on long silence (a breakout or
-    # multi-second pause): close the cue BEFORE the gapped word so it starts a
-    # fresh cue instead of the current one freezing across the gap.
+    # Latin / RTL: hard-cut on real silence, prefer authored punctuation, and
+    # never strand a grammatical joiner/pronoun at the END of a cue merely
+    # because the word counter hit six.  The old mechanical boundary produced
+    # captions such as "is exactly how Varys learns she"; all source words were
+    # present, but the displayed phrase read like broken grammar.
+    _punct_end = re.compile(r"[.!?][\"'’)]*$")
+    _dangling = {
+        "a", "an", "the", "and", "or", "but", "because", "although", "while",
+        "to", "of", "for", "with", "from", "into", "by", "as", "at", "on", "in",
+        "he", "she", "they", "we", "it", "his", "her", "their", "our", "your",
+        "that", "which", "who", "whose", "is", "are", "was", "were", "has", "have",
+    }
     cues, buf = [], []
     for w in words:
         if buf and (float(w.start) - float(buf[-1].end)) >= _CUE_GAP_BREAK:
@@ -118,12 +129,204 @@ def _group(words: list[WordTiming], max_words: int = 6, max_dur: float = 3.4):
             buf = []
         buf.append(w)
         span = buf[-1].end - buf[0].start
-        if len(buf) >= max_words or span >= max_dur:
+        authored_stop = bool(_punct_end.search(str(getattr(w, "word", "") or "")))
+        if authored_stop and len(buf) >= 2:
             cues.append(buf)
             buf = []
+        elif len(buf) >= max_words or span >= max_dur:
+            tail = _norm(str(getattr(buf[-1], "word", "") or ""))
+            if tail in _dangling and len(buf) >= 3:
+                cues.append(buf[:-1])
+                buf = [buf[-1]]
+            else:
+                cues.append(buf)
+                buf = []
     if buf:
         cues.append(buf)
     return cues
+
+
+def _cue_text(cue: list[WordTiming]) -> str:
+    return " ".join(str(getattr(w, "word", "") or "") for w in cue).strip()
+
+
+def _caption_schedule(words: list[WordTiming], *, target_cps: float = 20.0,
+                      max_words: int = 12, max_chars: int = 84) -> list[dict]:
+    """Return one readable, non-overlapping schedule shared by ASS and SRT.
+
+    `_group` is intentionally cadence-first, so an ASR boundary can leave a very
+    short cue even when the surrounding sentence has ordinary reading speed.
+    This pass merges only adjacent, same-utterance cues when doing so improves
+    the worse CPS, then divides inter-cue silence according to each neighbour's
+    remaining dwell-time need.  No word is edited, dropped, or reordered.
+
+    Invalid word timing is *not* papered over here.  It is retained in the
+    schedule and reported by `caption_schedule_problems`, allowing the export
+    gate to fail closed instead of serialising zero-duration subtitles.
+    """
+    cues = [list(c) for c in _group(words)]
+    if not cues:
+        return []
+
+    def _base(c):
+        return float(c[0].start), float(c[-1].end), _cue_text(c)
+
+    def _cps(c):
+        a, b, t = _base(c)
+        return len(t) / max(0.001, b - a)
+
+    # Bounded coalescing: at most two legacy six-word cues, at most two
+    # subtitle rows' worth of text, and never across a real pause/breakout.
+    changed = True
+    while changed:
+        changed = False
+        merged: list[list[WordTiming]] = []
+        i = 0
+        while i < len(cues):
+            cur = cues[i]
+            if i + 1 < len(cues):
+                nxt = cues[i + 1]
+                joined = cur + nxt
+                gap = float(nxt[0].start) - float(cur[-1].end)
+                old_worst = max(_cps(cur), _cps(nxt))
+                if (gap < 0.45 and len(joined) <= max_words
+                        and len(_cue_text(joined)) <= max_chars
+                        and (old_worst > target_cps)
+                        and _cps(joined) + 0.01 < old_worst):
+                    merged.append(joined)
+                    i += 2
+                    changed = True
+                    continue
+            merged.append(cur)
+            i += 1
+        cues = merged
+
+    starts = [float(c[0].start) for c in cues]
+    ends = [float(c[-1].end) for c in cues]
+    texts = [_cue_text(c) for c in cues]
+    # Bounded outer dwell.  Use the official 20-CPS target to size only the exposed outer edges;
+    # never show a phrase more than 180ms before speech, and never linger more than 450ms after it.
+    # Anything still unreadable after these honest bounds is rejected by the publication gate.
+    _lead_need = max(0.12, len(texts[0]) / max(target_cps, 1.0)
+                     - (ends[0] - starts[0]))
+    _old_start = starts[0]
+    starts[0] = max(0.0, starts[0] - min(0.18, _lead_need))
+    _lead_got = _old_start - starts[0]
+    _tail_need = max(0.12, len(texts[-1]) / max(target_cps, 1.0)
+                     - (ends[-1] - starts[-1]) - (_lead_got if len(cues) == 1 else 0.0))
+    ends[-1] = max(ends[-1], float(cues[-1][-1].end) + min(0.45, _tail_need))
+
+    for i in range(len(cues) - 1):
+        left_end = float(cues[i][-1].end)
+        right_start = float(cues[i + 1][0].start)
+        gap = right_start - left_end
+        if gap <= 0.02 or gap >= _CUE_GAP_BREAK:
+            continue
+        # Give more of the silence to whichever neighbour is furthest below
+        # its target dwell duration.  The 20 ms separator prevents rounding
+        # from creating overlapping SRT/ASS events.
+        need_l = max(0.0, len(texts[i]) / max(target_cps, 1.0)
+                     - (left_end - float(cues[i][0].start)))
+        need_r = max(0.0, len(texts[i + 1]) / max(target_cps, 1.0)
+                     - (float(cues[i + 1][-1].end) - right_start))
+        share_l = need_l / (need_l + need_r) if need_l + need_r > 1e-9 else 0.5
+        boundary = left_end + gap * share_l
+        ends[i] = max(ends[i], boundary - 0.01)
+        starts[i + 1] = min(starts[i + 1], boundary + 0.01)
+
+    return [{"words": c, "start": starts[i], "end": ends[i], "text": texts[i]}
+            for i, c in enumerate(cues)]
+
+
+def caption_schedule_problems(schedule: list[dict], *, hard_cps: float = 20.0,
+                              min_duration: float = 0.08) -> list[dict]:
+    """Validate the exact schedule that will be burned and written to SRT."""
+    problems: list[dict] = []
+    prev_end = -1.0
+    flattened = []
+    for i, rec in enumerate(schedule or []):
+        cue = list(rec.get("words") or [])
+        flattened.extend(cue)
+        try:
+            a, b = float(rec["start"]), float(rec["end"])
+        except (KeyError, TypeError, ValueError):
+            problems.append({"cue": i, "reason": "missing/non-numeric cue time"})
+            continue
+        if not (math.isfinite(a) and math.isfinite(b)):
+            problems.append({"cue": i, "reason": "non-finite cue time"})
+            continue
+        if b - a < min_duration:
+            problems.append({"cue": i, "reason": f"zero/too-short cue ({b-a:.3f}s)"})
+        if a < prev_end - 1e-3:
+            problems.append({"cue": i, "reason": "cue overlaps or runs backwards"})
+        prev_end = max(prev_end, b)
+        text = str(rec.get("text") or _cue_text(cue))
+        cps = len(text) / max(0.001, b - a)
+        if cps > hard_cps + 1e-6:
+            problems.append({"cue": i, "reason": f"caption speed {cps:.2f} CPS > {hard_cps:.2f}",
+                             "cps": round(cps, 2), "text": text})
+        last_start = -1.0
+        for j, w in enumerate(cue):
+            try:
+                ws, we = float(w.start), float(w.end)
+            except (TypeError, ValueError):
+                problems.append({"cue": i, "word": j, "reason": "non-numeric word time"})
+                continue
+            if not (math.isfinite(ws) and math.isfinite(we)) or we <= ws:
+                problems.append({"cue": i, "word": j,
+                                 "reason": f"non-positive word span {ws!r}->{we!r}"})
+            # Consecutive Whisper words may legitimately overlap by a few frames (or share a
+            # start); ASS clamps event boundaries downstream.  Only a genuinely backwards start
+            # order is corrupt.  Comparing against the previous *end* falsely rejected every
+            # ordinary co-articulation overlap.
+            if ws < last_start - 0.25:
+                problems.append({"cue": i, "word": j, "reason": "word timings run backwards"})
+            last_start = max(last_start, ws)
+    return problems
+
+
+def assert_caption_schedule(words: list[WordTiming], audit_path: Path, *,
+                            hard_cps: float = 20.0) -> list[dict]:
+    """Persist and enforce the exact caption schedule used by both SRT and ASS.
+
+    A subtitle file is a publication artifact, so an unwritable audit is itself a hard failure.
+    The gate rejects zero/backwards word timing, overlapping/zero cues and text above the bounded
+    reading-speed ceiling.  It never deletes or rewrites spoken words to manufacture a pass.
+    """
+    schedule = _caption_schedule(words)
+    problems = caption_schedule_problems(schedule, hard_cps=hard_cps)
+    rows = []
+    for i, rec in enumerate(schedule):
+        a, b = float(rec.get("start", 0.0)), float(rec.get("end", 0.0))
+        text = str(rec.get("text") or "")
+        rows.append({
+            "cue": i, "start": round(a, 3), "end": round(b, 3),
+            "duration": round(max(0.0, b - a), 3), "text": text,
+            "cps": round(len(text) / max(0.001, b - a), 2),
+            "words": len(rec.get("words") or []),
+        })
+    payload = {
+        "schema": "caption_readability/1", "hard_cps": float(hard_cps),
+        "passed": not problems, "word_count": len(words or []),
+        "cue_count": len(schedule), "problem_count": len(problems),
+        "problems": problems, "cues": rows,
+    }
+    audit_path = Path(audit_path)
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = audit_path.with_name(audit_path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+        os.replace(tmp, audit_path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+    if problems:
+        raise RuntimeError(
+            f"caption readability gate: {len(problems)} invalid/too-fast cue issue(s); "
+            f"first: {problems[0]['reason']}; see {audit_path.name}")
+    return schedule
 
 
 def _ts(t: float) -> str:
@@ -447,7 +650,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     _pad = 2.0 * (float(style.get("outline_w", 2) or 0) + float(style.get("shadow", 1) or 0) + 2.0)
     _safe_w = max(200.0, float(play_w) - _ml - _mr)
     lines = [header]
-    cues = _group(words)
+    # The publication gate is run by assemble's SRT preflight before this writer is reached.  Keep
+    # this lower-level renderer tolerant for preview/unit callers that intentionally exercise
+    # microscopic overlaps; the build cannot bypass ``assert_caption_schedule``.
+    _schedule = _caption_schedule(words)
+    cues = [r["words"] for r in _schedule]
     # NEXT-EVENT START, across cue boundaries. The aligner can hand back words whose spans OVERLAP
     # (measured on a delivered render: word 797 starts at 251.260 while word 796 still ends at
     # 251.280). At a cue's last word there is no in-cue successor to bridge to, so that overlap
@@ -460,7 +667,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     _next_start = {}
     for _i, _w in enumerate(_flat[:-1]):
         _next_start[id(_w)] = _flat[_i + 1].start
-    for cue in cues:
+    for _ci, cue in enumerate(cues):
+        _sched = _schedule[_ci]
         toks = [_esc(w.word) for w in cue]
         n = len(cue)
         # display cells (over-wide words grapheme-split) + map back to the source word index
@@ -483,7 +691,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         _reset = "\\r" + _cue
         _prefix = "{%s}" % _cue if _cue else ""
         for k, w in enumerate(cue):
-            ws = w.start
+            # ASS and SRT consume the SAME cue schedule.  Only the first
+            # word may enter a fraction early and only the last may linger;
+            # the active-word changes remain locked to the measured speech.
+            ws = _sched["start"] if k == 0 else w.start
             # BRIDGE TO THE NEXT WORD. One Dialogue event is emitted per word, each carrying the
             # WHOLE line with that word highlighted — so when an event ends at its own word's end,
             # the entire caption disappears until the next word begins. Measured on a 12-minute
@@ -497,7 +708,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             # This also supersedes the old `ws + 0.06` minimum: that floor pushed an event's end
             # PAST the next event's start and produced 4 overlapping pairs, one of which displaced
             # the caption a full line height for 0.87s and printed the same sentence twice.
-            we = max(w.end, cue[k + 1].start) if k < n - 1 else max(w.end, cue[-1].end)
+            we = (max(w.end, cue[k + 1].start) if k < n - 1
+                  else max(w.end, float(_sched["end"])))
             _nxt = _next_start.get(id(w))
             if _nxt is not None:
                 we = min(we, _nxt)           # never outlive the next event — see the note above

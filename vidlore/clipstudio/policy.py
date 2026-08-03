@@ -91,10 +91,34 @@ def _is_rhetorical_connector(seg) -> bool:
     return t.endswith("?") and len(t.split()) <= 10
 
 
-# The analyzer prompt promises required_kind ∈ {actor, character, object, scene, event, location}
-# and analyze.py stores whatever the model actually replied. A kind outside the set is a value no
-# downstream gate understands, so it silently becomes an unsatisfiable demand rather than a no-op.
-_KNOWN_KINDS = frozenset({"actor", "character", "object", "scene", "event", "location", ""})
+# The analyzer prompt promises required_kind ∈ {actor, character, object, scene, event, location},
+# but real replies also use a few plainly concrete nouns. Treat those as concrete rather than as a
+# montage merely because the enum drifted. Measured failure: "A raven takes weeks" arrived as
+# required_kind="animal", is_specific_claim=True, visual_policy=generic_filler and aired a dragon.
+# Montage-like unknown kinds remain fail-safe in _requires_many_subjects below.
+_KNOWN_KINDS = frozenset({
+    "actor", "character", "object", "scene", "event", "location", "",
+    "animal", "creature", "vehicle", "building", "place", "weapon", "prop",
+})
+
+# A direct visual assertion about a concrete non-person subject is exact even when the analyzer
+# forgot `is_specific_claim`. Measured: "almost nobody watched the cup" was labelled CHARACTER,
+# so a generic wedding-table still with no visible cup was accepted. These verbs/phrases say the
+# named object/animal/place is itself the visual evidence; a related venue is not enough.
+_DIRECT_CONCRETE_VISUAL_RX = re.compile(
+    r"\b(?:watch(?:ed|es|ing)?|look(?:ed|s|ing)?\s+at|see|sees|seeing|saw|seen|"
+    r"notice[ds]?|noticed|spot(?:ted|s|ting)?|show(?:s|ed|ing)?|visible|on[ -]screen|"
+    r"close[ -]?up|in plain sight)\b", re.I)
+_DIRECT_CONCRETE_KINDS = frozenset({
+    "object", "prop", "weapon", "animal", "creature", "location", "place", "building", "vehicle",
+})
+
+
+def _direct_concrete_visual(seg) -> bool:
+    kind = (getattr(seg, "required_kind", "") or "").strip().lower()
+    ent = (getattr(seg, "required_entity", "") or "").strip()
+    return bool(ent and kind in _DIRECT_CONCRETE_KINDS
+                and _DIRECT_CONCRETE_VISUAL_RX.search(getattr(seg, "text", "") or ""))
 
 
 def _requires_many_subjects(seg) -> bool:
@@ -118,6 +142,23 @@ def _requires_many_subjects(seg) -> bool:
         return False
     parts = [p.strip() for p in re.split(r",|\band\b|/|\+|;", ent) if p.strip()]
     return len(parts) >= 3
+
+
+def _has_concrete_specific_hook(seg) -> bool:
+    """Objective evidence that an LLM-labelled filler beat actually names a checkable moment.
+
+    `is_specific_claim` alone is intentionally insufficient: the analyzer over-marks abstract
+    commentary, and promoting all of it would broadly re-roll the edit. A quote is self-anchoring;
+    otherwise require both the analyzer's specific flag and a concrete entity/kind. The kind need
+    not be in the prompt enum ("animal" is the measured case) when a named entity is present.
+    """
+    if (getattr(seg, "quote", "") or "").strip():
+        return True
+    if not bool(getattr(seg, "is_specific_claim", False)):
+        return False
+    ent = (getattr(seg, "required_entity", "") or "").strip()
+    kind = (getattr(seg, "required_kind", "") or "").strip().lower()
+    return bool(ent or kind in _KNOWN_KINDS - {""})
 
 
 def is_deictic(seg) -> bool:
@@ -243,7 +284,7 @@ def classify(seg) -> str:
     """Heuristic policy from the signals the analyzer already produces. Deterministic — always works
     even with no LLM. The LLM's explicit `visual_policy` (when present + valid) takes precedence."""
     # deixis outranks every other signal, including the abstract heuristic below
-    if is_deictic(seg):
+    if is_deictic(seg) or _direct_concrete_visual(seg):
         return EXACT
     kind = (getattr(seg, "required_kind", "") or "").lower()
     ent = (getattr(seg, "required_entity", "") or "").strip()
@@ -269,9 +310,16 @@ def policy_of(seg) -> str:
     Deixis overrides the LLM label. The LLM sees one beat's words, not what they point AT, so it
     labels 'at that table' generic — and a generic label is a licence to air anything. The pointing
     word is objective evidence about the referent that outranks the model's guess."""
-    if is_deictic(seg):
+    if is_deictic(seg) or _direct_concrete_visual(seg):
         return EXACT
     p = (getattr(seg, "visual_policy", "") or "").strip().lower()
+    # PROMOTION GUARD — an explicit filler label cannot erase objective specificity. This is
+    # deliberately narrower than `classify`: only a quote, or a specific claim with a concrete
+    # entity/kind, overrides the LLM. Abstract beats accidentally marked specific stay filler.
+    # Continue through the montage guard instead of returning immediately, so a truly multi-scene
+    # demand still becomes CHARACTER rather than an impossible exact window.
+    if p == FILLER and _has_concrete_specific_hook(seg):
+        p = EXACT
     # DEMOTION GUARD — the mirror of the deixis promotion. A SPECIFIC label (exact/character) is a
     # demand for particular footage, so it must be earned by at least one concrete hook: a quote, a
     # required entity, or scene-describing text. A rhetorical connector has none; keeping the LLM's
