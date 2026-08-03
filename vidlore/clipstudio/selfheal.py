@@ -1030,6 +1030,25 @@ def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
             if _accept_installed(seg, sel):
                 resolved += 1
                 continue
+        # A current, independently audited exhaustion record means strict acquisition already ran
+        # against this exact beat and this exact searchable pool.  Consume that evidence before
+        # ``acquire_for_beat`` can add media and make its own authorization stale.  Ordinary
+        # unreviewed/stale/incomplete beats keep the acquire-first path below unchanged.
+        reviewed_exhausted, _review_reason = \
+            _phase1_reviewed_exhaustion_authorization(proj, seg)
+        if reviewed_exhausted:
+            if _phase1_softening_attempt(
+                    proj, seg, sel, used,
+                    lambda: _soften_and_retry(proj, seg, sel, eng, pool, used, log),
+                    basis="phase1_bound_strict_acquisition_exhausted",
+                    marker_original=marker_original):
+                resolved += 1
+            else:
+                log(f"self-heal: beat {bidx} — audited specificity ladder exhausted; "
+                    "strict state restored")
+            # Do not re-acquire after consuming a completed exhaustion audit.  Doing so would
+            # mutate the pool, invalidate the review, and recreate the stale-authorization loop.
+            continue
         if allow_acquire:
             try:
                 fresh = acquire_for_beat(proj, seg, cfg, policy=policy, log=log)
@@ -1222,12 +1241,41 @@ def _gap_pool_fingerprint(proj) -> tuple[str, int]:
             except Exception:                            # noqa: BLE001 — absence is part of identity
                 return [0, 0]
 
+        # Search consumes more than the shot/word JSON.  In particular the CLIP matrix decides
+        # which frame is retrieved, its manifest binds rows to keyframes/model identity, and a
+        # changed keyframe can alter both live-embedding fallback and the actual frame a verifier
+        # sees.  Stat every referenced keyframe rather than hashing image bytes: size + nanosecond
+        # mtime is cheap enough for the preassembly authorization and still makes an index rewrite
+        # invalidate a previously completed whole-pool review.
+        shots_path = proj.shots_path(sid)
+        keyframes = []
+        try:
+            shot_rows = json.loads(shots_path.read_text(encoding="utf-8"))
+            referenced = sorted({
+                str(row.get("keyframe_path", "") or "")
+                for row in shot_rows if isinstance(row, dict)
+                and str(row.get("keyframe_path", "") or "")
+            })
+            keyframes = [[path, _stat(path)] for path in referenced]
+        except Exception:                               # noqa: BLE001 — malformed is distinct state
+            keyframes = [["<unreadable-shot-keyframes>", [0, 0]]]
+
+        embeds_path_fn = getattr(proj, "embeds_path", None)
+        embeds_path = embeds_path_fn(sid) if callable(embeds_path_fn) else \
+            Path(proj.index_dir) / f"{sid}.embeds.npy"
+        embeds_manifest = embeds_path.with_name(
+            embeds_path.name.replace(".npy", "") + ".manifest.json")
+
         rows.append({
             "id": sid,
             "checksum": str(getattr(src, "checksum", "") or ""),
             "media": _stat(getattr(src, "local_path", "") or ""),
-            "shots": _stat(proj.shots_path(sid)),
+            "shots": _stat(shots_path),
             "words": _stat(Path(proj.index_dir) / f"{sid}.words.json"),
+            "embeds": _stat(embeds_path),
+            "embeds_manifest": _stat(embeds_manifest),
+            "index_meta": _stat(Path(proj.index_dir) / f"{sid}.index.meta.json"),
+            "keyframes": keyframes,
         })
     raw = json.dumps(rows, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest(), len(rows)
@@ -1585,8 +1633,178 @@ def _phase1_softening_authorization(proj, seg) -> tuple[bool, str]:
         return False, f"gap_review_validation_error:{type(exc).__name__}"
 
 
+_STRICT_ACQUISITION_EVIDENCE_SCHEMA = 1
+_STRICT_ACQUISITION_CLAIMS = (
+    ("classification", "footage_gap", "strict_acquisition_classification_not_footage_gap"),
+    ("actual_frame_pool_audit", True,
+     "strict_acquisition_actual_frame_pool_audit_absent"),
+    ("whole_pool_reviewed", True, "strict_acquisition_whole_pool_review_absent"),
+    ("correct_footage_present_in_pool", False,
+     "strict_acquisition_pool_absence_not_proven"),
+    ("pipeline_bug_ruled_out", True, "strict_acquisition_pipeline_bug_not_ruled_out"),
+    ("strict_acquisition_status", "exhausted",
+     "strict_acquisition_status_not_exhausted"),
+    ("technical_status", "complete", "strict_acquisition_technical_status_not_complete"),
+)
+
+
+def _strict_acquisition_evidence(proj, segments, beat_indices, *, source: str,
+                                 expected_sha256: str = "", stored_records=None) \
+        -> tuple[dict | None, str]:
+    """Validate the authoritative independent exhaustion artifact against the current world.
+
+    The project review is a cached authorization, not the evidence itself.  Therefore neither the
+    maker nor a hand-edited ``project.json`` may manufacture claims from a beat list.  Both creation
+    and consumption come through this function, which reads the content-hashed JSON artifact and
+    binds every requested beat plus the complete searchable pool before returning normalized rows.
+    """
+    evidence_source = str(source or "").strip()
+    if not evidence_source:
+        return None, "strict_acquisition_evidence_source_missing"
+    evidence_path = Path(evidence_source).expanduser()
+    if not evidence_path.is_absolute():
+        evidence_path = Path(getattr(proj, "root", "") or ".") / evidence_path
+    try:
+        evidence_path = evidence_path.resolve()
+    except Exception:                                    # noqa: BLE001 — read below fails closed
+        pass
+    if not evidence_path.is_file():
+        return None, "strict_acquisition_evidence_artifact_missing"
+
+    expected_sha = str(expected_sha256 or "").strip().lower()
+    if stored_records is not None and not expected_sha:
+        return None, "strict_acquisition_evidence_sha256_missing_or_malformed"
+    if expected_sha and not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+        return None, "strict_acquisition_evidence_sha256_missing_or_malformed"
+    try:
+        raw = evidence_path.read_bytes()
+    except Exception as exc:                              # noqa: BLE001 — evidence must be readable
+        return None, f"strict_acquisition_evidence_artifact_unreadable:{type(exc).__name__}"
+    actual_sha = hashlib.sha256(raw).hexdigest()
+    if expected_sha and actual_sha != expected_sha:
+        return None, "strict_acquisition_evidence_artifact_hash_mismatch"
+    try:
+        artifact = json.loads(raw.decode("utf-8"))
+    except Exception as exc:                              # noqa: BLE001 — malformed is not evidence
+        return None, f"strict_acquisition_evidence_json_invalid:{type(exc).__name__}"
+    if not isinstance(artifact, dict):
+        return None, "strict_acquisition_evidence_json_not_object"
+    schema = artifact.get("schema_version")
+    if isinstance(schema, bool) or not isinstance(schema, int) \
+            or schema != _STRICT_ACQUISITION_EVIDENCE_SCHEMA:
+        return None, "strict_acquisition_evidence_schema_not_1"
+    if str(artifact.get("status", "") or "") != "complete":
+        return None, "strict_acquisition_evidence_status_not_complete"
+
+    current_pool, current_count = _gap_pool_fingerprint(proj)
+    artifact_pool = str(artifact.get("pool_fingerprint", "") or "")
+    if not artifact_pool:
+        return None, "strict_acquisition_evidence_pool_fingerprint_missing"
+    if artifact_pool != current_pool:
+        return None, "strict_acquisition_evidence_source_pool_changed"
+    artifact_count = artifact.get("pool_source_count")
+    if isinstance(artifact_count, bool) or not isinstance(artifact_count, int):
+        return None, "strict_acquisition_evidence_pool_source_count_malformed"
+    if artifact_count != current_count:
+        return None, "strict_acquisition_evidence_pool_source_count_changed"
+
+    artifact_beats = artifact.get("beats")
+    if not isinstance(artifact_beats, dict):
+        return None, "strict_acquisition_evidence_beats_missing_or_malformed"
+    by_idx = {int(getattr(s, "index", -1)): s for s in (segments or [])}
+    normalized = {}
+    for raw_idx in (beat_indices or []):
+        if isinstance(raw_idx, bool):
+            return None, "strict_acquisition_evidence_beat_index_malformed"
+        try:
+            idx = int(raw_idx)
+        except (TypeError, ValueError):
+            return None, "strict_acquisition_evidence_beat_index_malformed"
+        seg = by_idx.get(idx)
+        if seg is None:
+            return None, "strict_acquisition_evidence_beat_absent"
+        row = artifact_beats.get(str(idx))
+        if not isinstance(row, dict):
+            return None, "strict_acquisition_evidence_beat_record_missing"
+        current_beat = _gap_beat_fingerprint(seg)
+        if str(row.get("beat_fingerprint", "") or "") != current_beat:
+            return None, "strict_acquisition_evidence_beat_fingerprint_mismatch"
+        for field, expected, failure in _STRICT_ACQUISITION_CLAIMS:
+            value = row.get(field)
+            if isinstance(expected, bool):
+                valid = value is expected
+            else:
+                valid = str(value or "") == expected
+            if not valid:
+                return None, failure
+
+        # The artifact is authoritative, but retain its normalized claims in project.json so audit
+        # output remains self-describing.  A hand edit must agree byte-for-byte with the artifact;
+        # it cannot turn an incomplete/pipeline-bug record into an early authorization.
+        stored = (stored_records or {}).get(str(idx)) if stored_records is not None else None
+        if stored_records is not None and not isinstance(stored, dict):
+            return None, "beat_strict_acquisition_exhaustion_missing"
+        if stored is not None:
+            if str(stored.get("beat_fingerprint", "") or "") != current_beat:
+                return None, "strict_acquisition_evidence_beat_fingerprint_mismatch"
+            for field, expected, failure in _STRICT_ACQUISITION_CLAIMS:
+                value = stored.get(field)
+                if isinstance(expected, bool):
+                    valid = value is expected
+                else:
+                    valid = str(value or "") == expected
+                if not valid or value != row.get(field):
+                    return None, failure
+        normalized[str(idx)] = {
+            "beat_fingerprint": current_beat,
+            **{field: row[field] for field, _expected, _failure
+               in _STRICT_ACQUISITION_CLAIMS},
+        }
+
+    return {
+        "evidence_source": str(evidence_path),
+        "evidence_sha256": actual_sha,
+        "pool_fingerprint": current_pool,
+        "pool_source_count": current_count,
+        "beats": normalized,
+    }, "strict_acquisition_evidence_valid"
+
+
+def _phase1_reviewed_exhaustion_authorization(proj, seg) -> tuple[bool, str]:
+    """Authorize the sole pre-acquisition specificity-ladder path.
+
+    A plain footage-gap review still follows the normal acquire-first flow.  Moving the ladder
+    earlier is safe only when an independent actual-frame/pool audit also records that strict
+    acquisition completed conclusively for this same pool.  The ordinary phase-1 authorization
+    remains authoritative for beat/pool fingerprints, quote typing, current verifier evidence,
+    and the semantic-vs-technical distinction.
+    """
+    ok, reason = _phase1_softening_authorization(proj, seg)
+    if not ok:
+        return False, reason
+    try:
+        review = (getattr(proj, "meta", {}) or {}).get(
+            "selection_relevance_gap_review") or {}
+        records = review.get("strict_acquisition_exhaustion")
+        if not isinstance(records, dict):
+            return False, "strict_acquisition_exhaustion_missing_or_malformed"
+        idx = int(getattr(seg, "index", -1))
+        record = records.get(str(idx))
+        if not isinstance(record, dict):
+            return False, "beat_strict_acquisition_exhaustion_missing"
+        validated, evidence_reason = _strict_acquisition_evidence(
+            proj, [seg], [idx], source=record.get("evidence_source", ""),
+            expected_sha256=record.get("evidence_sha256", ""), stored_records=records)
+        if validated is None:
+            return False, evidence_reason
+        return True, "authorized_by_bound_completed_strict_acquisition_exhaustion"
+    except Exception as exc:                              # noqa: BLE001 — mutation must fail closed
+        return False, f"strict_acquisition_review_validation_error:{type(exc).__name__}"
+
+
 def make_selection_relevance_gap_review(proj, segments, confirmed_gap_beats, *,
-                                        method: str, source: str = "") -> dict:
+                                        method: str, source: str = "",
+                                        strict_acquisition_exhausted_beats=None) -> dict:
     """Create a tamper/staleness-bound authorization for the specificity ladder.
 
     Bare beat numbers are unsafe: matching can rewrite a beat and strict recovery can add source
@@ -1599,7 +1817,7 @@ def make_selection_relevance_gap_review(proj, segments, confirmed_gap_beats, *,
     if missing:
         raise ValueError(f"cannot bind unknown gap beat(s): {missing}")
     pool_fp, pool_n = _gap_pool_fingerprint(proj)
-    return {
+    payload = {
         "schema_version": 2,
         "method": str(method or "actual_frame_and_pool_audit"),
         "source": str(source or ""),
@@ -1608,6 +1826,33 @@ def make_selection_relevance_gap_review(proj, segments, confirmed_gap_beats, *,
         "pool_fingerprint": pool_fp,
         "pool_source_count": pool_n,
     }
+    exhausted = sorted({int(i) for i in (strict_acquisition_exhausted_beats or [])})
+    if any(i not in wanted for i in exhausted):
+        raise ValueError("strict-acquisition exhaustion must be a subset of confirmed gap beats")
+    if exhausted:
+        evidence_source = str(source or "").strip()
+        if not evidence_source:
+            raise ValueError("strict-acquisition exhaustion requires a non-empty evidence source")
+        validated, evidence_reason = _strict_acquisition_evidence(
+            proj, [by_idx[i] for i in exhausted], exhausted, source=evidence_source)
+        if validated is None:
+            if evidence_reason == "strict_acquisition_evidence_artifact_missing":
+                raise ValueError(
+                    "strict-acquisition exhaustion evidence source must be an existing file")
+            raise ValueError(f"invalid strict-acquisition exhaustion evidence: {evidence_reason}")
+        if str(method or "") != "actual_frame_and_pool_audit":
+            raise ValueError(
+                "strict-acquisition exhaustion requires method=actual_frame_and_pool_audit")
+        payload["source"] = validated["evidence_source"]
+        payload["strict_acquisition_exhaustion"] = {
+            str(i): {
+                **validated["beats"][str(i)],
+                "evidence_source": validated["evidence_source"],
+                "evidence_sha256": validated["evidence_sha256"],
+            }
+            for i in exhausted
+        }
+    return payload
 
 
 def semantic_gap_candidates(proj, audit: dict) -> tuple[list[int], str]:

@@ -21,9 +21,10 @@ from vidlore.clipstudio import orchestrate as O
 
 
 class _Src:
-    def __init__(self, sid, title, status="ok", url=""):
+    def __init__(self, sid, title, status="ok", url="", error=""):
         self.id, self.title, self.status = sid, title, status
         self.url = url or f"https://y/{sid}"
+        self.error = error
 
 
 class _Proj:
@@ -45,6 +46,7 @@ def _wire(monkeypatch, *, cands=None, downloads=None):
     from vidlore.clipstudio import match as M
     monkeypatch.setattr(M, "_load_pool",
                         lambda *a, **k: seen.__setitem__("pool_calls", seen["pool_calls"] + 1))
+    monkeypatch.setattr(M, "usable_shot_yield", lambda *_a, **_k: (1, 1))
 
     def _disc(analysis, cfg, *, segments=None, progress=None, extra_queries=None):
         seen["queries"].append(list(extra_queries or []))
@@ -76,9 +78,12 @@ def _run(proj, **kw):
         log=kw.pop("log", lambda m: None), **kw)
 
 
-def test_refuses_to_run_without_face_id_references():
+def test_refuses_to_run_without_face_id_references(monkeypatch):
     """A source indexed without Face-ID starts w_face (0.30) behind every incumbent, so it loses
     the very beats it was fetched for and the failure reads as 'the picker ignores good footage'."""
+    # Keep this unit focused on the already-derived quality rejection. The real pool probe needs
+    # indexed media and would correctly reclassify this tiny synthetic source fixture.
+    monkeypatch.setattr("vidlore.clipstudio.match._load_pool", lambda *_a, **_k: None)
     msgs = []
     proj = _Proj([_Src("t", "The Trial of Petyr Baelish")], ["t"])
     n = O._backfill_rejected_sources(
@@ -162,6 +167,8 @@ def test_no_new_candidate_stops_cleanly(monkeypatch):
     assert _run(proj, log=msgs.append) == 0
     assert any("no NEW candidate" in m for m in msgs)
     assert seen["downloaded"] == [], "nothing new means nothing to download"
+    assert proj.meta["backfill_audit"]["status"] == "complete"
+    assert proj.meta["backfill_audit"]["reason"] == "no_new_candidate"
 
 
 def test_a_failing_edge_degrades_instead_of_killing_the_render(monkeypatch):
@@ -177,6 +184,8 @@ def test_a_failing_edge_degrades_instead_of_killing_the_render(monkeypatch):
     msgs = []
     assert _run(proj, log=msgs.append) == 0
     assert any("discovery failed" in m for m in msgs)
+    assert proj.meta["backfill_audit"]["status"] == "incomplete"
+    assert proj.meta["backfill_audit"]["reason"].startswith("discovery_failed:")
 
 
 def test_audit_is_persisted(monkeypatch):
@@ -187,6 +196,328 @@ def test_audit_is_persisted(monkeypatch):
     a = proj.meta.get("backfill_audit")
     assert a and a["rounds"], "the pass must record what it looked for and what it found"
     assert a["rounds"][0]["rejected"] == ["t"]
+    assert a["schema_version"] == 2 and a["status"] == "complete"
+
+
+def test_footage_signatures_use_the_post_backfill_pool_and_ignore_duplicate_records():
+    seg = types.SimpleNamespace(
+        index=0, text="beat", visual_policy="exact_scene", required_entity="",
+        required_kind="", scene_query="scene", quote="")
+    one = _Src("one", "one")
+    duplicate = _Src("one", "duplicate record sharing the same index namespace")
+    two = _Src("two", "newly admitted clean copy")
+
+    before = O._footage_stage_signatures(
+        "download", [one], force_index=False, segments=[seg], verify=True)
+    duplicate_only = O._footage_stage_signatures(
+        "download", [one, duplicate], force_index=False, segments=[seg], verify=True)
+    after = O._footage_stage_signatures(
+        "download", [one, duplicate, two], force_index=False, segments=[seg], verify=True)
+
+    assert duplicate_only == before
+    assert after != before
+
+
+def test_completed_backfill_checkpoint_skips_but_incomplete_audit_retries():
+    proj = _Proj([], [])
+    sig = O._sig("stable upstream", "backfillv3")
+    proj.meta["backfill_audit"] = {
+        "schema_version": 2, "status": "complete", "input_sig": sig}
+    O._stage_done(proj, "backfill", sig)
+    assert O._stage_skip(
+        proj, "backfill", sig, resume=True,
+        artifact_ok=O._backfill_audit_complete_for(proj, sig))
+
+    proj.meta["backfill_audit"]["status"] = "incomplete"
+    assert not O._stage_skip(
+        proj, "backfill", sig, resume=True,
+        artifact_ok=O._backfill_audit_complete_for(proj, sig))
+
+
+def test_incomplete_backfill_forces_cached_footage_path_then_complete_resume_skips():
+    """A failed pass must remain schedulable after that run checkpoints every later stage."""
+    proj = _Proj([], [])
+    seg = types.SimpleNamespace(
+        index=0, text="beat", visual_policy="exact_scene", required_entity="",
+        required_kind="", scene_query="scene", quote="")
+    cfg = types.SimpleNamespace(discover_target=18, max_height=1080)
+    analysis = types.SimpleNamespace(
+        movie_title="Game of Thrones", video_type="multi_scene",
+        actors=["Aidan Gillen"], characters=[], key_scenes=[])
+    footage = O._footage_stage_signatures(
+        "download", [], force_index=False, segments=[seg], verify=True)
+    sig_match, sig_verify, sig_recover = footage[1], footage[3], footage[4]
+    for stage, sig in (("match", sig_match), ("verify", sig_verify),
+                       ("recover", sig_recover)):
+        O._stage_done(proj, stage, sig)
+
+    sig_backfill = O._backfill_input_signature(
+        "download", [seg], policy="approved_testing", max_sources=8,
+        show_title="Game of Thrones", enabled=True, rounds=2,
+        cfg=cfg, analysis=analysis)
+    proj.meta["backfill_audit"] = {
+        "schema_version": 2, "status": "incomplete", "input_sig": sig_backfill}
+    downstream = {
+        "skip_match": O._stage_skip(proj, "match", sig_match, resume=True),
+        "skip_verify": O._stage_skip(proj, "verify", sig_verify, resume=True),
+        "skip_recover": O._stage_skip(proj, "recover", sig_recover, resume=True),
+    }
+    skip_backfill = O._stage_skip(
+        proj, "backfill", sig_backfill, resume=True,
+        artifact_ok=O._backfill_audit_complete_for(proj, sig_backfill))
+    assert all(downstream.values()) and not skip_backfill
+    assert O._footage_stages_required(
+        **downstream, backfill_enabled=True, skip_backfill=skip_backfill), \
+        "resume 1 must rebuild Face-ID/backfill context and retry the incomplete pass"
+
+    proj.meta["backfill_audit"]["status"] = "complete"
+    O._stage_done(proj, "backfill", sig_backfill)
+    skip_backfill = O._stage_skip(
+        proj, "backfill", sig_backfill, resume=True,
+        artifact_ok=O._backfill_audit_complete_for(proj, sig_backfill))
+    assert skip_backfill
+    assert not O._footage_stages_required(
+        **downstream, backfill_enabled=True, skip_backfill=skip_backfill), \
+        "resume 2 may skip only after the same semantic inputs completed conclusively"
+
+
+def test_backfill_signature_binds_cfg_analysis_and_gate_env_but_not_recovery_pool(monkeypatch):
+    seg = types.SimpleNamespace(
+        index=0, text="beat", visual_policy="exact_scene", required_entity="Petyr Baelish",
+        required_kind="character", scene_query="Littlefinger trial", quote="")
+    cfg = types.SimpleNamespace(
+        discover_target=18, discover_min_height=300, max_height=1080,
+        scene_threshold=27.0, detect_ocr=True)
+    analysis = types.SimpleNamespace(
+        movie_title="Game of Thrones", video_type="multi_scene",
+        actors=["Aidan Gillen"], characters=[{"name": "Petyr", "actor": "Aidan Gillen"}],
+        key_scenes=["Littlefinger trial"])
+
+    def _make(current_cfg=cfg, current_analysis=analysis):
+        return O._backfill_input_signature(
+            "download", [seg], policy="approved_testing", max_sources=8,
+            show_title="Game of Thrones", enabled=True, rounds=2,
+            cfg=current_cfg, analysis=current_analysis)
+
+    base = _make()
+    cfg_changed = types.SimpleNamespace(**vars(cfg))
+    cfg_changed.discover_min_height = 720
+    assert _make(current_cfg=cfg_changed) != base
+    analysis_changed = types.SimpleNamespace(**vars(analysis))
+    analysis_changed.actors = ["Aidan Gillen", "Sophie Turner"]
+    assert _make(current_analysis=analysis_changed) != base
+
+    with monkeypatch.context() as gate_env:
+        gate_env.setenv("VIDLORE_CLIPSTUDIO_OCR_GATE", "__changed_for_test__")
+        assert _make() != base
+    with monkeypatch.context() as yield_env:
+        yield_env.setenv("VIDLORE_CLIPSTUDIO_UNREADABLE_HI", "__changed_for_test__")
+        assert _make() != base
+    with monkeypatch.context() as perf_env:
+        perf_env.setenv("VIDLORE_CLIPSTUDIO_MAX_CPU", "__irrelevant_changed__")
+        assert _make() == base, "performance-only knobs must not replay a completed web search"
+
+    # Targeted post-match recovery changes the searchable pool, not the global clean-copy search's
+    # authored/config inputs. It must invalidate match signatures, but not replay backfill forever.
+    proj = _Proj([_Src("original", "original")], [])
+    before_pool_add = _make()
+    proj.sources.append(_Src("targeted-recovery", "new exact-scene source"))
+    assert _make() == before_pool_add
+
+
+def test_real_config_performance_toggle_does_not_replay_completed_backfill(monkeypatch):
+    import dataclasses
+    from vidlore.clipstudio.config import ClipConfig
+
+    for key in ("VIDLORE_CLIPSTUDIO_CUT_WORKERS",
+                "VIDLORE_CLIPSTUDIO_WHISPER_THREADS",
+                "VIDLORE_CLIPSTUDIO_CONCURRENCY"):
+        monkeypatch.delenv(key, raising=False)
+    seg = types.SimpleNamespace(
+        index=0, text="beat", visual_policy="exact_scene", required_entity="",
+        required_kind="", scene_query="scene", quote="")
+    analysis = types.SimpleNamespace(
+        movie_title="Game of Thrones", video_type="multi_scene",
+        actors=[], characters=[], key_scenes=[])
+
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_MAX_CPU", "0")
+    normal = ClipConfig()
+    normal_sig = O._backfill_input_signature(
+        "download", [seg], policy="approved_testing", max_sources=8,
+        show_title="Game of Thrones", enabled=True, rounds=2,
+        cfg=normal, analysis=analysis)
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_MAX_CPU", "1")
+    turbo = ClipConfig()
+    turbo_sig = O._backfill_input_signature(
+        "download", [seg], policy="approved_testing", max_sources=8,
+        show_title="Game of Thrones", enabled=True, rounds=2,
+        cfg=turbo, analysis=analysis)
+
+    assert (normal.cut_workers, normal.whisper_cpu_threads, normal.download_concurrency) != \
+        (turbo.cut_workers, turbo.whisper_cpu_threads, turbo.download_concurrency), \
+        "the test must exercise genuinely different performance settings"
+    assert turbo_sig == normal_sig
+
+    changed_index_semantics = dataclasses.replace(
+        turbo, target_clip_sec=turbo.target_clip_sec + 0.5)
+    changed_sig = O._backfill_input_signature(
+        "download", [seg], policy="approved_testing", max_sources=8,
+        show_title="Game of Thrones", enabled=True, rounds=2,
+        cfg=changed_index_semantics, analysis=analysis)
+    assert changed_sig != turbo_sig, \
+        "shot/index semantic changes must invalidate a completed backfill"
+
+
+def test_unexpected_new_invocation_failure_rolls_back_and_cannot_bless_stale_audit(
+        monkeypatch):
+    proj = _Proj([], [])
+    old_sig, new_sig = "old-inputs", "new-inputs"
+    proj.meta["backfill_audit"] = {
+        "schema_version": 2, "status": "complete", "input_sig": old_sig}
+    O._stage_done(proj, "backfill", old_sig)
+    proj.meta["banned_sources"] = ["preexisting-ban"]
+    msgs = []
+    purged = []
+    monkeypatch.setattr(
+        "vidlore.clipstudio.index.purge_source_index",
+        lambda _proj, sid: purged.append(sid))
+
+    def _boom():
+        proj.sources.append(_Src("unscreened", "post-index mutation"))
+        proj.meta["banned_sources"].append("partial-mutation")
+        raise RuntimeError("unexpected programming or provider failure")
+
+    assert O._run_backfill_invocation(proj, new_sig, _boom, log=msgs.append) is False
+    audit = proj.meta["backfill_audit"]
+    assert audit["input_sig"] == new_sig
+    assert audit["status"] == "incomplete"
+    assert audit["reason"] == "unexpected_failure:RuntimeError"
+    assert not O._backfill_audit_complete_for(proj, new_sig)
+    assert proj.meta["pipeline"]["stages"]["backfill"]["sig"] == old_sig
+    assert proj.sources == []
+    assert proj.meta["banned_sources"] == ["preexisting-ban"]
+    assert purged == ["unscreened"]
+
+
+def test_download_failed_status_is_incomplete_and_url_remains_retryable(monkeypatch):
+    monkeypatch.delenv("VIDLORE_CLIPSTUDIO_BACKFILL_REJECTED", raising=False)
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_BACKFILL_ROUNDS", "1")
+    url = "https://y/technical-failure"
+    failed = _Src(
+        "failed", "clean-copy candidate", status="download_failed", url=url,
+        error="HTTP 403 while downloading media")
+    seen = _wire(
+        monkeypatch,
+        cands=[types.SimpleNamespace(url=url, title="clean-copy candidate")],
+        downloads=[failed])
+    proj = _Proj([_Src("t", "The Trial of Petyr Baelish")], ["t"])
+
+    assert _run(proj, input_sig="attempt-one") == 0
+    audit = proj.meta["backfill_audit"]
+    assert audit["status"] == "incomplete"
+    assert audit["reason"] == "download_failed_status:1"
+    assert audit["input_sig"] == "attempt-one"
+    assert seen["index_calls"] == 0
+    assert all(s.url != url for s in proj.sources), \
+        "failed URL must not enter `have` and suppress its retry on Resume"
+
+
+def test_thrown_download_failure_rolls_back_rows_added_before_the_exception(monkeypatch):
+    monkeypatch.delenv("VIDLORE_CLIPSTUDIO_BACKFILL_REJECTED", raising=False)
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_BACKFILL_ROUNDS", "1")
+    url = "https://y/mutate-then-fail"
+    _wire(
+        monkeypatch,
+        cands=[types.SimpleNamespace(url=url, title="candidate")],
+        downloads=[])
+
+    def _mutate_then_fail(proj, *_a, **_k):
+        proj.sources.append(_Src("partial", "candidate", url=url))
+        raise RuntimeError("transport collapsed after manifest mutation")
+
+    monkeypatch.setattr("vidlore.clipstudio.download.download_candidates", _mutate_then_fail)
+    proj = _Proj([_Src("t", "The Trial of Petyr Baelish")], ["t"])
+
+    assert _run(proj, input_sig="thrown") == 0
+    assert proj.meta["backfill_audit"]["status"] == "incomplete"
+    assert proj.meta["backfill_audit"]["reason"] == "download_failed:RuntimeError"
+    assert all(s.url != url for s in proj.sources)
+
+
+def test_partial_download_failure_rolls_back_the_whole_unscreened_batch(monkeypatch):
+    monkeypatch.delenv("VIDLORE_CLIPSTUDIO_BACKFILL_REJECTED", raising=False)
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_BACKFILL_ROUNDS", "1")
+    good_url, bad_url = "https://y/good", "https://y/bad"
+    good = _Src("good", "usable clean copy", url=good_url)
+    failed = _Src(
+        "failed", "possibly exact clean copy", status="download_failed", url=bad_url,
+        error="timed out")
+    _wire(
+        monkeypatch,
+        cands=[types.SimpleNamespace(url=good_url, title="usable clean copy"),
+               types.SimpleNamespace(url=bad_url, title="possibly exact clean copy")],
+        downloads=[good, failed])
+    proj = _Proj([_Src("t", "The Trial of Petyr Baelish")], ["t"])
+
+    assert _run(proj, input_sig="partial") == 0
+    assert proj.meta["backfill_audit"]["status"] == "incomplete"
+    assert all(s.url != good_url for s in proj.sources), \
+        "a successful sibling has not passed the title/yield screen and must not pollute match"
+    assert all(s.url != bad_url for s in proj.sources), \
+        "the failed sibling must remain retryable even when another candidate succeeded"
+
+
+def test_index_failure_rolls_back_batch_and_same_candidate_retries(monkeypatch):
+    monkeypatch.delenv("VIDLORE_CLIPSTUDIO_BACKFILL_REJECTED", raising=False)
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_BACKFILL_ROUNDS", "1")
+    url = "https://y/retry-after-index"
+    replacement = _Src("replacement", "usable clean copy", url=url)
+    seen = _wire(
+        monkeypatch,
+        cands=[types.SimpleNamespace(url=url, title="usable clean copy")],
+        downloads=[replacement])
+    index_attempts = []
+
+    def _index_then_recover(*_args, **_kwargs):
+        index_attempts.append(True)
+        if len(index_attempts) == 1:
+            raise RuntimeError("index backend unavailable")
+
+    monkeypatch.setattr("vidlore.clipstudio.index.index_all", _index_then_recover)
+    proj = _Proj([_Src("t", "The Trial of Petyr Baelish")], ["t"])
+
+    assert _run(proj, input_sig="same-semantic-inputs") == 0
+    assert proj.meta["backfill_audit"]["status"] == "incomplete"
+    assert proj.meta["backfill_audit"]["reason"] == "indexing_failed:RuntimeError"
+    assert all(s.url != url for s in proj.sources), \
+        "unindexed URL must not enter `have` and masquerade as an exhausted search"
+
+    assert _run(proj, input_sig="same-semantic-inputs") == 1
+    assert proj.meta["backfill_audit"]["status"] == "complete"
+    assert seen["downloaded"] == [1, 1]
+    assert len(index_attempts) == 2
+
+
+def test_policy_and_checksum_exclusions_are_conclusive_download_outcomes(monkeypatch):
+    monkeypatch.delenv("VIDLORE_CLIPSTUDIO_BACKFILL_REJECTED", raising=False)
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_BACKFILL_ROUNDS", "1")
+    blocked_url, duplicate_url = "https://y/blocked", "https://y/duplicate"
+    blocked = _Src(
+        "blocked", "rights-blocked copy", status="blocked_no_permission", url=blocked_url)
+    duplicate = _Src(
+        "duplicate", "already represented bytes", status="duplicate", url=duplicate_url)
+    _wire(
+        monkeypatch,
+        cands=[types.SimpleNamespace(url=blocked_url, title="rights-blocked copy"),
+               types.SimpleNamespace(url=duplicate_url, title="already represented bytes")],
+        downloads=[blocked, duplicate])
+    proj = _Proj([_Src("t", "The Trial of Petyr Baelish")], ["t"])
+
+    assert _run(proj, input_sig="conclusive") == 0
+    audit = proj.meta["backfill_audit"]
+    assert audit["status"] == "complete"
+    assert audit["reason"] == "download_conclusive_policy_or_duplicate"
+    assert audit["input_sig"] == "conclusive"
 
 
 @pytest.mark.parametrize("title,want", [
@@ -294,8 +625,8 @@ def test_a_replacement_with_usable_shots_counts(monkeypatch):
     assert "clean" not in (proj.meta.get("banned_sources") or [])
 
 
-def test_unmeasurable_yield_is_given_the_benefit_of_the_doubt(monkeypatch):
-    """A yield probe that throws must not silently ban a good source."""
+def test_unmeasurable_yield_is_retryable_and_rolls_back_unscreened_batch(monkeypatch):
+    """A technical yield failure is neither a ban nor proof that the source can air."""
     monkeypatch.delenv("VIDLORE_CLIPSTUDIO_BACKFILL_REJECTED", raising=False)
     monkeypatch.setenv("VIDLORE_CLIPSTUDIO_BACKFILL_ROUNDS", "1")
     s = _Src("odd", "some scene", url="https://y/odd")
@@ -307,8 +638,18 @@ def test_unmeasurable_yield_is_given_the_benefit_of_the_doubt(monkeypatch):
 
     monkeypatch.setattr(M, "usable_shot_yield", _boom)
     proj = _Proj([_Src("t", "The Trial of Petyr Baelish")], ["t"])
-    assert _run(proj) == 1
+    purged = []
+    monkeypatch.setattr(
+        "vidlore.clipstudio.index.purge_source_index",
+        lambda _proj, sid: purged.append(sid))
+
+    assert _run(proj, input_sig="yield-attempt") == 0
+    assert proj.meta["backfill_audit"]["status"] == "incomplete"
+    assert proj.meta["backfill_audit"]["reason"] == \
+        "yield_measurement_failed:RuntimeError"
+    assert all(source.id != "odd" for source in proj.sources)
     assert "odd" not in (proj.meta.get("banned_sources") or [])
+    assert purged == ["odd"]
 
 
 # ---------------------------------------------------------------- what a replacement may BE

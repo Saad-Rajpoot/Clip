@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from .models import ClipProject, SOURCE_OK
+from .models import ClipProject, SOURCE_OK, SOURCE_BLOCKED, SOURCE_FAILED
 from .config import ClipConfig, load_clip_config, engine_config
 from .ingest import ingest_sources, SourceSpec
 from .index import index_all
@@ -154,6 +154,260 @@ def _stage_skip(proj, name: str, sig: str, resume: bool, artifact_ok: bool = Tru
         return False
     rec = _ckpt(proj)["stages"].get(name)
     return bool(rec and rec.get("status") == "done" and rec.get("sig") == sig and artifact_ok)
+
+
+def _footage_stage_signatures(download_sig: str, sources, *, force_index: bool,
+                              segments, verify: bool) -> tuple[str, str, str, str, str]:
+    """Sign the pool actually consumed by match and every dependent footage stage.
+
+    Pre-match anchor/backfill passes may add sources after the download checkpoint.  Computing these
+    signatures only before those passes records a pre-mutation signature beside post-mutation
+    selections, so every Resume needlessly rematches and re-runs backfill.  Source ids are canonical
+    because duplicate records with the same id resolve to one searchable index namespace.
+    """
+    source_ids = tuple(sorted({str(getattr(s, "id", "") or "") for s in (sources or [])
+                               if str(getattr(s, "id", "") or "")}))
+    sig_index = _sig(download_sig, source_ids, bool(force_index))
+    sig_match = _sig(sig_index, _seg_sig(segments), "gatev2-graphics")
+    sig_cut = _sig(sig_match)
+    sig_verify = _sig(sig_cut, bool(verify))
+    return sig_index, sig_match, sig_cut, sig_verify, _sig(sig_verify)
+
+
+def _semantic_fingerprint(value) -> str:
+    """Hash dataclass/dict-like semantic inputs without object ids or map-order noise."""
+    import dataclasses as _dc_sig
+    import json as _json_sig
+
+    def _plain(obj):
+        if obj is None or isinstance(obj, (str, int, float, bool)):
+            return obj
+        if isinstance(obj, Path):
+            return str(obj)
+        if _dc_sig.is_dataclass(obj) and not isinstance(obj, type):
+            return _plain(_dc_sig.asdict(obj))
+        if hasattr(obj, "to_dict") and callable(obj.to_dict):
+            return _plain(obj.to_dict())
+        if isinstance(obj, dict):
+            return {str(k): _plain(v) for k, v in sorted(
+                obj.items(), key=lambda item: str(item[0]))}
+        if isinstance(obj, (list, tuple)):
+            return [_plain(v) for v in obj]
+        if isinstance(obj, (set, frozenset)):
+            rows = [_plain(v) for v in obj]
+            return sorted(rows, key=lambda row: _json_sig.dumps(
+                row, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+        if hasattr(obj, "__dict__"):
+            return _plain({k: v for k, v in vars(obj).items()
+                           if not str(k).startswith("_") and not callable(v)})
+        # Unknown runtime handles (models, locks, clients) are deliberately represented only by
+        # type.  Backfill's persisted inputs are plain config/analysis values in production; this
+        # fallback keeps a diagnostic object from leaking a process-specific memory address.
+        return {"type": f"{type(obj).__module__}.{type(obj).__qualname__}"}
+
+    raw = _json_sig.dumps(
+        _plain(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return _hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
+
+
+_BACKFILL_SEMANTIC_ENV_KEYS = (
+    # Source-pool admission/rejection switches read directly by match._load_pool.
+    "VIDLORE_CLIPSTUDIO_BANNED_SOURCES",
+    "VIDLORE_CLIPSTUDIO_OCR_GATE",
+    "VIDLORE_CLIPSTUDIO_WATERMARK_MODE",
+    "VIDLORE_CLIPSTUDIO_NONSHOW_GATE",
+    "VIDLORE_CLIPSTUDIO_WRONGSHOW_GATE",
+    "VIDLORE_CLIPSTUDIO_FACE_FOOTAGE_GATE",
+    "VIDLORE_CLIPSTUDIO_CORNER_LOGO_GATE",
+    "VIDLORE_CLIPSTUDIO_SUBBED_SOURCE_MAX_FRAC",
+    "VIDLORE_CLIPSTUDIO_PROMO_OVERLAY_GATE",
+    "VIDLORE_CLIPSTUDIO_GRAPHICS_GATE",
+    "VIDLORE_CLIPSTUDIO_NUMERAL_GATE",
+    "VIDLORE_CLIPSTUDIO_NUMERAL_SRC_FRAC",
+    "VIDLORE_CLIPSTUDIO_STATIC_GATE",
+    "VIDLORE_CLIPSTUDIO_CURSOR_SRC_GATE",
+    # Shot-yield gates used to decide whether a fetched replacement can actually air.
+    "VIDLORE_CLIPSTUDIO_TEXT_GATE",
+    "VIDLORE_CLIPSTUDIO_SUBBAND_GATE",
+    "VIDLORE_CLIPSTUDIO_UNREADABLE_GATE",
+    "VIDLORE_CLIPSTUDIO_UNREADABLE_AVG",
+    "VIDLORE_CLIPSTUDIO_UNREADABLE_HI",
+    "VIDLORE_CLIPSTUDIO_UNREADABLE_HI_HARD",
+    "VIDLORE_CLIPSTUDIO_UNREADABLE_MIN",
+    "VIDLORE_CLIPSTUDIO_UNREADABLE_BLACKFRAC",
+    # Discovery/index semantics that are not represented by ClipConfig fields.
+    "VIDLORE_CLIPSTUDIO_ANGLE_VARIANTS",
+    "VIDLORE_CLIPSTUDIO_HD_PROBE",
+    "VIDLORE_CLIPSTUDIO_KEYSCENE_COVERAGE",
+    "VIDLORE_CLIPSTUDIO_QUERY_CAP",
+    "VIDLORE_CLIPSTUDIO_QUERY_CAP_MAX",
+    "VIDLORE_CLIPSTUDIO_SUB_VERIFY",
+    "VIDLORE_CLIPSTUDIO_FLAGS_FAST",
+    "VIDLORE_CLIPSTUDIO_GRAPHIC_MAX",
+    "VIDLORE_CLIPSTUDIO_GRAPHIC_SOFT",
+    "VIDLORE_CLIPSTUDIO_KF_PREEXTRACT",
+    "VIDLORE_CLIPSTUDIO_MULTIFRAME_FLAGS",
+    "VIDLORE_CLIPSTUDIO_STATIC_PAIR_DIFF",
+    # Download-quality behavior that can turn the same discovered upload into different media.
+    "VIDLORE_HD_DOWNLOAD",
+    "VIDLORE_HD_403_SWEEP",
+    "VIDLORE_HD_403_SWEEP2",
+    "VIDLORE_HD_COOKIES_BROWSER",
+    "VIDLORE_HD_COOKIES_FILE",
+    "VIDLORE_HD_REMOTE_COMPONENTS",
+)
+
+
+def _backfill_semantic_environment() -> tuple[tuple[str, str], ...]:
+    """Raw direct env inputs, excluding performance-only worker/timing knobs.
+
+    An unset value is explicit in the tuple.  Therefore unset->override and override->unset both
+    invalidate the checkpoint, while changing MAX_CPU/worker counts does not replay a completed
+    search.  Code-default changes are covered by the version literal in the parent signature.
+    """
+    import os as _os_bf_sig
+    return tuple((key, _os_bf_sig.environ.get(key, "<unset>"))
+                 for key in _BACKFILL_SEMANTIC_ENV_KEYS)
+
+
+_BACKFILL_SEMANTIC_CFG_FIELDS = (
+    # Source admission/index semantics used by this pass.  Keep this an explicit allow-list:
+    # ClipConfig also contains voice/render pacing plus worker/retry knobs, and hashing the whole
+    # dataclass made a MAX_CPU-only speed change replay a completed web search.
+    "watermark_mode",
+    # These four change persisted shot boundaries/ASR and therefore the searchable index built for
+    # every admitted replacement.  They are content semantics, not worker or render timing knobs.
+    "target_clip_sec",
+    "min_clip_sec",
+    "whisper_model",
+    "whisper_compute",
+    "scene_threshold",
+    "min_shot_sec",
+    "detect_faces",
+    "detect_ocr",
+    "dup_hamming",
+    # Discovery/download content decisions.  Retry counts and concurrency are deliberately absent;
+    # a technical attempt never receives a completed checkpoint, so they affect speed/reliability,
+    # not the meaning of a conclusive result.
+    "max_height",
+    "discover_target",
+    "discover_per_query",
+    "discover_min_sec",
+    "discover_max_sec",
+    "discover_min_height",
+    "discover_prefer_height",
+    "discover_max_per_channel",
+    "discover_coverage_extra",
+    "discover_resolve_quality",
+    "discover_resolve_limit",
+)
+
+
+def _backfill_semantic_config(cfg) -> tuple[tuple[str, object], ...]:
+    """Only ClipConfig values that can change the sources/shots a completed pass admits."""
+    return tuple((field, getattr(cfg, field, None))
+                 for field in _BACKFILL_SEMANTIC_CFG_FIELDS)
+
+
+def _backfill_input_signature(download_sig: str, segments, *, policy: str, max_sources: int,
+                              show_title: str, enabled: bool, rounds: int, cfg,
+                              analysis) -> str:
+    """Stable signature of every semantic input to the clean-copy backfill pass.
+
+    The source pool is intentionally absent: targeted recovery may add sources after match, and
+    that must not replay the same global clean-copy search forever.  Script analysis and ClipConfig
+    are included because they control discovery, download, indexing, and pool-gate decisions; a
+    completed audit made under different semantics is not reusable.
+    """
+    return _sig(
+        str(download_sig or ""), _seg_sig(segments), str(policy or ""), int(max_sources),
+        str(show_title or ""), bool(enabled), max(1, int(rounds)),
+        _semantic_fingerprint(_backfill_semantic_config(cfg)),
+        _semantic_fingerprint(analysis),
+        _semantic_fingerprint(_backfill_semantic_environment()),
+        "backfillv4-completion-aware-semantic-inputs",
+    )
+
+
+def _footage_stages_required(*, skip_match: bool, skip_verify: bool, skip_recover: bool,
+                             backfill_enabled: bool, skip_backfill: bool) -> bool:
+    """Whether footage-stage context is needed, including a retryable backfill attempt."""
+    downstream_cached = bool(skip_match and skip_verify and skip_recover)
+    backfill_pending = bool(backfill_enabled and not skip_backfill)
+    return bool(not downstream_cached or backfill_pending)
+
+
+def _backfill_audit_complete_for(proj, input_sig: str) -> bool:
+    """True only for a conclusive backfill invocation bound to these exact inputs."""
+    audit = (getattr(proj, "meta", {}) or {}).get("backfill_audit") or {}
+    return bool(
+        audit.get("schema_version") == 2
+        and audit.get("status") == "complete"
+        and str(audit.get("input_sig", "") or "") == str(input_sig or "")
+    )
+
+
+def _run_backfill_invocation(proj, input_sig: str, runner, *, log) -> bool:
+    """Run one completion-bound backfill attempt without blessing stale audit state.
+
+    The improvement pass remains fail-open for the current render, but its checkpoint is
+    fail-closed: an unexpected exception can never reuse a ``complete`` audit left by an older
+    signature.  ``runner`` owns the detailed audit on normal return.
+    """
+    import copy as _copy_bf_outer
+
+    # Known transport/index exits are rolled back by the pass itself.  This outer snapshot closes
+    # the remaining programming-error window: a crash after download/index but before the title or
+    # shot-yield screen must not leave an unscreened source available to the same render's matcher.
+    meta_before = _copy_bf_outer.deepcopy(getattr(proj, "meta", {}) or {})
+    source_before = [
+        (source, _copy_bf_outer.deepcopy(vars(source)))
+        for source in (getattr(proj, "sources", None) or [])
+    ]
+    source_ids_before = {
+        str(getattr(source, "id", "") or "") for source, _state in source_before
+    }
+
+    running = {"schema_version": 2, "status": "running", "reason": "",
+               "input_sig": str(input_sig or ""), "rounds": [], "admitted": 0}
+    proj.meta["backfill_audit"] = running
+    proj.save()
+    try:
+        runner()
+    except Exception as exc:                            # noqa: BLE001 — improvement stays fail-open
+        audit = (proj.meta or {}).get("backfill_audit") or {}
+        if str(audit.get("input_sig", "") or "") != str(input_sig or ""):
+            audit = dict(running)
+        else:
+            audit = dict(audit)
+        current_sources = list(getattr(proj, "sources", None) or [])
+        new_ids = {
+            str(getattr(source, "id", "") or "") for source in current_sources
+            if str(getattr(source, "id", "") or "") not in source_ids_before
+        }
+        try:
+            from .index import purge_source_index as _purge_backfill_outer
+            for sid in sorted(new_ids):
+                if sid:
+                    _purge_backfill_outer(proj, sid)
+        except Exception:                              # noqa: BLE001 — manifest restore is primary
+            pass
+        for source, state in source_before:
+            vars(source).clear()
+            vars(source).update(_copy_bf_outer.deepcopy(state))
+        proj.sources = [source for source, _state in source_before]
+        proj.meta = _copy_bf_outer.deepcopy(meta_before)
+        audit.update({
+            "schema_version": 2,
+            "status": "incomplete",
+            "reason": f"unexpected_failure:{type(exc).__name__}",
+            "input_sig": str(input_sig or ""),
+        })
+        proj.meta["backfill_audit"] = audit
+        proj.save()
+        log(f"5b/9 · backfill: skipped ({str(exc)[:80]})")
+        return False
+    return _backfill_audit_complete_for(proj, input_sig)
 
 
 def _run_preassemble_selfheal(proj, segs, cfg, analysis, *, policy: str,
@@ -1458,7 +1712,8 @@ def _index_overlap_on() -> bool:
 
 
 def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, roster,
-                               policy, max_sources, show_title, log) -> int:
+                               policy, max_sources, show_title, log,
+                               input_sig: str = "") -> int:
     """Replace footage the pool gates threw out, BEFORE match ever runs.
 
     The gates themselves are right — a burned-caption re-upload, a promo-card compilation, a screener
@@ -1491,19 +1746,22 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
     from .download import download_candidates
     from .index import index_all as _index_all
 
-    audit = {"rounds": [], "admitted": 0}
+    audit = {"schema_version": 2, "status": "running", "reason": "",
+             "input_sig": str(input_sig or ""), "rounds": [], "admitted": 0}
     tried_titles: set = set()
     admitted_total = 0
+    terminal_reason = "configured_rounds_completed"
 
-    # A replacement indexed WITHOUT Face-ID is structurally unable to win the beats it was fetched
-    # for: `faceid` carries w_face (0.30) of the score, so its shots start a third of a point behind
-    # every incumbent that has cast data. Measured while testing this pass — backfilled sources came
-    # in with faceid=False and won 0 of the 8 beats whose expected_visual names their exact scene,
-    # which reads exactly like "the picker ignores the right footage" and is really a missing input.
-    if faceid_obj is None or not refs:
-        log("5b/9 · backfill: WARNING — no Face-ID references available; replacements would be "
-            "indexed without cast data and could not compete. Skipping.")
-        return 0
+    def _finish(status: str, reason: str) -> int:
+        audit["status"] = str(status)
+        audit["reason"] = str(reason)
+        audit["admitted"] = admitted_total
+        try:
+            proj.meta["backfill_audit"] = audit
+            proj.save()
+        except Exception:                                # noqa: BLE001 — audit cannot mask result
+            pass
+        return admitted_total
 
     for rnd in range(max(1, rounds)):
         # a pool pass re-derives and persists this round's source-level rejections
@@ -1511,7 +1769,7 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
             _M._load_pool(proj, cfg, progress=None, show_title=show_title)
         except Exception as e:                                   # noqa: BLE001
             log(f"5b/9 · backfill: pool probe failed ({str(e)[:70]}) — skipping")
-            return admitted_total
+            return _finish("incomplete", f"pool_probe_failed:{type(e).__name__}")
         # Only QUALITY rejects deserve a replacement: the footage was right and the copy was not.
         # A CONTENT reject (interview, reaction, wrong show, fan art, still-image) is material we
         # never wanted, and searching for "a cleaner copy" of it just spends the budget pulling in
@@ -1528,7 +1786,18 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
         if not fresh:
             if rnd == 0:
                 log("5b/9 · backfill: no gate-rejected source to replace")
+            terminal_reason = "no_untried_quality_rejections"
             break
+
+        # A replacement indexed WITHOUT Face-ID is structurally unable to win the beats it was
+        # fetched for: `faceid` carries w_face (0.30) of the score, so its shots start a third of a
+        # point behind every incumbent that has cast data.  Check only after proving a replacement
+        # is actually needed: an empty rejected set is already a conclusive completed search and
+        # must not become a permanently retrying technical failure on Face-ID-less projects.
+        if faceid_obj is None or not refs:
+            log("5b/9 · backfill: WARNING — no Face-ID references available; replacements would "
+                "be indexed without cast data and could not compete. Skipping.")
+            return _finish("incomplete", "faceid_references_unavailable")
 
         # the rejected upload's own title IS the description of the footage we lost; strip the
         # channel furniture that would otherwise pull the search back to more re-uploads
@@ -1550,7 +1819,7 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
                                      extra_queries=queries) or []
         except Exception as e:                                   # noqa: BLE001
             log(f"5b/9 · backfill: discovery failed ({str(e)[:70]})")
-            break
+            return _finish("incomplete", f"discovery_failed:{type(e).__name__}")
         new = [c for c in cands if (getattr(c, "url", "") or "").strip()
                and (getattr(c, "url", "") or "").strip() not in have][:max(4, max_sources)]
         audit["rounds"].append({"round": rnd + 1,
@@ -1559,9 +1828,31 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
                                 "candidates": len(cands), "new": len(new)})
         if not new:
             log("5b/9 · backfill: no NEW candidate found — the pool keeps what it has")
+            terminal_reason = "no_new_candidate"
             break
 
-        before = {s.id for s in proj.sources if s.status == SOURCE_OK}
+        source_snapshot = list(proj.sources)
+        source_ids_before = {str(getattr(s, "id", "") or "") for s in source_snapshot}
+        before = {s.id for s in source_snapshot if s.status == SOURCE_OK}
+        wanted_urls = {(getattr(c, "url", "") or "").strip() for c in new
+                       if (getattr(c, "url", "") or "").strip()}
+
+        def _rollback_download_attempt() -> None:
+            attempted = [s for s in proj.sources
+                         if (getattr(s, "url", "") or "").strip() in wanted_urls]
+            attempted_new_ids = {
+                str(getattr(s, "id", "") or "") for s in attempted
+                if str(getattr(s, "id", "") or "") not in source_ids_before
+            }
+            from .index import purge_source_index as _purge_backfill_index
+            for sid in sorted(attempted_new_ids):
+                if sid:
+                    try:
+                        _purge_backfill_index(proj, sid)
+                    except Exception:                    # noqa: BLE001 — manifest rollback is primary
+                        pass
+            proj.sources = source_snapshot
+
         _pw = None
         if _index_overlap_on():
             try:
@@ -1569,25 +1860,68 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
                                       roster=roster, log=log)
             except Exception:                                    # noqa: BLE001
                 _pw = None
+        _download_exc = None
         try:
             download_candidates(proj, new, cfg, policy=policy, limit=len(new), progress=None,
                                 on_ready=(_pw.submit if _pw is not None else None))
         except Exception as e:                                   # noqa: BLE001
-            log(f"5b/9 · backfill: download failed ({str(e)[:70]})")
-            break
+            _download_exc = e
         finally:
             if _pw is not None:
                 _pw.close()
+        if _download_exc is not None:
+            _rollback_download_attempt()
+            log(f"5b/9 · backfill: download failed ({str(_download_exc)[:70]})")
+            return _finish("incomplete", f"download_failed:{type(_download_exc).__name__}")
+        # The downloader reports ordinary per-source failures in the manifest instead of raising.
+        # Treat those rows exactly like a thrown transport error: even one failed sibling means the
+        # searched pool is incomplete, so a later Resume must retry rather than cache a false
+        # "nothing usable exists" result.  Match by URL (the downloader's candidate id is private
+        # and title-derived); every URL here was absent from ``have`` immediately before the call.
+        outcomes = [s for s in proj.sources
+                    if (getattr(s, "url", "") or "").strip() in wanted_urls]
+        failed = [s for s in outcomes if getattr(s, "status", "") == SOURCE_FAILED]
+        if failed:
+            audit["rounds"][-1]["download_failures"] = [
+                {"id": getattr(s, "id", ""), "url": getattr(s, "url", ""),
+                 "error": str(getattr(s, "error", "") or "download_failed")[:240]}
+                for s in failed
+            ]
+            # A partial batch is one incomplete transaction: a successful sibling has not yet
+            # passed the backfill-only title/yield screens below, so retaining it here could let an
+            # unscreened anthology/BTS source enter match.  Roll every attempted row back to the
+            # pre-download manifest and purge prewarmed indexes; media bytes may remain as a safe
+            # resumable download, but no URL enters ``have`` until the whole batch is conclusive.
+            _rollback_download_attempt()
+            detail = ",".join(str(getattr(s, "id", "") or "?") for s in failed[:4])
+            log(f"5b/9 · backfill: {len(failed)} download(s) technically failed "
+                f"({detail}) — leaving checkpoint retryable")
+            return _finish("incomplete", f"download_failed_status:{len(failed)}")
         newly = [s for s in proj.sources if s.status == SOURCE_OK and s.id not in before]
         if not newly:
-            log(f"5b/9 · backfill: nothing downloaded under policy={policy}")
-            break
+            # Policy exclusions and checksum duplicates are content-conclusive.  An absent or
+            # unknown outcome is technical uncertainty and must never earn a completed checkpoint.
+            if outcomes and all(getattr(s, "status", "") in (SOURCE_BLOCKED, "duplicate")
+                                for s in outcomes):
+                log(f"5b/9 · backfill: all candidates excluded by policy/duplicate "
+                    f"under policy={policy}")
+                terminal_reason = "download_conclusive_policy_or_duplicate"
+                break
+            log(f"5b/9 · backfill: downloader produced no usable or conclusive outcome "
+                f"under policy={policy} — leaving checkpoint retryable")
+            return _finish("incomplete", "download_missing_or_unknown_outcome")
         try:
             _index_all(proj, cfg, references=refs, faceid=faceid_obj, roster=roster,
                        force=False, progress=None)
         except Exception as e:                                   # noqa: BLE001
+            # These rows have not passed the title/yield screen, and retaining their URLs would
+            # make the next Resume filter them out of discovery as already present.  That turns a
+            # technical index failure into a conclusive ``no_new_candidate`` checkpoint.  Roll the
+            # whole unscreened batch (and any prewarmed/partial indexes) back so the same clean-copy
+            # candidates remain genuinely retryable.
+            _rollback_download_attempt()
             log(f"5b/9 · backfill: indexing failed ({str(e)[:70]})")
-            break
+            return _finish("incomplete", f"indexing_failed:{type(e).__name__}")
         # A replacement only counts once it can actually AIR. Clearing the source-level gates is not
         # enough: a fetched copy of the exact scene we lost came back as another screener with
         # "FOR INTERNAL VIEWING ONLY" burned in, cleared every source gate, and then lost all 11 of
@@ -1641,8 +1975,14 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
                 continue
             try:
                 ok, tot = _M.usable_shot_yield(proj, s.id, cfg)
-            except Exception:                                    # noqa: BLE001
-                ok, tot = 1, 1                                   # can't measure → don't punish
+            except Exception as e:                               # noqa: BLE001
+                # This is technical uncertainty, not evidence of one airable shot.  Roll the whole
+                # unscreened batch (including its indexes) so Resume can retry the same candidates;
+                # the completed checkpoint must never cache a fabricated 1/1 yield.
+                _rollback_download_attempt()
+                log(f"5b/9 · backfill: shot-yield measurement failed "
+                    f"({type(e).__name__}: {str(e)[:60]})")
+                return _finish("incomplete", f"yield_measurement_failed:{type(e).__name__}")
             (kept if ok else dead).append((s, ok, tot))
         admitted_total += len(kept)
         audit["rounds"][-1]["downloaded"] = [
@@ -1660,13 +2000,7 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
         elif dead:
             log("5b/9 · backfill: every replacement this round was unusable — pool unchanged")
 
-    audit["admitted"] = admitted_total
-    try:
-        proj.meta["backfill_audit"] = audit
-        proj.save()
-    except Exception:                                            # noqa: BLE001
-        pass
-    return admitted_total
+    return _finish("complete", terminal_reason)
 
 
 def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, refs, roster,
@@ -2899,24 +3233,46 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
     # signature so any earlier change cascades a re-run. These also let us skip the whole
     # index/Face-ID/match/verify block when everything after download is already cached (the common
     # case for a content-blocked resume: jump straight to assemble).
-    _sig_index = _sig(_sig_download, tuple(sorted(s.id for s in usable)), bool(force_index))
-    # MATCH_GATE_VERSION folds pool-gate semantics into the match signature: a resume must NOT
-    # replay selections chosen before a new footage gate existed (observed: cached selections
-    # kept airing news-CGI/fan-art shots the new graphics gate would refuse — the gate was
-    # silently inert on every resumed project). Bump on any pool-gate semantics change.
-    _sig_match = _sig(_sig_index, _seg_sig(segs), "gatev2-graphics")
-    _sig_cut = _sig(_sig_match)
-    _sig_verify = _sig(_sig_cut, bool(verify))
-    _sig_recover = _sig(_sig_verify)
+    # MATCH_GATE_VERSION is folded into the helper: a resume must NOT replay selections chosen
+    # before a new footage gate existed.  These are refreshed again after every pre-match source
+    # mutator so checkpoints describe the pool actually matched, not its pre-backfill ancestor.
+    _sig_index, _sig_match, _sig_cut, _sig_verify, _sig_recover = \
+        _footage_stage_signatures(
+            _sig_download, usable, force_index=force_index, segments=segs, verify=verify)
     _sel_complete = (bool(proj.selections)
                      and {s.segment_index for s in proj.selections} >= {s.index for s in segs})
     _skip_match = _stage_skip(proj, "match", _sig_match, resume, artifact_ok=_sel_complete)
     _skip_verify = _stage_skip(proj, "verify", _sig_verify, resume, artifact_ok=_sel_complete)
     _skip_recover = _stage_skip(proj, "recover", _sig_recover, resume, artifact_ok=_sel_complete)
+    import os as _os_bf_stage
+    _backfill_enabled = _os_bf_stage.environ.get(
+        "VIDLORE_CLIPSTUDIO_BACKFILL_REJECTED", "1").strip().lower() \
+        not in ("0", "false", "no")
+    try:
+        _backfill_rounds = int(_os_bf_stage.environ.get(
+            "VIDLORE_CLIPSTUDIO_BACKFILL_ROUNDS", "2") or 2)
+    except (TypeError, ValueError):
+        _backfill_rounds = 2
+    _sig_backfill = _backfill_input_signature(
+        _sig_download, segs, policy=policy, max_sources=max_sources,
+        show_title=movie_hint or "", enabled=_backfill_enabled,
+        rounds=max(1, _backfill_rounds), cfg=cfg, analysis=analysis)
+    _backfill_artifact_ok = (not _backfill_enabled) or \
+        _backfill_audit_complete_for(proj, _sig_backfill)
+    _skip_backfill = _stage_skip(
+        proj, "backfill", _sig_backfill, resume,
+        artifact_ok=_backfill_artifact_ok)
     # Face-ID refs feed indexing (shot identities) + recovery re-indexing; match consumes persisted
     # shot identities, not the refs object. So they're only worth building when a footage stage will
     # actually run. A fully-cached resume (→ assemble only) skips this and the model load with it.
-    _need_footage_stages = not (_skip_match and _skip_verify and _skip_recover)
+    # Backfill is a first-class resumable stage too.  A transient backfill failure must retry even
+    # when the same failed run went on to checkpoint match/verify/recover; omitting it here made the
+    # removed backfill checkpoint unreachable on the next Resume.
+    _downstream_footage_pending = not (
+        _skip_match and _skip_verify and _skip_recover)
+    _need_footage_stages = _footage_stages_required(
+        skip_match=_skip_match, skip_verify=_skip_verify, skip_recover=_skip_recover,
+        backfill_enabled=_backfill_enabled, skip_backfill=_skip_backfill)
 
     # 4 — Face-ID references
     faceid_obj, refs = None, {}
@@ -2943,10 +3299,16 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
         log("4/9 · Face-ID references — ↻ skipped (resume, all footage stages cached)")
 
     # 5 — deep index
-    if _need_footage_stages:
+    if _downstream_footage_pending:
         log("5/9 · deep index (ASR + scenes + CLIP + Face-ID + OCR + quality + dedup)")
         index_all(proj, cfg, references=refs, faceid=faceid_obj, roster=roster,
                   force=(force_index and not resume), progress=progress)
+    elif _need_footage_stages:
+        # Backfill can be the only retryable stage after match/verify/recover were checkpointed.
+        # Existing sources were already indexed for those stages; re-indexing the whole pool before
+        # merely retrying discovery is wasted work.  Any newly downloaded replacement is indexed
+        # transactionally inside `_backfill_rejected_sources` before it can affect match.
+        log("5/9 · deep index — ↻ skipped (resume, cached pool; backfill retry only)")
     else:
         log("5/9 · deep index — ↻ skipped (resume, all footage stages cached)")
 
@@ -2964,13 +3326,45 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
 
     # 5b — backfill footage the pool gates will reject. Runs BEFORE match, because at match time the
     # discovery budget is already spent and a dropped source just leaves a hole nothing fills.
-    if _need_footage_stages and not _skip_match:
-        try:
-            _backfill_rejected_sources(
-                proj, segs, analysis, cfg, refs=refs, faceid_obj=faceid_obj, roster=roster,
-                policy=policy, max_sources=max_sources, show_title=movie_hint or "", log=log)
-        except Exception as e:                                   # noqa: BLE001
-            log(f"5b/9 · backfill: skipped ({str(e)[:80]})")
+    if _need_footage_stages and (
+            not _skip_match or (_backfill_enabled and not _skip_backfill)):
+        if _skip_backfill:
+            log("5b/9 · backfill — ↻ skipped (resume, completed clean-copy search cached)")
+        elif not _backfill_enabled:
+            log("5b/9 · backfill — disabled by operator configuration")
+            _stage_done(proj, "backfill", _sig_backfill)
+        else:
+            _backfill_complete = _run_backfill_invocation(
+                proj, _sig_backfill,
+                lambda: _backfill_rejected_sources(
+                    proj, segs, analysis, cfg, refs=refs, faceid_obj=faceid_obj, roster=roster,
+                    policy=policy, max_sources=max_sources, show_title=movie_hint or "", log=log,
+                    input_sig=_sig_backfill),
+                log=log)
+            if _backfill_complete:
+                _stage_done(proj, "backfill", _sig_backfill)
+            else:
+                # A transient discovery/download/index failure is retryable.  Never bless it as a
+                # completed quality search merely to make Resume faster.
+                _ckpt(proj)["stages"].pop("backfill", None)
+                proj.save()
+
+        # Anchor/backfill are source-pool mutators.  Refresh every downstream signature before
+        # recording match/cut/verify/recover checkpoints so they describe the pool actually used.
+        usable = [s for s in proj.sources if s.status == "ok"]
+        _sig_index, _sig_match, _sig_cut, _sig_verify, _sig_recover = \
+            _footage_stage_signatures(
+                _sig_download, usable, force_index=force_index, segments=segs, verify=verify)
+        # A pending backfill can be the sole reason we reached this block while the old downstream
+        # checkpoints were initially valid.  If it admitted a source, the refreshed signatures
+        # must invalidate those checkpoints now; if it made no pool change, the cached work remains
+        # reusable for this attempt.
+        _skip_match = _stage_skip(
+            proj, "match", _sig_match, resume, artifact_ok=_sel_complete)
+        _skip_verify = _stage_skip(
+            proj, "verify", _sig_verify, resume, artifact_ok=_sel_complete)
+        _skip_recover = _stage_skip(
+            proj, "recover", _sig_recover, resume, artifact_ok=_sel_complete)
 
     # 6 — match
     if _skip_match:

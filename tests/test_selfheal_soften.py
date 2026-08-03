@@ -18,8 +18,10 @@ labelled honestly: the resulting still is a `contextual_fallback`, never `exact`
 from __future__ import annotations
 
 import copy
+import hashlib
 import inspect
 import json
+from pathlib import Path
 from types import SimpleNamespace as NS
 
 import pytest
@@ -187,13 +189,18 @@ def test_it_says_out_loud_what_it_gave_up_on():
 # ------------------------------------------------------------------ where it sits in the ladder
 def test_softening_is_the_LAST_thing_tried():
     """It must run after the normal still search, after acquisition and after region-frames — the
-    point is to stop asking, not to skip the honest attempts."""
+    point is to stop asking, not to skip the honest attempts.  The only earlier call is guarded by
+    a current audit proving those strict acquisition attempts already completed for this pool."""
     src = inspect.getsource(S.heal_blocked_beats)
-    i_still = src.index("still_recover")
-    i_acq = src.index("acquire_for_beat")
+    still_calls = [i for i in range(len(src)) if src.startswith("still_recover", i)]
+    i_still = still_calls[1]  # ordinary strict search; [0] is the gate-forbidden special case
+    i_acq = src.index("fresh = acquire_for_beat")
     i_region = src.index("_region_frames_recover")
-    i_soft = src.index("_soften_and_retry")
-    assert i_soft > i_still and i_soft > i_acq and i_soft > i_region
+    i_ordinary_soft = src.rindex("_soften_and_retry")
+    i_reviewed_guard = src.index("_phase1_reviewed_exhaustion_authorization")
+    assert i_ordinary_soft > i_still and i_ordinary_soft > i_acq \
+        and i_ordinary_soft > i_region
+    assert i_still < i_reviewed_guard < i_acq
 
 
 def test_the_retry_does_not_re_acquire_or_rebuild_the_pool():
@@ -560,6 +567,261 @@ def test_phase1_ladder_runs_when_beat_and_current_pool_are_bound(monkeypatch, tm
     assert row["original"]["is_specific_claim"] is True
     assert row["original"]["image_path"] == ""
     assert row["original"]["image_meta"] == {}
+
+
+def _write_completed_exhaustion_evidence(
+        proj, seg, *, source="actual-frame-pool-audit.json", beat_patch=None, top_patch=None):
+    evidence = Path(source)
+    if not evidence.is_absolute():
+        evidence = Path(proj.root) / evidence
+    pool_fp, pool_n = S._gap_pool_fingerprint(proj)
+    beat = {
+        "beat_fingerprint": S._gap_beat_fingerprint(seg),
+        "classification": "footage_gap",
+        "actual_frame_pool_audit": True,
+        "whole_pool_reviewed": True,
+        "correct_footage_present_in_pool": False,
+        "pipeline_bug_ruled_out": True,
+        "strict_acquisition_status": "exhausted",
+        "technical_status": "complete",
+    }
+    beat.update(beat_patch or {})
+    artifact = {
+        "schema_version": 1, "status": "complete",
+        "pool_fingerprint": pool_fp, "pool_source_count": pool_n,
+        "beats": {str(seg.index): beat},
+    }
+    artifact.update(top_patch or {})
+    evidence.write_text(json.dumps(artifact, sort_keys=True))
+    return evidence, artifact
+
+
+def _bind_completed_exhaustion(proj, seg, *, source="actual-frame-pool-audit.json"):
+    evidence, _artifact = _write_completed_exhaustion_evidence(
+        proj, seg, source=source)
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, [seg], [seg.index], method="actual_frame_and_pool_audit",
+        source=str(evidence), strict_acquisition_exhausted_beats=[seg.index])
+    return evidence
+
+
+def test_bound_completed_exhaustion_runs_ladder_before_acquire(monkeypatch, tmp_path):
+    proj, seg, _sel = _phase1_evidence_fixture(tmp_path, index=24)
+    _bind_completed_exhaustion(proj, seg)
+    _stub_phase1_search(monkeypatch)
+    monkeypatch.setattr(S, "beat_unfillable", lambda _seg: False)
+    acquired = []
+    monkeypatch.setattr(
+        S, "acquire_for_beat",
+        lambda *_a, **_k: acquired.append(True) or pytest.fail("must not reacquire"))
+
+    def ladder(_proj, target, selection, *_args, **_kwargs):
+        target.visual_policy = P.ABSTRACT
+        selection.image_meta = {"selfheal_rung": "abstract"}
+        return True
+
+    monkeypatch.setattr(S, "_soften_and_retry", ladder)
+
+    resolved = S.heal_blocked_beats(
+        proj, [seg], None, blocked=[24], policy="approved_testing",
+        allow_acquire=True, log=lambda _m: None)
+
+    assert resolved == 1 and acquired == []
+    marker = proj.meta["selection_relevance_gap_softening"]
+    row = next(r for r in marker["beats"] if r["status"] == "softened")
+    assert row["basis"] == "phase1_bound_strict_acquisition_exhausted"
+    assert row["original"]["visual_policy"] == P.EXACT
+    assert row["new"]["visual_policy"] == P.ABSTRACT
+
+
+def test_exhausted_review_ladder_failure_restores_and_never_reacquires(
+        monkeypatch, tmp_path):
+    proj, seg, sel = _phase1_evidence_fixture(tmp_path, index=24)
+    _bind_completed_exhaustion(proj, seg)
+    _stub_phase1_search(monkeypatch)
+    monkeypatch.setattr(S, "beat_unfillable", lambda _seg: False)
+    before_seg, before_sel = copy.deepcopy(vars(seg)), copy.deepcopy(vars(sel))
+    acquired = []
+    monkeypatch.setattr(S, "acquire_for_beat",
+                        lambda *_a, **_k: acquired.append(True) or [])
+
+    def exhausted(_proj, target, selection, *_args, **_kwargs):
+        target.visual_policy = P.ABSTRACT
+        selection.image_path = "partial.jpg"
+        return False
+
+    monkeypatch.setattr(S, "_soften_and_retry", exhausted)
+
+    resolved = S.heal_blocked_beats(
+        proj, [seg], None, blocked=[24], policy="approved_testing",
+        allow_acquire=True, log=lambda _m: None)
+
+    assert resolved == 0 and acquired == []
+    assert vars(seg) == before_seg and vars(sel) == before_sel
+    assert "selection_relevance_gap_softening" not in proj.meta
+
+
+@pytest.mark.parametrize(("field", "value", "reason"), [
+    ("classification", "pipeline_bug", "classification_not_footage_gap"),
+    ("actual_frame_pool_audit", False, "actual_frame_pool_audit_absent"),
+    ("whole_pool_reviewed", False, "whole_pool_review_absent"),
+    ("correct_footage_present_in_pool", True, "pool_absence_not_proven"),
+    ("pipeline_bug_ruled_out", False, "pipeline_bug_not_ruled_out"),
+    ("strict_acquisition_status", "incomplete", "status_not_exhausted"),
+    ("technical_status", "download_error", "technical_status_not_complete"),
+    ("evidence_source", "", "evidence_source_missing"),
+    ("evidence_sha256", "", "evidence_sha256_missing_or_malformed"),
+    ("evidence_sha256", "not-a-hash", "evidence_sha256_missing_or_malformed"),
+])
+def test_unsafe_exhaustion_record_never_gets_early_authority(
+        field, value, reason, tmp_path):
+    proj, seg, _sel = _phase1_evidence_fixture(tmp_path)
+    _bind_completed_exhaustion(proj, seg)
+    proj.meta["selection_relevance_gap_review"]["strict_acquisition_exhaustion"][
+        str(seg.index)][field] = value
+
+    ok, why = S._phase1_reviewed_exhaustion_authorization(proj, seg)
+
+    assert ok is False and reason in why
+
+
+def test_stale_completed_exhaustion_cannot_soften(monkeypatch, tmp_path):
+    proj, seg, _sel = _phase1_evidence_fixture(tmp_path)
+    _bind_completed_exhaustion(proj, seg)
+    late_media = tmp_path / "late-source.mp4"
+    late_media.write_bytes(b"new searchable pool bytes")
+    proj.sources.append(SourceVideo(
+        id="late", url="late", title="Late exact scene", permission="owner",
+        status="ok", local_path=str(late_media)))
+
+    ok, why = S._phase1_reviewed_exhaustion_authorization(proj, seg)
+
+    assert ok is False and "stale_gap_review_source_pool_changed" in why
+
+
+def test_changed_retrieval_embeddings_stale_completed_exhaustion(tmp_path):
+    proj, seg, _sel = _phase1_evidence_fixture(tmp_path)
+    embeds = proj.embeds_path("show")
+    embeds.write_bytes(b"original-searchable-clip-matrix")
+    _bind_completed_exhaustion(proj, seg)
+
+    # The source, shots, words, and authored beat are unchanged; only the retrieval matrix changed.
+    # A whole-pool exhaustion decision made against the old ranking world must no longer authorize
+    # skipping strict acquisition.
+    embeds.write_bytes(b"replacement-searchable-clip-matrix-with-different-size")
+    ok, why = S._phase1_reviewed_exhaustion_authorization(proj, seg)
+
+    assert ok is False and "stale_gap_review_source_pool_changed" in why
+
+
+def test_tampered_exhaustion_evidence_artifact_cannot_soften(tmp_path):
+    proj, seg, _sel = _phase1_evidence_fixture(tmp_path)
+    _bind_completed_exhaustion(proj, seg)
+    record = proj.meta["selection_relevance_gap_review"]["strict_acquisition_exhaustion"][
+        str(seg.index)]
+    Path(record["evidence_source"]).write_text("tampered after review binding")
+
+    ok, why = S._phase1_reviewed_exhaustion_authorization(proj, seg)
+
+    assert ok is False and why == "strict_acquisition_evidence_artifact_hash_mismatch"
+
+
+def test_old_exhaustion_artifact_cannot_be_rebound_to_a_later_pool(tmp_path):
+    proj, seg, _sel = _phase1_evidence_fixture(tmp_path)
+    evidence, _artifact = _write_completed_exhaustion_evidence(proj, seg)
+    late_media = tmp_path / "late-source-before-review.mp4"
+    late_media.write_bytes(b"new searchable pool bytes")
+    proj.sources.append(SourceVideo(
+        id="late-before-review", url="late", title="Late exact scene", permission="owner",
+        status="ok", local_path=str(late_media)))
+
+    with pytest.raises(ValueError, match="evidence_source_pool_changed"):
+        S.make_selection_relevance_gap_review(
+            proj, [seg], [seg.index], method="actual_frame_and_pool_audit",
+            source=str(evidence), strict_acquisition_exhausted_beats=[seg.index])
+
+
+def test_completed_exhaustion_cannot_soften_a_verbatim_quote(tmp_path):
+    quote = "Chaos isn't a pit. Chaos is a ladder."
+    words = [[0.1 + i * .1, 0.2 + i * .1, word]
+             for i, word in enumerate("Chaos isn't a pit Chaos is a ladder".split())]
+    proj, seg, _sel = _phase1_evidence_fixture(tmp_path, quote=quote, words=words)
+    _bind_completed_exhaustion(proj, seg)
+
+    ok, why = S._phase1_reviewed_exhaustion_authorization(proj, seg)
+
+    assert ok is False and why == "phase1_verbatim_quote_promise"
+
+
+def test_exhaustion_declaration_requires_confirmed_beat_and_evidence_source(tmp_path):
+    proj, seg, _sel = _phase1_evidence_fixture(tmp_path)
+    with pytest.raises(ValueError, match="subset"):
+        S.make_selection_relevance_gap_review(
+            proj, [seg], [], method="audit", source="audit.json",
+            strict_acquisition_exhausted_beats=[seg.index])
+    with pytest.raises(ValueError, match="evidence source"):
+        S.make_selection_relevance_gap_review(
+            proj, [seg], [seg.index], method="audit",
+            strict_acquisition_exhausted_beats=[seg.index])
+    with pytest.raises(ValueError, match="existing file"):
+        S.make_selection_relevance_gap_review(
+            proj, [seg], [seg.index], method="audit", source=str(tmp_path / "missing.json"),
+            strict_acquisition_exhausted_beats=[seg.index])
+
+
+def test_beat80_pipeline_or_technical_evidence_cannot_skip_acquisition(
+        monkeypatch, tmp_path):
+    """The 101-beat incident's honest gaps must not become authority for its pipeline bugs.
+
+    Even a correctly hashed file is negative evidence when its own authoritative beat row says the
+    pool contains a pipeline/technical failure.  The maker rejects it, and hand-binding the same row
+    cannot bypass the runtime validator: normal acquisition runs and its technical error propagates.
+    """
+    proj, seg, sel = _phase1_evidence_fixture(tmp_path, index=80)
+    evidence, artifact = _write_completed_exhaustion_evidence(
+        proj, seg, source="beat80-pipeline-bug.json", beat_patch={
+            "classification": "pipeline_bug",
+            "pipeline_bug_ruled_out": False,
+            "strict_acquisition_status": "incomplete",
+            "technical_status": "download_error",
+        })
+    with pytest.raises(ValueError, match="classification_not_footage_gap"):
+        S.make_selection_relevance_gap_review(
+            proj, [seg], [80], method="actual_frame_and_pool_audit",
+            source=str(evidence), strict_acquisition_exhausted_beats=[80])
+
+    review = S.make_selection_relevance_gap_review(
+        proj, [seg], [80], method="actual_frame_and_pool_audit", source=str(evidence))
+    review["strict_acquisition_exhaustion"] = {
+        "80": {
+            **artifact["beats"]["80"],
+            "evidence_source": str(evidence.resolve()),
+            "evidence_sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        }
+    }
+    proj.meta["selection_relevance_gap_review"] = review
+    _stub_phase1_search(monkeypatch)
+    monkeypatch.setattr(S, "beat_unfillable", lambda _seg: False)
+    soften_calls = []
+    monkeypatch.setattr(
+        S, "_soften_and_retry", lambda *_a, **_k: soften_calls.append(True) or True)
+
+    def fail_acquire(*_args, **_kwargs):
+        raise S.InconclusiveAcquisitionError(80, "download", detail="network")
+
+    monkeypatch.setattr(S, "acquire_for_beat", fail_acquire)
+    before_seg, before_sel = copy.deepcopy(vars(seg)), copy.deepcopy(vars(sel))
+    before_meta = copy.deepcopy(proj.meta)
+
+    with pytest.raises(S.InconclusiveAcquisitionError, match="download"):
+        S.heal_blocked_beats(
+            proj, [seg], None, blocked=[80], policy="approved_testing",
+            allow_acquire=True, log=lambda _m: None)
+
+    assert soften_calls == []
+    assert vars(seg) == before_seg and vars(sel) == before_sel
+    assert proj.meta == before_meta
+    assert "selection_relevance_gap_softening" not in proj.meta
 
 
 def test_phase1_unfillable_mutation_is_recorded_and_failed_attempt_restores(
