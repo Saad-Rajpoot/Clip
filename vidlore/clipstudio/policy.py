@@ -58,7 +58,13 @@ _DEICTIC_RX = re.compile(
     r"\b(?:that|this|those|these)\s+(?:\w+\s+){0,2}"
     r"(?:tables?|rooms?|chambers?|scenes?|moments?|meetings?|councils?|seconds?|minutes?|"
     r"exchanges?|conversations?|sentences?|lines?|pauses?|silences?|dinners?|suppers?|feasts?)\b"
-    r"|\bthere it is\b|\bright there\b|\bwatch it again\b", re.I)
+    r"|\bthere it is\b|\bright there\b", re.I)
+
+# "Watch it again" is only a scene pointer when the beat also names (or carries a searchable
+# reference to) what "it" means.  Treating the bare editorial phrase as self-anchoring promoted
+# "Watch it again and something uncomfortable comes apart" to exact_scene even though the
+# narration, entity and query supplied no retrievable scene at all.
+_REWATCH_RX = re.compile(r"\bwatch it again\b", re.I)
 
 
 # RHETORICAL CONNECTORS — transition/question lines whose only job is moving the argument along:
@@ -164,7 +170,18 @@ def _has_concrete_specific_hook(seg) -> bool:
 def is_deictic(seg) -> bool:
     """True when the beat POINTS at the anchor scene instead of naming it. Such a beat inherits the
     exact_scene treatment: 'that table' can only ever be satisfied by THAT table."""
-    return bool(_DEICTIC_RX.search(getattr(seg, "text", "") or ""))
+    text = getattr(seg, "text", "") or ""
+    if _DEICTIC_RX.search(text):
+        return True
+    if not _REWATCH_RX.search(text):
+        return False
+    # A narrated look-target ("don't look at Joffrey"), authored quote/entity, or an actual search
+    # query makes the pronoun resolvable. expected_visual is deliberately excluded: it is an
+    # analyzer-authored storyboard and cannot turn an unanchored narration line into a promise.
+    return bool((getattr(seg, "quote", "") or "").strip()
+                or (getattr(seg, "required_entity", "") or "").strip()
+                or (getattr(seg, "scene_query", "") or "").strip()
+                or deictic_target(seg))
 
 
 # INSTRUCTED LOOKING — the narrator tells the viewer to look at a NAMED thing: "keep your eye on
@@ -327,6 +344,10 @@ def policy_of(seg) -> str:
     # be satisfied — measured: 11 such beats release-blocked a render after ~7h of doomed fallback
     # work. Genuinely specific beats are untouched (any quote or entity keeps the label).
     if p in (EXACT, CHARACTER) and _is_rhetorical_connector(seg):
+        return ABSTRACT
+    # A bare re-watch instruction is editorial/meta narration, not a retrievable scene contract.
+    # The anchored form remains EXACT through `is_deictic` above.
+    if p == EXACT and _REWATCH_RX.search(getattr(seg, "text", "") or ""):
         return ABSTRACT
     # MONTAGE GUARD — the same lesson as the connector guard, one step up: a beat can name plenty of
     # concrete subjects and still be impossible, because it names FOUR of them across four scenes.

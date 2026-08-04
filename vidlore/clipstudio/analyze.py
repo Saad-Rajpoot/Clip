@@ -203,9 +203,11 @@ def _llm_analyze(script_text: str, topic: str, movie_hint: str, beats: list[Scri
         numbered = [{"i": b.index, "line": b.text} for b in chunk]
         bu = (
             _ctx +
-            "You know this film/show scene-by-scene. Using the WHOLE-STORY context above, for EACH of "
-            "the beats below identify the EXACT moment it describes (resolve vague lines from the arc) "
-            "so the viewer sees THAT specific scene, not generic footage. Reply ONLY a JSON array, one "
+            "You know this film/show scene-by-scene. For EACH beat, first classify only the visual "
+            "promise actually made by its NARRATION. Do not invent an exact action, location, pose, "
+            "camera angle, or scene from whole-story context for a generic, character-general, or "
+            "abstract line. Only after a beat genuinely names a precise moment should you identify "
+            "that exact scene. Reply ONLY a JSON array, one "
             "object per beat, same order:\n"
             '[{"i":int,"expected_visual":"concrete shot description of the exact moment",'
             '"scene_query":"a precise search string to find THIS exact scene clip — movie + character + '
@@ -221,7 +223,9 @@ def _llm_analyze(script_text: str, topic: str, movie_hint: str, beats: list[Scri
             "exact_scene=a precise scene/quote/character-action/plot-event (needs the EXACT clip); "
             "character_specific=a named person/thing in general (needs the right subject, any clean shot); "
             "generic_filler=generic/explanatory line (any relevant clip); abstract_effect=abstract/"
-            'emotional/meta with no literal visual (use an image/effect)",'
+            'emotional/meta with no literal visual (use an image/effect). For character_specific, '
+            'describe only the named subject generally and set specific=false; for generic_filler or '
+            'abstract_effect leave scene_query empty and set specific=false",'
             '"emotion":"one word or '
             "''\",\"specific\":true}]\n\nBEATS:\n" + json.dumps(numbered, ensure_ascii=False)
         )
@@ -246,6 +250,34 @@ def _llm_analyze(script_text: str, topic: str, movie_hint: str, beats: list[Scri
                  f"failed (invalid LLM JSON twice) — they fall back to heuristic visuals")
         _log(f"analyze: per-beat {min(start + BATCH, len(beats))}/{len(beats)}")
     return {"analysis": analysis, "beats": beat_out}
+
+
+def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
+    """Apply one analyzer reply while keeping policy and specificity internally coherent."""
+    if directive.get("expected_visual"):
+        beat.expected_visual = str(directive["expected_visual"])[:200]
+    beat.scene_query = str(directive.get("scene_query", ""))[:120]
+    beat.quote = str(directive.get("quote", ""))[:160]
+    beat.shot_intent = str(directive.get("shot_intent", ""))[:24]
+    beat.required_entity = str(directive.get("required_entity", ""))[:80]
+    beat.required_kind = str(directive.get("required_kind", ""))[:20]
+    beat.emotion = str(directive.get("emotion", ""))[:24]
+    resolved = _policy.normalize(directive.get("visual_policy", ""))
+    # Policy and specificity are one contract. A character-general or abstract label cannot
+    # simultaneously carry an analyzer-invented `specific=true` that steers title affinity and
+    # downstream prompts back toward a fabricated exact storyboard.
+    if resolved in (_policy.CHARACTER, _policy.ABSTRACT):
+        beat.is_specific_claim = False
+    elif directive.get("specific"):
+        beat.is_specific_claim = True
+    if resolved == _policy.ABSTRACT:
+        # Abstract means there is no literal searchable subject. Keep expected_visual as an
+        # effects/art-direction hint, but remove contradictory retrieval fields.
+        beat.scene_query = ""
+        beat.required_entity = ""
+        beat.required_kind = ""
+    if resolved:
+        beat.visual_policy = resolved
 
 
 _ANCHOR_STOP = set(          # (was `_STOPQ if False else set(...)` — the dead branch never ran,
@@ -388,19 +420,7 @@ def analyze_script(script_text: str, *, topic: str = "", movie_hint: str = "",
         o = by_i.get(b.index)
         if not o:
             continue
-        if o.get("expected_visual"):
-            b.expected_visual = str(o["expected_visual"])[:200]
-        b.scene_query = str(o.get("scene_query", ""))[:120]
-        b.quote = str(o.get("quote", ""))[:160]
-        b.shot_intent = str(o.get("shot_intent", ""))[:24]
-        b.required_entity = str(o.get("required_entity", ""))[:80]
-        b.required_kind = str(o.get("required_kind", ""))[:20]
-        b.emotion = str(o.get("emotion", ""))[:24]
-        if o.get("specific"):
-            b.is_specific_claim = True
-        _vp = _policy.normalize(o.get("visual_policy", ""))   # LLM's explicit class (validated)
-        if _vp:
-            b.visual_policy = _vp
+        _apply_beat_direction(b, o)
     # ROBUSTNESS: the LLM returns anchor_scenes inconsistently under load. If it omitted them, derive
     # the recurring (anchor) scene + video_type from the per-beat scene_queries so the footage strategy
     # never silently degrades to "scatter clips".

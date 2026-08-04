@@ -284,6 +284,32 @@ def test_missing_evidence_gets_scoped_reverify_before_acquisition(tmp_path):
     stills.assert_not_called()
 
 
+@pytest.mark.parametrize("reason", [
+    "exact_verifier_evidence_not_strict",
+    "exact_moving_verdict_was_downgraded",
+    "exact_moving_relevance_is_contextual",
+])
+def test_exact_non_strict_provenance_gets_scoped_reverify(reason):
+    audit = {"blockers": [{"segment_index": 59, "reasons": [reason]}]}
+    assert O._unverifiable_relevance_indices(audit) == {59}
+
+
+def test_exact_non_strict_provenance_with_semantic_negative_still_skips_reverify():
+    audit = {"blockers": [{
+        "segment_index": 59,
+        "reasons": ["exact_verifier_evidence_not_strict", "matches_narration_false"],
+    }]}
+    assert O._unverifiable_relevance_indices(audit) == set()
+
+
+def test_absent_moving_source_does_not_enter_impossible_scoped_reverify():
+    audit = {"blockers": [{
+        "segment_index": 59,
+        "reasons": ["moving_source_absent", "verifier_evidence_unrecomputable"],
+    }]}
+    assert O._unverifiable_relevance_indices(audit) == set()
+
+
 @pytest.mark.parametrize("summary,expected_reason", INCONCLUSIVE_VERIFY_SUMMARIES)
 def test_missing_evidence_inconclusive_summary_is_retryable_before_recovery(
         tmp_path, summary, expected_reason):
@@ -2206,6 +2232,124 @@ def test_current_pool_recovery_clears_a_real_timed_quote_window_contract(tmp_pat
     assert final["status"] == "pass"
     assert final["quote_branch_counts"] == {
         "verbatim": 1, "paraphrase": 0, "indeterminate": 0}
+
+
+def test_quote_window_builder_contains_full_phrase_and_skips_sd_equal_ratio(tmp_path):
+    """Whole-pool existence evidence becomes a bounded HD window, not an arbitrary SD pick."""
+    from vidlore.clipstudio import relevance_contract as R
+
+    proj, segs, old = _fixture(tmp_path, GOOD)
+    seg = segs[0]
+    seg.quote = "Chaos isn't a pit. Chaos is a ladder."
+    seg.est_duration = 1.5
+    old.flagged = True
+    old.flag_reasons = ["verifier_failed", "exact_scene_missing"]
+    old.in_point, old.out_point = 0.0, 2.0
+    hd_media = tmp_path / "quote_hd.mp4"
+    hd_media.write_bytes(b"hd quote bytes")
+    hd_alt_media = tmp_path / "quote_hd_alt.mp4"
+    hd_alt_media.write_bytes(b"hd recap bytes")
+    proj.sources.append(SourceVideo(
+        id="quote_hd", url="u-hd",
+        title="Game of Thrones Olenna Sansa necklace stone chaos is a ladder",
+        permission="owner", status="ok", local_path=str(hd_media), duration=30.0))
+    proj.sources.append(SourceVideo(
+        id="quote_hd_alt", url="u-hd-alt", title="generic recap",
+        permission="owner", status="ok", local_path=str(hd_alt_media), duration=30.0))
+    for sid in ("s1", "quote_hd", "quote_hd_alt"):
+        frame = tmp_path / f"{sid}_quote.jpg"
+        frame.write_bytes(b"quote frame")
+        shot = Shot(source_id=sid, index=4, start=8.0, end=18.0,
+                    keyframe_path=str(frame), quality=(0.6 if sid == "quote_hd_alt" else 0.8))
+        proj.shots_path(sid).write_text(json.dumps([shot.to_dict()]))
+
+    branch = {
+        "authored_quote": seg.quote, "branch": "verbatim", "verbatim_required": True,
+        "pool_match": {"source_id": "s1", "source_title": "SD first",
+                       "timed_asr_span": [10.0, 15.2], "timed_asr_ratio": 1.0},
+        "pool_matches": [
+            {"source_id": "s1", "source_title": "SD first",
+             "timed_asr_span": [10.0, 15.2], "timed_asr_ratio": 1.0},
+                {"source_id": "quote_hd", "source_title": "HD second",
+                 "timed_asr_span": [10.0, 15.2], "timed_asr_ratio": 1.0},
+                {"source_id": "quote_hd_alt", "source_title": "HD recap",
+                 "timed_asr_span": [10.0, 15.2], "timed_asr_ratio": 1.0},
+        ],
+    }
+
+    def dimensions(path):
+        return ({"width": 640, "height": 360} if path.name == "source.mp4"
+                else {"width": 1920, "height": 1080})
+
+    with mock.patch.object(R, "_quote_pool_branches", return_value={0: branch}), \
+            mock.patch("vidlore.clipstudio.ingest.probe", side_effect=dimensions):
+        built, audit = O._quote_window_recovery_selections(
+            proj, segs, ClipConfig(), {0})
+
+    assert set(built) == {0}
+    picked = built[0]
+    assert picked.source_id == "quote_hd"
+    assert picked.in_point <= 10.0 and picked.out_point >= 15.2
+    assert picked.duration >= 5.2 - 1e-6, "a short narration beat must not truncate the real quote"
+    assert picked.flagged is False
+    assert picked.flag_reasons == []
+    assert picked.beat_windows == [["quote_hd", 10.0, 15.2]]
+    assert len(picked.alternates) == 1
+    assert picked.alternates[0].source_id == "quote_hd_alt"
+    rows = audit["beats"][0]["candidates"]
+    assert next(row for row in rows if row["source_id"] == "s1")["status"] == \
+        "skipped_non_hd_or_unprobeable"
+    assert next(row for row in rows if row["source_id"] == "quote_hd")["status"] == \
+        "candidate"
+
+
+def test_quote_window_rung_commits_before_broad_rematch_and_keeps_page_receipt(tmp_path):
+    proj, segs, old = _fixture(tmp_path, GOOD)
+    old.flagged = True
+    old.flag_reasons = ["verifier_failed", "exact_scene_missing"]
+    direct = copy.deepcopy(old)
+    direct.in_point, direct.out_point = 10.0, 15.2
+    direct.clip_path = ""
+    direct.flagged = False
+    direct.flag_reasons = []
+    direct.verifier = {}
+    direct.beat_windows = [["s1", 10.0, 15.2]]
+    direct.signals = {"dialogue": 1.0, "moment_lock": 1.0, "quote_pool_exact": True}
+    rung_audit = {"attempted": [0], "recovered": [], "still_unresolved": [0],
+                  "error": "", "beats": [{"segment_index": 0, "status": "candidate_ready"}]}
+
+    def cut_one(_proj, sel, _cfg, **_kw):
+        path = _proj.clips_dir / f"seg_{sel.segment_index:03d}.mp4"
+        path.write_bytes(b"fresh quote-window clip")
+        return path
+
+    with mock.patch.object(O, "_quote_window_recovery_selections",
+                           return_value=({0: direct}, rung_audit)), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=dict(VERIFY_OK)), \
+            mock.patch("vidlore.clipstudio.relevance_contract.evaluate_selection_relevance",
+                       return_value={"status": "pass", "blocked_count": 0, "blockers": []}), \
+            mock.patch("vidlore.clipstudio.cut.cut_selection", side_effect=cut_one), \
+            mock.patch.object(O, "match_segments") as broad, \
+            mock.patch("vidlore.clipstudio.discover.discover_sources") as discover:
+        recovered = O._recover_unresolved_beats(
+            proj, segs, SimpleNamespace(movie_title="Game of Thrones"), ClipConfig(),
+            SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+            policy="approved_testing", log=lambda _m: None, only_indices={0},
+            audit_filename="quote-rung-page.json", audit_request_id="quote-page")
+
+    assert recovered == 1
+    broad.assert_not_called()
+    discover.assert_not_called()
+    assert proj.selections[0].in_point == 10.0
+    assert proj.selections[0].flagged is False
+    assert proj.selections[0].flag_reasons == []
+    assert proj.selections[0].beat_windows == [["s1", 10.0, 15.2]]
+    page = json.loads((proj.output_dir / "quote-rung-page.json").read_text())
+    assert page["current_pool_quote_windows"]["recovered"] == [0]
+    assert page["current_pool_rematch"]["attempted"] == page["page_scope"] == [0]
+    assert page["current_pool_rematch"]["broad_attempted"] == []
+    assert page["page_completed"] is True
 
 
 def test_orchestrate_runs_strict_recovery_then_confirmed_gap_ladder_then_asserts():

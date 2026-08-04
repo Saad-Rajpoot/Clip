@@ -8,8 +8,12 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace as NS
 
+import pytest
+
 from vidlore.clipstudio import policy as P
 from vidlore.clipstudio import verify as V
+from vidlore.clipstudio import analyze as A
+from vidlore.clipstudio import relevance_contract as R
 
 
 def _seg(text: str, **kw):
@@ -55,6 +59,106 @@ def test_quote_cannot_remain_llm_filler_but_unanchored_commentary_can():
     commentary = _seg("And that changes everything.", visual_policy=P.FILLER,
                       is_specific_claim=True)
     assert P.policy_of(commentary) == P.FILLER
+
+
+def test_character_general_directives_cannot_reintroduce_exact_storyboard_specificity():
+    measured = (
+        ("For seven seasons, the agreement about Petyr Baelish was almost total.",
+         "Petyr Baelish smug in his brothel"),
+        ("There is a second objection here, and it deserves a straight answer.",
+         "Littlefinger alone in his brothel looking at camera"),
+        ("Baelish alone treated the absence of checking as a permanent resource.",
+         "Littlefinger at a window over King's Landing"),
+    )
+    for text, invented_storyboard in measured:
+        beat = _seg(text, is_specific_claim=True)
+        A._apply_beat_direction(beat, {
+            "expected_visual": invented_storyboard,
+            "scene_query": "Game of Thrones " + invented_storyboard,
+            "required_entity": "Petyr Baelish", "required_kind": "character",
+            "visual_policy": "character_specific", "specific": True,
+        })
+        assert beat.visual_policy == P.CHARACTER
+        assert beat.is_specific_claim is False
+        assert P.policy_of(beat) == P.CHARACTER
+
+
+def test_unanchored_rewatch_is_abstract_but_a_narrated_target_remains_exact():
+    unanchored = _seg(
+        "Watch it again and something uncomfortable comes apart.",
+        visual_policy=P.EXACT,
+        expected_visual="invented rewind montage of four unrelated scenes")
+    assert not P.is_deictic(unanchored)
+    assert P.policy_of(unanchored) == P.ABSTRACT
+
+    anchored = _seg("Watch it again sometime, and don't look at Joffrey at all.",
+                    visual_policy=P.EXACT)
+    assert P.is_deictic(anchored)
+    assert P.policy_of(anchored) == P.EXACT
+
+    normalized = _seg("Watch it again and something uncomfortable comes apart.")
+    A._apply_beat_direction(normalized, {
+        "expected_visual": "an editorial rewind effect", "scene_query": "invented scene",
+        "required_entity": "invented subject", "required_kind": "scene",
+        "visual_policy": "abstract_effect", "specific": True,
+    })
+    assert normalized.visual_policy == P.ABSTRACT
+    assert normalized.is_specific_claim is False
+    assert normalized.scene_query == normalized.required_entity == normalized.required_kind == ""
+
+
+def test_character_general_verifier_omits_aspirational_storyboard_and_stays_positive(
+        tmp_path, monkeypatch):
+    from vidlore.clipstudio import llm as L
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"frame")
+    prompts = []
+
+    def complete_ex(**kwargs):
+        prompts.append(kwargs["messages"][0]["content"][1]["text"])
+        return ('{"matches_narration":true,"correct_subject_visible":true,'
+                '"wrong_subject_visible":false,"contradicts_narration":false,'
+                '"specific_enough":true,"quality_ok":true,"confidence":0.9,'
+                '"verdict":"keep","reason":"right subject"}', {"served": "test"})
+
+    monkeypatch.setattr(L, "complete_ex", complete_ex)
+    V.verify_frame(
+        frame, "The agreement about Petyr Baelish was almost total.", "Petyr Baelish",
+        "character", [], NS(), is_specific=False,
+        expected_visual="Baelish smirking alone inside his brothel",
+        scene_query="Game of Thrones Littlefinger brothel smirk")
+    assert "Baelish smirking alone" not in prompts[0]
+    assert "Target scene:" not in prompts[0]
+    assert "specific_enough=true" in prompts[0]
+
+    V.verify_frame(
+        frame, "Baelish reveals the dagger in his brothel.", "Petyr Baelish",
+        "character", [], NS(), is_specific=True,
+        expected_visual="Baelish reveals the dagger in his brothel",
+        scene_query="Game of Thrones Littlefinger dagger brothel")
+    assert "Baelish reveals the dagger" in prompts[1]
+    assert "Target scene:" in prompts[1]
+
+
+def test_lenient_fingerprint_ignores_unused_storyboard_but_strict_does_not():
+    base = dict(
+        src_hash="a", source_id="s", shot_start=0.0, shot_end=2.0,
+        beat_text="Petyr Baelish was underestimated", required_entity="Petyr Baelish",
+        required_kind="character", expected_visual="invented room one",
+        scene_query="invented query one", visual_policy=P.CHARACTER,
+        faceid_names=[], multiframe=True, image_id="sheet:x", model="vision")
+    lenient_a = V.verdict_fingerprint(**base, is_specific=False)
+    lenient_b = V.verdict_fingerprint(
+        **{**base, "expected_visual": "invented room two",
+           "scene_query": "invented query two"}, is_specific=False)
+    strict_a = V.verdict_fingerprint(**base, is_specific=True)
+    strict_b = V.verdict_fingerprint(
+        **{**base, "expected_visual": "invented room two",
+           "scene_query": "invented query two"}, is_specific=True)
+    assert lenient_a == lenient_b
+    assert strict_a != strict_b
+    assert V.PROMPT_VERSION == "v9-2026-08", "unchanged exact questions keep their warm cache"
+    assert V.LENIENT_PROMPT_VERSION == "v10-2026-08"
 
 
 _EXPLICIT_MISMATCH = {
@@ -164,6 +268,37 @@ def test_nonexact_contextual_leniency_is_preserved(tmp_path, monkeypatch):
     assert summary["failed"] == 0
     assert proj.selections[0].verifier["verdict"] == "keep"
     assert "non-exact" in proj.selections[0].verifier["relaxed"]
+
+
+@pytest.mark.parametrize("binding_reason", [
+    "verifier_evidence_mismatch",
+    "verifier_evidence_absent",
+    "verifier_evidence_schema_mismatch",
+    "verifier_evidence_model_mismatch",
+    "verifier_evidence_window_not_sampled",
+])
+def test_stale_lenient_negative_is_a_technical_reverify_not_a_content_mismatch(
+        tmp_path, monkeypatch, binding_reason):
+    proj, segs, _shot, _cfg = _verify_fixture(tmp_path, P.CHARACTER)
+    sel = proj.selections[0]
+    sel.verifier = {
+        "status": "ok", "verdict": "keep", "matches_narration": False,
+        "specific_enough": False, "correct_subject_visible": True,
+        "wrong_subject_visible": False, "quality_ok": True,
+    }
+    monkeypatch.setattr(
+        R, "selection_verifier_evidence_reason",
+        lambda *_a, **_k: binding_reason)
+    stale = R.evaluate_selection_relevance(proj, segs)
+    assert stale["status"] == "blocked"
+    assert stale["blockers"][0]["reasons"] == [binding_reason]
+
+    # Once evidence is current, the same explicit negative facts remain hard blockers. The change
+    # routes a changed question to re-verification; it does not accept a mismatch or lower a floor.
+    monkeypatch.setattr(R, "selection_verifier_evidence_reason", lambda *_a, **_k: "")
+    current = R.evaluate_selection_relevance(proj, segs)
+    assert "matches_narration_false" in current["blockers"][0]["reasons"]
+    assert "specific_enough_false" in current["blockers"][0]["reasons"]
 
 
 def test_verifier_judges_selected_trim_not_target_elsewhere_in_same_shot(tmp_path, monkeypatch):

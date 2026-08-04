@@ -1347,6 +1347,290 @@ def _load_conclusive_semantic_recovery_page(path: Path, *, request_id: str,
     return raw
 
 
+def _quote_window_recovery_selections(proj, segs, cfg, scope, *, quote_pool_cache=None) \
+        -> tuple[dict[int, object], dict]:
+    """Build scoped selections directly from authoritative whole-pool quote locations.
+
+    This is a recovery candidate builder, not a new matcher or a permissive acceptance path.  It is
+    deliberately called only for blockers selected into one bounded semantic page.  A real authored
+    quote has already been located by ``find_quote_span`` across the complete dialogue-eligible pool;
+    rebuilding the whole project matcher merely to rediscover that source/time lets diversity and
+    anti-reuse choose a neighbouring shot again.  Instead, put the full located phrase into a small
+    exact-window bench.  The ordinary strict verifier and relevance contract decide whether those
+    pixels actually depict the beat, and ``_commit_scoped_recovery`` owns the eventual recut/rollback.
+
+    Only natively-HD, locally probeable sources become candidates.  A sole SD quote hit is useful
+    absence evidence, but accepting it here would only move the same beat to the later native-HD
+    publication failure instead of letting acquisition seek a publishable copy.
+    """
+    import copy as _copy_quote
+
+    from . import index as _index_quote
+    from . import match as _match_quote
+    from . import relevance_contract as _rel_quote
+    from . import verify as _verify_quote
+    from .ingest import probe as _probe_quote
+    from .models import ClipCandidate as _ClipCandidate_quote
+    from .models import ClipSelection as _ClipSelection_quote
+    from .quality_contract import native_video_ok as _native_video_ok_quote
+
+    if quote_pool_cache is None:
+        contracts = _rel_quote._quote_pool_branches(proj, segs, cfg=cfg)
+    elif type(quote_pool_cache) is _rel_quote._RequestQuotePoolClassificationCache:
+        contracts = quote_pool_cache.contracts_for(proj, segs, cfg=cfg)
+    else:
+        # Do not let a caller-authored ``paraphrase`` or fabricated span enter this evidence path.
+        raise TypeError("quote_pool_cache must be a request-local classification cache")
+
+    seg_by_idx = {int(getattr(seg, "index", -1)): seg for seg in (segs or [])}
+    sel_by_idx = {int(getattr(sel, "segment_index", -1)): sel
+                  for sel in (getattr(proj, "selections", None) or [])}
+    dim_cache: dict[str, dict] = {}
+    built: dict[int, object] = {}
+    result = {
+        "attempted": [],
+        "recovered": [],
+        "still_unresolved": [],
+        "error": "",
+        "beats": [],
+    }
+
+    def _window(seg, src, shots, q0: float, q1: float) -> tuple[float, float] | None:
+        if not (q1 > q0 >= 0.0):
+            return None
+        qdur = q1 - q0
+        try:
+            narration_need = float(getattr(seg, "est_duration", 0.0) or 0.0) + 0.6
+            normal_need = min(float(getattr(cfg, "max_clip_sec", qdur) or qdur),
+                              max(float(getattr(cfg, "min_clip_sec", 0.0) or 0.0),
+                                  narration_need))
+        except (TypeError, ValueError):
+            normal_need = qdur
+        # Never truncate a long spoken phrase to a short narration beat (the measured beat-13 bug).
+        need = max(qdur, normal_need)
+        extra = max(0.0, need - qdur)
+        start = max(0.0, q0 - extra / 2.0)
+        end = q1 + (extra - (q0 - start))
+        source_end = max(
+            float(getattr(src, "duration", 0.0) or 0.0),
+            max((float(getattr(shot, "end", 0.0) or 0.0) for shot in shots), default=0.0))
+        if source_end > 0.0 and end > source_end:
+            shift = end - source_end
+            end = source_end
+            start = max(0.0, start - shift)
+        if start > q0 or end < q1:
+            return None
+        return round(start, 3), round(end, 3)
+
+    for idx in sorted({int(i) for i in (scope or set())}):
+        seg = seg_by_idx.get(idx)
+        branch = dict(contracts.get(idx) or {})
+        beat_row = {
+            "segment_index": idx,
+            "branch": str(branch.get("branch", "") or ""),
+            "authored_quote": str(branch.get("authored_quote", "") or ""),
+            "status": "not_verbatim",
+            "candidates": [],
+        }
+        if seg is None or branch.get("branch") != "verbatim":
+            result["beats"].append(beat_row)
+            continue
+
+        raw_matches = list(branch.get("pool_matches") or [])
+        if not raw_matches and isinstance(branch.get("pool_match"), dict):
+            raw_matches = [branch["pool_match"]]          # old contract/audit compatibility
+        candidates = []
+        candidate_rows: dict[tuple, dict] = {}
+        candidate_shots: dict[tuple, object] = {}
+        seen_sources: set[str] = set()
+        for match in raw_matches:
+            sid = str((match or {}).get("source_id", "") or "")
+            row = {
+                "source_id": sid,
+                "source_title": str((match or {}).get("source_title", "") or ""),
+                "timed_asr_span": list((match or {}).get("timed_asr_span") or []),
+                "timed_asr_ratio": (match or {}).get("timed_asr_ratio"),
+                "status": "invalid_pool_match",
+            }
+            beat_row["candidates"].append(row)
+            if not sid or sid in seen_sources:
+                row["status"] = "duplicate_or_missing_source"
+                continue
+            seen_sources.add(sid)
+            try:
+                q0, q1 = (float(row["timed_asr_span"][0]),
+                          float(row["timed_asr_span"][1]))
+                ratio = float(row["timed_asr_ratio"] or 0.0)
+            except (IndexError, TypeError, ValueError):
+                continue
+            if ratio < float(_rel_quote.QUOTE_DIALOGUE_FLOOR):
+                row["status"] = "below_quote_floor"
+                continue
+            src = proj.source(sid)
+            path = str(getattr(src, "local_path", "") or "") if src is not None else ""
+            if (src is None or str(getattr(src, "status", "") or "") != SOURCE_OK
+                    or not path or not Path(path).is_file()):
+                row["status"] = "source_unavailable"
+                continue
+            if path not in dim_cache:
+                try:
+                    dim_cache[path] = dict(_probe_quote(Path(path)) or {})
+                except Exception:
+                    dim_cache[path] = {}
+            dims = dim_cache[path]
+            row["native_width"] = int(dims.get("width") or 0)
+            row["native_height"] = int(dims.get("height") or 0)
+            row["native_hd"] = bool(_native_video_ok_quote(dims))
+            if not row["native_hd"]:
+                row["status"] = "skipped_non_hd_or_unprobeable"
+                continue
+            try:
+                shots = list(_index_quote.load_shots(proj, sid) or [])
+            except Exception:
+                shots = []
+            overlaps = [shot for shot in shots
+                        if float(getattr(shot, "end", 0.0) or 0.0) >= q0
+                        and float(getattr(shot, "start", 0.0) or 0.0) <= q1]
+            if not overlaps:
+                row["status"] = "quote_span_has_no_indexed_shot"
+                continue
+
+            def _anchor_rank(shot):
+                start = float(getattr(shot, "start", 0.0) or 0.0)
+                end = float(getattr(shot, "end", 0.0) or 0.0)
+                overlap = max(0.0, min(end, q1) - max(start, q0))
+                midpoint = (q0 + q1) / 2.0
+                contains_midpoint = 1 if start <= midpoint <= end else 0
+                return overlap, contains_midpoint, float(getattr(shot, "quality", 0.0) or 0.0), \
+                    -int(getattr(shot, "index", 0) or 0)
+
+            anchor = max(overlaps, key=_anchor_rank)
+            selected_window = _window(seg, src, shots, q0, q1)
+            if selected_window is None:
+                row["status"] = "quote_span_outside_source"
+                continue
+            signals = {
+                "dialogue": round(ratio, 3),
+                "moment_lock": 1.0,
+                "moment_ratio": round(ratio, 3),
+                "quote_pool_exact": True,
+                "quality": round(float(getattr(anchor, "quality", 0.0) or 0.0), 3),
+                "native_width": row["native_width"],
+                "native_height": row["native_height"],
+            }
+            cand = _ClipCandidate_quote(
+                segment_index=idx, source_id=sid,
+                shot_index=int(getattr(anchor, "index", -1)), score=round(ratio, 4),
+                in_point=selected_window[0], out_point=selected_window[1], signals=signals)
+            try:
+                action, reason, _meta = _match_quote.validate_candidate_window(
+                    cand, anchor, shots, cfg, seg)
+            except Exception as exc:
+                row["status"] = f"window_qc_error:{type(exc).__name__}"
+                continue
+            tolerance = float(_rel_quote.QUOTE_WINDOW_TOLERANCE_SEC)
+            contained = (q0 >= float(cand.in_point) - tolerance
+                         and q1 <= float(cand.out_point) + tolerance)
+            if action == "rejected" or not contained:
+                row["status"] = ("window_qc_rejected" if action == "rejected"
+                                 else "window_qc_lost_quote_containment")
+                row["window_qc_reason"] = str(reason or "")
+                continue
+            row.update({
+                "status": "candidate",
+                "anchor_shot_index": int(getattr(anchor, "index", -1)),
+                "selected_window": [round(float(cand.in_point), 3),
+                                    round(float(cand.out_point), 3)],
+                "window_qc": str(action or "ok"),
+                "window_qc_reason": str(reason or ""),
+            })
+            key = (cand.source_id, cand.shot_index, cand.in_point, cand.out_point)
+            candidates.append(cand)
+            candidate_rows[key] = row
+            candidate_shots[key] = anchor
+
+        if not candidates:
+            beat_row["status"] = "no_publishable_exact_window"
+            result["beats"].append(beat_row)
+            continue
+
+        # Quality/phrase strength order within a scene-affinity tier.  The existing stable source
+        # affinity helper then puts a source whose title names the authored scene first; neither sort
+        # is an acceptance decision and every candidate is judged below.
+        candidates.sort(key=lambda cand: (
+            float((cand.signals or {}).get("moment_ratio", 0.0) or 0.0),
+            int((cand.signals or {}).get("native_width", 0) or 0)
+            * int((cand.signals or {}).get("native_height", 0) or 0),
+            float((cand.signals or {}).get("quality", 0.0) or 0.0),
+            cand.source_id), reverse=True)
+        candidates = _verify_quote._scene_affinity_order(
+            candidates, seg, proj,
+            str(getattr(sel_by_idx.get(idx), "source_id", "") or ""))
+        _candidate_bench_cap = 12
+        beat_row["publishable_candidate_count"] = len(candidates)
+        beat_row["candidate_bench_cap"] = _candidate_bench_cap
+        beat_row["candidate_overflow"] = max(0, len(candidates) - _candidate_bench_cap)
+        for overflow in candidates[_candidate_bench_cap:]:
+            okey = (overflow.source_id, overflow.shot_index,
+                    overflow.in_point, overflow.out_point)
+            candidate_rows[okey]["status"] = "candidate_overflow_not_attempted"
+        candidates = candidates[:_candidate_bench_cap]
+        for rank, cand in enumerate(candidates, 1):
+            key = (cand.source_id, cand.shot_index, cand.in_point, cand.out_point)
+            candidate_rows[key]["rank"] = rank
+
+        primary = candidates[0]
+        old = sel_by_idx.get(idx)
+        if old is None:
+            new_sel = _ClipSelection_quote(
+                segment_index=idx, source_id=primary.source_id,
+                shot_index=primary.shot_index, in_point=primary.in_point,
+                out_point=primary.out_point, confidence=primary.score)
+        else:
+            new_sel = _copy_quote.deepcopy(old)
+        pkey = (primary.source_id, primary.shot_index, primary.in_point, primary.out_point)
+        pshot = candidate_shots[pkey]
+        new_sel.source_id = primary.source_id
+        new_sel.shot_index = primary.shot_index
+        new_sel.in_point = primary.in_point
+        new_sel.out_point = primary.out_point
+        new_sel.confidence = primary.score
+        new_sel.signals = dict(primary.signals or {})
+        new_sel.identity = ((getattr(pshot, "face_ids", None) or [""])[0] or "")
+        new_sel.identity_score = 0.0
+        # This object is a fresh recovery hypothesis.  Failure flags copied from the rejected
+        # selection describe the old pixels and must not survive into verifier prediction/self-heal;
+        # the verifier and publication contract will add current reasons if this window also fails.
+        new_sel.flagged = False
+        new_sel.flag_reasons = []
+        new_sel.verifier = {}                              # exact new bytes require a fresh judgment
+        # Only the primary has been selected for verification.  ASR-identical alternates can be a
+        # recap or another scene (the measured beat-84 case), so putting them in beat_windows would
+        # let unverified pixels air.  verify._try_promote rewrites this sole entry to the first
+        # strictly accepted alternate when promotion succeeds.
+        new_sel.beat_windows = [[primary.source_id, round(primary.in_point, 3),
+                                 round(primary.out_point, 3)]]
+        new_sel.alternates = list(candidates[1:])
+        new_sel.deep_alternates = []
+        new_sel.source_url = (getattr(proj.source(primary.source_id), "url", "") or "")
+        new_sel.image_path = ""
+        new_sel.image_meta = {}
+        new_sel.clip_path = ""                            # materialized only by scoped commit
+        new_sel.approved = False
+        new_sel.legibility_grade = ""
+        built[idx] = new_sel
+        result["attempted"].append(idx)
+        beat_row["status"] = "candidate_ready"
+        beat_row["primary"] = {
+            "source_id": primary.source_id,
+            "shot_index": primary.shot_index,
+            "selected_window": [primary.in_point, primary.out_point],
+        }
+        result["beats"].append(beat_row)
+
+    return built, result
+
+
 def _commit_scoped_recovery(proj, cfg, snapshot: dict, rematched: dict,
                             recovered: set[int], *, log=print) -> bool:
     """Atomically retain and cut only strictly recovered scoped selections.
@@ -2020,7 +2304,7 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
 def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, refs, roster,
                               policy, log, only_indices=None,
                               audit_filename: str = "recovery_audit.json",
-                              audit_request_id: str = "") -> int:
+                              audit_request_id: str = "", quote_pool_cache=None) -> int:
     """R4-5 BOUNDED AUTONOMOUS RECOVERY. For EXACT beats still unresolved after match + verify, run
     ONE bounded round of targeted rediscovery → download → index → rematch → (re-cut) → reverify
     BEFORE the render can fall back to a deterministic still / editorial hold / release-block.
@@ -2130,44 +2414,107 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
     # may rebuild every selection internally for its diversity constraints; snapshot reconciliation
     # ensures only contract-cleared scoped beats survive, and a final cut re-establishes clip lineage.
     if _scope is not None:
-        current_snapshot = {s.segment_index: _copy.deepcopy(s) for s in proj.selections}
+        _page_scope = list(unresolved)
         current_error = ""
-        try:
-            match_segments(proj, segs, cfg, analysis=analysis, progress=None)
-            from . import verify as _verify_pool
+        from . import verify as _verify_pool
+        from . import relevance_contract as _rel_pool
+
+        def _run_scoped_verify(_indices):
             import os as _os_pool
             _pool_workers_unset = "VIDLORE_CLIPSTUDIO_VERIFY_WORKERS" not in _os_pool.environ
             if _pool_workers_unset:
                 _os_pool.environ["VIDLORE_CLIPSTUDIO_VERIFY_WORKERS"] = "4"
             try:
-                _pool_verify_result = _verify_pool.verify_and_repair(
-                    proj, segs, cfg, eng, only_indices=set(unresolved), progress=None,
+                return _verify_pool.verify_and_repair(
+                    proj, segs, cfg, eng, only_indices=set(_indices), progress=None,
                     materialize_promotions=False, persist_project=False)
             finally:
                 if _pool_workers_unset:
                     _os_pool.environ.pop("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", None)
-            _pool_verify_error = _verifier_summary_error(_pool_verify_result)
-            if _pool_verify_error:
-                raise RuntimeError(f"current_pool_{_pool_verify_error}")
 
-            from . import relevance_contract as _rel_pool
-            strict_after = _rel_pool.evaluate_selection_relevance(proj, segs, cfg=cfg)
-            blocked_after = {int(e.get("segment_index", -1))
-                             for e in (strict_after.get("blockers") or [])}
-            current_pool_recovered = set(unresolved) - blocked_after
+        # REAL-QUOTE WINDOW RUNG.  Whole-pool ASR has already proved the phrase's source/time;
+        # consume that exact evidence before a global rematch lets diversity choose a neighbouring
+        # instant again.  This transaction is scoped and contract-positive just like the broad rung.
+        quote_snapshot = {s.segment_index: _copy.deepcopy(s) for s in proj.selections}
+        quote_audit = {"attempted": [], "recovered": [], "still_unresolved": [],
+                       "error": "", "beats": []}
+        quote_recovered: set[int] = set()
+        try:
+            quote_selections, quote_audit = _quote_window_recovery_selections(
+                proj, segs, cfg, set(unresolved), quote_pool_cache=quote_pool_cache)
+            if quote_selections:
+                proj.selections = [quote_selections.get(i, quote_snapshot[i])
+                                   for i in sorted(quote_snapshot)]
+                proj.selections.extend(quote_selections[i]
+                                       for i in sorted(set(quote_selections) - set(quote_snapshot)))
+                quote_summary = _run_scoped_verify(set(quote_selections))
+                quote_error = _verifier_summary_error(quote_summary)
+                if quote_error:
+                    raise RuntimeError(f"quote_window_{quote_error}")
+                quote_contract = _rel_pool.evaluate_selection_relevance(
+                    proj, segs, cfg=cfg, quote_pool_cache=quote_pool_cache)
+                quote_blocked = {int(e.get("segment_index", -1))
+                                 for e in (quote_contract.get("blockers") or [])}
+                quote_recovered = set(quote_selections) - quote_blocked
+                by_block = {int(e.get("segment_index", -1)): e
+                            for e in (quote_contract.get("blockers") or [])}
+                for row in quote_audit.get("beats") or []:
+                    idx = int(row.get("segment_index", -1))
+                    if idx in quote_selections:
+                        row["strict_result"] = ("recovered" if idx in quote_recovered else "blocked")
+                        row["strict_reasons"] = list((by_block.get(idx) or {}).get("reasons") or [])
+            quote_rematched = {s.segment_index: s for s in proj.selections}
+            if not _commit_scoped_recovery(
+                    proj, cfg, quote_snapshot, quote_rematched, quote_recovered, log=log):
+                raise RuntimeError("quote_window_scoped_cut_or_lineage_commit_failed")
         except Exception as e:                           # noqa: BLE001 — restore and fail closed
             current_error = f"{type(e).__name__}: {e}"
-            log(f"recovery: current-pool scoped rematch errored ({current_error[:120]}) — "
-                "no selection accepted")
-            current_pool_recovered.clear()
+            quote_audit["error"] = current_error
+            _commit_scoped_recovery(
+                proj, cfg, quote_snapshot,
+                {s.segment_index: s for s in proj.selections}, set(), log=log)
+            quote_recovered.clear()
+        quote_audit["recovered"] = sorted(quote_recovered)
+        quote_audit["still_unresolved"] = [i for i in _page_scope if i not in quote_recovered]
+        audit["current_pool_quote_windows"] = quote_audit
+        current_pool_recovered.update(quote_recovered)
+        unresolved = [i for i in unresolved if i not in quote_recovered]
+        if quote_recovered:
+            log(f"recovery: exact whole-pool quote windows recovered {len(quote_recovered)} "
+                f"strict blocker(s) {sorted(quote_recovered)} before global rematch/acquisition")
 
-        rematched = {s.segment_index: s for s in proj.selections}
-        if not _commit_scoped_recovery(
-                proj, cfg, current_snapshot, rematched, current_pool_recovered, log=log):
-            current_error = current_error or "scoped_cut_or_lineage_commit_failed"
-            current_pool_recovered.clear()
+        broad_attempted = list(unresolved)
+        if unresolved and not current_error:
+            current_snapshot = {s.segment_index: _copy.deepcopy(s) for s in proj.selections}
+            broad_recovered: set[int] = set()
+            try:
+                match_segments(proj, segs, cfg, analysis=analysis, progress=None)
+                _pool_verify_result = _run_scoped_verify(set(unresolved))
+                _pool_verify_error = _verifier_summary_error(_pool_verify_result)
+                if _pool_verify_error:
+                    raise RuntimeError(f"current_pool_{_pool_verify_error}")
+                strict_after = _rel_pool.evaluate_selection_relevance(
+                    proj, segs, cfg=cfg, quote_pool_cache=quote_pool_cache)
+                blocked_after = {int(e.get("segment_index", -1))
+                                 for e in (strict_after.get("blockers") or [])}
+                broad_recovered = set(unresolved) - blocked_after
+            except Exception as e:                       # noqa: BLE001 — restore and fail closed
+                current_error = f"{type(e).__name__}: {e}"
+                log(f"recovery: current-pool scoped rematch errored ({current_error[:120]}) — "
+                    "no broad-rematch selection accepted")
+                broad_recovered.clear()
+            rematched = {s.segment_index: s for s in proj.selections}
+            if not _commit_scoped_recovery(
+                    proj, cfg, current_snapshot, rematched, broad_recovered, log=log):
+                current_error = current_error or "scoped_cut_or_lineage_commit_failed"
+                broad_recovered.clear()
+            current_pool_recovered.update(broad_recovered)
+
         audit["current_pool_rematch"] = {
-            "attempted": list(unresolved),
+            # Compatibility/conclusive-page invariant: this remains the exact page scope even when
+            # its quote subset was recovered by the narrower rung before the broad rematch.
+            "attempted": list(_page_scope),
+            "broad_attempted": broad_attempted,
             "recovered": sorted(current_pool_recovered),
             "still_unresolved": [i for i in unresolved_before
                                  if i not in current_pool_recovered],
@@ -2177,7 +2524,8 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
         if current_error:
             # Matching/verifier infrastructure did not complete, so this is not an exhausted
             # content page. The scoped commit above has already restored exploratory metadata.
-            return _finish_page(0, completed=False, error=current_error)
+            audit["recovered"] = sorted(current_pool_recovered)
+            return _finish_page(len(current_pool_recovered), completed=False, error=current_error)
         if current_pool_recovered:
             log(f"recovery: current indexed pool recovered {len(current_pool_recovered)} "
                 f"strict blocker(s) {sorted(current_pool_recovered)} before rediscovery")
@@ -2549,8 +2897,17 @@ def _unverifiable_relevance_indices(audit: dict) -> set[int]:
         "verifier_evidence_absent", "verifier_evidence_schema_mismatch",
         "verifier_evidence_model_mismatch", "verifier_evidence_mismatch",
         "verifier_evidence_unrecomputable", "verifier_evidence_window_not_sampled",
+        # These are provenance defects, not semantic rejections.  The selected bytes may be the
+        # exact scene (for example, an earlier lenient/contextual verifier judged them), but they
+        # have never been asked the strict publication question.  Re-verify that same window once
+        # before spending acquisition budget or declaring a footage gap.
+        "exact_verifier_evidence_not_strict", "exact_moving_verdict_was_downgraded",
+        "exact_moving_relevance_is_contextual",
     )
-    explicit_negative = (
+    cannot_reverify_in_place = (
+        # There are no moving bytes to ask about.  These beats need selection recovery/stills,
+        # not a verifier call that can never bind evidence to an absent source.
+        "selection_absent", "moving_source_absent",
         "verdict_replace", "matches_narration_false", "specific_enough_false",
         "quality_ok_false", "wrong_subject_visible_true", "correct_subject_visible_false",
         "target_visible_false", "contradicts_narration_true", "era_ok_false",
@@ -2560,7 +2917,8 @@ def _unverifiable_relevance_indices(audit: dict) -> set[int]:
         int(e.get("segment_index", -1))
         for e in (audit.get("blockers") or [])
         if any(str(r).startswith(prefixes) for r in (e.get("reasons") or []))
-        and not any(str(r).startswith(explicit_negative) for r in (e.get("reasons") or []))
+        and not any(str(r).startswith(cannot_reverify_in_place)
+                    for r in (e.get("reasons") or []))
     }
 
 
@@ -2772,7 +3130,8 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
                     proj, segs, analysis, cfg, eng, faceid_obj=faceid_obj, refs=refs,
                     roster=roster, policy=policy, log=log, only_indices=_recovery_scope,
                     audit_filename="semantic_recovery_audit.json",
-                    audit_request_id=_page_request_id)
+                    audit_request_id=_page_request_id,
+                    quote_pool_cache=_quote_pool_cache_sr)
             except Exception as exc:                     # noqa: BLE001 — retryable technical stop
                 raise PipelineError(
                     f"semantic recovery helper failed before conclusive page completion: "

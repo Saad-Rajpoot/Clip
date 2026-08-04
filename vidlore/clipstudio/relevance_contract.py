@@ -264,14 +264,28 @@ def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
         branch = by_quote.get(key)
         if branch is None:
             best = None
+            matches: list[dict] = []
             for src, words in streams:
                 try:
                     span = _index.find_quote_span(
                         words, quote, min_ratio=QUOTE_DIALOGUE_FLOOR)
                 except Exception:
                     span = None
-                if span and (best is None or float(span[2]) > float(best[1][2])):
-                    best = (src, span)
+                if span:
+                    match = {
+                        "source_id": str(getattr(src, "id", "") or ""),
+                        "source_title": str(getattr(src, "title", "") or ""),
+                        "timed_asr_span": [
+                            round(float(span[0]), 3), round(float(span[1]), 3)],
+                        "timed_asr_ratio": round(float(span[2]), 3),
+                    }
+                    matches.append(match)
+                    # Preserve the historical ``pool_match`` choice exactly: first source at the
+                    # strongest phrase ratio wins.  Recovery consumes ``pool_matches`` below so an
+                    # arbitrary equal-ratio first source (often a 360p copy) is evidence of
+                    # existence, not an accidental recommendation.
+                    if best is None or float(span[2]) > float(best[1][2]):
+                        best = (src, span)
             if best is not None:
                 kind = "verbatim"
             elif invalid_provenance or not streams:
@@ -300,6 +314,12 @@ def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
                 "asr_provenance_invalid_source_count": len(invalid_provenance),
                 "asr_provenance_invalid_sources": invalid_provenance,
                 "pool_match": match,
+                # Complete, source-deduplicated whole-pool location evidence.  This does not alter
+                # quote typing or ranking.  A bounded scoped recovery rung may try these exact
+                # windows before buying another URL; every candidate still faces native-HD,
+                # selected-window, strict-vision and lineage gates.
+                "pool_match_count": len(matches),
+                "pool_matches": matches,
             }
             by_quote[key] = branch
         # Each entry owns its dict so selected-window evidence can be appended without leaking to a
@@ -510,27 +530,34 @@ def evaluate_selection_relevance(proj, segments, *, cfg=None,
                 verdict = str(verifier.get("verdict", "") or "")
                 if status != "ok":
                     reasons.append(f"verifier_{status or 'absent'}")
-                if verdict != "keep":
-                    reasons.append(f"verdict_{verdict or 'absent'}")
 
-                # A positive JSON verdict is meaningful only for the exact source/shot/window and
-                # prompt pixels it judged.  Resume and late project edits used to retain `keep`
-                # while changing the selection underneath it; recompute the persisted binding from
-                # current source bytes, shot index/bounds, trim, beat prompt, model and frame/sheet.
+                # Any JSON verdict—positive OR negative—is meaningful only for the exact current
+                # source/shot/window and prompt. A prompt-version change makes the old false fields
+                # technical stale evidence, not a fresh content rejection. Keep the gate blocked on
+                # the binding reason alone so scoped re-verification asks the corrected question;
+                # never route a stale `specific_enough=false` into new-footage acquisition.
                 evidence_reason = selection_verifier_evidence_reason(proj, sel, seg, verifier)
                 if evidence_reason:
                     reasons.append(evidence_reason)
-
-                # EXACT means exact: a lenient/contextual question cannot prove an exact scene, and
-                # a later relabel/downgrade must not erase that fact from the publication gate.
-                evidence = verifier.get("selection_evidence") or {}
-                if policy == _policy.EXACT:
-                    if evidence.get("is_specific") is not True:
-                        reasons.append("exact_verifier_evidence_not_strict")
-                    if verifier.get("downgraded"):
-                        reasons.append("exact_moving_verdict_was_downgraded")
-                    if str(verifier.get("relevance_class", "") or "") == "contextual_fallback":
-                        reasons.append("exact_moving_relevance_is_contextual")
+                # Every binding failure means these facts answered a different or unprovable
+                # question (old model/schema, different bytes/window/prompt, missing sampled
+                # pixels, or legacy evidence with no binding at all).  Keep the technical reason
+                # as a hard blocker and re-ask the same selection; do not also treat stale false
+                # fields as a current semantic rejection that diverts it into acquisition.
+                stale_question = bool(evidence_reason)
+                if not stale_question:
+                    if verdict != "keep":
+                        reasons.append(f"verdict_{verdict or 'absent'}")
+                    # EXACT means exact: a lenient/contextual question cannot prove an exact scene,
+                    # and a later relabel/downgrade must not erase that fact from the gate.
+                    evidence = verifier.get("selection_evidence") or {}
+                    if policy == _policy.EXACT:
+                        if evidence.get("is_specific") is not True:
+                            reasons.append("exact_verifier_evidence_not_strict")
+                        if verifier.get("downgraded"):
+                            reasons.append("exact_moving_verdict_was_downgraded")
+                        if str(verifier.get("relevance_class", "") or "") == "contextual_fallback":
+                            reasons.append("exact_moving_relevance_is_contextual")
                 # The montage guard may demote a multi-subject beat from EXACT to CHARACTER, but a
                 # real authored quote remains a timed dialogue promise.  Apply the same pool typing
                 # and selected-window floor to every strict beat; only an affirmative paraphrase
@@ -542,40 +569,42 @@ def evaluate_selection_relevance(proj, segments, *, cfg=None,
                     if not quote_ok:
                         reasons.append(quote_why)
 
-                # These fields are part of the longstanding verifier JSON contract. Missing values
-                # are UNKNOWN, never a pass: this is what closes verify-disabled and stale resume.
-                for field in ("matches_narration", "specific_enough", "quality_ok"):
-                    value = verifier.get(field)
-                    if value is not True:
-                        reasons.append(f"{field}_{'false' if value is False else 'absent'}")
-                wrong = verifier.get("wrong_subject_visible")
-                if wrong is not False:
-                    reasons.append(f"wrong_subject_visible_{'true' if wrong is True else 'absent'}")
-
-                # A named required subject must be positively present. The object verifier defines
-                # this as the correct scene/context when the prop itself is too small to resolve.
-                if (getattr(seg, "required_entity", "") or "").strip():
-                    visible = verifier.get("correct_subject_visible")
-                    if visible is not True:
+                if not stale_question:
+                    # These fields remain strict. Missing values are UNKNOWN, never a pass; only a
+                    # stale answer is withheld until the same footage is judged under this prompt.
+                    for field in ("matches_narration", "specific_enough", "quality_ok"):
+                        value = verifier.get(field)
+                        if value is not True:
+                            reasons.append(f"{field}_{'false' if value is False else 'absent'}")
+                    wrong = verifier.get("wrong_subject_visible")
+                    if wrong is not False:
                         reasons.append(
-                            f"correct_subject_visible_{'false' if visible is False else 'absent'}")
-                if verifier.get("contradicts_narration") is True:
-                    reasons.append("contradicts_narration_true")
-                if verifier.get("era_ok") is False:
-                    reasons.append("era_ok_false")
-                try:
-                    must_see = _policy.deictic_target(seg)
-                except Exception:
-                    must_see = ""
-                if must_see and verifier.get("target_visible") is not True:
-                    reasons.append(
-                        f"target_visible_{'false' if verifier.get('target_visible') is False else 'absent'}")
+                            f"wrong_subject_visible_{'true' if wrong is True else 'absent'}")
 
-                deterministic = _contradiction_reason(
-                    seg, verifier, _selection_source_title(proj, sel), char2actor)
-                if deterministic and "contradicts_narration_true" not in reasons:
-                    reasons.append("deterministic_contradiction")
-                    verifier = {**verifier, "contract_contradiction_reason": deterministic}
+                    # A named required subject must be positively present. The object verifier
+                    # defines this as scene/context when the prop itself is too small to resolve.
+                    if (getattr(seg, "required_entity", "") or "").strip():
+                        visible = verifier.get("correct_subject_visible")
+                        if visible is not True:
+                            reasons.append(
+                                f"correct_subject_visible_{'false' if visible is False else 'absent'}")
+                    if verifier.get("contradicts_narration") is True:
+                        reasons.append("contradicts_narration_true")
+                    if verifier.get("era_ok") is False:
+                        reasons.append("era_ok_false")
+                    try:
+                        must_see = _policy.deictic_target(seg)
+                    except Exception:
+                        must_see = ""
+                    if must_see and verifier.get("target_visible") is not True:
+                        reasons.append(
+                            f"target_visible_{'false' if verifier.get('target_visible') is False else 'absent'}")
+
+                    deterministic = _contradiction_reason(
+                        seg, verifier, _selection_source_title(proj, sel), char2actor)
+                    if deterministic and "contradicts_narration_true" not in reasons:
+                        reasons.append("deterministic_contradiction")
+                        verifier = {**verifier, "contract_contradiction_reason": deterministic}
 
         # A verified still suppresses the moving selection entirely, so its old moving-video
         # verdict is audit context rather than a publication blocker.

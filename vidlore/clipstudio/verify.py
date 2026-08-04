@@ -50,11 +50,10 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
     crossbow") demands the EXACT scene; a GENERIC line ("and everything changed") only needs a
     thematically-relevant filler — so the verifier is told to grade leniently there.
 
-    `expected_visual`/`scene_query`/`era_hint` give the verifier the beat's STORYBOARD — what the
-    exact moment should look like, which scene it is, and the era/season. Without them the verifier
-    only knew the required character, so it rationalized wrong-scene keeps ("Arya is visible looking
-    up at Jon Snow (the most powerful man)" for a Daenerys beat; "holding a coin-like object" for the
-    Jaqen coin handoff). With the storyboard it can fail a right-character / wrong-moment frame.
+    For a specific/venue question, `expected_visual`/`scene_query` give the verifier the beat's
+    STORYBOARD so a right-character / wrong-moment frame fails. They are deliberately excluded from
+    generic and character-general questions, where an aspirational storyboard is not narration.
+    `era_hint` remains active at every policy level to reject clearly wrong-era footage.
 
     `keyframe_path` may be a single frame or a pre-built start→mid→end contact sheet (set
     `multiframe=True`) so an ACTION beat is judged on whether the action actually occurs, not on one
@@ -67,9 +66,13 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         "subject. Be STRICT: the correct character ALONE is not enough — if the frame shows the right "
         "person but a DIFFERENT scene, moment, action, or era than the one described, mark 'replace'.\n"
         if is_specific else
-        "This is a GENERIC narration line (no specific scene claim) — a thematically RELEVANT filler "
-        "clip is acceptable. Mark 'replace' ONLY if the footage is off-topic, jarring, or shows the "
-        "WRONG character/era — NOT merely because it isn't a specific/exact scene.\n")
+        "This is a GENERIC or CHARACTER-GENERAL narration line (no exact-scene claim) — a "
+        "thematically RELEVANT clip with the required subject is acceptable. Judge only the "
+        "narration's actual claim and required subject; do not demand an invented pose, room, action, "
+        "or camera angle. Set matches_narration=true and specific_enough=true when the footage is a "
+        "clean, relevant illustration at this policy level. Mark 'replace' ONLY if it is off-topic, "
+        "jarring, contradicts the line, or shows the WRONG character/era — NOT merely because it "
+        "isn't a specific/exact scene.\n")
     # INSTRUCTED LOOKING — the narration tells the viewer to look at a NAMED thing ("keep your eye
     # on the dagger", "watch Bran's face"). These are the beats a viewer notices breaking, and on
     # the v4 render the named thing was absent on 12 of them. When the line points at something,
@@ -82,9 +85,13 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
                  f"the right characters or the right scene but WITHOUT {must_see} does not satisfy "
                  f"this line. Judge the object/face itself, not the surrounding context.\n")
     _story = ""
-    if expected_visual:
+    # Storyboards/search queries are strict-scene evidence only. The analyzer may provide an
+    # aspirational shot for a character-general line ("Baelish smirking in his brothel"); injecting
+    # that into a lenient question made correct Baelish footage fail `specific_enough`. Venue stills
+    # explicitly ask a scene-context question and therefore retain the storyboard.
+    if expected_visual and (is_specific or venue_fallback):
         _story += f"The exact moment should LOOK LIKE: {expected_visual}\n"
-    if scene_query:
+    if scene_query and (is_specific or venue_fallback):
         _story += f"Target scene: {scene_query}\n"
     if era_hint:
         _story += (f"Era/season context: {era_hint} — footage from a clearly different era/season "
@@ -216,8 +223,8 @@ _SEASON_RX = re.compile(
 # change that did NOT bump it would serve answers to a different question — the whole point of the
 # fingerprint. The cost is one cold verify pass on the next render (~$1); the alternative is a
 # silently stale cache, which is worse.
-PROMPT_VERSION = "v9-2026-08"          # v9: explicit contradiction judgment; v8: behind-the-scenes
-                                       # clause; v7: non-show illustration hard rule
+PROMPT_VERSION = "v9-2026-08"           # strict/exact prompt remains byte-identical to v9
+LENIENT_PROMPT_VERSION = "v10-2026-08"  # policy-typed generic/character/venue question
 # Bump when the contact-sheet SAMPLING changes (frame count/positions/layout). The sheet is the
 # image the verifier judges, so a different sampling is a different question even for the same shot.
 SHEET_VERSION = "sheet-v2-selected-window-15-50-85"
@@ -355,6 +362,15 @@ def verdict_fingerprint(*, src_hash: str, source_id: str, shot_start: float, sho
                           opposite verdict, so the two must never share a key. Appended to the hash
                           ONLY when True so every pre-existing (venue-less) cache key stays valid."""
     import hashlib
+    # Mirror verify_frame exactly: non-specific moving-footage questions do not contain the
+    # analyzer's storyboard/query. Besides avoiding needless cache misses, this makes the evidence
+    # fingerprint describe the question that was actually asked. Venue fallback retains both.
+    if not is_specific and not venue_fallback:
+        expected_visual = ""
+        scene_query = ""
+    # Exact prompts did not change, so preserve their warm v9 cache. Every non-specific question
+    # uses the rewritten generic rule (including venue fallback) and must cold-miss under v10.
+    prompt_version = PROMPT_VERSION if is_specific else LENIENT_PROMPT_VERSION
     h = hashlib.sha256()
     parts = [src_hash, source_id, f"{float(shot_start):.3f}", f"{float(shot_end):.3f}",
              (beat_text or "").strip(), (required_entity or "").strip().lower(),
@@ -363,7 +379,7 @@ def verdict_fingerprint(*, src_hash: str, source_id: str, shot_start: float, sho
              (visual_policy or "").strip().lower(), "1" if is_specific else "0",
              _norm_faces(faceid_names), "mf" if multiframe else "sf",
              (image_id or ""), (model or "").strip(),
-             PROMPT_VERSION, SHEET_VERSION]
+             prompt_version, SHEET_VERSION]
     if venue_fallback:
         parts.append("venue")
     # must_see changes the QUESTION ("is the dagger visible?"), so a verdict cached without it
@@ -482,7 +498,7 @@ def selection_verifier_evidence_record(
         "faceid_names": sorted({str(x).strip().lower() for x in faces if str(x).strip()}),
         "era": str(era or ""),
         "must_see": str(must_see or ""),
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": (PROMPT_VERSION if is_specific else LENIENT_PROMPT_VERSION),
         "sheet_version": SHEET_VERSION,
     }
 
