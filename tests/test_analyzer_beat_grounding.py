@@ -89,17 +89,6 @@ def test_zero_overlap_global_storyboards_downgrade_to_generic_and_clear_exact_fi
     "text, directive, grounded_role",
     [
         (
-            "to the master-at-arms of the Red Keep.",
-            {
-                "expected_visual": "The master-at-arms examining the dagger",
-                "scene_query": "Game of Thrones master-at-arms Aron Santagar dagger",
-                "quote": "It's Valyrian steel.",
-                "required_entity": "Aron Santagar",
-                "required_kind": "character",
-            },
-            "master-at-arms",
-        ),
-        (
             "the master-at-arms of the Red Keep.",
             {
                 "expected_visual": "Close up of the master-at-arms examining the dagger",
@@ -138,6 +127,30 @@ def test_named_subject_without_a_narrated_exact_moment_becomes_character_specifi
     assert beat._analyzer_grounding_guard["to_policy"] == P.CHARACTER
     if grounded_role:
         assert beat._analyzer_grounding_guard["grounded_subject_role"] == grounded_role
+
+
+def test_measured_beat32_verb_less_role_cannot_inherit_analyzer_guessed_identity():
+    text = "to the master-at-arms of the Red Keep."
+    beat = _apply(
+        text,
+        expected_visual="The master-at-arms examining the dagger",
+        scene_query="Game of Thrones master-at-arms Aron Santagar dagger",
+        quote="It's Valyrian steel.",
+        required_entity="Aron Santagar",
+        required_kind="character",
+    )
+
+    assert beat.visual_policy == P.FILLER
+    assert beat.is_specific_claim is False
+    assert beat.expected_visual == text
+    assert beat.scene_query == beat.quote == ""
+    assert beat.required_entity == beat.required_kind == ""
+    marker = beat._analyzer_grounding_guard
+    assert marker["branch"] == "ungrounded_exact_downgrade"
+    assert marker["reason"] == "verb_less_role_has_analyzer_guessed_identity"
+    assert marker["to_policy"] == P.FILLER
+    assert marker["grounded_subject_role"] == "master-at-arms"
+    assert marker["analyzer_guessed_required_entity"] == "Aron Santagar"
 
 
 def test_generic_the_one_comparison_cannot_inherit_an_unrelated_exact_scene_or_quote():
@@ -523,11 +536,12 @@ def test_grounding_branches_persist_in_analysis_metadata_and_round_trip():
         "bare_named_event_sanitized": 0,
         "adjacent_quote_copy_sanitized": 0,
         "nominal_role_contract_narrowed": 0,
+        "nominal_guessed_identity_cleared": 0,
         "downgraded": 1,
         "to_character_specific": 0,
         "to_generic_filler": 1,
     }
-    assert analysis.beat_grounding_audit["schema"] == 4
+    assert analysis.beat_grounding_audit["schema"] == 5
     restored = A.ScriptAnalysis.from_dict(analysis.to_dict())
     assert restored.beat_grounding_audit == analysis.beat_grounding_audit
     assert restored.beat_grounding_audit["beats"]["0"]["branch"] == \
@@ -718,7 +732,7 @@ def test_resume_preserves_fresh_sanitizer_reason_when_post_state_changes_nothing
     assert marker["branch"] == "grounded_exact_sanitized"
     assert marker["reason"] == "record_intent_is_not_verbatim_dialogue"
     assert marker["sanitized_fields"] == ["quote"]
-    assert marker["cached_revalidation_schema"] == 4
+    assert marker["cached_revalidation_schema"] == 5
     saved_audit = loaded_analysis.to_dict()["beat_grounding_audit"]
 
     loaded_again = ScriptSegment.from_dict(loaded.to_dict())
@@ -729,7 +743,7 @@ def test_resume_preserves_fresh_sanitizer_reason_when_post_state_changes_nothing
     assert analysis_again.to_dict()["beat_grounding_audit"] == saved_audit
 
 
-def test_schema4_migrates_measured_comparison_event_and_cached_nominal_role_contracts():
+def test_schema5_migrates_measured_comparison_event_and_cached_nominal_role_contracts():
     comparison = ScriptSegment(
         index=15,
         text=("The one who was always three moves ahead of people who were physically stronger, "
@@ -810,14 +824,16 @@ def test_schema4_migrates_measured_comparison_event_and_cached_nominal_role_cont
 
     assert first["exact_revalidated"] == 3
     assert first["cached_nominal_roles_migrated"] == 1
+    assert first["cached_nominal_role_promises_cleared"] == 1
     assert first["changed_indices"] == [15, 32, 54]
     assert comparison.visual_policy == P.FILLER
     assert comparison.quote == "" and comparison.breakout_candidate is False
-    assert nominal.visual_policy == P.CHARACTER
-    assert nominal.required_entity == nominal.scene_query == "master-at-arms"
-    assert first["changes"]["32"]["changed_fields"] == ["scene_query", "required_entity"]
+    assert nominal.visual_policy == P.FILLER
+    assert nominal.required_entity == nominal.required_kind == nominal.scene_query == ""
+    assert first["changes"]["32"]["changed_fields"] == [
+        "visual_policy", "required_entity", "required_kind"]
     assert first["changes"]["32"]["guard"]["schema_migration"] == \
-        "nominal_role_contract_v4"
+        "nominal_guessed_identity_contract_v5"
     assert event.visual_policy == P.EXACT
     assert event.expected_visual == event.scene_query == event.required_entity == \
         "The Purple Wedding"
@@ -825,7 +841,7 @@ def test_schema4_migrates_measured_comparison_event_and_cached_nominal_role_cont
     assert grounded_control.visual_policy == P.EXACT
     assert manual_control.required_entity == "Janos Slynt"
     assert manual_control.scene_query == ""
-    assert analysis.beat_grounding_audit["schema"] == 4
+    assert analysis.beat_grounding_audit["schema"] == 5
 
     saved = analysis.to_dict()
     reloaded = [ScriptSegment.from_dict(row.to_dict()) for row in rows]
@@ -835,3 +851,58 @@ def test_schema4_migrates_measured_comparison_event_and_cached_nominal_role_cont
     assert second["changed_count"] == 0
     assert second["exact_revalidated"] == 0
     assert second["cached_nominal_roles_migrated"] == 0
+    assert second["cached_nominal_role_promises_cleared"] == 0
+
+
+def test_schema5_corrects_cached_schema4_role_migration_and_preserves_provenance():
+    beat = ScriptSegment(
+        index=32,
+        text="to the master-at-arms of the Red Keep.",
+        expected_visual="to the master-at-arms of the Red Keep.",
+        scene_query="master-at-arms",
+        required_entity="master-at-arms",
+        required_kind="character",
+        visual_policy=P.CHARACTER,
+        is_specific_claim=False,
+    )
+    analysis = A.ScriptAnalysis(beat_grounding_audit={
+        "schema": 4,
+        "beats": {
+            "32": {
+                "branch": "ungrounded_exact_downgrade",
+                "reason": "named_subject_without_exact_action",
+                "to_policy": P.CHARACTER,
+                "grounded_subject_role": "master-at-arms",
+                "required_entity_replaced": "Aron Santagar",
+                "cached_revalidation_schema": 4,
+                "schema_migration": "nominal_role_contract_v4",
+            },
+        },
+    })
+
+    first = A.revalidate_cached_directions([beat], analysis)
+
+    assert first["changed_indices"] == [32]
+    assert first["cached_nominal_role_promises_cleared"] == 1
+    assert first["changes"]["32"]["changed_fields"] == [
+        "visual_policy", "scene_query", "required_entity", "required_kind"]
+    assert beat.visual_policy == P.FILLER
+    assert beat.scene_query == beat.required_entity == beat.required_kind == ""
+    marker = analysis.beat_grounding_audit["beats"]["32"]
+    assert marker["reason"] == "verb_less_role_has_analyzer_guessed_identity"
+    assert marker["analyzer_guessed_required_entity"] == "Aron Santagar"
+    assert marker["schema_migration"] == "nominal_guessed_identity_contract_v5"
+    assert marker["previous_schema_migration"] == "nominal_role_contract_v4"
+    assert marker["cached_revalidation_schema"] == 5
+
+    saved = analysis.to_dict()
+    loaded = ScriptSegment.from_dict(beat.to_dict())
+    loaded_analysis = A.ScriptAnalysis.from_dict(saved)
+    second = A.revalidate_cached_directions([loaded], loaded_analysis)
+
+    assert second["changed_count"] == 0
+    assert second["cached_nominal_role_promises_cleared"] == 0
+    resumed = loaded_analysis.to_dict()["beat_grounding_audit"]
+    assert resumed["beats"] == saved["beat_grounding_audit"]["beats"]
+    assert resumed["cached_revalidation"]["changed_indices"] == []
+    assert resumed["last_material_revalidation"]["changed_indices"] == [32]

@@ -422,6 +422,20 @@ def _narrated_subject_role(narration: str, directive: dict) -> str:
     return role
 
 
+def _role_identity_was_analyzer_guessed(role: str, required_entity: str) -> bool:
+    """Whether a nominal role was expanded into an unrelated canonical identity.
+
+    A verb-less fragment such as ``to the master-at-arms of the Red Keep`` names a role, but it
+    does not identify *which* master-at-arms the viewer must see.  When the analyzer turns that
+    role into ``Aron Santagar``, neither retrieval nor visual verification can honestly prove the
+    stronger identity promise from the narration.  Require disjoint content terms so ordinary
+    spelling/article variants of the narrated role are not mistaken for an identity guess.
+    """
+    role_terms = _grounding_terms(role)
+    entity_terms = _grounding_terms(required_entity)
+    return bool(role_terms and entity_terms and role_terms.isdisjoint(entity_terms))
+
+
 def _bare_final_named_event(narration: str, directive: dict) -> str:
     """Return a literal multi-word event title used as the narration's final bare clause.
 
@@ -612,15 +626,22 @@ def _exact_direction_grounding(beat: ScriptSegment, directive: dict) -> dict:
     )
     if (_NOMINAL_FRAGMENT_RX.search(narration) or verb_less_named_subject) and not has_action:
         grounded_role = _narrated_subject_role(narration, directive)
+        guessed_role_identity = bool(
+            grounded_role and _role_identity_was_analyzer_guessed(
+                grounded_role, str(directive.get("required_entity", "") or "")))
         result = {
             "grounded": False,
-            "reason": "named_subject_without_exact_action",
+            "reason": ("verb_less_role_has_analyzer_guessed_identity"
+                       if guessed_role_identity else "named_subject_without_exact_action"),
             "shared_terms": sorted(shared)[:8],
             "entity_grounded": bool(entity_shared),
             "subject_named": bool(subject_named or grounded_role),
         }
         if grounded_role:
             result["grounded_subject_role"] = grounded_role
+        if guessed_role_identity:
+            result["analyzer_guessed_required_entity"] = str(
+                directive.get("required_entity", "") or "")
         return result
     if _VAGUE_SUBJECT_RX.search(narration) and not subject_named:
         return {"grounded": False, "reason": "vague_subject_has_no_grounded_subject",
@@ -671,6 +692,9 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
             marker["grounded_event"] = str(grounding["grounded_event"])
         if grounding.get("grounded_subject_role"):
             marker["grounded_subject_role"] = str(grounding["grounded_subject_role"])
+        if grounding.get("analyzer_guessed_required_entity"):
+            marker["analyzer_guessed_required_entity"] = str(
+                grounding["analyzer_guessed_required_entity"])
         if sanitize_fields:
             marker["sanitized_fields"] = sanitize_fields
             if "expected_visual" in sanitize_fields:
@@ -690,7 +714,14 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
             # a storyboard this beat never authored.
             subject_named = bool(grounding.get("subject_named")
                                  or grounding.get("entity_grounded"))
-            resolved = _policy.CHARACTER if subject_named else _policy.FILLER
+            # A narration-named role is not a narration-named identity.  If the analyzer supplied
+            # an unrelated canonical person, even a role-level character contract would ask the
+            # publication verifier to prove something the beat never promised.  Fall back to
+            # ordinary semantic footage and retain the discarded identity only in audit metadata.
+            guessed_role_identity = bool(
+                grounding.get("analyzer_guessed_required_entity"))
+            resolved = (_policy.CHARACTER
+                        if subject_named and not guessed_role_identity else _policy.FILLER)
             marker["to_policy"] = resolved
             beat.expected_visual = str(getattr(beat, "text", "") or "")[:200]
             grounded_role = str(grounding.get("grounded_subject_role") or "")
@@ -703,6 +734,7 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
                 if old_entity.lower() != grounded_role.lower():
                     marker["required_entity_replaced"] = old_entity
             if resolved == _policy.FILLER:
+                beat.scene_query = ""
                 beat.required_entity = ""
                 beat.required_kind = ""
         setattr(beat, "_analyzer_grounding_guard", marker)
@@ -791,7 +823,7 @@ def _sanitize_adjacent_quote_borrowing(beats) -> int:
     return changed
 
 
-_BEAT_GROUNDING_AUDIT_SCHEMA = 4
+_BEAT_GROUNDING_AUDIT_SCHEMA = 5
 
 
 def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
@@ -840,6 +872,9 @@ def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
             in (m.get("sanitization_reasons") or []) for m in records.values()),
         "nominal_role_contract_narrowed": sum(
             bool(m.get("grounded_subject_role")) for m in records.values()),
+        "nominal_guessed_identity_cleared": sum(
+            bool(m.get("analyzer_guessed_required_entity"))
+            and m.get("to_policy") == _policy.FILLER for m in records.values()),
         "downgraded": downgraded,
         "to_character_specific": sum(
             m.get("to_policy") == _policy.CHARACTER for m in records.values()),
@@ -911,8 +946,8 @@ def revalidate_cached_directions(beats, analysis: ScriptAnalysis | None = None) 
 
     Resuming an old job normally loads ``ScriptSegment`` rows without their process-local guard
     marker.  This helper restores any persisted markers, revalidates rows that still claim
-    ``exact_scene``, migrates a previously downgraded nominal-role contract when a new guard schema
-    can narrow it from a guessed canonical identity to the narrated role, then re-runs the
+    ``exact_scene``, corrects previously downgraded nominal-role contracts when a new guard schema
+    proves their canonical identity was analyzer-guessed, then re-runs the
     cross-beat quote-copy sanitizer.  It never calls an LLM and it is field-idempotent: a second pass
     reports zero new changes.  When ``analysis`` is supplied, the complete guard audit and the first
     material revalidation diff are persisted for later review.
@@ -950,34 +985,73 @@ def revalidate_cached_directions(beats, analysis: ScriptAnalysis | None = None) 
     exact_revalidated = 0
     preserved_sanitized_provenance = 0
     cached_nominal_roles_migrated = 0
+    cached_nominal_role_promises_cleared = 0
     for beat in rows:
         current_policy = _policy.normalize(getattr(beat, "visual_policy", ""))
         existing_marker = getattr(beat, "_analyzer_grounding_guard", None)
         if current_policy != _policy.EXACT:
-            # Schema 3 could already have honestly softened a nominal fragment to character-level
-            # footage while leaving the analyzer's unsupported canonical identity behind.  The
-            # original exact fields are gone, so migrate only rows carrying that precise persisted
-            # guard provenance; ordinary/manual character contracts are never inferred or changed.
+            # Older schemas could already have softened a nominal fragment to character footage.
+            # Schema 4 replaced an analyzer-guessed identity with the narrated role, but a real
+            # verifier run established that a verb-less role cannot prove the person's identity at
+            # all.  Correct only rows carrying the original downgrade provenance.  For schema-4
+            # rows, ``required_entity_replaced`` preserves the discarded canonical guess; ordinary
+            # or manually-authored character contracts remain outside this migration.
             if (prior_guard_schema < _CACHED_DIRECTION_GUARD_SCHEMA
                     and current_policy == _policy.CHARACTER
                     and isinstance(existing_marker, dict)
                     and existing_marker.get("branch") == "ungrounded_exact_downgrade"
-                    and existing_marker.get("reason") == "named_subject_without_exact_action"):
+                    and existing_marker.get("reason") in {
+                        "named_subject_without_exact_action",
+                        "verb_less_role_has_analyzer_guessed_identity",
+                    }):
                 grounded_role = _narrated_subject_role(
                     str(getattr(beat, "text", "") or ""), _cached_direction(beat))
                 if grounded_role:
                     old_entity = str(getattr(beat, "required_entity", "") or "")
                     old_query = str(getattr(beat, "scene_query", "") or "")
-                    beat.required_entity = grounded_role[:80]
-                    beat.scene_query = grounded_role[:120]
+                    original_entity = str(
+                        existing_marker.get("analyzer_guessed_required_entity")
+                        or existing_marker.get("required_entity_replaced")
+                        or old_entity)
+                    guessed_role_identity = _role_identity_was_analyzer_guessed(
+                        grounded_role, original_entity)
                     existing_marker["grounded_subject_role"] = grounded_role
-                    if old_entity.lower() != grounded_role.lower():
-                        existing_marker["required_entity_replaced"] = old_entity
+                    if guessed_role_identity:
+                        old_policy = beat.visual_policy
+                        old_kind = str(getattr(beat, "required_kind", "") or "")
+                        beat.visual_policy = _policy.FILLER
+                        beat.is_specific_claim = False
+                        beat.expected_visual = str(getattr(beat, "text", "") or "")[:200]
+                        beat.scene_query = ""
+                        beat.quote = ""
+                        beat.required_entity = ""
+                        beat.required_kind = ""
+                        existing_marker["reason"] = \
+                            "verb_less_role_has_analyzer_guessed_identity"
+                        existing_marker["to_policy"] = _policy.FILLER
+                        existing_marker["analyzer_guessed_required_entity"] = original_entity
+                        previous_migration = str(existing_marker.get("schema_migration", "") or "")
+                        if previous_migration:
+                            existing_marker["previous_schema_migration"] = previous_migration
+                        existing_marker["schema_migration"] = \
+                            "nominal_guessed_identity_contract_v5"
+                        if (old_policy != beat.visual_policy or old_query or old_entity or old_kind):
+                            cached_nominal_role_promises_cleared += 1
+                            cached_nominal_roles_migrated += 1
+                    else:
+                        # Preserve the schema-4 behavior for a role that was literally the declared
+                        # entity.  This is not an identity expansion and therefore is not the
+                        # measured failure fixed by schema 5.
+                        beat.required_entity = grounded_role[:80]
+                        beat.scene_query = grounded_role[:120]
+                        if old_entity.lower() != grounded_role.lower():
+                            existing_marker["required_entity_replaced"] = old_entity
+                        existing_marker["schema_migration"] = \
+                            "nominal_role_contract_v5"
+                        if (old_entity != beat.required_entity or old_query != beat.scene_query):
+                            cached_nominal_roles_migrated += 1
                     existing_marker["cached_revalidation_schema"] = \
                         _CACHED_DIRECTION_GUARD_SCHEMA
-                    existing_marker["schema_migration"] = "nominal_role_contract_v4"
-                    if (old_entity != beat.required_entity or old_query != beat.scene_query):
-                        cached_nominal_roles_migrated += 1
             continue
         if (isinstance(existing_marker, dict)
                 and existing_marker.get("cached_revalidation_schema")
@@ -1059,6 +1133,7 @@ def revalidate_cached_directions(beats, analysis: ScriptAnalysis | None = None) 
         "exact_revalidated": exact_revalidated,
         "preserved_sanitized_provenance": preserved_sanitized_provenance,
         "cached_nominal_roles_migrated": cached_nominal_roles_migrated,
+        "cached_nominal_role_promises_cleared": cached_nominal_role_promises_cleared,
         "changed_count": len(changes),
         "changed_indices": sorted(int(index) for index in changes),
         "changes": changes,
