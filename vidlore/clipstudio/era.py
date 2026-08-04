@@ -182,13 +182,35 @@ def title_era_conflicts(beat_era_str: str, title: str) -> bool:
 
 def anchor_token_eras(analysis) -> list:
     """[(scene-token set, era string)] for every anchor scene that DECLARES an episode. Tokens are
-    the anchor's scene-specific words (movie-title + stop tokens removed) — the same token currency
-    as discover's anchor/key-scene coverage and verify's venue mapping."""
+    the anchor's scene-specific words (movie-title + stop + known person + cross-era-common tokens
+    removed) — the same token currency as discover's anchor/key-scene coverage and verify's venue
+    mapping.
+
+    Person names are identity evidence, not chronology.  In a multi-era essay, ``Olenna`` and
+    ``Joffrey`` can occur in both an S4 garden discussion and an S7 confession; allowing those two
+    names alone to infer S7 hard-penalized the exact S4 source.  Known character/actor tokens are
+    removed when the caller carries the roster.  Production's lightweight shims do not always do
+    so, therefore a token shared by anchors from conflicting eras is also removed: by definition it
+    cannot distinguish those eras. Repetition across anchors in the SAME era remains useful.
+    """
     def _get(obj, key):
         if isinstance(obj, dict):
             return obj.get(key)
         return getattr(obj, key, None)
-    out = []
+    entity_tokens = set()
+    for ch in (_get(analysis, "characters") or []):
+        if isinstance(ch, dict):
+            values = (ch.get("name", ""), ch.get("actor", ""))
+        else:
+            values = (str(ch or ""),)
+        for value in values:
+            entity_tokens |= {w for w in re.findall(r"[a-z']+", str(value or "").lower())
+                              if len(w) > 2}
+    for actor in (_get(analysis, "actors") or []):
+        entity_tokens |= {w for w in re.findall(r"[a-z']+", str(actor or "").lower())
+                          if len(w) > 2}
+
+    rows = []
     mv = {w for w in re.findall(r"[a-z']+", str(_get(analysis, "movie_title") or "").lower())
           if len(w) > 2}
     try:
@@ -205,7 +227,18 @@ def anchor_token_eras(analysis) -> list:
                     r"[a-z']+", ((sc.get("name", "") or "") + " " + (sc.get("query", "") or "")).lower())
                 if len(w) > 2 and w not in mv and w not in _STOP}
         if toks:
-            out.append((toks, era))
+            rows.append((toks, era))
+    token_eras: dict[str, set[str]] = {}
+    for toks, row_era in rows:
+        for token in toks:
+            token_eras.setdefault(token, set()).add(row_era)
+    out = []
+    for toks, era in rows:
+        scene_specific = {token for token in toks
+                          if token not in entity_tokens
+                          and len(token_eras.get(token, ())) <= 1}
+        if scene_specific:
+            out.append((scene_specific, era))
     return out
 
 

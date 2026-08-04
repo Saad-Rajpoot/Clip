@@ -824,10 +824,47 @@ def _norm_words(s: str) -> list[str]:
     return [w for w in re.findall(r"[a-z']+", (s or "").lower()) if len(w) > 1 and w not in _STOP]
 
 
-def _dialogue_match(seg: ScriptSegment, transcript: str) -> float:
+_MATCHER_QUOTE_BRANCHES = frozenset({"verbatim", "paraphrase", "indeterminate"})
+
+
+def _effective_matcher_quote_branch(seg, quote_branch=None, proj=None) -> str:
+    """Return the whole-pool type assigned to ``seg.quote`` for retrieval.
+
+    ``quote`` is an authored analyzer hint, not a type guarantee.  Production matching passes the
+    branch explicitly; the transient segment attribute keeps the immediately-following verifier on
+    the same contract, and the project metadata is the durable audit/resume copy.  ``legacy`` is
+    retained only for direct helper callers which predate quote typing.  It is never passed by
+    ``match_segments``.
+    """
+    if quote_branch is not None:
+        branch = str(quote_branch or "").strip().lower()
+        if not branch and not str(getattr(seg, "quote", "") or "").strip():
+            return "none"
+        return branch if branch in _MATCHER_QUOTE_BRANCHES else "indeterminate"
+    branch = str(getattr(seg, "_matcher_quote_branch", "") or "").strip().lower()
+    if branch in _MATCHER_QUOTE_BRANCHES:
+        return branch
+    try:
+        recorded = ((getattr(proj, "meta", None) or {}).get(
+            "matcher_quote_branches", {}) or {}).get(str(int(getattr(seg, "index", -1))), "")
+        branch = str(recorded or "").strip().lower()
+        if branch in _MATCHER_QUOTE_BRANCHES:
+            return branch
+    except Exception:
+        pass
+    return "legacy"
+
+
+def _dialogue_match(seg: ScriptSegment, transcript: str, *, quote_branch=None) -> float:
     """SCENE-LOCK: is the beat's iconic quote actually SPOKEN in this clip's ASR transcript? If the
     exact line ('break the wheel', 'I am the dragon's daughter') shows up in the speech, this clip IS
     the moment the script is about. Scores a contiguous-phrase run high, scattered words lower."""
+    # Only a phrase independently located in the complete usable dialogue pool is allowed to steer
+    # retrieval.  A paraphrase can coincidentally overlap unrelated ASR (measured: 117 poisoned
+    # retained candidates across 19/20 paraphrase beats); indeterminate provenance is equally
+    # unsafe.  Publication remains fail-closed for indeterminate quotes in relevance_contract.py.
+    if _effective_matcher_quote_branch(seg, quote_branch) not in ("verbatim", "legacy"):
+        return 0.0
     quote = (getattr(seg, "quote", "") or "").strip()
     if not quote or not transcript:
         return 0.0
@@ -954,7 +991,7 @@ def _anchor_echo(seg, anchor_lines) -> str:
     return best
 
 
-def beat_quote_candidates(seg, anchor_lines=None) -> list:
+def beat_quote_candidates(seg, anchor_lines=None, *, quote_branch=None, proj=None) -> list:
     """Every phrasing worth looking for, best first.
 
     The analyzer's quote is a PARAPHRASE as often as a transcription, and find_quote_span scores the
@@ -965,9 +1002,15 @@ def beat_quote_candidates(seg, anchor_lines=None) -> list:
     Same moment, same source, one phrasing finds it and one does not. So try the beat's own quote
     first, then the anchor scene's VERBATIM line that the beat echoes — the analyzer records those
     separately and they are transcriptions, not paraphrases."""
+    branch = _effective_matcher_quote_branch(seg, quote_branch, proj)
     out, seen = [], set()
-    for cand in ((getattr(seg, "quote", "") or "").strip(),
-                 _anchor_echo(seg, anchor_lines)):
+    # The branch types only the authored per-beat field. Anchor-scene dialogue is a separate
+    # analyzer channel whose lines are transcriptions; keep a DISTINCT echoed anchor eligible even
+    # when the authored phrase is a paraphrase/unknown. This preserves the measured paraphrase →
+    # real-anchor recovery without letting the paraphrase itself collect ASR credit.
+    authored = ((getattr(seg, "quote", "") or "").strip()
+                if branch in ("verbatim", "legacy") else "")
+    for cand in (authored, _anchor_echo(seg, anchor_lines)):
         if not cand:
             continue
         k = " ".join(_norm_words(cand))
@@ -977,19 +1020,83 @@ def beat_quote_candidates(seg, anchor_lines=None) -> list:
     return out
 
 
-def _beat_quote(seg, anchor_lines=None) -> str:
+def _beat_quote(seg, anchor_lines=None, *, quote_branch=None, proj=None) -> str:
     """Back-compat single-value view of `beat_quote_candidates` (tests call this)."""
-    c = beat_quote_candidates(seg, anchor_lines)
+    c = beat_quote_candidates(
+        seg, anchor_lines, quote_branch=quote_branch, proj=proj)
     return c[0] if c else ""
 
 
-def locate_beat_moment(proj, sid: str, seg, anchor_lines=None):
+def locate_beat_moment(proj, sid: str, seg, anchor_lines=None, *, quote_branch=None):
     """First phrasing of this beat that can be found in source `sid`. -> (t0, t1, ratio) | None."""
-    for q in beat_quote_candidates(seg, anchor_lines):
+    for q in beat_quote_candidates(
+            seg, anchor_lines, quote_branch=quote_branch, proj=proj):
         sp = quote_span_in_source(proj, sid, q)
         if sp:
             return sp
     return None
+
+
+def _matcher_quote_pool_branches(proj, segments, cfg, progress=None) -> dict[int, str]:
+    """Type every authored quote before it can influence retrieval.
+
+    This deliberately reuses the publication contract's complete usable-dialogue-pool scan instead
+    of letting the selected source type its own quote.  Any technical uncertainty becomes
+    ``indeterminate``: matching receives no quote boost, while the downstream publication contract
+    continues to block because the evidence is unknown.  The branch map is written to project
+    metadata and mirrored transiently on each segment so verifier repair in this process obeys the
+    same decision.
+    """
+    quoted = [seg for seg in (segments or [])
+              if str(getattr(seg, "quote", "") or "").strip()]
+    if not quoted:
+        try:
+            (getattr(proj, "meta", None) or {}).pop("matcher_quote_branches", None)
+        except Exception:
+            pass
+        return {}
+
+    contracts = {}
+    error = ""
+    try:
+        from .relevance_contract import _quote_pool_branches
+        contracts = _quote_pool_branches(proj, segments, cfg=cfg)
+    except Exception as exc:                          # fail closed: unknown evidence earns no boost
+        error = f"{type(exc).__name__}: {exc}"
+        contracts = {}
+
+    out: dict[int, str] = {}
+    for seg in quoted:
+        idx = int(getattr(seg, "index", -1))
+        branch = str((contracts.get(idx) or {}).get("branch", "") or "").strip().lower()
+        if branch not in _MATCHER_QUOTE_BRANCHES:
+            branch = "indeterminate"
+        out[idx] = branch
+        # ScriptSegment.to_dict uses dataclass fields, so this process-local marker cannot pollute
+        # the authored script schema. It lets verify's match helpers see the branch immediately.
+        try:
+            setattr(seg, "_matcher_quote_branch", branch)
+        except Exception:
+            pass
+
+    try:
+        if getattr(proj, "meta", None) is None:
+            proj.meta = {}
+        proj.meta["matcher_quote_branches"] = {
+            str(idx): branch for idx, branch in sorted(out.items())}
+        if error:
+            proj.meta["matcher_quote_branch_error"] = error[:500]
+        else:
+            proj.meta.pop("matcher_quote_branch_error", None)
+    except Exception:
+        pass
+    if progress:
+        counts = {branch: sum(1 for value in out.values() if value == branch)
+                  for branch in sorted(_MATCHER_QUOTE_BRANCHES)}
+        progress("match: whole-pool quote typing — " + ", ".join(
+            f"{branch}={counts[branch]}" for branch in
+            ("verbatim", "paraphrase", "indeterminate")))
+    return out
 
 
 def _text_sim(seg: ScriptSegment, transcript: str) -> float:
@@ -1963,7 +2070,8 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
                 anchor_lines: list | None = None,
                 tgt01: dict | None = None,
                 anchor_ep=None,
-                beat_era_soft: bool = False) -> list[tuple[float, float, dict, _PoolShot]]:
+                beat_era_soft: bool = False,
+                quote_branch=None) -> list[tuple[float, float, dict, _PoolShot]]:
     import numpy as np
     import os
     # DETERMINISTIC ERA PENALTY. The vision verifier cannot read a season off a torch-lit hall —
@@ -2106,9 +2214,11 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
     gate_on = os.environ.get("VIDLORE_CLIPSTUDIO_OCR_GATE", "1").strip() not in ("0", "false", "no", "")
     tgate_on = os.environ.get("VIDLORE_CLIPSTUDIO_TEXT_GATE", "1").strip() not in ("0", "false", "no", "")
     # MOMENT-LOCK: resolve the beat to a dialogue line ONCE per beat (not per candidate shot).
+    _quote_branch = _effective_matcher_quote_branch(seg, quote_branch, proj)
     _mm_on = proj is not None and os.environ.get(
         "VIDLORE_CLIPSTUDIO_MOMENT_LOCK", "1").strip() not in ("0", "false", "no")
-    _bq = _beat_quote(seg, anchor_lines) if _mm_on else ""
+    _bq = (_beat_quote(seg, anchor_lines, quote_branch=_quote_branch, proj=proj)
+           if _mm_on else "")
     # big enough to beat CLIP's noise swing (w_clip 0.80 over a ~0.02-cosine real range), and only
     # ever awarded when find_quote_span matched the phrase at >= _MOMENT_MIN_RATIO.
     _mom_w = _f_env("VIDLORE_CLIPSTUDIO_MOMENT_WEIGHT", 0.9)
@@ -2187,13 +2297,15 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
         obj = 0.0
         if seg.keywords and ps.shot.tags:
             obj = min(1.0, len(set(seg.keywords) & {t.lower() for t in ps.shot.tags}) / max(1, len(seg.keywords)))
-        dlg = _dialogue_match(seg, ps.shot.transcript)    # SCENE-LOCK: the line is spoken in this clip
+        dlg = _dialogue_match(                            # SCENE-LOCK: independently typed real line
+            seg, ps.shot.transcript, quote_branch=_quote_branch)
         # MOMENT-LOCK: where inside this SOURCE is that line actually spoken? The shot-transcript
         # test above misses any line that straddles a cut (midpoint binning), which is most of them.
         _mom = 0.0
         _mom_ratio = 0.0
         if _mm_on and _bq:
-            _sp = locate_beat_moment(proj, ps.sid, seg, anchor_lines)
+            _sp = locate_beat_moment(
+                proj, ps.sid, seg, anchor_lines, quote_branch=_quote_branch)
             if _sp:
                 _mom = _moment_proximity(ps.shot, _sp)
                 _mom_ratio = float(_sp[2])
@@ -2348,9 +2460,16 @@ def _score_pool(seg: ScriptSegment, pool: list[_PoolShot], text_vec, cfg: ClipCo
                "transcript": round(trans, 4), "faceid": round(faceid, 3),
                "object": round(obj, 3), "dialogue": round(dlg, 3),
                "quality": round(ps.shot.quality, 3)}
+        if _quote_branch in _MATCHER_QUOTE_BRANCHES:
+            # Signals are numeric by ledger contract. The durable human-readable map lives at
+            # project.meta.matcher_quote_branches.
+            sig[f"quote_branch_{_quote_branch}"] = 1.0
         if _mom:
             sig["moment_lock"] = round(_mom, 3)
             sig["moment_ratio"] = round(_mom_ratio, 3)
+            if (_quote_branch not in ("verbatim", "legacy")
+                    and _anchor_echo(seg, anchor_lines)):
+                sig["anchor_quote_lock"] = 1.0
         if _mom_bonus:
             sig["moment_bonus"] = round(_mom_bonus, 3)
         if bonus:
@@ -2442,7 +2561,7 @@ def _cleanliness_key(sid: str, shot, src_dirty: dict, src_height: dict) -> tuple
 def _clean_copy_swap(seg, best, scored, src_dirty: dict, src_height: dict, cfg,
                      *, eps: float = 0.03, shot_uses: dict | None = None,
                      shot_cap: int | None = None, proj=None, beat_quote: str = "",
-                     anchor_lines: list | None = None):
+                     anchor_lines: list | None = None, quote_branch=None):
     """SAME-SCENE CLEAN-COPY ARBITRATION. Scene compilations upload the same iconic moment many
     times — one copy clean 1080p, another with a channel bug / burned Turkish subs / 360p. The
     greedy pick takes the highest-scoring copy, which is blind to cleanliness (observed: a
@@ -2457,6 +2576,11 @@ def _clean_copy_swap(seg, best, scored, src_dirty: dict, src_height: dict, cfg,
     import numpy as np
     if best is None:
         return best, None
+    if _effective_matcher_quote_branch(seg, quote_branch, proj) not in ("verbatim", "legacy"):
+        anchor_quote = _anchor_echo(seg, anchor_lines)
+        if not anchor_quote or " ".join(_norm_words(beat_quote)) != " ".join(
+                _norm_words(anchor_quote)):
+            beat_quote = ""
     _adj, base_b, ps_b, cand_b = best
     key_b = _cleanliness_key(ps_b.sid, ps_b.shot, src_dirty, src_height)
     # Early-out ONLY when the current best is UNBEATABLE: no watermark (key[0]==0), no subs
@@ -2590,6 +2714,11 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         proj.selections = [ClipSelection(segment_index=s.index, source_id="", shot_index=-1,
                                          in_point=0, out_point=0, confidence=0.0) for s in segments]
         return proj.selections
+
+    # Type authored quotes against the COMPLETE usable indexed dialogue pool once, before any one
+    # selected source can influence the answer.  Paraphrase/unknown branches retain ordinary
+    # semantic CLIP/transcript/face/object matching but receive no dialogue or moment privilege.
+    _quote_branches_m = _matcher_quote_pool_branches(proj, segments, cfg, progress=progress)
 
     vr = _index._vr() if _index.clip_available() else None
     #  WINDOW-level wrong-character guard. The shot-level wrongface penalty cannot see this: two
@@ -2857,6 +2986,9 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
 
     _hist_win = max(cfg.recency_cooldown, cfg.source_recency_window)
     for seg in segments:
+        _quote_branch_seg = _quote_branches_m.get(
+            int(getattr(seg, "index", -1)),
+            "indeterminate" if str(getattr(seg, "quote", "") or "").strip() else "")
         t_now = t_of.get(seg.index, 0.0)
         # recency/source history only matters within the cooldown window — prune so candidate
         # scoring stays O(pool × window) instead of O(pool × all prior segments)
@@ -2904,7 +3036,9 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         try:
             from . import era as _era_mm
             _ana_shim_m = type("A", (), {"anchor_scenes": _ana_m.get("anchor_scenes"),
-                                         "movie_title": _ana_m.get("movie_title", "")})()
+                                         "movie_title": _ana_m.get("movie_title", ""),
+                                         "characters": _ana_m.get("characters"),
+                                         "actors": _ana_m.get("actors")})()
             _beat_era_m = _era_mm.beat_era(
                 seg, str(_ana_m.get("episode_hint") or ""),
                 single_scene=(_ana_m.get("video_type") == "single_scene"),
@@ -2943,7 +3077,8 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
                              all_faces=all_faces, title_toks=_ta_titles, mv_toks=_ta_mv,
                              beat_era=_beat_era_m, src_titles=_src_titles_m,
                              proj=proj, anchor_lines=_anchor_lines, tgt01=_tgt01,
-                             anchor_ep=_anchor_ep_m, beat_era_soft=_era_soft_m)
+                             anchor_ep=_anchor_ep_m, beat_era_soft=_era_soft_m,
+                             quote_branch=_quote_branch_seg)
 
         # `base` = match QUALITY (drives the reported confidence + flagging).
         # `adj`  = base + anchor bonus minus diversity penalties (drives only WHICH is picked).
@@ -2964,7 +3099,9 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
         # at 1.0 — the precise scene must win even from a recently-used source.
         _variety = 1.6 if _policy.maximize_variety(seg) else 1.0
         # the dialogue line this beat is about, resolved once per beat (mirrors _score_pool)
-        _bq_seg = _beat_quote(seg, _anchor_lines) if _mm_gate else ""
+        _bq_seg = (_beat_quote(
+            seg, _anchor_lines, quote_branch=_quote_branch_seg, proj=proj)
+            if _mm_gate else "")
         # The near-adjacent replay block below is a HARD skip, so it can in principle starve a beat
         # of every candidate. `_hard_gap` is dropped on a second pass if that happens — a beat must
         # never go unselected (that escalates to the still/release-block path).
@@ -3063,7 +3200,9 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
                       + 0.08 * (ps.shot.quality - 0.5))  # mild quality pref
             qual = round(max(0.0, min(1.0, base)), 4)
             # centre the cut on the located line when there is one (see _trim_window)
-            _cand_mom = locate_beat_moment(proj, ps.sid, seg, _anchor_lines) if _bq_seg else None
+            _cand_mom = (locate_beat_moment(
+                proj, ps.sid, seg, _anchor_lines, quote_branch=_quote_branch_seg)
+                if _bq_seg else None)
             in_p, out_p = _trim_window(ps.shot, seg, cfg, _cand_mom)
             cand = ClipCandidate(segment_index=seg.index, source_id=ps.sid,
                                  shot_index=ps.shot.index, score=qual,
@@ -3098,7 +3237,8 @@ def match_segments(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipCo
                                                 shot_uses=shot_uses,
                                                 shot_cap=cfg.max_reuse_per_shot,
                                                 proj=proj, beat_quote=_bq_seg,
-                                                anchor_lines=_anchor_lines)
+                                                anchor_lines=_anchor_lines,
+                                                quote_branch=_quote_branch_seg)
             if _swap_note:
                 _pc = alt_best.get(_old_cand.source_id)
                 if _pc is None or _old_cand.score > _pc.score:

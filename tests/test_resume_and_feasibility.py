@@ -108,6 +108,72 @@ def test_checkpoint_version_bump_invalidates_old_records():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_conclusive_scoped_recovery_rebinds_cached_footage_without_resetting_pagination(
+        tmp_path):
+    """A recovery-only source must not turn the next Resume into a global footage rerun.
+
+    The scoped transaction has already restored out-of-scope selections and materialized every
+    accepted in-scope change. Rebinding its completed artifacts lets Resume continue the audited
+    deferred tail directly; the original global-stage timestamp remains truthful for offline replay.
+    """
+    seg = _seg(0, "Littlefinger trial Great Hall", "Petyr Baelish")
+    p = _proj(str(tmp_path), [seg], [_sel(0, "base")])
+    base_media = tmp_path / "base.mp4"
+    base_media.write_bytes(b"base source bytes")
+    p.sources = [SourceVideo(
+        id="base", url="u:base", title="Base scene", permission="owner", status="ok",
+        local_path=str(base_media), checksum="base-checksum")]
+    kwargs = dict(force_index=False, segments=[seg], verify=True, asr_signature="asr-v1")
+    old = O._footage_stage_signatures("download", p.sources, **kwargs)
+    for name, sig in zip(("match", "cut", "verify", "recover"), old[1:]):
+        O._stage_done(p, name, sig)
+    old_match_at = p.meta["pipeline"]["stages"]["match"]["at"]
+    p.meta["selection_relevance_recovery"] = {
+        "post_fingerprint": "generation-a", "deferred": [12, 19, 27],
+        "completed_page_scope": [1, 2, 3]}
+    marker_before = dict(p.meta["selection_relevance_recovery"])
+
+    recovery_media = tmp_path / "unusable-recovery.mp4"
+    recovery_media.write_bytes(b"indexed but irrelevant recovery source")
+    p.sources.append(SourceVideo(
+        id="recovery_only", url="u:recovery", title="Recovery candidate",
+        permission="owner", status="ok", local_path=str(recovery_media),
+        checksum="recovery-checksum"))
+    current = O._footage_stage_signatures("download", p.sources, **kwargs)
+    assert not O._stage_skip(p, "match", current[1], resume=True), \
+        "the enlarged source pool changes the ordinary match signature"
+
+    rebound = O._rebind_completed_footage_stages(
+        p, dict(zip(("match", "cut", "verify", "recover"), current[1:])),
+        reason="conclusive_semantic_recovery_pool")
+
+    assert rebound is True
+    assert all(O._stage_skip(p, name, sig, resume=True)
+               for name, sig in zip(("match", "cut", "verify", "recover"), current[1:]))
+    assert not O._footage_stages_required(
+        skip_match=True, skip_verify=True, skip_recover=True,
+        backfill_enabled=False, skip_backfill=True), \
+        "Face-ID/index work must stay skipped when only the scoped pagination tail remains"
+    match_rec = p.meta["pipeline"]["stages"]["match"]
+    assert match_rec["at"] == old_match_at, "do not falsify the global matcher audit timestamp"
+    assert match_rec["rebound_reason"] == "conclusive_semantic_recovery_pool"
+    assert p.meta["selection_relevance_recovery"] == marker_before, \
+        "checkpoint rebinding must not restart or rewrite the deferred cursor"
+
+
+def test_scoped_rebind_is_atomic_when_any_required_stage_is_incomplete(tmp_path):
+    p = ClipProject(name="rebind-fail-closed", root=str(tmp_path))
+    p.ensure_dirs()
+    O._stage_done(p, "match", "old-match")
+    before = dict(p.meta["pipeline"]["stages"]["match"])
+
+    assert O._rebind_completed_footage_stages(
+        p, {"match": "new-match", "verify": "new-verify"},
+        reason="scoped_recovery") is False
+    assert p.meta["pipeline"]["stages"]["match"] == before, \
+        "a missing/failed stage must prevent every partial checkpoint mutation"
+
+
 # --------------------------------------------------------------------------- fail-fast feasibility
 def test_doomed_beat_with_no_compatible_predecessor_blocks_early():
     tmp = tempfile.mkdtemp()

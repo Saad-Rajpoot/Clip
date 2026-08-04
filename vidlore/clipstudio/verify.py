@@ -508,6 +508,8 @@ def _project_beat_era(proj: ClipProject, seg: ScriptSegment) -> str:
     shim = type("A", (), {
         "anchor_scenes": analysis.get("anchor_scenes"),
         "movie_title": analysis.get("movie_title", ""),
+        "characters": analysis.get("characters"),
+        "actors": analysis.get("actors"),
     })()
     return _beat_era(
         seg, global_era, single, global_verified=global_ok,
@@ -1623,7 +1625,8 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
             # verbatim contract merely because this new rung erased its proof.
             try:
                 dialogue = float(_M_n._dialogue_match(
-                    seg, getattr(sh, "transcript", "") or ""))
+                    seg, getattr(sh, "transcript", "") or "",
+                    quote_branch=_M_n._effective_matcher_quote_branch(seg, proj=proj)))
             except Exception:
                 dialogue = 0.0
             try:
@@ -1794,7 +1797,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
     _global_ok = bool((proj.meta.get("analysis", {}) or {}).get("episode_hint_verified", False))
     _ana_shim = type("A", (), {
         "anchor_scenes": (proj.meta.get("analysis", {}) or {}).get("anchor_scenes"),
-        "movie_title": (proj.meta.get("analysis", {}) or {}).get("movie_title", "")})()
+        "movie_title": (proj.meta.get("analysis", {}) or {}).get("movie_title", ""),
+        "characters": (proj.meta.get("analysis", {}) or {}).get("characters"),
+        "actors": (proj.meta.get("analysis", {}) or {}).get("actors")})()
     _event_eras = _era.event_eras_from(_ana_shim)
     _anchor_eras = _era.anchor_token_eras(_ana_shim)
 

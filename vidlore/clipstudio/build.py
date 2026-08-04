@@ -1835,7 +1835,9 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         # legitimizing S7 sources for S4 beats.
         from . import era as _era9
         _ana_shim9 = type("A", (), {"anchor_scenes": _ana9.get("anchor_scenes"),
-                                    "movie_title": _ana9.get("movie_title", "")})()
+                                    "movie_title": _ana9.get("movie_title", ""),
+                                    "characters": _ana9.get("characters"),
+                                    "actors": _ana9.get("actors")})()
         _event_eras9 = _era9.event_eras_from(_ana_shim9)
         _anchor_eras9 = _era9.anchor_token_eras(_ana_shim9)
         _global_era9v = str(_ana9.get("episode_hint") or "")

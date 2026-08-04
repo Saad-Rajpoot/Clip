@@ -117,7 +117,7 @@ _PIPELINE_CKPT_VERSION = 2   # bump when a stage's semantics change so old check
 # Narrow semantic versions for stages whose code-level content gates are not otherwise represented
 # by their data/config inputs.  Keep these separate from _PIPELINE_CKPT_VERSION: changing a source
 # admission rule must replay backfill + match, but it must not throw away valid downloads/indexes.
-_MATCH_GATE_VERSION = "gatev4-native-hd-actual-bytes"
+_MATCH_GATE_VERSION = "gatev5-typed-quotes-entity-safe-era"
 _BACKFILL_SIGNATURE_VERSION = "backfillv6-native-hd-actual-bytes"
 
 
@@ -161,6 +161,39 @@ def _stage_skip(proj, name: str, sig: str, resume: bool, artifact_ok: bool = Tru
         return False
     rec = _ckpt(proj)["stages"].get(name)
     return bool(rec and rec.get("status") == "done" and rec.get("sig") == sig and artifact_ok)
+
+
+def _rebind_completed_footage_stages(proj, signatures: dict[str, str], *, reason: str) -> bool:
+    """Bind completed match/cut/verify/recover artifacts to a conclusive scoped-recovery pool.
+
+    Semantic recovery is intentionally transactional: it may add/index sources, rematch only the
+    blocked page, re-cut every accepted changed selection, and restore every out-of-scope selection.
+    Once that page completes, the persisted selection/clip/verifier state is the authoritative
+    reconciled result for the enlarged pool.  Leaving the older pool signatures on those artifacts
+    makes Resume treat the recovery source as an external mutation, rebuild Face-ID, globally rerun
+    match/cut/verify, and destroy the audited deferred-page cursor.
+
+    Rebinding is fail-closed. Every named stage must already be completed; callers must separately
+    prove the enlarged ASR/index pool is current. Preserve ``at`` because it records when the global
+    stage actually ran (offline reproduction filters sources by that timestamp); ``rebound_at`` says
+    when a later scoped transaction made its artifacts current for a newer pool.
+    """
+    stages = _ckpt(proj)["stages"]
+    wanted = {str(name): str(sig) for name, sig in (signatures or {}).items() if name and sig}
+    if not wanted or any(
+            not isinstance(stages.get(name), dict)
+            or stages[name].get("status") != "done"
+            for name in wanted):
+        return False
+    rebound_at = _dt.now(_tz.utc).isoformat(timespec="seconds")
+    for name, sig in wanted.items():
+        rec = dict(stages[name])
+        rec["sig"] = sig
+        rec["rebound_at"] = rebound_at
+        rec["rebound_reason"] = str(reason or "scoped_recovery")
+        stages[name] = rec
+    proj.save()
+    return True
 
 
 def _footage_stage_signatures(download_sig: str, sources, *, force_index: bool,
@@ -612,7 +645,9 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
     from . import era as _era_sv
     _anchor_eras_sv = _era_sv.anchor_token_eras(
         type("A", (), {"anchor_scenes": (proj.meta.get("analysis", {}) or {}).get("anchor_scenes"),
-                       "movie_title": (proj.meta.get("analysis", {}) or {}).get("movie_title", "")})())
+                       "movie_title": (proj.meta.get("analysis", {}) or {}).get("movie_title", ""),
+                       "characters": (proj.meta.get("analysis", {}) or {}).get("characters"),
+                       "actors": (proj.meta.get("analysis", {}) or {}).get("actors")})())
 
     from . import index as _index_sv
 
@@ -4165,9 +4200,11 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
         # still/hold/block. Prefers an exact clip that verifies over an irrelevant HD one; preserves
         # every already-resolved beat; fail-closed. The deterministic still (8b) and the build-stage
         # editorial hold / honest release-block remain the downstream last resorts.
+        _scoped_recovery_conclusive = False
         try:
             _recover_unresolved_beats(proj, segs, analysis, cfg, eng, faceid_obj=faceid_obj, refs=refs,
                                       roster=roster, policy=policy, log=log)
+            _scoped_recovery_conclusive = True
         except Exception as _e:
             _log_stage_skip(log, proj, "recovery", _e)
 
@@ -4180,6 +4217,24 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
                 _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, eng_cfg=eng)
             except Exception as _e:
                 _log_stage_skip(log, proj, "image-fallback", _e)
+        # Scoped recovery can add an indexed source after global match/cut/verify.  Its transaction
+        # rematches only blocked beats, materializes accepted changes, and restores every other
+        # selection. Rebind those completed artifacts to the enlarged current pool before writing
+        # recover's checkpoint; otherwise the next Resume sees the source as an external mutation,
+        # globally reruns all footage stages, and loses semantic pagination progress. A failed or
+        # ASR-incomplete recovery never earns the rebind.
+        if _scoped_recovery_conclusive:
+            _usable_after_recovery = [s for s in proj.sources if s.status == "ok"]
+            if asr_pool_current(proj, cfg, _usable_after_recovery):
+                (_sig_index, _sig_match, _sig_cut, _sig_verify,
+                 _sig_recover) = _footage_stage_signatures(
+                    _sig_download, _usable_after_recovery, force_index=force_index,
+                    segments=segs, verify=verify, asr_signature=_asr_signature)
+                _rebind_completed_footage_stages(
+                    proj,
+                    {"match": _sig_match, "cut": _sig_cut,
+                     **({"verify": _sig_verify} if verify else {})},
+                    reason="conclusive_scoped_recovery_pool")
         _stage_done(proj, "recover", _sig_recover)
 
     def _refresh_qc():
@@ -4231,6 +4286,24 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
             log(f"semantic-recovery: technical failure ({type(_se).__name__}: "
                 f"{str(_se)[:100]}); original publication block preserved")
             raise _original_error
+
+        # A completed semantic page is the same scoped transaction as stage 8a, only later in the
+        # pipeline. It may have added an unusable-but-indexed source while retaining an audited
+        # deferred tail. Bind the already-reconciled artifacts to that pool so Resume continues the
+        # tail directly instead of rebuilding Face-ID/global match/cut/verify and restarting at the
+        # first page. Never bless an incomplete ASR pool or an absent prior stage checkpoint.
+        _usable_after_semantic = [s for s in proj.sources if s.status == "ok"]
+        if asr_pool_current(proj, cfg, _usable_after_semantic):
+            (_sr_sig_index, _sr_sig_match, _sr_sig_cut, _sr_sig_verify,
+             _sr_sig_recover) = _footage_stage_signatures(
+                _sig_download, _usable_after_semantic, force_index=force_index,
+                segments=segs, verify=verify, asr_signature=_asr_signature)
+            _rebind_completed_footage_stages(
+                proj,
+                {"match": _sr_sig_match, "cut": _sr_sig_cut,
+                 **({"verify": _sr_sig_verify} if verify else {}),
+                 "recover": _sr_sig_recover},
+                reason="conclusive_semantic_recovery_pool")
 
         # Never trust the retry helper's summary as an authorization. Re-run the exact publication
         # assertion against the now-persisted project, whether the helper reported blockers or a
