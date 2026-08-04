@@ -294,7 +294,8 @@ def _venue_verify(kf_path: str, seg, faces, eng_cfg, *, proj=None, cache=None):
                                                             and cache is not None) else ""
     if _fp:
         _hit = cache.get(_fp)
-        if _hit is not None and _verdict_schema_ok(_hit) \
+        if _hit is not None and _verdict_schema_ok(
+                _hit, required_entity=getattr(seg, "required_entity", "") or "") \
                 and _hit_provider_ok(_hit, _vision_model(eng_cfg)):
             _pm_vv.incr("selfheal.venue.cache_hit")
             return dict(_hit)                            # copy: callers mutate their verdict
@@ -308,7 +309,8 @@ def _venue_verify(kf_path: str, seg, faces, eng_cfg, *, proj=None, cache=None):
     # Never turn an explicit provider/error status into a successful cached judgment.  Raw
     # ``verify_frame`` replies historically omit status, which is the one legacy-success form the
     # schema accepts; an explicitly non-ok status must remain non-ok all the way to the caller.
-    if _fp and v is not None and _verdict_schema_ok(v):
+    if _fp and v is not None and _verdict_schema_ok(
+            v, required_entity=getattr(seg, "required_entity", "") or ""):
         cache[_fp] = {k: val for k, val in v.items() if k != "reused"}
     return v
 
@@ -354,7 +356,10 @@ def _still_verdict_schema_error(verdict, seg=None, *, require_keep_facts: bool =
         return f"verifier status is {status!r}, not ok"
     try:
         from .verify import _verdict_schema_ok
-        valid = _verdict_schema_ok(verdict)
+        # This helper reports the precise missing keep fact below. Ask the shared cache validator
+        # only for the status/verdict/confidence envelope here; cache read/write call sites use its
+        # complete-keep default and therefore still evict malformed positive entries.
+        valid = _verdict_schema_ok(verdict, complete_keep=False)
     except Exception:                                   # noqa: BLE001 — schema uncertainty fails closed
         valid = False
     if not valid:

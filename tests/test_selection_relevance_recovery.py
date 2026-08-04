@@ -159,6 +159,110 @@ def _write_mock_recovery_page(proj, kw, *, deferred=(), page_completed=True,
     (proj.output_dir / kw["audit_filename"]).write_text(json.dumps(audit))
 
 
+def _quote_cache_fixture(tmp_path):
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    segs[0].quote = "Who does this belong to?"
+    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+        [0.0, 0.2, "winter"], [0.2, 0.4, "is"], [0.4, 0.6, "coming"],
+    ]), encoding="utf-8")
+    _stamp_current_asr_provenance(proj, "s1")
+    return proj, segs
+
+
+def test_retry_reuses_quote_pool_classification_while_generation_is_stable(tmp_path):
+    from vidlore.clipstudio import relevance_contract as R
+    proj, segs = _quote_cache_fixture(tmp_path)
+
+    def exhausted(_proj, _segs, _analysis, _cfg, _eng, **kw):
+        _write_mock_recovery_page(_proj, kw)
+        return 0
+
+    env = {"VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK": "0",
+           "VIDLORE_CLIPSTUDIO_SELFHEAL": "0"}
+    with mock.patch.dict(os.environ, env), \
+            mock.patch.object(O, "_recover_unresolved_beats", side_effect=exhausted), \
+            mock.patch.object(R, "_quote_pool_branches",
+                              wraps=R._quote_pool_branches) as branch_builder, \
+            mock.patch.object(R, "evaluate_selection_relevance",
+                              wraps=R.evaluate_selection_relevance) as evaluations:
+        audit = _call(proj, segs)
+
+    assert audit["status"] == "blocked"
+    assert evaluations.call_count >= 4, "the recovery path must exercise repeated strict audits"
+    assert branch_builder.call_count == 1, (
+        "selection/verifier-only audits must reuse the request-local whole-pool classification")
+
+
+def test_quote_pool_cache_cannot_be_replaced_with_caller_authored_branches(tmp_path):
+    from vidlore.clipstudio import relevance_contract as R
+    proj, segs = _quote_cache_fixture(tmp_path)
+    injected = {0: {"branch": "paraphrase", "verbatim_required": False}}
+
+    with pytest.raises(TypeError, match="request-local classification cache"):
+        R.evaluate_selection_relevance(
+            proj, segs, cfg=ClipConfig(), quote_pool_cache=injected)
+
+    class ForgedCache(R._RequestQuotePoolClassificationCache):
+        def contracts_for(self, *_args, **_kwargs):
+            return injected
+
+    with pytest.raises(TypeError, match="request-local classification cache"):
+        R.evaluate_selection_relevance(
+            proj, segs, cfg=ClipConfig(), quote_pool_cache=ForgedCache())
+
+
+def test_retry_invalidates_quote_pool_classification_when_index_generation_changes(tmp_path):
+    from vidlore.clipstudio import relevance_contract as R
+    proj, segs = _quote_cache_fixture(tmp_path)
+
+    def grow_index(_proj, _segs, _analysis, _cfg, _eng, **kw):
+        words = _proj.index_dir / "s1.words.json"
+        words.write_text(words.read_text(encoding="utf-8") + " ", encoding="utf-8")
+        _write_mock_recovery_page(_proj, kw)
+        return 0
+
+    env = {"VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK": "0",
+           "VIDLORE_CLIPSTUDIO_SELFHEAL": "0"}
+    with mock.patch.dict(os.environ, env), \
+            mock.patch.object(O, "_recover_unresolved_beats", side_effect=grow_index), \
+            mock.patch.object(R, "_quote_pool_branches",
+                              wraps=R._quote_pool_branches) as branch_builder:
+        _call(proj, segs)
+
+    assert branch_builder.call_count == 2, (
+        "the post-recovery audit must rebuild branches exactly once for the new indexed pool")
+
+
+def test_retry_invalidates_quote_pool_classification_after_specificity_softening(tmp_path):
+    from vidlore.clipstudio import relevance_contract as R
+    from vidlore.clipstudio import selfheal as S
+    proj, segs = _quote_cache_fixture(tmp_path)
+
+    def exhausted(_proj, _segs, _analysis, _cfg, _eng, **kw):
+        _write_mock_recovery_page(_proj, kw)
+        return 0
+
+    def soften(_proj, _segs, *_args, **_kwargs):
+        _segs[0].visual_policy = P.ABSTRACT
+        return {"candidate_count": 1, "softened_count": 1}
+
+    env = {"VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK": "0",
+           "VIDLORE_CLIPSTUDIO_SELFHEAL": "1",
+           "VIDLORE_CLIPSTUDIO_SELFHEAL_SOFTEN": "1"}
+    with mock.patch.dict(os.environ, env), \
+            mock.patch.object(O, "_recover_unresolved_beats", side_effect=exhausted), \
+            mock.patch.object(S, "heal_selection_relevance_gaps", side_effect=soften), \
+            mock.patch.object(R, "_quote_pool_branches",
+                              wraps=R._quote_pool_branches) as branch_builder:
+        audit = _call(proj, segs)
+
+    assert audit["status"] == "pass"
+    assert branch_builder.call_count == 2, (
+        "the final audit must not reuse a pre-softening quote-policy classification")
+
+
 def test_missing_evidence_gets_scoped_reverify_before_acquisition(tmp_path):
     proj, segs, sel = _fixture(tmp_path, {"status": "ok", "verdict": "keep"})
 
@@ -191,6 +295,35 @@ def test_missing_evidence_inconclusive_summary_is_retryable_before_recovery(
             mock.patch.object(O, "_fill_image_fallbacks") as stills, \
             mock.patch("vidlore.clipstudio.selfheal.heal_selection_relevance_gaps") as ladder:
         with pytest.raises(O.PipelineError, match=expected_reason):
+            _call(proj, segs)
+
+    verifier.assert_called_once()
+    recover.assert_not_called()
+    stills.assert_not_called()
+    ladder.assert_not_called()
+    assert "selection_relevance_recovery" not in proj.meta
+
+
+def test_success_summary_with_fresh_malformed_keep_is_retryable_before_recovery(tmp_path):
+    """A successful batch count is not proof that its positive JSON was publication-complete."""
+    proj, segs, sel = _fixture(tmp_path, {"status": "ok", "verdict": "keep"})
+
+    def malformed_reverify(_proj, _segs, _cfg, _eng, *, only_indices, progress):
+        assert only_indices == {0}
+        malformed = dict(GOOD)
+        malformed["matches_naration"] = malformed.pop("matches_narration")
+        sel.verifier = malformed
+        V.bind_selection_verifier_evidence(
+            proj, sel, segs[0], sel.verifier, model="vision", is_specific=True,
+            multiframe=True, faceid_names=[], era="", must_see="")
+        return dict(VERIFY_OK)
+
+    with mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                    side_effect=malformed_reverify) as verifier, \
+            mock.patch.object(O, "_recover_unresolved_beats") as recover, \
+            mock.patch.object(O, "_fill_image_fallbacks") as stills, \
+            mock.patch("vidlore.clipstudio.selfheal.heal_selection_relevance_gaps") as ladder:
+        with pytest.raises(O.PipelineError, match="remained technically inconclusive"):
             _call(proj, segs)
 
     verifier.assert_called_once()
@@ -975,6 +1108,247 @@ def test_tail_page_pool_growth_reopens_prior_blockers_once_then_exhausts(tmp_pat
     assert third["blocked_count"] == fourth["blocked_count"] == 2
     assert {e["segment_index"] for e in third["blockers"]} == {1, 2}
     assert proj.meta["selection_relevance_recovery"]["deferred"] == []
+
+
+def test_page_growth_restores_hidden_29th_blocker_into_same_bounded_generation(tmp_path):
+    """A pool-bound abstract beat must join pagination as soon as a page grows the pool.
+
+    This reproduces the 101-beat run's 28→29 transition: 28 strict blockers enter semantic
+    recovery while beat 24 is legitimately abstract for the old pool.  The first bounded page adds
+    indexed footage, invalidating beat 24's softening.  Its restored strict blocker must be included
+    in that page's persisted post-state/deferred tail, so Resume advances through the tail instead
+    of treating the same pool as a fresh generation and restarting all 29 blockers.
+    """
+    from vidlore.clipstudio import relevance_contract as R
+    from vidlore.clipstudio import selfheal as S
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    base_frame = tmp_path / "shot_0000.jpg"
+    base_shot = Shot(source_id="s1", index=0, start=0.0, end=2.0,
+                     keyframe_path=str(base_frame))
+    for idx in range(1, 29):
+        seg = ScriptSegment(
+            index=idx, text=f"Strict blocked narration {idx}",
+            expected_visual=f"Exact missing scene {idx}", required_entity=f"target {idx}",
+            required_kind="object", scene_query=f"exact scene target {idx}",
+            visual_policy=P.EXACT, is_specific_claim=True)
+        sel = ClipSelection(
+            segment_index=idx, source_id="s1", shot_index=0, in_point=0.0,
+            out_point=2.0, confidence=0.8, verifier=dict(bad))
+        V.bind_selection_verifier_evidence(
+            proj, sel, seg, sel.verifier, shot=base_shot, model="vision",
+            is_specific=True, multiframe=True, faceid_names=[], era="", must_see="")
+        proj.segments.append(seg)
+        proj.selections.append(sel)
+        segs.append(seg)
+
+    softened_idx = 24
+    softened_seg = next(s for s in segs if s.index == softened_idx)
+    softened_sel = next(s for s in proj.selections if s.segment_index == softened_idx)
+    original = S._capture_softening_state(softened_seg, softened_sel)
+    old_pool_fp, old_pool_n = S._gap_pool_fingerprint(proj)
+    softened_seg.visual_policy = P.ABSTRACT
+    softened_seg.required_entity = ""
+    softened_seg.required_kind = ""
+    softened_seg.scene_query = ""
+    softened_seg.expected_visual = "Neutral atmosphere"
+    softened_seg.is_specific_claim = False
+    softened_sel.image_meta = {"selfheal_rung": "abstract", "installed": True}
+    S._record_phase1_softening(
+        proj, softened_seg, softened_sel, original, basis="reproduced_old_pool_gap",
+        pool_fingerprint=old_pool_fp, pool_source_count=old_pool_n)
+
+    initial = R.evaluate_selection_relevance(proj, segs)
+    assert initial["blocked_count"] == 28
+    assert softened_idx not in {e["segment_index"] for e in initial["blockers"]}
+
+    scopes = []
+
+    def bounded_pages(_proj, _segs, _analysis, _cfg, _eng, **kw):
+        scope = sorted(kw["only_indices"])
+        scopes.append(scope)
+        if len(scopes) == 1:
+            assert len(scope) == 28 and softened_idx not in scope
+            media = tmp_path / "page-growth.mp4"
+            media.write_bytes(b"new indexed footage")
+            frame = tmp_path / "page-growth-shot.jpg"
+            frame.write_bytes(b"new indexed frame")
+            _proj.sources.append(SourceVideo(
+                id="page_growth", url="u-page-growth", title="New exact scene source",
+                permission="owner", status="ok", local_path=str(media)))
+            _proj.shots_path("page_growth").write_text(json.dumps([Shot(
+                source_id="page_growth", index=0, start=0.0, end=2.0,
+                keyframe_path=str(frame)).to_dict()]))
+            (_proj.index_dir / "page_growth.words.json").write_text("[]")
+            # Model a cap=8 page: twenty original blockers remain in its audited tail.
+            _write_mock_recovery_page(_proj, kw, deferred=scope[8:])
+        else:
+            # The second Resume must receive only the prior generation's deferred scope. Advance
+            # another bounded page without changing the pool again.
+            _write_mock_recovery_page(_proj, kw, deferred=scope[8:])
+        return 0
+
+    with mock.patch.object(O, "_recover_unresolved_beats", side_effect=bounded_pages), \
+            mock.patch.object(O, "_fill_image_fallbacks") as images, \
+            mock.patch.object(S, "heal_selection_relevance_gaps") as ladder:
+        first = _call(proj, segs)
+        first_marker = copy.deepcopy(proj.meta["selection_relevance_recovery"])
+        first_row = next(r for r in
+                         proj.meta["selection_relevance_gap_softening"]["beats"]
+                         if r["segment_index"] == softened_idx)
+
+        assert first["blocked_count"] == 29
+        assert first_marker["before"] == sorted(i for i in range(29) if i != softened_idx)
+        assert first_marker["after"] == list(range(29))
+        assert first_row["status"] == "restored_pool_changed"
+        assert first_row["active"] is False
+        assert len(first_marker["completed_page_scope"]) == 8
+        assert len(first_marker["deferred"]) == 21
+        assert softened_idx in first_marker["deferred"]
+        assert first_marker["post_fingerprint"] == \
+            O._selection_relevance_retry_fingerprint(proj, segs, first)
+        assert first_marker["pool_fingerprint"] == \
+            O._semantic_recovery_pool_fingerprint(proj)
+        assert O._pending_semantic_recovery_tail(proj, segs) == first_marker["deferred"]
+
+        # Only a current, structurally complete, still-blocked tail can postpone the old
+        # rejected-footage fast predictor. Empty/corrupt/wrong-pool metadata and the kill switch
+        # all fail closed to the predictor; none can bypass a publication gate.
+        valid_marker = copy.deepcopy(first_marker)
+        invalid_markers = [
+            {},
+            {**valid_marker, "deferred": []},
+            {**valid_marker, "deferred": [softened_idx, softened_idx]},
+            {**valid_marker, "deferred": [999], "after": [999]},
+            {**valid_marker, "pool_fingerprint": "wrong-pool"},
+        ]
+        for invalid in invalid_markers:
+            proj.meta["selection_relevance_recovery"] = invalid
+            assert O._pending_semantic_recovery_tail(proj, segs) == []
+        proj.meta["selection_relevance_recovery"] = copy.deepcopy(valid_marker)
+        softened_seg.visual_policy = P.ABSTRACT
+        assert O._pending_semantic_recovery_tail(proj, segs) == [], \
+            "a stale tail cannot postpone the predictor after its deferred beat stops blocking"
+        softened_seg.visual_policy = P.EXACT
+        with mock.patch.dict(os.environ, {"VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY": "0"}):
+            assert O._preassembly_semantic_recovery_tail(proj, segs) == []
+        assert O._preassembly_semantic_recovery_tail(proj, segs) == valid_marker["deferred"]
+
+        expected_resume_scope = first_marker["deferred"]
+        second = _call(proj, segs)
+        second_marker = copy.deepcopy(proj.meta["selection_relevance_recovery"])
+
+    assert scopes[1] == expected_resume_scope
+    assert len(scopes[1]) == 21 < second["blocked_count"] == 29
+    assert len(second_marker["deferred"]) == 13
+    assert set(second_marker["deferred"]).issubset(set(expected_resume_scope))
+    images.assert_not_called()
+    ladder.assert_not_called()
+
+
+def test_pending_semantic_tail_reaches_build_retry_before_legacy_preassembly_block(tmp_path):
+    """The old rejected-footage predictor may not deadlock an already-paged strict retry.
+
+    The first build call represents build_video's mandatory first semantic assertion; after its
+    typed failure the existing catch must run semantic retry.  A second build call then represents
+    the independent authoritative rejected-footage gate and is still allowed to block.  Thus only
+    the early predictor/self-heal is postponed—neither publication gate is weakened.
+    """
+    from vidlore.clipstudio import analyze as AN
+    from vidlore.clipstudio import build as B
+    from vidlore.clipstudio import discover as DS
+    from vidlore.clipstudio import download as DL
+    from vidlore.clipstudio import faceid as FI
+    from vidlore.clipstudio import index as INDEX
+    from vidlore.clipstudio import ledger as LG
+    from vidlore.clipstudio import review as RV
+    from vidlore.clipstudio.analyze import ScriptAnalysis
+
+    seg = ScriptSegment(
+        index=24, text="Beat twenty four strict narration", scene_query="missing exact scene",
+        expected_visual="Missing exact scene", required_entity="Dontos",
+        required_kind="character", visual_policy=P.EXACT, is_specific_claim=True)
+    candidate = DS.SourceCandidate(url="https://video/source", id="src", title="Scene")
+
+    def analyze(*_args, **_kwargs):
+        return (ScriptAnalysis(topic="t", movie_title="Game of Thrones",
+                               video_type="multi_scene", actors=[], characters=[]), [seg])
+
+    def download(proj, *_args, **_kwargs):
+        proj.sources = [SourceVideo(
+            id="src", url=candidate.url, title=candidate.title, permission="owner",
+            status="ok", local_path=str(tmp_path / "source.mp4"), duration=30.0)]
+        (tmp_path / "source.mp4").write_bytes(b"source")
+
+    def match(proj, *_args, **_kwargs):
+        proj.selections = [ClipSelection(
+            segment_index=24, source_id="src", shot_index=0, in_point=0.0, out_point=3.0,
+            confidence=0.8, flag_reasons=["verifier_failed"],
+            verifier={"status": "ok", "verdict": "replace"},
+            beat_windows=[["src", 0.0, 3.0]])]
+
+    build_calls = []
+    from vidlore.clipstudio.verify import NonRetryableBuildError
+
+    def authoritative_build(*_args, **_kwargs):
+        build_calls.append(len(build_calls) + 1)
+        if len(build_calls) == 1:
+            raise NonRetryableBuildError(
+                "strict selection relevance still blocked", kind="selection_relevance")
+        raise NonRetryableBuildError(
+            "authoritative rejected footage still blocked", kind="rejected_footage")
+
+    clear = {"status": "pass", "blocked_count": 0, "blockers": []}
+    env = {
+        "VIDLORE_CLIPSTUDIO_BACKFILL_REJECTED": "0",
+        "VIDLORE_CLIPSTUDIO_INDEX_OVERLAP": "0",
+        "VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY": "1",
+        "VIDLORE_CLIPSTUDIO_SELFHEAL_BUILD_RETRY": "0",
+    }
+    legacy_selfheal = mock.Mock()
+    retry = mock.Mock(return_value=clear)
+    from contextlib import ExitStack
+    patches = [
+        mock.patch.dict(os.environ, env),
+        mock.patch.object(AN, "analyze_script", side_effect=analyze),
+        mock.patch.object(DS, "discover_sources", return_value=[candidate]),
+        mock.patch.object(DL, "download_candidates", side_effect=download),
+        mock.patch.object(FI, "available", return_value=False),
+        mock.patch.object(INDEX, "clip_available", return_value=True),
+        mock.patch.object(O, "asr_pool_current", return_value=True),
+        mock.patch.object(O, "index_all"),
+        mock.patch.object(O, "_ensure_anchor_coverage"),
+        mock.patch.object(O, "match_segments", side_effect=match),
+        mock.patch.object(O, "cut_all"),
+        mock.patch.object(O, "_recover_unresolved_beats"),
+        mock.patch.object(O, "_fill_image_fallbacks"),
+        mock.patch.object(O, "_purge_unwanted_sources", return_value=0),
+        mock.patch.object(RV, "write_review", return_value="review.html"),
+        mock.patch.object(LG, "finalize", return_value={
+            "flagged_for_review": 1, "segments": 1, "mean_confidence": 0.8}),
+        mock.patch.object(B, "preassemble_release_block_reason",
+                          return_value="pre-assembly blocker scene(s) [24]"),
+        mock.patch.object(O, "_preassembly_semantic_recovery_tail", return_value=[24]),
+        mock.patch.object(O, "_run_preassemble_selfheal", legacy_selfheal),
+        mock.patch.object(O, "_retry_selection_relevance", retry),
+        mock.patch.object(O, "build_video", side_effect=authoritative_build),
+    ]
+    with ExitStack() as stack:
+        for patcher in patches:
+            stack.enter_context(patcher)
+        with pytest.raises(NonRetryableBuildError) as exc:
+            O.produce_auto(
+                tmp_path, topic="t", script_text="A sufficiently real narration script.",
+                movie_hint="Game of Thrones", policy="approved_testing", max_sources=1,
+                do_build=True, verify=False)
+
+    assert exc.value.kind == "rejected_footage"
+    legacy_selfheal.assert_not_called()
+    retry.assert_called_once()
+    assert build_calls == [1, 2], \
+        "strict semantic assertion and authoritative rejected-footage gate both remain active"
 
 
 def test_scoped_recovery_reuses_current_pool_before_demanding_a_new_url(tmp_path):

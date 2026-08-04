@@ -549,19 +549,37 @@ def _hit_provider_ok(entry, expected_model: str) -> bool:
     return (not sb) or sb == (expected_model or "")
 
 
-def _verdict_schema_ok(v) -> bool:
-    """A cached verdict is reusable only if it is a SUCCESSFUL, well-formed one.
+def _verdict_schema_ok(v, *, required_entity: str = "", must_see: str = "",
+                       complete_keep: bool = True) -> bool:
+    """Whether a verdict is complete enough to store in, or serve from, the vision cache.
 
-    Guards two ways of poisoning the cache with something that was never a judgment: storing an
-    error/unavailable stub, and storing a malformed reply whose missing `verdict` key would later
-    read as falsy ("not a replace") and quietly pass."""
+    A ``replace`` is conclusive negative evidence once its status/verdict/confidence envelope is
+    valid.  A ``keep`` is stronger: every boolean consumed by the publication contract must be
+    explicitly typed.  This distinction prevents malformed positive replies (observed in production
+    as ``matches_naration``) from becoming permanent cache hits that scoped re-verification can never
+    repair.  Subject and instructed-look facts are conditional because those questions are required
+    only when the corresponding prompt inputs were present.
+    """
     if not isinstance(v, dict):
         return False
     if str(v.get("status", "ok")) not in ("ok", ""):
         return False
     if v.get("verdict") not in ("keep", "replace"):
         return False
-    return isinstance(v.get("confidence", 0.0), (int, float))
+    if not isinstance(v.get("confidence", 0.0), (int, float)):
+        return False
+    if v.get("verdict") == "replace" or not complete_keep:
+        return True
+    for field in ("matches_narration", "specific_enough", "quality_ok",
+                  "wrong_subject_visible", "contradicts_narration"):
+        if not isinstance(v.get(field), bool):
+            return False
+    if str(required_entity or "").strip() \
+            and not isinstance(v.get("correct_subject_visible"), bool):
+        return False
+    if str(must_see or "").strip() and not isinstance(v.get("target_visible"), bool):
+        return False
+    return True
 
 
 def _load_verdict_cache(proj) -> dict:
@@ -1701,14 +1719,20 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         nonlocal _vcache_dirty
         from . import perf_metrics as _pm_r
         _fp_r, _ws_r = _rung_fingerprint(ashot, _seg, strict_flag, faceids, window)
+        _required_r = getattr(_seg, "required_entity", "") or ""
+        _must_see_r = _must_see(_seg)
         _hit = _vcache.get(_fp_r) if _fp_r else None
-        if _hit is not None and _verdict_schema_ok(_hit) and _hit_provider_ok(_hit, _vmodel):
+        if _hit is not None and _verdict_schema_ok(
+                _hit, required_entity=_required_r, must_see=_must_see_r) \
+                and _hit_provider_ok(_hit, _vmodel):
             _pm_r.incr(f"verify.rung.{rung}.cache_hit")
             return dict(_hit), _ws_r                     # copy: callers mutate their verdict
         _pm_r.incr(f"verify.rung.{rung}.call")
         v_r, used_r = _verify_ctx(kf_path, ashot, _seg, strict_flag, faceids, window)
         if _fp_r and v_r is not None and used_r == _ws_r \
-                and _verdict_schema_ok({**v_r, "status": "ok"}):
+                and _verdict_schema_ok(
+                    {**v_r, "status": "ok"}, required_entity=_required_r,
+                    must_see=_must_see_r):
             # store under the ACTUAL server's key — a Claude fallback answer must never sit
             # under a Gemini-predicted fingerprint (and vice versa)
             _served_r = _served_model_of(v_r)
@@ -1779,7 +1803,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             _c0 = _vcache.get(_fp)
             if _fp:
                 _prim_items.append((_fp, sel, seg, shot, kf, faceid_names, _exact, _window))
-            if _fp and (_c0 is None or not _verdict_schema_ok(_c0)
+            if _fp and (_c0 is None or not _verdict_schema_ok(
+                            _c0, required_entity=getattr(seg, "required_entity", "") or "",
+                            must_see=_must_see(seg))
                         or not _hit_provider_ok(_c0, _vmodel)):
                 _pending.append(
                     (_fp, seg, shot, kf, faceid_names, _exact, _want_sheet, _window))
@@ -1790,16 +1816,20 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             _pf_fail = _pf_ok = 0
             with _cf.ThreadPoolExecutor(max_workers=_pf_workers) as _ex:
                 _futs = {_ex.submit(_verify_ctx, kf9, shot9, seg9, ex9, fids9, win9):
-                         (fp9, ws9)
+                         (fp9, ws9, seg9)
                          for (fp9, seg9, shot9, kf9, fids9, ex9, ws9, win9) in _pending}
                 for _fu in _cf.as_completed(_futs):
-                    _fp9, _ws9 = _futs[_fu]
+                    _fp9, _ws9, _seg_schema9 = _futs[_fu]
                     try:
                         _v9, _us9 = _fu.result()
                     except Exception:                     # noqa: BLE001
                         _v9, _us9 = None, _ws9
                     if _v9 is not None and _us9 == _ws9 \
-                            and _verdict_schema_ok({**_v9, "status": "ok"}):
+                            and _verdict_schema_ok(
+                                {**_v9, "status": "ok"},
+                                required_entity=getattr(
+                                    _seg_schema9, "required_entity", "") or "",
+                                must_see=_must_see(_seg_schema9)):
                         _served9 = _served_model_of(_v9)
                         _fp_store9 = _fp9
                         if _served9 != _vmodel:
@@ -1869,7 +1899,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             _beat_alts, _len_jobs = [], []
             for (_fpP, selP, segP, shotP, kfP, fidsP, _exP, _winP) in _prim_items:
                 _v0 = _vcache.get(_fpP)
-                if not (_v0 is not None and _verdict_schema_ok(_v0)
+                if not (_v0 is not None and _verdict_schema_ok(
+                            _v0, required_entity=getattr(segP, "required_entity", "") or "",
+                            must_see=_must_see(segP))
                         and _hit_provider_ok(_v0, _vmodel)):
                     continue                             # primary not warm → serial pays as today
                 if str(_v0.get("verdict")) != "replace" or not _exP:
@@ -2024,7 +2056,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         # reply whose missing "verdict" key would read as falsy and quietly pass
         _cached = _vcache.get(_fp) if _fp else None
         _used_sheet = _want_sheet
-        if _cached is not None and _verdict_schema_ok(_cached) \
+        if _cached is not None and _verdict_schema_ok(
+                _cached, required_entity=getattr(seg, "required_entity", "") or "",
+                must_see=_must_see(seg)) \
                 and _hit_provider_ok(_cached, _vmodel):
             from . import perf_metrics as _pm_v
             _pm_v.incr("verify.primary.cache_hit")
@@ -2074,7 +2108,10 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         # STORE only a schema-valid verdict, and only when the sheet prediction that went INTO the
         # key actually held. A sheet build can fail and silently fall back to one frame — storing
         # that single-frame answer under a multiframe key would hand back the wrong judgment later.
-        if _fp and not v.get("reused") and _verdict_schema_ok({**v, "status": "ok"}):
+        if _fp and not v.get("reused") and _verdict_schema_ok(
+                {**v, "status": "ok"},
+                required_entity=getattr(seg, "required_entity", "") or "",
+                must_see=_must_see(seg)):
             if _used_sheet == _want_sheet:
                 # key by the ACTUAL server (a fallback provider's answer must never sit under
                 # the predicted provider's fingerprint)

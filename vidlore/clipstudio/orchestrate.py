@@ -718,7 +718,10 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
         faces = _shot_face_ids(sid, sidx)
         _fp = _still_fp(kf_path, seg, sid, sidx, faces)
         _hit = _still_vcache.get(_fp) if _fp else None
-        if _hit is not None and _verify_mod._verdict_schema_ok(_hit) \
+        _required_sv = getattr(seg, "required_entity", "") or ""
+        _must_see_sv = _policy.deictic_target(seg)
+        if _hit is not None and _verify_mod._verdict_schema_ok(
+                _hit, required_entity=_required_sv, must_see=_must_see_sv) \
                 and _verify_mod._hit_provider_ok(_hit, _vmodel_sv):
             _pm_sv.incr("still.verdict.cache_hit")
             _ev = {**dict(_hit), "status": "ok"}
@@ -740,7 +743,9 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                     continue                              # transport error → retry, then unverified
                 v = {**v, "status": "ok"}
                 _still_evidence[(str(kf_path), int(seg.index))] = dict(v)
-                if _fp and _verify_mod._verdict_schema_ok({**v, "status": "ok"}):
+                if _fp and _verify_mod._verdict_schema_ok(
+                        {**v, "status": "ok"}, required_entity=_required_sv,
+                        must_see=_must_see_sv):
                     _sb = str(v.get("vision_served_by") or "")
                     _fp_store = _fp if (not _sb or _sb == _vmodel_sv) else \
                         _still_fp(kf_path, seg, sid, sidx, faces, model_id=_sb)
@@ -2530,6 +2535,72 @@ def _selection_relevance_retry_fingerprint(proj, segs, audit: dict) -> str:
     return _hashlib_sr.sha256(raw.encode("utf-8", "replace")).hexdigest()
 
 
+def _pending_semantic_recovery_tail(proj, segs, *, cfg=None) -> list[int]:
+    """Return a structurally valid persisted semantic-pagination tail, else ``[]``.
+
+    This marker is allowed to postpone only the *fail-fast predictor* before build; it never
+    authorizes footage or bypasses either publication gate.  Validate the full persisted shape so
+    corrupt/stale free-form metadata cannot suppress even that early diagnostic.  A changed content
+    fingerprint is intentionally not rejected here: `_retry_selection_relevance` owns generation
+    invalidation and must be reached to start the appropriate fresh bounded generation.
+    """
+    from . import relevance_contract as _R_pending
+
+    marker = (getattr(proj, "meta", {}) or {}).get("selection_relevance_recovery")
+    if not isinstance(marker, dict) \
+            or marker.get("schema_version") != _R_pending.SCHEMA_VERSION \
+            or not str(marker.get("post_fingerprint", "") or ""):
+        return []
+    deferred = marker.get("deferred")
+    after = marker.get("after")
+    if not isinstance(deferred, list) or not deferred \
+            or not isinstance(after, list):
+        return []
+    if any(isinstance(i, bool) or not isinstance(i, int) or i < 0 for i in deferred + after):
+        return []
+    if len(deferred) != len(set(deferred)) or len(after) != len(set(after)) \
+            or not set(deferred).issubset(set(after)):
+        return []
+    try:
+        current = {int(getattr(seg, "index", -1)) for seg in (segs or [])}
+    except (TypeError, ValueError):
+        return []
+    if not set(deferred).issubset(current):
+        return []
+    # New markers expose the indexed-pool identity directly.  Keep accepting the immediately prior
+    # schema-6 shape (which has no field) so the live 101-beat job can escape the deadlock once; any
+    # marker that does carry the binding must match exactly.
+    bound_pool = marker.get("pool_fingerprint")
+    if bound_pool is not None and (
+            not isinstance(bound_pool, str)
+            or not bound_pool
+            or bound_pool != _semantic_recovery_pool_fingerprint(proj)):
+        return []
+    # Deferred pagination is meaningful only for beats still blocked by the current strict
+    # contract.  This also rejects a structurally plausible but stale marker after those beats were
+    # fixed by some other operation.  Evaluation is read-only; generation mismatch remains the
+    # retry function's responsibility.
+    try:
+        current_audit = _R_pending.evaluate_selection_relevance(proj, segs, cfg=cfg)
+        current_blockers = {
+            int(e.get("segment_index", -1))
+            for e in (current_audit.get("blockers") or [])}
+    except Exception:                                  # noqa: BLE001 — predictor handoff fails closed
+        return []
+    if not set(deferred).issubset(current_blockers):
+        return []
+    return sorted(deferred)
+
+
+def _preassembly_semantic_recovery_tail(proj, segs, *, cfg=None) -> list[int]:
+    """Pending semantic tail eligible to postpone the rejected-footage fast predictor."""
+    import os as _os_pending
+    if _os_pending.environ.get("VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY", "1") \
+            .strip().lower() in ("0", "false", "no"):
+        return []
+    return _pending_semantic_recovery_tail(proj, segs, cfg=cfg)
+
+
 def _unverifiable_relevance_indices(audit: dict) -> set[int]:
     """Strict blockers where a scoped re-verification can add missing evidence.
 
@@ -2608,8 +2679,17 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
     result, so failure remains a NonRetryable content stop.
     """
     from . import relevance_contract as _R_sr
+
+    # Request-local only: one strict recovery calls the publication audit repeatedly while verifier
+    # and selection facts change, but whole-pool quote typing depends on neither.  Reuse that costly
+    # source×quote scan while its actual inputs are unchanged.  The opaque cache builds its own
+    # branches and validates source/index provenance plus quote/resolved-policy state on every use;
+    # callers cannot inject a permissive ``paraphrase`` classification.
+    _quote_pool_cache_sr = _R_sr._RequestQuotePoolClassificationCache()
+
     audit_path = proj.output_dir / _R_sr.AUDIT_FILENAME
-    audit = _R_sr.evaluate_selection_relevance(proj, segs, cfg=cfg)
+    audit = _R_sr.evaluate_selection_relevance(
+        proj, segs, cfg=cfg, quote_pool_cache=_quote_pool_cache_sr)
     _R_sr.write_selection_relevance_audit(audit_path, audit)
     if not audit.get("blockers"):
         return audit
@@ -2696,7 +2776,8 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
             log(f"semantic-recovery: beat {idx} legacy still actual-image reverify "
                 f"{'passed' if not why else 'failed — ' + why}")
         proj.save()
-        audit = _R_sr.evaluate_selection_relevance(proj, segs, cfg=cfg)
+        audit = _R_sr.evaluate_selection_relevance(
+            proj, segs, cfg=cfg, quote_pool_cache=_quote_pool_cache_sr)
 
     # Missing/old evidence can be repaired without changing selection order. Explicit `false` facts
     # never enter this branch; they require genuinely different footage.
@@ -2719,7 +2800,23 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
             raise PipelineError(
                 f"semantic scoped re-verification failed: {type(exc).__name__}: {exc}") from exc
 
-    audit = _R_sr.evaluate_selection_relevance(proj, segs, cfg=cfg)
+    audit = _R_sr.evaluate_selection_relevance(
+        proj, segs, cfg=cfg, quote_pool_cache=_quote_pool_cache_sr)
+    if unverified:
+        _still_unverifiable = sorted(
+            set(unverified) & _unverifiable_relevance_indices(audit))
+        if _still_unverifiable:
+            _remaining_facts = {
+                int(_entry.get("segment_index", -1)): list(_entry.get("reasons") or [])
+                for _entry in (audit.get("blockers") or [])
+                if int(_entry.get("segment_index", -1)) in set(_still_unverifiable)
+            }
+            # A nominally successful verifier batch can still contain a fresh malformed KEEP. It
+            # is correctly absent from the verdict cache, but it is not content evidence and must
+            # not send the beat into acquisition/softening as though footage had been rejected.
+            raise PipelineError(
+                "semantic scoped re-verification remained technically inconclusive for "
+                f"beat(s) {_still_unverifiable}: missing/schema evidence {_remaining_facts}")
     blockers = {int(e["segment_index"]) for e in audit.get("blockers") or []}
     _recovery_deferred: list[int] = []
     _page_pool_changed = False
@@ -2760,11 +2857,33 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
             _completed_page_scope = {int(i) for i in (_ra.get("page_scope") or [])}
             _page_pool_changed = (
                 _semantic_recovery_pool_fingerprint(proj) != _pool_before_page)
+            if _page_pool_changed:
+                # A semantic page can add/index footage while an earlier genuine-gap beat is
+                # still carrying a pool-bound exact→character→abstract softening.  Restore
+                # that stale promise *inside this recovery generation*, before deriving blockers
+                # or pagination state.  Leaving restoration to the later publication assertion
+                # made the page persist a 28-beat fingerprint/deferred tail even though that
+                # assertion immediately revived a 29th strict beat; Resume then mistook the same
+                # pool for a fresh generation and restarted at its head.
+                try:
+                    from . import selfheal as _selfheal_restore_sr
+                    _restored_softenings = \
+                        _selfheal_restore_sr.restore_stale_selection_relevance_softenings(
+                            proj, segs, log=log)
+                except Exception as exc:                 # noqa: BLE001 — retryable state repair
+                    raise PipelineError(
+                        "semantic recovery could not restore stale pool-bound softening "
+                        f"after page growth: {type(exc).__name__}: {exc}") from exc
+                if _restored_softenings.get("restored"):
+                    log("semantic-recovery: page changed the indexed pool; restored stale "
+                        "authored promise(s) "
+                        f"{_restored_softenings['restored']} before pagination bookkeeping")
         proj.save()
 
         # Re-evaluate before the still pass: recovered moving footage needs no image, and passing a
         # subset keeps the second still pass from decorating/changing any already-approved beat.
-        audit = _R_sr.evaluate_selection_relevance(proj, segs, cfg=cfg)
+        audit = _R_sr.evaluate_selection_relevance(
+            proj, segs, cfg=cfg, quote_pool_cache=_quote_pool_cache_sr)
         blockers = {int(e["segment_index"]) for e in audit.get("blockers") or []}
         if _page_pool_changed:
             # The page's own scoped beats were rematched after its downloads/indexing. Every prior
@@ -2812,7 +2931,8 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
     # after it is exhausted may the existing exact→character→abstract ladder run, and it excludes
     # located real quotes plus binding/schema/backend failures. The unchanged publication contract
     # is immediately re-evaluated below; softening never bypasses it.
-    pre_soften = _R_sr.evaluate_selection_relevance(proj, segs, cfg=cfg)
+    pre_soften = _R_sr.evaluate_selection_relevance(
+        proj, segs, cfg=cfg, quote_pool_cache=_quote_pool_cache_sr)
     _pre_soften_for_ladder = pre_soften
     if _recovery_deferred:
         # Keep this generation-wide too. A deferred tail may acquire footage for an already-tried
@@ -2837,6 +2957,10 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
                 _gap_softening = _selfheal_gap.heal_selection_relevance_gaps(
                     proj, segs, cfg, _pre_soften_for_ladder,
                     policy=policy, eng=eng, log=log)
+                # The ladder may change exact→character→abstract specificity.  Never carry the
+                # pre-softening quote branch snapshot across that semantic boundary, even if a
+                # future policy implementation happens to resolve to the same label.
+                _quote_pool_cache_sr.invalidate()
                 if _gap_softening.get("candidate_count"):
                     log(f"semantic-gap: specificity ladder softened "
                         f"{_gap_softening.get('softened_count', 0)}/"
@@ -2849,7 +2973,8 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
                     f"semantic gap specificity ladder failed before completion: "
                     f"{type(exc).__name__}: {exc}") from exc
 
-    final = _R_sr.evaluate_selection_relevance(proj, segs, cfg=cfg)
+    final = _R_sr.evaluate_selection_relevance(
+        proj, segs, cfg=cfg, quote_pool_cache=_quote_pool_cache_sr)
     _R_sr.write_selection_relevance_audit(audit_path, final)
     after = sorted(int(e["segment_index"]) for e in final.get("blockers") or [])
     _recovery_deferred = [i for i in _recovery_deferred if i in set(after)]
@@ -2860,6 +2985,7 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
         "post_fingerprint": _selection_relevance_retry_fingerprint(proj, segs, final),
         "gap_softening": _gap_softening or {},
         "deferred": _recovery_deferred,
+        "pool_fingerprint": _semantic_recovery_pool_fingerprint(proj),
         "pool_changed_during_page": _page_pool_changed,
         "completed_page_scope": sorted(_completed_page_scope),
     }
@@ -3413,7 +3539,12 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
         log("7/9 · cut — ↻ skipped (resume, clips cached)")
     else:
         log("7/9 · cut")
-        cut_all(proj, cfg, resume=resume, progress=progress)
+        # Existing seg_NNN files are reusable only when the persisted match itself was reused.
+        # If match ran in this attempt, its deterministic segment indices may now name different
+        # source windows; passing the job-level Resume flag here silently returned those stale files
+        # without cutting the new selections (the 101-beat reproduction completed this stage in
+        # 0.439s).  A partial cut may still resume cheaply when match was genuinely skipped.
+        cut_all(proj, cfg, resume=bool(resume and _skip_match), progress=progress)
         _stage_done(proj, "cut", _sig_cut)
 
     # 8 — AI verify + repair
@@ -3548,6 +3679,19 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
         except Exception as _e:                          # never let the fast-path itself break a render
             _pre = None
             _log_stage_skip(log, proj, "pre-assemble gate", _e)
+        # A persisted semantic page tail must reach build_video's first operation: the strict
+        # selection-relevance assertion.  That assertion raises the typed error routed into
+        # `_retry_selection_relevance`, which advances the bounded tail.  Running the older
+        # rejected-footage predictor/self-heal first deadlocked Resume on the newly-restored exact
+        # beat (the new pool correctly made its old gap authorization stale), so the tail could
+        # never run.  Postpone ONLY this fail-fast predictor; the strict semantic gate still runs
+        # before any encoding and the authoritative rejected-footage gate still runs in assembly.
+        _pending_semantic_tail = _preassembly_semantic_recovery_tail(proj, segs, cfg=cfg)
+        if _pre and _pending_semantic_tail:
+            log("semantic-recovery: pending bounded page tail "
+                f"{_pending_semantic_tail}; postponing the pre-assembly footage predictor so "
+                "the build-first strict semantic assertion can advance it")
+            _pre = None
         # SELF-HEALING FOOTAGE RECOVERY — the automated gate-unblock playbook (verified stills
         # at the venue bar → targeted LLM-queried acquisition → retry), bounded rounds, never
         # weakens the gate. Manual on job olenna_v2_allfixes it took 17 blocked beats to 0;

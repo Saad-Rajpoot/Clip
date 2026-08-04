@@ -42,7 +42,8 @@ import test_perf_neutral_caching as H                            # noqa: E402  (
 SRC = ROOT / "vidlore" / "clipstudio"
 _REJECT = dict(H._REJECT_ALL)
 _KEEP = {"verdict": "keep", "correct_subject_visible": True, "matches_narration": True,
-         "wrong_subject_visible": False, "quality_ok": True, "confidence": 0.9, "reason": "ok"}
+         "wrong_subject_visible": False, "contradicts_narration": False,
+         "specific_enough": True, "quality_ok": True, "confidence": 0.9, "reason": "ok"}
 
 
 # ─────────────────────────────────────────────────────────── A. accounting
@@ -307,6 +308,31 @@ class TestSelfhealCache(unittest.TestCase):
                 V.verify_frame = o
             self.assertEqual(calls[0], 1, "the second identical question must be free")
             self.assertEqual(v1["verdict"], v2["verdict"])
+
+    def test_malformed_positive_hit_is_reasked_and_repaired(self):
+        with tempfile.TemporaryDirectory() as td:
+            proj, kf = _proj_with_kf(td)
+            seg, eng = _seg(), NS(anthropic_model="m", anthropic_key="k")
+            cache = SH._venue_cache(proj)
+            fp = SH._venue_fp(proj, kf, seg, [], eng)
+            poisoned = dict(_KEEP)
+            poisoned["matches_naration"] = poisoned.pop("matches_narration")
+            cache[fp] = poisoned
+            calls = [0]
+
+            def fake(*a, **k):
+                calls[0] += 1
+                return dict(_KEEP)
+
+            o = V.verify_frame
+            V.verify_frame = fake
+            try:
+                verdict = SH._venue_verify(kf, seg, [], eng, proj=proj, cache=cache)
+            finally:
+                V.verify_frame = o
+            self.assertEqual(calls[0], 1, "a malformed cached keep must not suppress vision")
+            self.assertEqual(verdict.get("matches_narration"), True)
+            self.assertNotIn("matches_naration", cache[fp])
 
     def test_uncached_when_no_cache_is_supplied(self):
         """Back-compat: the bare call signature still works and simply pays."""

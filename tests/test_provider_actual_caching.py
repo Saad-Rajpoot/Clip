@@ -20,7 +20,8 @@ from vidlore.clipstudio import verify as V                       # noqa: E402
 
 FAILS = []
 _VERDICT_TXT = json.dumps({"matches_narration": True, "correct_subject_visible": True,
-                           "wrong_subject_visible": False, "specific_enough": True,
+                           "wrong_subject_visible": False, "contradicts_narration": False,
+                           "specific_enough": True,
                            "quality_ok": True, "confidence": 0.9, "verdict": "keep",
                            "reason": "stub"})
 

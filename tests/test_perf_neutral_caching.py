@@ -226,7 +226,8 @@ def test_workers4_is_decision_identical_to_serial():
     t1 = tempfile.mkdtemp()
     t2 = tempfile.mkdtemp()
     keep = {"verdict": "keep", "correct_subject_visible": True, "matches_narration": True,
-            "wrong_subject_visible": False, "quality_ok": True, "confidence": 0.9, "reason": "t"}
+            "wrong_subject_visible": False, "contradicts_narration": False,
+            "specific_enough": True, "quality_ok": True, "confidence": 0.9, "reason": "t"}
     try:
         summ1, n1, proj1 = _drive(t1, lambda n: dict(keep), workers=1)
         summ2, n2, proj2 = _drive(t2, lambda n: dict(keep), workers=4)

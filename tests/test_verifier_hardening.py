@@ -26,6 +26,12 @@ BASE = dict(src_hash="a", source_id="s1", shot_start=1.0, shot_end=3.0,
             visual_policy="exact_scene", is_specific=True,
             faceid_names=["Charles Dance"], multiframe=False, image_id="kf:abc",
             model="gemini:gemini-2.5-flash:apikey")
+CACHE_KEEP = {
+    "status": "ok", "verdict": "keep", "confidence": 0.9,
+    "matches_narration": True, "specific_enough": True, "quality_ok": True,
+    "wrong_subject_visible": False, "contradicts_narration": False,
+    "correct_subject_visible": True,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -72,8 +78,11 @@ def test_prompt_and_sheet_versions_are_in_the_key():
 
 
 def test_only_schema_valid_successful_verdicts_are_reusable():
-    ok = {"verdict": "keep", "confidence": 0.9, "status": "ok"}
-    assert V._verdict_schema_ok(ok)
+    assert V._verdict_schema_ok(CACHE_KEEP, required_entity="Tywin Lannister")
+    assert V._verdict_schema_ok(
+        {"verdict": "replace", "confidence": 0.2, "status": "ok"},
+        required_entity="Tywin Lannister", must_see="the dagger"), \
+        "an explicit replace is conclusive negative evidence without positive keep facts"
     for bad, why in (({"status": "error"}, "an error stub is not a judgment"),
                      ({"status": "unavailable"}, "unavailable is not a judgment"),
                      ({"confidence": 0.9}, "a missing verdict key would read as falsy = 'not replace'"),
@@ -81,6 +90,35 @@ def test_only_schema_valid_successful_verdicts_are_reusable():
                      ({"verdict": "keep", "confidence": "high"}, "confidence must be numeric"),
                      ("not a dict", "not a dict"), (None, "None")):
         assert not V._verdict_schema_ok(bad), why
+
+    for field in ("matches_narration", "specific_enough", "quality_ok",
+                  "wrong_subject_visible", "contradicts_narration"):
+        malformed = dict(CACHE_KEEP)
+        malformed.pop(field)
+        assert not V._verdict_schema_ok(malformed), \
+            f"cached keep missing publication boolean {field!r} must be re-asked"
+        malformed[field] = "yes"
+        assert not V._verdict_schema_ok(malformed), \
+            f"cached keep with non-boolean {field!r} must be re-asked"
+
+    typo = dict(CACHE_KEEP)
+    typo["matches_naration"] = typo.pop("matches_narration")
+    assert not V._verdict_schema_ok(typo), \
+        "the production misspelling must not poison scoped re-verification forever"
+
+    no_subject_fact = dict(CACHE_KEEP)
+    no_subject_fact.pop("correct_subject_visible")
+    assert V._verdict_schema_ok(no_subject_fact), \
+        "correct_subject_visible is conditional when no required subject was asked"
+    assert not V._verdict_schema_ok(
+        no_subject_fact, required_entity="Tywin Lannister"), \
+        "a named required subject needs a typed visibility fact"
+    assert not V._verdict_schema_ok(
+        CACHE_KEEP, must_see="the dagger"), \
+        "an instructed-look prompt needs a typed target_visible fact"
+    assert V._verdict_schema_ok(
+        {**CACHE_KEEP, "target_visible": False}, must_see="the dagger"), \
+        "schema validation checks type, while the semantic gate decides a typed false"
 
 
 def test_source_fingerprint_sees_any_changed_byte_and_is_memoized():
@@ -138,7 +176,7 @@ def _mini_project(tmp, n_beats=30):
     return proj, segs, shots
 
 
-def _run_verify(tmp, *, always_fail=True, n_beats=30, sheet=False):
+def _run_verify(tmp, *, always_fail=True, n_beats=30, sheet=False, look_target=False):
     """Drive verify_and_repair with a fake vision backend; return (summary, call_count, proj).
 
     sheet=False by default: the fake media is 2KB, so a real contact-sheet build cannot succeed,
@@ -147,12 +185,20 @@ def _run_verify(tmp, *, always_fail=True, n_beats=30, sheet=False):
     the prediction hold, so the cache path is exercised honestly rather than through that guard."""
     from vidlore.clipstudio.config import ClipConfig
     proj, segs, shots = _mini_project(tmp, n_beats)
+    if look_target:
+        for seg in segs:
+            seg.text = f"Keep your eye on the dagger while Tywin speaks {seg.index}."
     by = {(s.source_id, s.index): s for s in shots}
     calls = {"n": 0}
 
-    def fake_verify_frame(*a, **k):
+    def fake_verify_frame(*a, **kwargs):
         calls["n"] += 1
-        return None if always_fail else {"verdict": "keep", "confidence": 0.9}
+        if always_fail:
+            return None
+        verdict = {key: value for key, value in CACHE_KEEP.items() if key != "status"}
+        if kwargs.get("must_see"):
+            verdict["target_visible"] = True
+        return verdict
 
     orig_vf, orig_lookup = V.verify_frame, V._shot_lookup
     orig_env = os.environ.get("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET")
@@ -276,6 +322,72 @@ def test_a_poisoned_cache_entry_is_dropped_not_served():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_a_misspelled_positive_cache_entry_is_reasked_not_reused():
+    """The live 101-beat run got stuck on a cached ``matches_naration`` keep.
+
+    Scoped re-verification asked the same fingerprint, `_verdict_schema_ok` accepted the typo, and
+    the publication contract kept reporting ``matches_narration_absent`` forever.  Exercise the real
+    primary-cache path: every malformed keep must miss, call vision again, and be replaced by a
+    complete cache record.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        _run_verify(tmp, always_fail=False, n_beats=3)
+        p = os.path.join(tmp, "verdict_cache.json")
+        cache = json.load(open(p))
+        for verdict in cache.values():
+            verdict["matches_naration"] = verdict.pop("matches_narration")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh)
+
+        summ, n_calls, _ = _run_verify(tmp, always_fail=False, n_beats=3)
+        assert n_calls == 3, "each misspelled keep must be genuinely re-asked"
+        assert summ["reused"] == 0
+        repaired = json.load(open(p))
+        assert all("matches_narration" in v and "matches_naration" not in v
+                   for v in repaired.values())
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_cached_keep_missing_required_subject_fact_is_reasked():
+    tmp = tempfile.mkdtemp()
+    try:
+        _run_verify(tmp, always_fail=False, n_beats=2)
+        p = os.path.join(tmp, "verdict_cache.json")
+        cache = json.load(open(p))
+        for verdict in cache.values():
+            verdict.pop("correct_subject_visible")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh)
+
+        summ, n_calls, _ = _run_verify(tmp, always_fail=False, n_beats=2)
+        assert n_calls == 2, "a named-subject keep without visibility evidence must miss"
+        assert summ["reused"] == 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_cached_keep_missing_instructed_look_fact_is_reasked():
+    tmp = tempfile.mkdtemp()
+    try:
+        _run_verify(tmp, always_fail=False, n_beats=2, look_target=True)
+        p = os.path.join(tmp, "verdict_cache.json")
+        cache = json.load(open(p))
+        assert all(v.get("target_visible") is True for v in cache.values())
+        for verdict in cache.values():
+            verdict.pop("target_visible")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh)
+
+        summ, n_calls, _ = _run_verify(
+            tmp, always_fail=False, n_beats=2, look_target=True)
+        assert n_calls == 2, "a look-target keep without target visibility evidence must miss"
+        assert summ["reused"] == 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---------------------------------------------------------------------------
 # H2 — the generic-filler rung. Positive proof required; the beat is NOT unreachable.
 # ---------------------------------------------------------------------------
@@ -337,6 +449,9 @@ TESTS = [
     test_breaker_stops_making_requests,
     test_healthy_backend_verifies_every_beat_and_caches,
     test_a_poisoned_cache_entry_is_dropped_not_served,
+    test_a_misspelled_positive_cache_entry_is_reasked_not_reused,
+    test_cached_keep_missing_required_subject_fact_is_reasked,
+    test_cached_keep_missing_instructed_look_fact_is_reasked,
     test_a_verdict_is_not_cached_when_the_sheet_prediction_did_not_hold,
     test_object_beat_in_single_scene_does_not_crash_the_filler_rung,
     test_generic_filler_needs_a_fresh_positive_lenient_verdict,

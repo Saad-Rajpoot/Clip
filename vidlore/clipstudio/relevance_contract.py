@@ -308,6 +308,75 @@ def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
     return out
 
 
+def _quote_pool_input_key(proj, segments, cfg) -> tuple:
+    """Identity of every input that can change whole-pool quote classification."""
+    from . import index as _index
+
+    def _stat(path) -> tuple[int, int]:
+        try:
+            value = Path(path).stat()
+            return int(value.st_size), int(value.st_mtime_ns)
+        except Exception:                                # noqa: BLE001 — absence is state too
+            return 0, 0
+
+    sources = []
+    for source in sorted((getattr(proj, "sources", None) or []),
+                         key=lambda item: str(getattr(item, "id", "") or "")):
+        sid = str(getattr(source, "id", "") or "")
+        sources.append((
+            sid,
+            str(getattr(source, "status", "") or ""),
+            str(getattr(source, "title", "") or ""),
+            _stat(getattr(source, "local_path", "") or ""),
+            _stat(proj.shots_path(sid)),
+            _stat(Path(proj.index_dir) / f"{sid}.words.json"),
+            _stat(Path(proj.index_dir) / f"{sid}.index.meta.json"),
+        ))
+    try:
+        asr_generation = str(_index.asr_semantic_fingerprint(proj, cfg) or "")
+    except Exception:                                   # noqa: BLE001 — same fail-closed generation
+        asr_generation = ""
+    beat_state = tuple(
+        (int(getattr(seg, "index", -1)),
+         str(getattr(seg, "quote", "") or "").strip(),
+         str(getattr(seg, "visual_policy", "") or ""),
+         _policy.policy_of(seg))
+        for seg in (segments or []))
+    return tuple(sources), asr_generation, beat_state
+
+
+class _RequestQuotePoolClassificationCache:
+    """Opaque, one-request memo for internally-built quote branches.
+
+    Callers can request reuse but cannot supply their own ``paraphrase`` facts.  Every hit is bound
+    to source/index provenance plus authored quote/resolved-policy state; a changed generation is a
+    miss.  The object is deliberately created inside one recovery request and never persisted.
+    """
+    __slots__ = ("__key", "__contracts")
+
+    def __init__(self):
+        self.__key = None
+        self.__contracts = None
+
+    def contracts_for(self, proj, segments, *, cfg=None) -> dict[int, dict]:
+        if cfg is None:
+            from .config import load_clip_config
+            cfg = load_clip_config()
+        key = _quote_pool_input_key(proj, segments, cfg)
+        if self.__contracts is None or self.__key != key:
+            self.__contracts = _quote_pool_branches(proj, segments, cfg=cfg)
+            self.__key = key
+        # Never expose the memoized branch dict itself.  The evaluator may enrich beat-local quote
+        # evidence, and an external caller holding a mutable reference must not be able to rewrite a
+        # real quote into a cached paraphrase.
+        return {int(idx): json.loads(json.dumps(branch))
+                for idx, branch in self.__contracts.items()}
+
+    def invalidate(self) -> None:
+        self.__key = None
+        self.__contracts = None
+
+
 def exact_quote_dialogue_evidence(proj, sel, seg, *, quote_contract=None) \
         -> tuple[bool, str, dict]:
     """Prove an authored quote is spoken at the selected source window.
@@ -386,8 +455,15 @@ def exact_quote_dialogue_evidence(proj, sel, seg, *, quote_contract=None) \
     return True, "", detail
 
 
-def evaluate_selection_relevance(proj, segments, *, cfg=None) -> dict:
-    """Return the complete semantic publication audit without mutating project or selections."""
+def evaluate_selection_relevance(proj, segments, *, cfg=None,
+                                 quote_pool_cache=None) -> dict:
+    """Return the complete semantic publication audit without mutating project or selections.
+
+    ``quote_pool_cache`` may be the opaque request-local cache above. Recovery invokes this audit
+    several times while only selections/verifier evidence change; the cache avoids rescanning every
+    source for every audit while still constructing and validating every branch internally. Ordinary
+    callers omit it and retain the fail-closed, freshly-computed behaviour.
+    """
     by_idx = {int(getattr(s, "segment_index", -1)): s for s in (proj.selections or [])}
     analysis = (getattr(proj, "meta", {}) or {}).get("analysis", {}) or {}
     char2actor = {
@@ -395,7 +471,12 @@ def evaluate_selection_relevance(proj, segments, *, cfg=None) -> dict:
         for c in (analysis.get("characters") or [])
         if isinstance(c, dict) and c.get("name") and c.get("actor")
     }
-    quote_contracts = _quote_pool_branches(proj, segments, cfg=cfg)
+    if quote_pool_cache is None:
+        quote_contracts = _quote_pool_branches(proj, segments, cfg=cfg)
+    elif type(quote_pool_cache) is _RequestQuotePoolClassificationCache:
+        quote_contracts = quote_pool_cache.contracts_for(proj, segments, cfg=cfg)
+    else:
+        raise TypeError("quote_pool_cache must be a request-local classification cache")
     checked, blockers = [], []
     skipped_generic = 0
 
