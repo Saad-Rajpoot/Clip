@@ -5541,7 +5541,200 @@ def _require_declared_image_path(sel) -> Path:
     return p
 
 
-def _rescue_still_fullres(proj, sel, img_path: str, log) -> dict:
+def _still_owner_source_fingerprint(owner: dict) -> str:
+    """Return a usable owner-byte identity; sentinel hashes can never bind publication proof."""
+    from .verify import NonRetryableBuildError, _file_fingerprint
+
+    source_fp = _file_fingerprint(owner.get("source_path") or "")
+    if source_fp in ("", "missing", "unreadable"):
+        raise NonRetryableBuildError(
+            f"image-lineage gate: indexed owner {owner.get('source_id')!r} has no readable "
+            "source-content fingerprint", kind="scene_lineage")
+    return source_fp
+
+
+def _require_unchanged_still_source(owner: dict, expected_fingerprint: str) -> None:
+    """Fail if extraction/judging raced a source rewrite or an unreadable owner."""
+    from .verify import NonRetryableBuildError
+
+    current = _still_owner_source_fingerprint(owner)
+    if not expected_fingerprint or current != expected_fingerprint:
+        raise NonRetryableBuildError(
+            f"image-lineage gate: indexed owner {owner.get('source_id')!r} changed while its "
+            "native still was being materialized or verified", kind="scene_lineage")
+
+
+def _owned_still_binding(owner: dict, declared: Path, *, source_fingerprint: str = "") -> dict:
+    """Immutable inputs that tie an early full-resolution extraction to its indexed owner."""
+    source_fp = source_fingerprint or _still_owner_source_fingerprint(owner)
+    if source_fp in ("", "missing", "unreadable"):
+        # An explicit sentinel must not bypass `_still_owner_source_fingerprint` via the override.
+        source_fp = _still_owner_source_fingerprint(owner)
+
+    return {
+        "declared_image_sha256": _image_file_sha256(declared),
+        "indexed_keyframe_sha256": str(owner.get("keyframe_sha256") or ""),
+        "owner_source_content_fingerprint": source_fp,
+        "owner_source_id": str(owner.get("source_id") or ""),
+        "owner_shot_index": int(owner.get("shot_index", -1)),
+        "owner_time": float(owner.get("time", -1.0)),
+    }
+
+
+def _semantic_still_question_fingerprint(proj, seg, owner: dict, *, image_sha256: str,
+                                         model: str, source_fingerprint: str = "") \
+        -> tuple[str, str]:
+    """Fingerprint the exact full-resolution still question and its source bytes."""
+    from . import policy as _policy_still
+    from .verify import verdict_fingerprint
+
+    source_fp = source_fingerprint or _still_owner_source_fingerprint(owner)
+    if source_fp in ("", "missing", "unreadable"):
+        source_fp = _still_owner_source_fingerprint(owner)
+    analysis = (getattr(proj, "meta", {}) or {}).get("analysis", {}) or {}
+    era = str(analysis.get("episode_hint", "") or "")
+    is_specific = _policy_still.policy_of(seg) == _policy_still.EXACT
+    must_see = _policy_still.deictic_target(seg)
+    question_fp = verdict_fingerprint(
+        src_hash=source_fp,
+        source_id=str(owner.get("source_id") or ""),
+        shot_start=float(owner.get("start", 0.0) or 0.0),
+        shot_end=float(owner.get("end", 0.0) or 0.0),
+        beat_text=getattr(seg, "text", "") or "",
+        required_entity=getattr(seg, "required_entity", "") or "",
+        required_kind=getattr(seg, "required_kind", "") or "",
+        expected_visual=getattr(seg, "expected_visual", "") or "",
+        scene_query=getattr(seg, "scene_query", "") or "",
+        era=era,
+        visual_policy=_policy_still.policy_of(seg),
+        is_specific=is_specific,
+        faceid_names=(),
+        multiframe=False,
+        image_id=f"sha256:{image_sha256}",
+        model=str(model or ""),
+        venue_fallback=False,
+        must_see=must_see,
+    )
+    return question_fp, source_fp
+
+
+def _strictly_verify_native_still(proj, sel, seg, owner: dict, image_path: Path, eng,
+                                  *, source_fingerprint: str) -> dict:
+    """Freshly judge the exact native pixels; thumbnail verdicts are never transferred."""
+    from . import policy as _policy_still
+    from . import relevance_contract as _relevance_still
+    from . import verify as _verify_still
+    from .selfheal import _still_verdict_schema_error
+    from .verify import NonRetryableBuildError, VisionBackendError
+
+    analysis = (getattr(proj, "meta", {}) or {}).get("analysis", {}) or {}
+    era = str(analysis.get("episode_hint", "") or "")
+    is_specific = _policy_still.policy_of(seg) == _policy_still.EXACT
+    must_see = _policy_still.deictic_target(seg)
+    _require_unchanged_still_source(owner, source_fingerprint)
+    image_hash_before = _image_file_sha256(image_path)
+    if not image_hash_before:
+        raise NonRetryableBuildError(
+            "image-lineage gate: native still bytes vanished before semantic verification",
+            kind="scene_lineage")
+    try:
+        verdict = _verify_still.verify_frame(
+            str(image_path), getattr(seg, "text", "") or "",
+            getattr(seg, "required_entity", "") or "",
+            getattr(seg, "required_kind", "") or "", [], eng,
+            getattr(eng, "anthropic_model", ""), is_specific=is_specific,
+            expected_visual=getattr(seg, "expected_visual", "") or "",
+            scene_query=getattr(seg, "scene_query", "") or "", era_hint=era,
+            venue_fallback=False, must_see=must_see)
+    except (NonRetryableBuildError, VisionBackendError):
+        raise
+    except Exception as exc:  # noqa: BLE001 — a transport/backend exception is not a verdict
+        raise VisionBackendError(
+            f"native still verifier failed before judging beat "
+            f"{getattr(seg, 'index', '?')}: {type(exc).__name__}", kind="down") from exc
+    if not isinstance(verdict, dict):
+        raise VisionBackendError(
+            f"native still verifier returned no valid verdict for beat "
+            f"{getattr(seg, 'index', '?')}; thumbnail evidence was not transferred", kind="down")
+    schema_error = _still_verdict_schema_error(
+        verdict, seg, require_keep_facts=True)
+    if schema_error:
+        raise VisionBackendError(
+            f"native still verifier returned inconclusive status/schema for beat "
+            f"{getattr(seg, 'index', '?')} ({schema_error})", kind="down")
+    verdict = dict(verdict)
+    verdict["status"] = "ok"
+    why = _relevance_still.strict_still_evidence_reason(verdict, seg)
+    if why:
+        explicit_negative = (
+            verdict.get("verdict") == "replace"
+            or verdict.get("matches_narration") is False
+            or verdict.get("specific_enough") is False
+            or verdict.get("quality_ok") is False
+            or verdict.get("correct_subject_visible") is False
+            or verdict.get("wrong_subject_visible") is True
+            or verdict.get("contradicts_narration") is True
+            or verdict.get("era_ok") is False
+            or verdict.get("target_visible") is False)
+        if not explicit_negative:
+            raise VisionBackendError(
+                f"native still verifier returned incomplete keep evidence for beat "
+                f"{getattr(seg, 'index', '?')} ({why})", kind="down")
+        raise NonRetryableBuildError(
+            f"image semantic gate: native still for beat {getattr(seg, 'index', '?')} failed "
+            f"strict verification ({why})", kind="selection_relevance")
+    image_hash = _image_file_sha256(image_path)
+    _require_unchanged_still_source(owner, source_fingerprint)
+    if not image_hash or image_hash != image_hash_before:
+        raise NonRetryableBuildError(
+            "image-lineage gate: native still pixels changed while the semantic verifier was "
+            "judging them", kind="scene_lineage")
+    model = str(verdict.get("vision_served_by") or "")
+    if not model or model == "none":
+        raise VisionBackendError(
+            "native still verifier returned a keep verdict without actual served-model identity; "
+            "predicted provider identity cannot authorize publication", kind="down")
+    question_fp, source_fp = _semantic_still_question_fingerprint(
+        proj, seg, owner, image_sha256=image_hash, model=model,
+        source_fingerprint=source_fingerprint)
+    return {
+        "verdict": verdict,
+        "model": model,
+        "question_fingerprint": question_fp,
+        "source_content_fingerprint": source_fp,
+        "image_sha256": image_hash,
+    }
+
+
+def _extract_owned_still_fullres(original: Path, owner: dict) -> tuple[Path, int, int]:
+    """Extract the exact indexed midpoint without scaling and require native publication pixels."""
+    from .verify import NonRetryableBuildError
+    import hashlib
+
+    token = hashlib.sha256(
+        f"{owner['source_id']}:{owner['shot_index']}:{owner['time']:.3f}".encode("utf-8")
+    ).hexdigest()[:12]
+    dest = original.with_name(f"{original.stem}_fullres_{token}.jpg")
+    dest.unlink(missing_ok=True)       # never let a stale extraction satisfy this run
+    proc = subprocess.run(
+        [ffmpeg_exe(), "-y", "-loglevel", "error", "-ss", f"{owner['time']:.3f}",
+         "-i", owner["source_path"], "-frames:v", "1", "-q:v", "2", str(dest)],
+        capture_output=True, timeout=60)
+    if proc.returncode != 0 or not dest.is_file() or dest.stat().st_size <= 0:
+        raise NonRetryableBuildError(
+            f"image-lineage gate: could not re-extract {owner['source_id']!r} shot "
+            f"{owner['shot_index']} at {owner['time']:.3f}s; refusing an unowned fallback",
+            kind="scene_lineage")
+    iw, ih = _image_pixel_dimensions(dest)
+    if not _publishable_still_pixels(iw, ih):
+        raise NonRetryableBuildError(
+            f"image native-resolution gate: extracted still {dest.name} is {iw}x{ih}; "
+            "the aired source-frame itself must retain real 1280x720-or-better pixels",
+            kind="native_resolution")
+    return dest, iw, ih
+
+
+def _rescue_still_fullres(proj, sel, img_path: str, log, *, seg=None, eng=None) -> dict:
     """Return the aired still plus independently checkable, actual ownership.
 
     Source-frame stills with complete metadata are re-extracted from the exact indexed ``src`` and
@@ -5562,8 +5755,17 @@ def _rescue_still_fullres(proj, sel, img_path: str, log) -> dict:
         raise NonRetryableBuildError(
             f"image-lineage gate: declared image source {_image_source or '?'} has no explicit "
             f"verifier proof; refusing to label it verified_image", kind="scene_lineage")
+    declared_hash = _image_file_sha256(original)
+    claimed_semantic_hash = str(meta.get("still_image_sha256") or "")
+    semantic_claimed = meta.get("still_semantic_verified") is True
+    if semantic_claimed and (
+            not claimed_semantic_hash or claimed_semantic_hash != declared_hash):
+        raise NonRetryableBuildError(
+            "image-lineage gate: semantic still SHA is missing or does not match the "
+            "declared judged bytes", kind="scene_lineage")
     owner = _resolve_indexed_still_owner(proj, sel)
     if owner is not None:
+        source_fingerprint = _still_owner_source_fingerprint(owner)
         sw, sh = _probe_image_owner_source(owner["source_path"])
         if not _publishable_still_pixels(sw, sh):
             reason = f"{sw}x{sh}" if sw and sh else "unprobeable"
@@ -5574,20 +5776,47 @@ def _rescue_still_fullres(proj, sel, img_path: str, log) -> dict:
                 kind="native_resolution")
         # Strict semantic evidence is bound to the exact declared bytes. Re-extracting another
         # JPEG from the same owned instant would air pixels the semantic verifier never judged.
-        # Preserve the judged bytes when (and only when) the persisted SHA claim matches them;
-        # build does not perform or invent a new semantic verdict.
-        declared_hash = _image_file_sha256(original)
-        claimed_semantic_hash = str(meta.get("still_image_sha256") or "")
-        strict_semantic_bound = (meta.get("still_semantic_verified") is True
-                                 and bool(claimed_semantic_hash)
-                                 and claimed_semantic_hash == declared_hash)
+        # Preserve native judged bytes when the persisted SHA matches. A low-resolution index
+        # thumbnail may only be replaced after a fresh strict verdict on the exact native bytes;
+        # its old thumbnail verdict is never transferred.
+        strict_semantic_bound = semantic_claimed
         if strict_semantic_bound:
             iw, ih = _image_pixel_dimensions(original)
             if not _publishable_still_pixels(iw, ih):
-                raise NonRetryableBuildError(
-                    f"image native-resolution gate: semantically judged still is {iw}x{ih}; "
-                    f"the exact judged bytes must already be real 1280x720-or-better",
-                    kind="native_resolution")
+                if seg is None or eng is None:
+                    raise NonRetryableBuildError(
+                        f"image native-resolution gate: semantically judged still is {iw}x{ih}; "
+                        "the exact judged bytes must already be real 1280x720-or-better",
+                        kind="native_resolution")
+                dest, iw, ih = _extract_owned_still_fullres(original, owner)
+                semantic = _strictly_verify_native_still(
+                    proj, sel, seg, owner, dest, eng,
+                    source_fingerprint=source_fingerprint)
+                _require_unchanged_still_source(owner, source_fingerprint)
+                binding = _owned_still_binding(
+                    owner, original, source_fingerprint=source_fingerprint)
+                log(f"build: native still freshly verified for beat "
+                    f"{getattr(seg, 'index', '?')} from indexed owner {owner['source_id']} shot "
+                    f"{owner['shot_index']} @{owner['time']:.3f}s ({sw}x{sh})")
+                return {
+                    "path": str(dest), "ownership_kind": "source_frame",
+                    "actual_source_id": owner["source_id"],
+                    "actual_shot_index": owner["shot_index"], "actual_time": owner["time"],
+                    "source_path": owner["source_path"], "source_width": sw,
+                    "source_height": sh, "image_width": iw, "image_height": ih,
+                    "preserved_original": False, "file_sha256": semantic["image_sha256"],
+                    "semantic_binding_preserved": True,
+                    "semantic_image_sha256": semantic["image_sha256"],
+                    "semantic_rematerialized": True,
+                    "semantic_verifier": semantic["verdict"],
+                    "semantic_model": semantic["model"],
+                    "semantic_question_fingerprint": semantic["question_fingerprint"],
+                    "source_content_fingerprint": semantic["source_content_fingerprint"],
+                    **binding,
+                }
+            _require_unchanged_still_source(owner, source_fingerprint)
+            binding = _owned_still_binding(
+                owner, original, source_fingerprint=source_fingerprint)
             return {"path": str(original), "ownership_kind": "source_frame",
                     "actual_source_id": owner["source_id"],
                     "actual_shot_index": owner["shot_index"], "actual_time": owner["time"],
@@ -5595,30 +5824,12 @@ def _rescue_still_fullres(proj, sel, img_path: str, log) -> dict:
                     "source_height": sh, "image_width": iw, "image_height": ih,
                     "preserved_original": True, "file_sha256": declared_hash,
                     "semantic_binding_preserved": True,
-                    "semantic_image_sha256": claimed_semantic_hash}
-        # Include immutable owner facts in the filename and overwrite it every build.  The old
-        # generic `_fullres.jpg` could be a stale frame extracted by the pre-fix, wrong-source path.
-        import hashlib
-        token = hashlib.sha256(
-            f"{owner['source_id']}:{owner['shot_index']}:{owner['time']:.3f}".encode("utf-8")
-        ).hexdigest()[:12]
-        dest = original.with_name(f"{original.stem}_fullres_{token}.jpg")
-        dest.unlink(missing_ok=True)       # never let a pre-existing/stale rescue satisfy this run
-        proc = subprocess.run(
-            [ffmpeg_exe(), "-y", "-loglevel", "error", "-ss", f"{owner['time']:.3f}",
-             "-i", owner["source_path"], "-frames:v", "1", "-q:v", "2", str(dest)],
-            capture_output=True, timeout=60)
-        if proc.returncode != 0 or not dest.is_file() or dest.stat().st_size <= 0:
-            raise NonRetryableBuildError(
-                f"image-lineage gate: could not re-extract {owner['source_id']!r} shot "
-                f"{owner['shot_index']} at {owner['time']:.3f}s; refusing an unowned fallback",
-                kind="scene_lineage")
-        iw, ih = _image_pixel_dimensions(dest)
-        if not _publishable_still_pixels(iw, ih):
-            raise NonRetryableBuildError(
-                f"image native-resolution gate: extracted still {dest.name} is {iw}x{ih}; "
-                f"the aired source-frame itself must retain real 1280x720-or-better pixels",
-                kind="native_resolution")
+                    "semantic_image_sha256": claimed_semantic_hash,
+                    **binding}
+        dest, iw, ih = _extract_owned_still_fullres(original, owner)
+        _require_unchanged_still_source(owner, source_fingerprint)
+        binding = _owned_still_binding(
+            owner, original, source_fingerprint=source_fingerprint)
         log(f"build: still re-extracted from indexed owner {owner['source_id']} shot "
             f"{owner['shot_index']} @{owner['time']:.3f}s ({sw}x{sh}) — {dest.name}")
         return {"path": str(dest), "ownership_kind": "source_frame",
@@ -5627,7 +5838,8 @@ def _rescue_still_fullres(proj, sel, img_path: str, log) -> dict:
                 "source_path": owner["source_path"], "source_width": sw, "source_height": sh,
                 "image_width": iw, "image_height": ih, "preserved_original": False,
                 "file_sha256": _image_file_sha256(dest),
-                "semantic_binding_preserved": False, "semantic_image_sha256": ""}
+                "semantic_binding_preserved": False, "semantic_image_sha256": "",
+                **binding}
 
     # Web images and legacy source-frame records without ownership metadata remain the verified
     # file that was selected.  They may not borrow sel.source_id/time.  Legacy source-frame records
@@ -5655,7 +5867,7 @@ def _rescue_still_fullres(proj, sel, img_path: str, log) -> dict:
                                        if meta.get("still_semantic_verified") is True else "")}
 
 
-def _verified_image_lineage_root(proj, sel, rescue: dict, final_scene: int) -> dict:
+def _verified_image_lineage_root(proj, sel, rescue: dict, final_scene: int, *, seg=None) -> dict:
     """Validate expected image ownership against the rescue's actual root and bind it immutably."""
     import hashlib
     import json
@@ -5681,21 +5893,6 @@ def _verified_image_lineage_root(proj, sel, rescue: dict, final_scene: int) -> d
                 f"image native-resolution gate: source/air dimensions changed or are below "
                 f"native 1280x720 "
                 f"(source={source_dims}, aired={actual_dims})", kind="native_resolution")
-        declared = _require_declared_image_path(sel)
-        declared_hash = _image_file_sha256(declared)
-        claimed_semantic_hash = str(meta.get("still_image_sha256") or "")
-        strict_semantic_bound = (meta.get("still_semantic_verified") is True
-                                 and bool(claimed_semantic_hash)
-                                 and claimed_semantic_hash == declared_hash)
-        if strict_semantic_bound and (
-                rescue.get("semantic_binding_preserved") is not True
-                or str(rescue.get("semantic_image_sha256") or "") != claimed_semantic_hash
-                or actual_hash != claimed_semantic_hash
-                or actual_path.resolve() != declared.resolve()
-                or rescue.get("preserved_original") is not True):
-            raise NonRetryableBuildError(
-                "image-lineage gate: strict semantic evidence is not bound to the exact aired "
-                "source-frame bytes", kind="scene_lineage")
         actual_tuple = (str(rescue.get("actual_source_id") or ""),
                         rescue.get("actual_shot_index"), rescue.get("actual_time"))
         expected_tuple = (expected["source_id"], expected["shot_index"], expected["time"])
@@ -5708,12 +5905,86 @@ def _verified_image_lineage_root(proj, sel, rescue: dict, final_scene: int) -> d
             raise NonRetryableBuildError(
                 f"image-lineage gate: expected owner {expected_tuple!r}, got {actual_tuple!r}",
                 kind="scene_lineage")
+        declared = _require_declared_image_path(sel)
+        # Image rescue runs before narration/breakout work. Re-check every ownership input at the
+        # moment the still is consumed so a source/keyframe/selection mutation during that window
+        # can never reuse an earlier extraction or verdict.
+        current_binding = _owned_still_binding(expected, declared)
+        for field in (
+                "declared_image_sha256", "indexed_keyframe_sha256",
+                "owner_source_content_fingerprint", "owner_source_id", "owner_shot_index"):
+            if str(rescue.get(field, "")) != str(current_binding.get(field, "")):
+                raise NonRetryableBuildError(
+                    f"image-lineage gate: preflight ownership field {field} changed before air",
+                    kind="scene_lineage")
+        try:
+            binding_time_ok = abs(float(rescue.get("owner_time"))
+                                  - float(current_binding.get("owner_time"))) <= 0.001
+        except (TypeError, ValueError):
+            binding_time_ok = False
+        if not binding_time_ok:
+            raise NonRetryableBuildError(
+                "image-lineage gate: indexed still midpoint changed after preflight",
+                kind="scene_lineage")
+
+        declared_hash = _image_file_sha256(declared)
+        claimed_semantic_hash = str(meta.get("still_image_sha256") or "")
+        semantic_claimed = meta.get("still_semantic_verified") is True
+        if semantic_claimed and (
+                not claimed_semantic_hash or claimed_semantic_hash != declared_hash):
+            raise NonRetryableBuildError(
+                "image-lineage gate: semantic still SHA is missing or does not match the "
+                "declared judged bytes", kind="scene_lineage")
+        if semantic_claimed:
+            rematerialized = rescue.get("semantic_rematerialized") is True
+            if rematerialized:
+                if seg is None:
+                    raise NonRetryableBuildError(
+                        "image-lineage gate: native semantic rescue has no current beat question",
+                        kind="scene_lineage")
+                from .relevance_contract import strict_still_evidence_reason
+                evidence = rescue.get("semantic_verifier") or {}
+                reason = strict_still_evidence_reason(evidence, seg)
+                model = str(rescue.get("semantic_model") or "")
+                expected_qfp, expected_source_fp = _semantic_still_question_fingerprint(
+                    proj, seg, expected, image_sha256=actual_hash, model=model)
+                if (reason
+                        or rescue.get("semantic_binding_preserved") is not True
+                        or str(rescue.get("semantic_image_sha256") or "") != actual_hash
+                        or str(rescue.get("source_content_fingerprint") or "")
+                            != expected_source_fp
+                        or str(rescue.get("semantic_question_fingerprint") or "")
+                            != expected_qfp
+                        or not model or model == "none"
+                        or rescue.get("preserved_original") is not False):
+                    raise NonRetryableBuildError(
+                        "image-lineage gate: native semantic rescue is not bound to the current "
+                        "source, pixels, model, and beat question",
+                        kind="scene_lineage")
+            elif (rescue.get("semantic_binding_preserved") is not True
+                    or str(rescue.get("semantic_image_sha256") or "")
+                        != claimed_semantic_hash
+                    or actual_hash != claimed_semantic_hash
+                    or actual_path.resolve() != declared.resolve()
+                    or rescue.get("preserved_original") is not True):
+                raise NonRetryableBuildError(
+                    "image-lineage gate: strict semantic evidence is not bound to the exact aired "
+                    "source-frame bytes", kind="scene_lineage")
         owner_payload = {"kind": "source_frame", "source_id": expected["source_id"],
                          "shot_index": expected["shot_index"], "time": expected["time"]}
     else:
         expected_file = _require_declared_image_path(sel)
         expected_hash = _image_file_sha256(expected_file)
         actual_hash = str(rescue.get("file_sha256") or "")
+        claimed_semantic_hash = str(meta.get("still_image_sha256") or "")
+        semantic_claimed = meta.get("still_semantic_verified") is True
+        if semantic_claimed and (
+                not claimed_semantic_hash or claimed_semantic_hash != expected_hash
+                or rescue.get("semantic_binding_preserved") is not True
+                or str(rescue.get("semantic_image_sha256") or "") != expected_hash):
+            raise NonRetryableBuildError(
+                "image-lineage gate: metadata-free semantic still proof changed before air",
+                kind="scene_lineage")
         # No ownership metadata means preservation, never a guessed source-frame extraction.
         if (rescue.get("ownership_kind") != "verified_file" or not expected_hash
                 or actual_hash != expected_hash
@@ -5743,6 +6014,12 @@ def _verified_image_lineage_root(proj, sel, rescue: dict, final_scene: int) -> d
         "preserved_original": bool(rescue.get("preserved_original")),
         "semantic_binding_preserved": bool(rescue.get("semantic_binding_preserved")),
         "semantic_image_sha256": str(rescue.get("semantic_image_sha256") or ""),
+        "semantic_rematerialized": bool(rescue.get("semantic_rematerialized")),
+        "semantic_model": str(rescue.get("semantic_model") or ""),
+        "semantic_question_fingerprint": str(
+            rescue.get("semantic_question_fingerprint") or ""),
+        "semantic_source_content_fingerprint": str(
+            rescue.get("source_content_fingerprint") or ""),
     }
 
 
@@ -6524,6 +6801,50 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     _assert_selection_relevance(
         proj, segments, proj.output_dir / "selection_relevance_audit.json", cfg=cfg)
 
+    # IMAGE PUBLICATION PREFLIGHT — index keyframes are intentionally 512px CLIP thumbnails. A
+    # source-frame still must therefore be materialized from its indexed owner at native pixels
+    # before narration alignment, breakout judging, or encoding. Three strict stills in a 101-beat
+    # run otherwise failed sequentially only after 28 minutes of breakout work. A SHA-bound
+    # thumbnail gets a fresh verdict on the exact native extraction; its old verdict is never
+    # transferred. Keep the rescue in memory so project/checkpoint semantics do not change, then
+    # revalidate every source/keyframe/question fingerprint when the image actually enters air.
+    _image_lineage_entries: list[dict] = []
+    _image_lineage_failures: list[dict] = []
+    _preflight_image_rescues: dict[int, dict] = {}
+    _semantic_rematerialized = 0
+    for _seg_img_pf in segments:
+        _sel_img_pf = sel_by_idx.get(_seg_img_pf.index)
+        _img_pf = str(getattr(_sel_img_pf, "image_path", "") or "") \
+            if _sel_img_pf is not None else ""
+        if not _img_pf:
+            continue
+        try:
+            _rescue_pf = _rescue_still_fullres(
+                proj, _sel_img_pf, _img_pf, log, seg=_seg_img_pf, eng=eng)
+            _preflight_image_rescues[id(_sel_img_pf)] = _rescue_pf
+            _semantic_rematerialized += int(
+                _rescue_pf.get("semantic_rematerialized") is True)
+        except Exception as _img_pf_exc:                 # noqa: BLE001 — persist then fail closed
+            _image_lineage_failures.append({
+                "final_scene": int(_seg_img_pf.index),
+                "original_beat": int(getattr(
+                    _sel_img_pf, "segment_index", _seg_img_pf.index)),
+                "declared_path": _img_pf,
+                "expected_source_id": str((getattr(
+                    _sel_img_pf, "image_meta", {}) or {}).get("src", "") or ""),
+                "expected_shot_index": (getattr(
+                    _sel_img_pf, "image_meta", {}) or {}).get("shot"),
+                "preflight": True,
+                "reason": str(_img_pf_exc),
+            })
+            _persist_image_lineage_audit(
+                proj, _image_lineage_entries, _image_lineage_failures)
+            raise
+    if _preflight_image_rescues:
+        log(f"build: image preflight — {len(_preflight_image_rescues)} native still(s) "
+            f"materialized; {_semantic_rematerialized} low-resolution semantic thumbnail(s) "
+            "freshly reverified on exact HD bytes")
+
     # CAPTION PRESET + ON/OFF — the single resolution point for the whole render (every downstream
     # caption gate reads _cap_on / _cap_preset, never the raw args). Precedence via the centralized
     # resolvers: an EXPLICIT value wins; the env var is a fallback only when nothing was supplied
@@ -6718,8 +7039,6 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     from .scene_lineage import (assert_scene_lineage as _assert_scene_lineage,
                                 selection_binding as _selection_binding)
     _lineage_roots: dict[str, dict] = {}
-    _image_lineage_entries: list[dict] = []
-    _image_lineage_failures: list[dict] = []
     _final_to_orig_lineage = {v: k for k, v in (_bidx or {}).items()}
     _breakout_cap_by_final = {
         int(c["final_index"]): c for c in
@@ -7261,9 +7580,15 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         if _img:
             try:
                 _declared_img = _require_declared_image_path(sel)
-                _img_rescue = _rescue_still_fullres(proj, sel, str(_declared_img), log)
+                _img_rescue = _preflight_image_rescues.get(id(sel))
+                if _img_rescue is None:
+                    # Defensive only: a post-preflight image mutation/addition must still take the
+                    # strict path, never fall through to moving footage or an unverified thumbnail.
+                    _img_rescue = _rescue_still_fullres(
+                        proj, sel, str(_declared_img), log, seg=seg, eng=eng)
                 _img = str(_img_rescue["path"])
-                _img_root = _verified_image_lineage_root(proj, sel, _img_rescue, seg.index)
+                _img_root = _verified_image_lineage_root(
+                    proj, sel, _img_rescue, seg.index, seg=seg)
                 _img_audit_row = {
                     **_img_root, "final_scene": int(seg.index),
                     "declared_path": str(_declared_img.resolve()),

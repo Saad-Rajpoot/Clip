@@ -88,10 +88,29 @@ def validate_scene_lineage(entries: list[dict]) -> list[dict]:
                 bad(f"verified image has unknown owner kind {owner_kind!r}")
             if not str(rec.get("image_sha256") or ""):
                 bad("verified image has no immutable source-image hash")
-            if rec.get("semantic_binding_preserved") is True:
+            semantic_bound = rec.get("semantic_binding_preserved") is True
+            rematerialized = rec.get("semantic_rematerialized") is True
+            if rematerialized and not semantic_bound:
+                bad("native semantic still is not marked as immutably bound")
+            if semantic_bound:
                 semantic_hash = str(rec.get("semantic_image_sha256") or "")
-                if (not semantic_hash or semantic_hash != str(rec.get("image_sha256") or "")
-                        or rec.get("preserved_original") is not True):
+                if not semantic_hash or semantic_hash != str(rec.get("image_sha256") or ""):
+                    bad("strict semantic still hash does not match the exact aired bytes")
+                if rematerialized:
+                    if owner_kind != "source_frame":
+                        bad("native semantic rematerialization has no indexed source-frame owner")
+                    if rec.get("preserved_original") is not False:
+                        bad("native semantic rematerialization incorrectly claims original bytes")
+                    model = str(rec.get("semantic_model") or "")
+                    question_fp = str(rec.get("semantic_question_fingerprint") or "")
+                    source_fp = str(rec.get("semantic_source_content_fingerprint") or "")
+                    if not model or model == "none":
+                        bad("native semantic rematerialization has no verifier model identity")
+                    if not question_fp:
+                        bad("native semantic rematerialization has no question fingerprint")
+                    if not source_fp:
+                        bad("native semantic rematerialization has no source-content fingerprint")
+                elif rec.get("preserved_original") is not True:
                     bad("strict semantic still hash does not match the exact preserved aired bytes")
             try:
                 iw, ih = int(rec.get("image_width") or 0), int(rec.get("image_height") or 0)

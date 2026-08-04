@@ -6,6 +6,8 @@ import pytest
 from PIL import Image
 
 from vidlore.clipstudio import build as B
+from vidlore.clipstudio import scene_lineage as SL
+from vidlore.clipstudio.verify import NonRetryableBuildError, VisionBackendError
 
 
 def _jpg(path: Path, size=(1280, 720), colour=(80, 110, 140)) -> Path:
@@ -31,6 +33,20 @@ def _source(tmp_path: Path, sid: str):
 def _selection(img: Path, **meta):
     return NS(segment_index=34, source_id="wrong-moving-selection", shot_index=91,
               in_point=99.0, out_point=101.0, image_path=str(img), image_meta=meta)
+
+
+def _strict_segment():
+    return NS(index=34, text="Varys appears in the city.", visual_policy="character_specific",
+              required_entity="Varys", required_kind="character", expected_visual="Varys",
+              scene_query="", quote="", is_specific_claim=False)
+
+
+def _strict_keep_verdict():
+    return {"status": "ok", "verdict": "keep", "matches_narration": True,
+            "specific_enough": True, "quality_ok": True,
+            "correct_subject_visible": True, "wrong_subject_visible": False,
+            "contradicts_narration": False, "era_ok": True, "confidence": 0.9,
+            "vision_served_by": "gemini:gemini-test:apikey"}
 
 
 def _index_shot(proj, keyframe: Path, *, shot=7, start=10.0, end=14.0):
@@ -109,6 +125,260 @@ def test_sha_bound_semantic_still_airs_exact_judged_bytes_without_reextract(
     assert root["semantic_image_sha256"] == root["image_sha256"] == judged_hash
     # Mutating the moving selection owner cannot redirect these source-frame bytes.
     assert root["actual_image_source_id"] == root["expected_image_source_id"] == "varys"
+
+
+def test_lowres_sha_bound_semantic_still_is_native_extracted_then_freshly_verified(
+        monkeypatch, tmp_path):
+    intended = _source(tmp_path, "varys")
+    proj = _project(tmp_path, {"varys": intended})
+    proj.meta = {"analysis": {"episode_hint": "S01E03"}}
+    judged = _jpg(tmp_path / "shot_0007.jpg", (512, 288), (31, 73, 119))
+    _index_shot(proj, judged)
+    judged_hash = B._image_file_sha256(judged)
+    sel = _selection(judged, source="source-frame-recovery", src="varys", shot=7,
+                     still_verified=True, still_semantic_verified=True,
+                     still_image_sha256=judged_hash)
+    seg = _strict_segment()
+    eng = NS(anthropic_model="claude-test")
+    seen = {}
+    monkeypatch.setattr("vidlore.clipstudio.ingest.probe",
+                        lambda _p: {"width": 1920, "height": 1080})
+
+    def fake_run(argv, **_kwargs):
+        _jpg(Path(argv[-1]), (1920, 1080), (31, 73, 119))
+        return NS(returncode=0)
+
+    def fake_verify(path, *_args, **_kwargs):
+        seen["verified_path"] = str(path)
+        return _strict_keep_verdict()
+
+    monkeypatch.setattr(B.subprocess, "run", fake_run)
+    monkeypatch.setattr("vidlore.clipstudio.verify.verify_frame", fake_verify)
+    rescue = B._rescue_still_fullres(
+        proj, sel, str(judged), lambda _m: None, seg=seg, eng=eng)
+
+    assert rescue["semantic_rematerialized"] is True
+    assert rescue["image_width"] == 1920 and rescue["image_height"] == 1080
+    assert Path(rescue["path"]).resolve() != judged.resolve()
+    assert seen["verified_path"] == rescue["path"]
+    assert rescue["semantic_image_sha256"] == B._image_file_sha256(rescue["path"])
+    assert rescue["semantic_image_sha256"] != judged_hash
+    root = B._verified_image_lineage_root(proj, sel, rescue, 34, seg=seg)
+    assert root["validated"] is True
+    assert root["semantic_rematerialized"] is True
+    assert root["semantic_image_sha256"] == root["image_sha256"]
+
+
+@pytest.mark.parametrize("verdict", [
+    None,
+    {"status": "error", "verdict": "keep"},
+    {"status": False, "verdict": "keep"},
+    {"status": "ok", "verdict": "keep"},
+    {**_strict_keep_verdict(), "confidence": "high"},
+    {k: v for k, v in _strict_keep_verdict().items() if k != "vision_served_by"},
+])
+def test_lowres_semantic_native_inconclusive_reverification_is_retryable(
+        monkeypatch, tmp_path, verdict):
+    intended = _source(tmp_path, "varys")
+    proj = _project(tmp_path, {"varys": intended})
+    proj.meta = {"analysis": {}}
+    judged = _jpg(tmp_path / "shot_0007.jpg", (512, 288))
+    _index_shot(proj, judged)
+    sel = _selection(judged, source="source-frame-recovery", src="varys", shot=7,
+                     still_verified=True, still_semantic_verified=True,
+                     still_image_sha256=B._image_file_sha256(judged))
+    monkeypatch.setattr("vidlore.clipstudio.ingest.probe",
+                        lambda _p: {"width": 1920, "height": 1080})
+
+    def fake_run(argv, **_kwargs):
+        _jpg(Path(argv[-1]), (1920, 1080))
+        return NS(returncode=0)
+
+    monkeypatch.setattr(B.subprocess, "run", fake_run)
+    monkeypatch.setattr("vidlore.clipstudio.verify.verify_frame",
+                        lambda *_a, **_k: verdict)
+    with pytest.raises(VisionBackendError, match="native still verifier"):
+        B._rescue_still_fullres(
+            proj, sel, str(judged), lambda _m: None,
+            seg=_strict_segment(), eng=NS(anthropic_model="claude-test"))
+
+
+def test_lowres_semantic_native_explicit_rejection_is_nonretryable(monkeypatch, tmp_path):
+    intended = _source(tmp_path, "varys")
+    proj = _project(tmp_path, {"varys": intended})
+    proj.meta = {"analysis": {}}
+    judged = _jpg(tmp_path / "shot_0007.jpg", (512, 288))
+    _index_shot(proj, judged)
+    sel = _selection(judged, source="source-frame-recovery", src="varys", shot=7,
+                     still_verified=True, still_semantic_verified=True,
+                     still_image_sha256=B._image_file_sha256(judged))
+    monkeypatch.setattr("vidlore.clipstudio.ingest.probe",
+                        lambda _p: {"width": 1920, "height": 1080})
+
+    def fake_run(argv, **_kwargs):
+        _jpg(Path(argv[-1]), (1920, 1080))
+        return NS(returncode=0)
+
+    rejection = {"status": "ok", "verdict": "replace", "matches_narration": False,
+                 "specific_enough": False, "quality_ok": True,
+                 "correct_subject_visible": False, "wrong_subject_visible": True,
+                 "contradicts_narration": False, "era_ok": True}
+    monkeypatch.setattr(B.subprocess, "run", fake_run)
+    monkeypatch.setattr("vidlore.clipstudio.verify.verify_frame",
+                        lambda *_a, **_k: rejection)
+    with pytest.raises(NonRetryableBuildError, match="image semantic gate"):
+        B._rescue_still_fullres(
+            proj, sel, str(judged), lambda _m: None,
+            seg=_strict_segment(), eng=NS(anthropic_model="claude-test"))
+
+
+def _native_rematerialized_record(tmp_path: Path) -> dict:
+    aired = _jpg(tmp_path / "aired_native.jpg", (1920, 1080))
+    return {
+        "kind": "verified_image", "final_scene": 34, "original_beat": 34,
+        "owner_beat": 34, "clip": "beat_034.mp4", "file": str(aired),
+        "validated": True, "root_binding": "binding",
+        "image_owner_kind": "source_frame",
+        "image_sha256": B._image_file_sha256(aired),
+        "image_width": 1920, "image_height": 1080,
+        "expected_image_source_id": "varys", "actual_image_source_id": "varys",
+        "expected_image_shot_index": 7, "actual_image_shot_index": 7,
+        "actual_image_time": 12.0,
+        "source_native_width": 1920, "source_native_height": 1080,
+        "preserved_original": False, "semantic_binding_preserved": True,
+        "semantic_rematerialized": True,
+        "semantic_image_sha256": B._image_file_sha256(aired),
+        "semantic_model": "gemini:gemini-test:apikey",
+        "semantic_question_fingerprint": "question-fingerprint",
+        "semantic_source_content_fingerprint": "source-content-fingerprint",
+    }
+
+
+def test_scene_lineage_assert_accepts_complete_native_semantic_rematerialization(tmp_path):
+    rec = _native_rematerialized_record(tmp_path)
+    audit = SL.assert_scene_lineage([rec], tmp_path / "lineage.json")
+    assert audit["passed"] is True and audit["failures"] == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("semantic_image_sha256", "forged"),
+    ("semantic_model", ""),
+    ("semantic_question_fingerprint", ""),
+    ("semantic_source_content_fingerprint", ""),
+    ("semantic_binding_preserved", False),
+    ("preserved_original", True),
+])
+def test_scene_lineage_assert_rejects_incomplete_or_forged_native_semantic_proof(
+        tmp_path, field, value):
+    rec = _native_rematerialized_record(tmp_path)
+    rec[field] = value
+    audit_path = tmp_path / f"lineage_{field}.json"
+    with pytest.raises(NonRetryableBuildError, match="scene-lineage gate"):
+        SL.assert_scene_lineage([rec], audit_path)
+    persisted = json.loads(audit_path.read_text())
+    assert persisted["passed"] is False and persisted["failures"]
+
+
+def test_source_rewrite_during_native_extract_fails_closed(monkeypatch, tmp_path):
+    intended = _source(tmp_path, "varys")
+    proj = _project(tmp_path, {"varys": intended})
+    original = _jpg(tmp_path / "shot_0007.jpg", (512, 288))
+    _index_shot(proj, original)
+    sel = _selection(original, source="source-frame-recovery", src="varys", shot=7,
+                     still_verified=True)
+    monkeypatch.setattr("vidlore.clipstudio.ingest.probe",
+                        lambda _p: {"width": 1920, "height": 1080})
+
+    def replacing_run(argv, **_kwargs):
+        _jpg(Path(argv[-1]), (1920, 1080))
+        Path(intended.local_path).write_bytes(b"replacement source bytes with different content")
+        return NS(returncode=0)
+
+    monkeypatch.setattr(B.subprocess, "run", replacing_run)
+    with pytest.raises(NonRetryableBuildError, match="changed while"):
+        B._rescue_still_fullres(proj, sel, str(original), lambda _m: None)
+
+
+def test_native_pixels_replaced_while_verifier_runs_fail_closed(monkeypatch, tmp_path):
+    intended = _source(tmp_path, "varys")
+    proj = _project(tmp_path, {"varys": intended})
+    proj.meta = {"analysis": {}}
+    judged = _jpg(tmp_path / "shot_0007.jpg", (512, 288))
+    _index_shot(proj, judged)
+    sel = _selection(judged, source="source-frame-recovery", src="varys", shot=7,
+                     still_verified=True, still_semantic_verified=True,
+                     still_image_sha256=B._image_file_sha256(judged))
+    monkeypatch.setattr("vidlore.clipstudio.ingest.probe",
+                        lambda _p: {"width": 1920, "height": 1080})
+
+    def fake_run(argv, **_kwargs):
+        _jpg(Path(argv[-1]), (1920, 1080), (10, 20, 30))
+        return NS(returncode=0)
+
+    def replacing_verify(path, *_args, **_kwargs):
+        _jpg(Path(path), (1920, 1080), (200, 180, 160))
+        return _strict_keep_verdict()
+
+    monkeypatch.setattr(B.subprocess, "run", fake_run)
+    monkeypatch.setattr("vidlore.clipstudio.verify.verify_frame", replacing_verify)
+    with pytest.raises(NonRetryableBuildError, match="pixels changed"):
+        B._rescue_still_fullres(
+            proj, sel, str(judged), lambda _m: None,
+            seg=_strict_segment(), eng=NS(anthropic_model="claude-test"))
+
+
+@pytest.mark.parametrize("claimed", ["", "not-the-declared-sha"])
+def test_semantic_claim_missing_or_mismatched_sha_never_falls_into_unverified_extract(
+        monkeypatch, tmp_path, claimed):
+    intended = _source(tmp_path, "varys")
+    proj = _project(tmp_path, {"varys": intended})
+    judged = _jpg(tmp_path / "shot_0007.jpg", (512, 288))
+    _index_shot(proj, judged)
+    sel = _selection(judged, source="source-frame-recovery", src="varys", shot=7,
+                     still_verified=True, still_semantic_verified=True,
+                     still_image_sha256=claimed)
+    monkeypatch.setattr("vidlore.clipstudio.ingest.probe",
+                        lambda _p: {"width": 1920, "height": 1080})
+    monkeypatch.setattr(
+        B.subprocess, "run",
+        lambda *_a, **_k: pytest.fail("invalid semantic SHA must fail before extraction"))
+    with pytest.raises(Exception, match="semantic still SHA"):
+        B._rescue_still_fullres(
+            proj, sel, str(judged), lambda _m: None,
+            seg=_strict_segment(), eng=NS(anthropic_model="claude-test"))
+
+
+@pytest.mark.parametrize("mutation", ["source", "question"])
+def test_preflight_native_semantic_rescue_rejects_identity_change_before_air(
+        monkeypatch, tmp_path, mutation):
+    intended = _source(tmp_path, "varys")
+    proj = _project(tmp_path, {"varys": intended})
+    proj.meta = {"analysis": {}}
+    judged = _jpg(tmp_path / "shot_0007.jpg", (512, 288))
+    _index_shot(proj, judged)
+    sel = _selection(judged, source="source-frame-recovery", src="varys", shot=7,
+                     still_verified=True, still_semantic_verified=True,
+                     still_image_sha256=B._image_file_sha256(judged))
+    seg = _strict_segment()
+    monkeypatch.setattr("vidlore.clipstudio.ingest.probe",
+                        lambda _p: {"width": 1920, "height": 1080})
+
+    def fake_run(argv, **_kwargs):
+        _jpg(Path(argv[-1]), (1920, 1080))
+        return NS(returncode=0)
+
+    monkeypatch.setattr(B.subprocess, "run", fake_run)
+    monkeypatch.setattr("vidlore.clipstudio.verify.verify_frame",
+                        lambda *_a, **_k: _strict_keep_verdict())
+    rescue = B._rescue_still_fullres(
+        proj, sel, str(judged), lambda _m: None,
+        seg=seg, eng=NS(anthropic_model="claude-test"))
+    if mutation == "source":
+        Path(intended.local_path).write_bytes(b"changed owner source bytes")
+    else:
+        seg.text = "A materially different narration question."
+    with pytest.raises(Exception, match="image-lineage gate"):
+        B._verified_image_lineage_root(proj, sel, rescue, 34, seg=seg)
 
 
 def test_metadata_free_verified_source_frame_preserves_file_never_selection(monkeypatch, tmp_path):
