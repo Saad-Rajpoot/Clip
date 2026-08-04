@@ -350,6 +350,156 @@ def test_information_event_stays_exact_but_invented_delivery_staging_is_removed(
     assert beat._analyzer_grounding_guard["sanitized_fields"] == ["expected_visual", "quote"]
 
 
+def test_measured_dagger_beat_removes_invented_camera_composition_not_exact_contract():
+    text = "the weapon they left behind is the only thing she has."
+    query = "Game of Thrones catspaw Valyrian steel dagger left behind"
+
+    beat = _apply(
+        text,
+        expected_visual=("Close-up of the Valyrian steel dagger lying on the floor or in "
+                         "Catelyn's hands after the attack"),
+        scene_query=query,
+        required_entity="Valyrian steel dagger",
+        required_kind="object",
+    )
+
+    assert beat.visual_policy == P.EXACT
+    assert beat.is_specific_claim is True
+    assert beat.expected_visual == (
+        "Exact scene: Game of Thrones catspaw Valyrian steel dagger left behind. "
+        "Also show: Catelyn.")
+    assert beat.scene_query == query
+    assert beat.required_entity == "Valyrian steel dagger"
+    assert beat.required_kind == "object"
+    marker = beat._analyzer_grounding_guard
+    assert marker["branch"] == "grounded_exact_sanitized"
+    assert marker["reason"] == "unsupported_camera_composition_removed"
+    assert marker["camera_cues"] == ["close_up"]
+    assert marker["sanitized_fields"] == ["expected_visual"]
+    assert "Catelyn's hands" in marker["camera_original_values"]["expected_visual"]
+
+
+def test_measured_brothel_beat_removes_camera_words_but_keeps_semantic_query():
+    text = "brothel because it could not be tested."
+
+    beat = _apply(
+        text,
+        expected_visual=("Wide shot pulling back from the brothel, the private chamber where no "
+                         "one can contest the story."),
+        scene_query="Game of Thrones brothel wide shot interior Catelyn Littlefinger",
+        required_entity="the brothel",
+        required_kind="location",
+    )
+
+    assert beat.visual_policy == P.EXACT
+    assert beat.is_specific_claim is True
+    assert beat.expected_visual == \
+        "Exact scene: Game of Thrones brothel interior Catelyn Littlefinger."
+    assert beat.scene_query == "Game of Thrones brothel interior Catelyn Littlefinger"
+    assert beat.required_entity == "the brothel"
+    assert beat.required_kind == "location"
+    marker = beat._analyzer_grounding_guard
+    assert marker["reason"] == "unsupported_camera_composition_removed"
+    assert marker["camera_cues"] == ["pull_back", "wide_shot"]
+    assert marker["sanitized_fields"] == ["expected_visual", "scene_query"]
+
+
+def test_camera_guard_preserves_authored_cinematography_and_ordinary_wide_prose():
+    authored = _apply(
+        "The wide shot pulls back from the brothel as Catelyn enters.",
+        expected_visual="Wide shot pulling back from the brothel as Catelyn enters",
+        scene_query="Example Show wide shot pulls back brothel Catelyn",
+        required_entity="the brothel",
+        required_kind="location",
+    )
+    lexical_control = _apply(
+        "The wide gate opens onto the courtyard.",
+        expected_visual="A wide gate opens onto the courtyard",
+        scene_query="Example Show wide gate opens courtyard",
+        required_entity="the courtyard gate",
+        required_kind="object",
+    )
+
+    assert authored.expected_visual == \
+        "Wide shot pulling back from the brothel as Catelyn enters"
+    assert authored.scene_query == "Example Show wide shot pulls back brothel Catelyn"
+    assert authored._analyzer_grounding_guard["branch"] == "grounded_exact"
+    assert lexical_control.expected_visual == "A wide gate opens onto the courtyard"
+    assert lexical_control._analyzer_grounding_guard["branch"] == "grounded_exact"
+
+
+def test_query_only_camera_cleanup_keeps_grounded_expected_visual():
+    beat = _apply(
+        "Catelyn enters the brothel.",
+        expected_visual="Catelyn enters the brothel private chamber",
+        scene_query="Example Show Catelyn wide shot brothel entrance",
+        required_entity="the brothel",
+        required_kind="location",
+    )
+
+    assert beat.expected_visual == "Catelyn enters the brothel private chamber"
+    assert beat.scene_query == "Example Show Catelyn brothel entrance"
+    assert beat._analyzer_grounding_guard["sanitized_fields"] == ["scene_query"]
+
+
+def test_stacked_aerial_wide_camera_phrase_is_fully_removed_without_mangling_place_name():
+    beat = _apply(
+        "The story returns to King's Landing.",
+        expected_visual="Aerial wide shot of King's Landing at dusk",
+        scene_query="Game of Thrones King's Landing aerial",
+        required_entity="King's Landing",
+        required_kind="location",
+    )
+
+    assert "aerial" not in beat.expected_visual.lower()
+    assert "aerial" not in beat.scene_query.lower()
+    assert "King's Landing" in beat.expected_visual
+    assert "King Landing" not in beat.expected_visual
+    assert set(beat._analyzer_grounding_guard["camera_cues"]) >= {
+        "aerial_view", "compound_shot", "wide_shot"}
+
+
+def test_camera_cleanup_does_not_promote_an_invented_capitalized_place():
+    beat = _apply(
+        "That is not a background detail of the setting.",
+        expected_visual="Aerial wide shot of King's Landing, Red Keep and cityscape",
+        scene_query="Game of Thrones King's Landing aerial wide shot",
+        required_entity="King's Landing",
+        required_kind="location",
+    )
+
+    assert beat.scene_query == "Game of Thrones King's Landing"
+    assert beat.expected_visual == "Exact scene: Game of Thrones King's Landing."
+    assert "Red Keep" not in beat.expected_visual
+
+    ship = _apply(
+        "A ship waiting in the bay.",
+        expected_visual=("Wide shot of Littlefinger's ship anchored in the bay, "
+                         "King's Landing on the shore"),
+        scene_query="Game of Thrones Littlefinger ship waiting bay Purple Wedding",
+        required_entity="Littlefinger's ship",
+        required_kind="object",
+    )
+    assert ship.expected_visual == (
+        "Exact scene: Game of Thrones Littlefinger ship waiting bay Purple Wedding.")
+    assert "King's Landing" not in ship.expected_visual
+
+
+def test_camera_cleanup_preserves_narration_authored_action_and_location():
+    beat = _apply(
+        "The dagger lies on the floor.",
+        expected_visual="Close-up of the dagger lying on the floor",
+        scene_query="Example Show dagger",
+        required_entity="the dagger",
+        required_kind="object",
+    )
+
+    assert beat.expected_visual == (
+        "Exact scene: Example Show dagger. "
+        "Narrated action/location: The dagger lies on the floor.")
+    assert beat.scene_query == "Example Show dagger"
+
+
 def test_adjacent_quote_copy_is_removed_only_from_distinct_grounded_physical_event():
     cup = _apply(
         "And it tells us again years later when Olenna is holding a cup of poison of her own.",
@@ -534,6 +684,7 @@ def test_grounding_branches_persist_in_analysis_metadata_and_round_trip():
         "information_staging_sanitized": 1,
         "record_intent_quote_sanitized": 0,
         "bare_named_event_sanitized": 0,
+        "unsupported_camera_composition_sanitized": 0,
         "adjacent_quote_copy_sanitized": 0,
         "nominal_role_contract_narrowed": 0,
         "nominal_guessed_identity_cleared": 0,
@@ -541,7 +692,7 @@ def test_grounding_branches_persist_in_analysis_metadata_and_round_trip():
         "to_character_specific": 0,
         "to_generic_filler": 1,
     }
-    assert analysis.beat_grounding_audit["schema"] == 5
+    assert analysis.beat_grounding_audit["schema"] == 6
     restored = A.ScriptAnalysis.from_dict(analysis.to_dict())
     assert restored.beat_grounding_audit == analysis.beat_grounding_audit
     assert restored.beat_grounding_audit["beats"]["0"]["branch"] == \
@@ -732,7 +883,7 @@ def test_resume_preserves_fresh_sanitizer_reason_when_post_state_changes_nothing
     assert marker["branch"] == "grounded_exact_sanitized"
     assert marker["reason"] == "record_intent_is_not_verbatim_dialogue"
     assert marker["sanitized_fields"] == ["quote"]
-    assert marker["cached_revalidation_schema"] == 5
+    assert marker["cached_revalidation_schema"] == 6
     saved_audit = loaded_analysis.to_dict()["beat_grounding_audit"]
 
     loaded_again = ScriptSegment.from_dict(loaded.to_dict())
@@ -841,7 +992,7 @@ def test_schema5_migrates_measured_comparison_event_and_cached_nominal_role_cont
     assert grounded_control.visual_policy == P.EXACT
     assert manual_control.required_entity == "Janos Slynt"
     assert manual_control.scene_query == ""
-    assert analysis.beat_grounding_audit["schema"] == 5
+    assert analysis.beat_grounding_audit["schema"] == 6
 
     saved = analysis.to_dict()
     reloaded = [ScriptSegment.from_dict(row.to_dict()) for row in rows]
@@ -893,7 +1044,7 @@ def test_schema5_corrects_cached_schema4_role_migration_and_preserves_provenance
     assert marker["analyzer_guessed_required_entity"] == "Aron Santagar"
     assert marker["schema_migration"] == "nominal_guessed_identity_contract_v5"
     assert marker["previous_schema_migration"] == "nominal_role_contract_v4"
-    assert marker["cached_revalidation_schema"] == 5
+    assert marker["cached_revalidation_schema"] == 6
 
     saved = analysis.to_dict()
     loaded = ScriptSegment.from_dict(beat.to_dict())
@@ -906,3 +1057,70 @@ def test_schema5_corrects_cached_schema4_role_migration_and_preserves_provenance
     assert resumed["beats"] == saved["beat_grounding_audit"]["beats"]
     assert resumed["cached_revalidation"]["changed_indices"] == []
     assert resumed["last_material_revalidation"]["changed_indices"] == [32]
+
+
+def test_schema6_migrates_cached_camera_contracts_once_and_preserves_material_diff():
+    dagger = ScriptSegment(
+        index=3,
+        text="the weapon they left behind is the only thing she has.",
+        expected_visual=("Close-up of the Valyrian steel dagger lying on the floor or in "
+                         "Catelyn's hands after the attack"),
+        scene_query="Game of Thrones catspaw Valyrian steel dagger left behind",
+        required_entity="Valyrian steel dagger",
+        required_kind="object",
+        visual_policy=P.EXACT,
+        is_specific_claim=True,
+    )
+    brothel = ScriptSegment(
+        index=51,
+        text="brothel because it could not be tested.",
+        expected_visual=("Wide shot pulling back from the brothel, the private chamber where no "
+                         "one can contest the story."),
+        scene_query="Game of Thrones brothel wide shot interior Catelyn Littlefinger",
+        required_entity="the brothel",
+        required_kind="location",
+        visual_policy=P.EXACT,
+        is_specific_claim=True,
+    )
+    analysis = A.ScriptAnalysis(beat_grounding_audit={
+        "schema": 5,
+        "beats": {
+            "3": {"branch": "grounded_exact", "reason": "conservative_no_mismatch_proven",
+                  "cached_revalidation_schema": 5},
+            "51": {"branch": "grounded_exact", "reason": "named_subject_and_scene_action",
+                   "cached_revalidation_schema": 5},
+        },
+    })
+
+    first = A.revalidate_cached_directions([dagger, brothel], analysis)
+
+    assert first["exact_revalidated"] == 2
+    assert first["changed_indices"] == [3, 51]
+    assert first["changes"]["3"]["changed_fields"] == ["expected_visual"]
+    assert first["changes"]["51"]["changed_fields"] == [
+        "expected_visual", "scene_query"]
+    assert dagger.expected_visual == (
+        "Exact scene: Game of Thrones catspaw Valyrian steel dagger left behind. "
+        "Also show: Catelyn.")
+    assert dagger.scene_query == "Game of Thrones catspaw Valyrian steel dagger left behind"
+    assert brothel.expected_visual == \
+        "Exact scene: Game of Thrones brothel interior Catelyn Littlefinger."
+    assert brothel.scene_query == "Game of Thrones brothel interior Catelyn Littlefinger"
+    for beat in (dagger, brothel):
+        assert beat.visual_policy == P.EXACT
+        assert beat.is_specific_claim is True
+        assert beat._analyzer_grounding_guard["guard_schema"] == 6
+        assert beat._analyzer_grounding_guard["cached_revalidation_schema"] == 6
+    assert analysis.beat_grounding_audit["counts"][
+        "unsupported_camera_composition_sanitized"] == 2
+
+    saved = analysis.to_dict()
+    loaded = [ScriptSegment.from_dict(row.to_dict()) for row in (dagger, brothel)]
+    loaded_analysis = A.ScriptAnalysis.from_dict(saved)
+    second = A.revalidate_cached_directions(loaded, loaded_analysis)
+
+    assert second["changed_count"] == 0
+    assert second["exact_revalidated"] == 0
+    assert second["preserved_sanitized_provenance"] == 2
+    assert loaded_analysis.beat_grounding_audit[
+        "last_material_revalidation"]["changed_indices"] == [3, 51]

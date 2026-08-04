@@ -2797,7 +2797,8 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
             try:
                 return _verify_pool.verify_and_repair(
                     proj, segs, cfg, eng, only_indices=set(_indices), progress=None,
-                    materialize_promotions=False, persist_project=False)
+                    materialize_promotions=False, persist_project=False,
+                    strict_pool_recovery=True)
             finally:
                 if _pool_workers_unset:
                     _os_pool.environ.pop("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", None)
@@ -3114,7 +3115,8 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
         try:
             _new_verify_result = _verify_r.verify_and_repair(
                 proj, segs, cfg, eng, only_indices=set(unresolved),
-                progress=None, materialize_promotions=False, persist_project=False)
+                progress=None, materialize_promotions=False, persist_project=False,
+                strict_pool_recovery=True)
         finally:
             if _vwr_unset:
                 _os_vwr.environ.pop("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", None)

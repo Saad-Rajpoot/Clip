@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 from vidlore.clipstudio import image_fallback as IF
+from vidlore.clipstudio import ledger as L
 from vidlore.clipstudio import match as M
 from vidlore.clipstudio import verify as V
 from vidlore.clipstudio.config import ClipConfig
@@ -117,6 +118,226 @@ def test_candidate_cap_is_explicit_and_hard_bounded(tmp_path, monkeypatch):
     target = [c for c in huge if c.source_id == "target"]
     distances = [c.signals["neighbor_distance"] for c in target]
     assert distances == sorted(distances)
+
+
+def test_scoped_pool_recovery_finds_unseen_source_by_metadata_and_timed_text(
+        tmp_path, monkeypatch):
+    """A source omitted by global diversity may enter only the scoped, still-strict recovery lane."""
+    proj = ClipProject(name="indexed-pool-timed", root=str(tmp_path))
+    proj.ensure_dirs()
+    proj.meta["analysis"] = {"movie_title": "Game of Thrones"}
+    proj.sources = [
+        SourceVideo(id="wrong", title="Valyrian steel weapon compilation", url="u:wrong",
+                    local_path=str(tmp_path / "wrong.mp4"), status="ok", permission="owner",
+                    extra={"query": "Valyrian steel dagger"}),
+        SourceVideo(id="exact", title="Catelyn after Bran was attacked", url="u:exact",
+                    local_path=str(tmp_path / "exact.mp4"), status="ok", permission="owner",
+                    extra={"query": "Bran catspaw assassin dagger"}),
+    ]
+    for source in proj.sources:
+        Path(source.local_path).write_bytes(b"media")
+    shots = {}
+    for sid in ("wrong", "exact"):
+        rows = []
+        for index in range(18):
+            keyframe = tmp_path / f"{sid}_{index:02d}.jpg"
+            keyframe.write_bytes(b"jpg" + bytes([index]))
+            transcript = ""
+            if sid == "exact" and index == 11:
+                transcript = ("Did you notice the dagger the killer used? The blade is Valyrian "
+                              "steel; someone gave it to him after the attack.")
+            rows.append(Shot(
+                source_id=sid, index=index, start=float(index) * 3.0,
+                end=float(index) * 3.0 + 2.8, keyframe_path=str(keyframe),
+                transcript=transcript, quality=0.9, luma_avg=40.0, subs_flag=0,
+                graphics_flag=0, static_frac=0.0, pair_diff_max=5.0,
+                pair_diff_mean=5.0))
+        shots[sid] = rows
+
+    def get_shot(sid, index):
+        return next((shot for shot in shots.get(sid, []) if shot.index == index), None)
+
+    get_shot.all_shots = lambda sid: shots.get(sid, [])
+    seg = ScriptSegment(
+        index=0, text="the weapon they left behind is the only thing she has",
+        expected_visual="The dagger after the attack in Catelyn's hands.",
+        required_entity="Valyrian steel dagger", required_kind="object",
+        scene_query="catspaw Valyrian steel dagger left behind",
+        visual_policy="exact_scene", is_specific_claim=True, est_duration=4.5)
+    sel = ClipSelection(segment_index=0, source_id="wrong", shot_index=0,
+                        in_point=0.0, out_point=2.5, confidence=0.7)
+    proj.selections = [sel]
+    monkeypatch.setattr(IF, "_shot_relevance", lambda *_a, **_k: 0.5)
+    from vidlore.clipstudio import quality_contract as QC
+    monkeypatch.setattr(QC, "probe_native_video_info",
+                        lambda _path: {"width": 1920, "height": 1080})
+
+    ordinary = V._strict_scene_neighborhood_candidates(
+        sel, seg, proj, get_shot, ClipConfig(), cap=12, source_cap=1)
+    recovered = V._strict_scene_neighborhood_candidates(
+        sel, seg, proj, get_shot, ClipConfig(), cap=12, source_cap=1,
+        allow_indexed_pool_sources=True)
+
+    assert not any(candidate.source_id == "exact" for candidate in ordinary)
+    exact = [candidate for candidate in recovered if candidate.source_id == "exact"]
+    assert exact and exact[0].shot_index == 11
+    assert exact[0].signals["strict_scene_timed_text_region"] is True
+    assert exact[0].signals["strict_indexed_pool_source"] is True
+    assert exact[0].signals["strict_indexed_pool_admitted_new_source"] == 1.0
+    assert all(isinstance(value, (int, float)) for value in exact[0].signals.values())
+    assert L._numeric_ledger_signals(exact[0].signals)[
+        "strict_indexed_pool_admitted_new_source"] == 1.0
+    assert len(recovered) <= 12
+
+
+def test_scoped_pool_recovery_prioritizes_strong_deep_source_inside_source_cap(
+        tmp_path, monkeypatch):
+    """Normal-alt source spread must not hide a metadata-exact deep source during recovery."""
+    proj = ClipProject(name="indexed-pool-deep", root=str(tmp_path))
+    proj.ensure_dirs()
+    proj.meta["analysis"] = {"movie_title": "Game of Thrones"}
+    sources = []
+    for sid in ("wrong0", "wrong1", "wrong2", "wrong3", "wrong4"):
+        media = tmp_path / f"{sid}.mp4"
+        media.write_bytes(b"media")
+        sources.append(SourceVideo(
+            id=sid, title=f"Catelyn context {sid}", url=f"u:{sid}",
+            local_path=str(media), status="ok", permission="owner",
+            extra={"query": "Catelyn location context"}))
+    exact_media = tmp_path / "exact.mp4"
+    exact_media.write_bytes(b"media")
+    sources.append(SourceVideo(
+        id="exact", title="Catelyn Stark asks Lord Baelish about the dagger", url="u:exact",
+        local_path=str(exact_media), status="ok", permission="owner",
+        extra={"query": "Catelyn Littlefinger dagger scene"}))
+    proj.sources = sources
+    shots = {}
+    for source in sources:
+        rows = []
+        for index in range(30):
+            keyframe = tmp_path / f"{source.id}_{index:02d}.jpg"
+            keyframe.write_bytes(b"jpg" + bytes([index]))
+            rows.append(Shot(
+                source_id=source.id, index=index, start=float(index) * 3.0,
+                end=float(index) * 3.0 + 2.8, keyframe_path=str(keyframe),
+                quality=0.9, luma_avg=40.0, subs_flag=0, graphics_flag=0,
+                static_frac=0.0, pair_diff_max=5.0, pair_diff_mean=5.0))
+        shots[source.id] = rows
+
+    def get_shot(sid, index):
+        return next((shot for shot in shots.get(sid, []) if shot.index == index), None)
+
+    get_shot.all_shots = lambda sid: shots.get(sid, [])
+    seg = ScriptSegment(
+        index=0, text="brothel because it could not be tested",
+        expected_visual="Wide private chamber inside the brothel.",
+        required_entity="the brothel", required_kind="location",
+        scene_query="Catelyn Littlefinger brothel interior",
+        visual_policy="exact_scene", is_specific_claim=True, est_duration=3.0)
+    sel = ClipSelection(
+        segment_index=0, source_id="wrong0", shot_index=2,
+        in_point=6.0, out_point=8.5, confidence=0.8,
+        alternates=[_cand(f"wrong{index}", 2) for index in range(1, 5)],
+        deep_alternates=[_cand("exact", 22, score=0.75)])
+    proj.selections = [sel]
+    monkeypatch.setattr(
+        IF, "_shot_relevance",
+        lambda shot, *_a, **_k: 0.95 if shot.source_id == "exact" and shot.index == 22
+        else 0.5)
+    from vidlore.clipstudio import quality_contract as QC
+    monkeypatch.setattr(QC, "probe_native_video_info",
+                        lambda _path: {"width": 1920, "height": 1080})
+
+    ordinary = V._strict_scene_neighborhood_candidates(
+        sel, seg, proj, get_shot, ClipConfig(), cap=12, source_cap=4)
+    recovered = V._strict_scene_neighborhood_candidates(
+        sel, seg, proj, get_shot, ClipConfig(), cap=12, source_cap=4,
+        allow_indexed_pool_sources=True)
+
+    assert not any(candidate.source_id == "exact" for candidate in ordinary)
+    exact = next(candidate for candidate in recovered
+                 if candidate.source_id == "exact" and candidate.shot_index == 22)
+    assert exact.signals["strict_indexed_pool_source"] is True
+    assert exact.signals["strict_indexed_pool_reprioritized_retained"] == 1.0
+    assert all(isinstance(value, (int, float)) for value in exact.signals.values())
+    assert L._numeric_ledger_signals(exact.signals)[
+        "strict_indexed_pool_reprioritized_retained"] == 1.0
+    assert len(recovered) <= 12
+
+
+def test_scoped_pool_recovery_rolls_back_if_prospective_source_scan_fails(
+        tmp_path, monkeypatch):
+    """An unexpected second-source failure cannot leave the first source partially admitted."""
+    proj, seg, sel, get_shot = _fixture(tmp_path)
+    seg.expected_visual = "Sansa accuses Littlefinger as he kneels at the Great Hall trial"
+    seg.scene_query = "Sansa accuses Littlefinger kneels judgment Great Hall trial"
+    extra_shots = {}
+    for sid in ("pool_a", "pool_b"):
+        media = tmp_path / f"{sid}.mp4"
+        media.write_bytes(b"media")
+        proj.sources.append(SourceVideo(
+            id=sid, title="Sansa accuses Littlefinger trial Great Hall",
+            url=f"u:{sid}", local_path=str(media), status="ok", permission="owner",
+            extra={"query": "Littlefinger kneels Sansa Great Hall trial"}))
+        keyframe = tmp_path / f"{sid}_00.jpg"
+        keyframe.write_bytes(b"jpg")
+        extra_shots[sid] = [Shot(
+            source_id=sid, index=0, start=0.0, end=2.8, keyframe_path=str(keyframe),
+            quality=0.9, luma_avg=40.0, subs_flag=0, graphics_flag=0,
+            static_frac=0.0, pair_diff_max=5.0, pair_diff_mean=5.0)]
+
+    original_all_shots = get_shot.all_shots
+
+    def flaky_all_shots(sid):
+        if sid == "pool_b":
+            raise RuntimeError("measured prospective-source failure")
+        return extra_shots.get(sid, original_all_shots(sid))
+
+    get_shot.all_shots = flaky_all_shots
+    monkeypatch.setattr(IF, "_shot_relevance", lambda *_a, **_k: 0.5)
+    from vidlore.clipstudio import quality_contract as QC
+    monkeypatch.setattr(QC, "probe_native_video_info",
+                        lambda _path: {"width": 1920, "height": 1080})
+
+    ordinary = V._strict_scene_neighborhood_candidates(
+        sel, seg, proj, get_shot, ClipConfig(), cap=12, source_cap=4)
+    recovered = V._strict_scene_neighborhood_candidates(
+        sel, seg, proj, get_shot, ClipConfig(), cap=12, source_cap=4,
+        allow_indexed_pool_sources=True)
+
+    assert [(row.source_id, row.shot_index) for row in recovered] == [
+        (row.source_id, row.shot_index) for row in ordinary]
+    assert not any(row.signals.get("strict_indexed_pool_source") for row in recovered)
+
+
+def test_camera_words_plus_entity_alone_cannot_open_scoped_pool_source(
+        tmp_path, monkeypatch):
+    proj, seg, sel, get_shot = _fixture(tmp_path)
+    media = tmp_path / "camera_only.mp4"
+    media.write_bytes(b"media")
+    proj.sources.append(SourceVideo(
+        id="camera_only", title="Petyr Baelish wide tracking shot closeup",
+        url="u:camera", local_path=str(media), status="ok", permission="owner",
+        extra={"query": "Petyr Baelish camera pulling framing"}))
+    keyframe = tmp_path / "camera_only_00.jpg"
+    keyframe.write_bytes(b"jpg")
+    camera_shot = Shot(
+        source_id="camera_only", index=0, start=0.0, end=2.8,
+        keyframe_path=str(keyframe), quality=0.9, luma_avg=40.0, subs_flag=0,
+        graphics_flag=0, static_frac=0.0, pair_diff_max=5.0, pair_diff_mean=5.0)
+    original_all_shots = get_shot.all_shots
+    get_shot.all_shots = lambda sid: ([camera_shot] if sid == "camera_only"
+                                      else original_all_shots(sid))
+    monkeypatch.setattr(IF, "_shot_relevance", lambda *_a, **_k: 0.5)
+    from vidlore.clipstudio import quality_contract as QC
+    monkeypatch.setattr(QC, "probe_native_video_info",
+                        lambda _path: {"width": 1920, "height": 1080})
+
+    recovered = V._strict_scene_neighborhood_candidates(
+        sel, seg, proj, get_shot, ClipConfig(), cap=12, source_cap=4,
+        allow_indexed_pool_sources=True)
+
+    assert not any(row.source_id == "camera_only" for row in recovered)
 
 
 def test_evidence_backed_same_source_deep_region_gets_five_nearest_strict_calls(

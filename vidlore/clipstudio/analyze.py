@@ -215,7 +215,9 @@ def _llm_analyze(script_text: str, topic: str, movie_hint: str, beats: list[Scri
             "other delivery mechanism. Only after a beat genuinely names a precise moment should "
             "you identify that exact scene. Reply ONLY a JSON array, one "
             "object per beat, same order:\n"
-            '[{"i":int,"expected_visual":"concrete shot description of the exact moment",'
+            '[{"i":int,"expected_visual":"semantic WHO/WHAT/WHERE/ACTION facts visibly required '
+            "by this narration; do not put camera distance, movement, angle, or editorial framing "
+            'here — those belong only in shot_intent",'
             '"scene_query":"a precise search string to find THIS exact scene clip — movie + character + '
             "the specific action/location (e.g. 'Game of Thrones Daenerys walks into fire unburnt "
             "Drogo funeral pyre'), or '' if the line is generic\",\"quote\":\"the iconic line of "
@@ -319,6 +321,179 @@ _INFORMATION_MECHANISM_RX = re.compile(
     r"spies|spy|reads?|reading|informs?|informed)\b",
     re.I,
 )
+# Camera language belongs to edit direction, not to the narration's semantic promise.  The beat
+# analyzer is explicitly told not to invent it, but measured exact-object/location rows still came
+# back as impossible conjunctions ("dagger in Catelyn's hands" and "wide shot pulling back").
+# Keep the vocabulary deliberately literal: ordinary prose such as "a wide gate" must not match.
+_CAMERA_CUE_PATTERNS = (
+    # Longest/stacked form first so ``aerial wide shot`` is removed as one unit rather than
+    # stripping only ``wide shot`` and silently leaving ``aerial`` as a hard requirement.
+    ("compound_shot", re.compile(
+        r"\b(?:(?:extreme|tight|aerial|overhead|bird'?s[- ]eye|wide|medium|"
+        r"establishing|tracking|reaction|point[- ]of[- ]view|pov|close[- ]?up)\s+){2,}"
+        r"shot\b(?:\s+of\b)?", re.I)),
+    # Search queries often compress ``aerial wide shot`` to a trailing ``aerial``.  It is still a
+    # camera demand, unlike ordinary adjectives such as ``wide`` which may describe a real gate.
+    ("aerial_view", re.compile(
+        r"\b(?:aerial|overhead|bird'?s[- ]eye)(?:\s+view)?\b", re.I)),
+    ("close_up", re.compile(
+        r"\b(?:(?:extreme|tight)\s+)?close[- ]?up(?:\s+shot)?\b(?:\s+of\b)?", re.I)),
+    ("wide_shot", re.compile(
+        r"\bwide(?:\s+establishing)?\s+shot\b(?:\s+of\b)?", re.I)),
+    ("medium_shot", re.compile(
+        r"\bmedium(?:\s+(?:close[- ]?up|long))?\s+shot\b(?:\s+of\b)?", re.I)),
+    ("establishing_shot", re.compile(
+        r"\bestablishing\s+shot\b(?:\s+of\b)?", re.I)),
+    ("aerial_shot", re.compile(
+        r"\b(?:aerial|overhead|bird'?s[- ]eye)\s+shot\b(?:\s+of\b)?", re.I)),
+    ("tracking_shot", re.compile(
+        r"\b(?:tracking|reaction|point[- ]of[- ]view|pov)\s+shot\b(?:\s+of\b)?", re.I)),
+    ("pull_back", re.compile(
+        r"\b(?:the\s+)?(?:camera\s+)?pull(?:s|ed|ing)?\s+back\b", re.I)),
+    ("push_in", re.compile(
+        r"\b(?:the\s+)?(?:camera\s+)?push(?:es|ed|ing)?\s+(?:in|toward|towards)\b", re.I)),
+    ("zoom", re.compile(
+        r"\b(?:the\s+)?(?:camera\s+)?zoom(?:s|ed|ing)?\s+(?:in|out)\b", re.I)),
+    ("pan", re.compile(
+        r"\b(?:the\s+)?(?:camera\s+)?pan(?:s|ned|ning)?\s+"
+        r"(?:across|left|right|up|down|toward|towards)\b", re.I)),
+    ("tilt", re.compile(
+        r"\b(?:the\s+)?(?:camera\s+)?tilt(?:s|ed|ing)?\s+(?:up|down)\b", re.I)),
+)
+_CAMERA_CONTRACT_KINDS = frozenset({
+    "object", "prop", "weapon", "location", "place", "building",
+})
+
+
+def _camera_cues(value: str) -> set[str]:
+    """Return literal cinematography cues present in one analyzer field."""
+    text = str(value or "")
+    return {name for name, pattern in _CAMERA_CUE_PATTERNS if pattern.search(text)}
+
+
+def _strip_camera_cues(value: str, cues: set[str]) -> str:
+    """Remove only named camera phrases, retaining scene/entity search terms."""
+    cleaned = str(value or "")
+    for name, pattern in _CAMERA_CUE_PATTERNS:
+        if name in cues:
+            cleaned = pattern.sub(" ", cleaned)
+    cleaned = re.sub(r"\s+([,.;:])", r"\1", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" \t\r\n,.;:-")
+    return cleaned
+
+
+_PROPER_VISUAL_PHRASE_RX = re.compile(
+    r"\b[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,2}\b")
+_PROPER_VISUAL_IGNORE = frozenset({
+    "a", "an", "the", "close", "close-up", "wide", "medium", "extreme", "aerial",
+    "overhead", "establishing", "tracking", "shot", "scene", "exact", "game", "thrones",
+})
+_PROPER_VISUAL_PLACE_TOKENS = frozenset({
+    "bay", "castle", "city", "court", "garden", "hall", "harbor", "harbour",
+    "island", "keep", "kingdom", "land", "landing", "palace", "port", "redoubt", "river",
+    "road", "room", "shore", "street", "tower", "village", "westeros",
+})
+
+
+def _semantic_camera_replacement(beat: ScriptSegment, directive: dict,
+                                 semantic_query: str) -> str:
+    """Keep scene identity and named participants while dropping their invented pose/placement."""
+    narration = str(getattr(beat, "text", "") or "").strip()
+    required_entity = str(directive.get("required_entity", "") or "").strip()
+    query = str(semantic_query or "").strip()
+    base_terms = _grounding_terms(" ".join((narration, required_entity, query)))
+    names = []
+    visual_without_camera = _strip_camera_cues(
+        str(directive.get("expected_visual", "") or ""),
+        _camera_cues(str(directive.get("expected_visual", "") or "")))
+    for raw in _PROPER_VISUAL_PHRASE_RX.findall(visual_without_camera):
+        phrase = raw.strip()
+        words = [word.lower() for word in _GROUNDING_WORD_RX.findall(phrase)]
+        while words and words[0] in _PROPER_VISUAL_IGNORE:
+            words.pop(0)
+        if not words:
+            continue
+        # Capitalization alone cannot distinguish a character from an invented extra location.
+        # Keep character participants such as Catelyn, but never turn ``Red Keep`` or ``King's
+        # Landing`` from the discarded storyboard into a new hard place requirement.
+        if any(_grounding_stem(word) in _PROPER_VISUAL_PLACE_TOKENS for word in words):
+            continue
+        terms = _grounding_terms(" ".join(words))
+        if not terms or terms <= base_terms:
+            continue
+        cleaned = " ".join(word for word in phrase.split()
+                           if word.lower() not in _PROPER_VISUAL_IGNORE).strip()
+        # A single possessive capitalized token is normally a person in an authored staging phrase
+        # (``Catelyn's hands``), so retain the person but not the invented possession.  Multi-token
+        # proper names such as ``King's Landing`` must keep their spelling intact.
+        if len(cleaned.split()) == 1:
+            cleaned = re.sub(r"'s\b", "", cleaned).strip()
+        if cleaned and cleaned.lower() not in {name.lower() for name in names}:
+            names.append(cleaned)
+
+    if query:
+        value = f"Exact scene: {query}."
+    else:
+        value = narration
+        if required_entity and not (_grounding_terms(required_entity)
+                                    <= _grounding_terms(narration)):
+            value = f"{value} Required subject: {required_entity}.".strip()
+    # If removing the camera phrase would also discard an action/location actually authored by the
+    # narration, preserve that semantic fact.  Require two shared grounded terms and at least one
+    # fact not already carried by the query/entity; this keeps ``dagger lies on the floor`` while
+    # not turning abstract commentary such as ``could not be tested`` into visual staging.
+    narration_terms = _grounding_terms(narration)
+    visual_terms = _grounding_terms(visual_without_camera)
+    query_entity_terms = _grounding_terms(" ".join((query, required_entity)))
+    if (len(narration_terms & visual_terms) >= 2
+            and bool(narration_terms - query_entity_terms)):
+        value = f"{value} Narrated action/location: {narration}".strip()
+    if names:
+        value = f"{value} Also show: {', '.join(names)}."
+    return value[:200]
+
+
+def _unsupported_camera_contract(beat: ScriptSegment, directive: dict) -> dict:
+    """Return exact replacement values for analyzer-invented object/location cinematography.
+
+    This is intentionally not a generic storyboard simplifier.  It applies only to concrete
+    object/location contracts, only when the analyzer emitted a literal camera cue that the
+    narration did not author.  Exactness, the required entity/kind, quote, and semantic query all
+    survive.  Replacing the whole prose storyboard (rather than deleting only ``close-up``) is what
+    removes coupled invented staging such as "on the floor or in Catelyn's hands".
+    """
+    required_kind = str(directive.get("required_kind", "") or "").strip().lower()
+    if required_kind not in _CAMERA_CONTRACT_KINDS:
+        return {}
+    narration = str(getattr(beat, "text", "") or "")
+    authored = _camera_cues(narration)
+    expected = str(directive.get("expected_visual", "") or "")
+    scene_query = str(directive.get("scene_query", "") or "")
+    expected_unsupported = _camera_cues(expected) - authored
+    query_unsupported = _camera_cues(scene_query) - authored
+    if not expected_unsupported and not query_unsupported:
+        return {}
+
+    values = {}
+    originals = {}
+    semantic_query = _strip_camera_cues(scene_query, query_unsupported)
+    if not _grounding_terms(semantic_query):
+        semantic_query = str(directive.get("required_entity", "") or narration)
+    if expected_unsupported:
+        originals["expected_visual"] = expected[:200]
+        values["expected_visual"] = _semantic_camera_replacement(
+            beat, directive, semantic_query)
+    if query_unsupported:
+        originals["scene_query"] = scene_query[:120]
+        values["scene_query"] = semantic_query[:120]
+    return {
+        "reason": "unsupported_camera_composition_removed",
+        "camera_cues": sorted(expected_unsupported | query_unsupported),
+        "sanitized_values": values,
+        "original_values": originals,
+    }
+
+
 # A quote copied onto a neighbouring, independently narrated physical beat creates an impossible
 # conjunction even when both pieces occur somewhere in the same long scene.  We only remove the
 # copy when a nearby beat carries the identical line with substantially stronger beat-local support.
@@ -358,6 +533,8 @@ _NON_SUBJECT_GROUNDING_TERMS = _SCENE_ACTION_ROOTS | frozenset({
 def _grounding_stem(word: str) -> str:
     """Small deterministic stemmer for overlap evidence; it is not a semantic classifier."""
     w = word.lower().strip("'-")
+    if w.endswith("'s"):
+        w = w[:-2]
     if len(w) <= 3:
         return w
     # Prefer a known action root before generic suffix stripping: ``takes`` -> ``take``,
@@ -368,6 +545,8 @@ def _grounding_stem(word: str) -> str:
     if w.endswith("ies") and len(w) > 4:
         return w[:-3] + "y"
     if w.endswith("ing") and len(w) > 5:
+        if w == "lying":
+            return "lie"
         root = w[:-3]
         if len(root) > 3 and root[-1:] == root[-2:-1]:
             root = root[:-1]
@@ -669,6 +848,36 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
     resolved = _policy.normalize(directive.get("visual_policy", ""))
     grounding = (_exact_direction_grounding(beat, directive)
                  if resolved == _policy.EXACT else None)
+    if grounding is not None and grounding.get("grounded"):
+        camera_guard = _unsupported_camera_contract(beat, directive)
+        if camera_guard:
+            grounding = dict(grounding)
+            existing_fields = list(grounding.get("sanitize_fields") or [])
+            existing_values = dict(grounding.get("sanitized_values") or {})
+            added_fields = []
+            for field, value in camera_guard["sanitized_values"].items():
+                # A stronger semantic sanitizer (for example the bare-event guard) owns fields it
+                # already replaces.  Camera cleanup only fills otherwise-unsanitized hard inputs.
+                if field in existing_fields:
+                    continue
+                existing_fields.append(field)
+                existing_values[field] = value
+                added_fields.append(field)
+            if added_fields:
+                if not grounding.get("sanitize_fields"):
+                    grounding["reason"] = camera_guard["reason"]
+                else:
+                    reasons = list(grounding.get("sanitization_reasons") or [])
+                    if camera_guard["reason"] not in reasons:
+                        reasons.append(camera_guard["reason"])
+                    grounding["sanitization_reasons"] = reasons
+                grounding["sanitize_fields"] = existing_fields
+                grounding["sanitized_values"] = existing_values
+                grounding["camera_cues"] = camera_guard["camera_cues"]
+                grounding["camera_original_values"] = {
+                    field: camera_guard["original_values"][field]
+                    for field in added_fields
+                }
     if directive.get("expected_visual"):
         beat.expected_visual = str(directive["expected_visual"])[:200]
     beat.scene_query = str(directive.get("scene_query", ""))[:120]
@@ -687,6 +896,7 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
             "from_policy": _policy.EXACT,
             "shared_terms": grounding.get("shared_terms", []),
             "entity_grounded": bool(grounding.get("entity_grounded")),
+            "guard_schema": _BEAT_GROUNDING_AUDIT_SCHEMA,
         }
         if grounding.get("grounded_event"):
             marker["grounded_event"] = str(grounding["grounded_event"])
@@ -695,18 +905,29 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
         if grounding.get("analyzer_guessed_required_entity"):
             marker["analyzer_guessed_required_entity"] = str(
                 grounding["analyzer_guessed_required_entity"])
+        if grounding.get("sanitization_reasons"):
+            marker["sanitization_reasons"] = list(grounding["sanitization_reasons"])
+        if grounding.get("camera_cues"):
+            marker["camera_cues"] = list(grounding["camera_cues"])
+        if grounding.get("camera_original_values"):
+            marker["camera_original_values"] = dict(grounding["camera_original_values"])
         if sanitize_fields:
             marker["sanitized_fields"] = sanitize_fields
+            sanitized_values = dict(grounding.get("sanitized_values") or {})
+            if sanitized_values:
+                marker["sanitized_values"] = dict(sanitized_values)
             if "expected_visual" in sanitize_fields:
-                beat.expected_visual = str(
-                    grounding.get("grounded_event")
-                    or getattr(beat, "text", "") or "")[:200]
+                beat.expected_visual = str(sanitized_values.get(
+                    "expected_visual", grounding.get("grounded_event")
+                    or getattr(beat, "text", "") or ""))[:200]
             if "scene_query" in sanitize_fields:
-                beat.scene_query = str(grounding.get("grounded_event") or "")[:120]
+                beat.scene_query = str(sanitized_values.get(
+                    "scene_query", grounding.get("grounded_event") or ""))[:120]
             if "required_entity" in sanitize_fields:
-                beat.required_entity = str(grounding.get("grounded_event") or "")[:80]
+                beat.required_entity = str(sanitized_values.get(
+                    "required_entity", grounding.get("grounded_event") or ""))[:80]
             if "quote" in sanitize_fields:
-                beat.quote = ""
+                beat.quote = str(sanitized_values.get("quote", ""))[:160]
         if not grounding["grounded"]:
             # A narration-named subject still merits subject-correct footage, but no exact action.
             # With no named subject, ordinary semantic filler is the honest promise.  Clear every
@@ -823,7 +1044,7 @@ def _sanitize_adjacent_quote_borrowing(beats) -> int:
     return changed
 
 
-_BEAT_GROUNDING_AUDIT_SCHEMA = 5
+_BEAT_GROUNDING_AUDIT_SCHEMA = 6
 
 
 def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
@@ -867,6 +1088,10 @@ def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
         "bare_named_event_sanitized": sum(
             m.get("reason") == "bare_named_event_staging_removed"
             for m in records.values()),
+        "unsupported_camera_composition_sanitized": sum(
+            m.get("reason") == "unsupported_camera_composition_removed"
+            or "unsupported_camera_composition_removed"
+            in (m.get("sanitization_reasons") or []) for m in records.values()),
         "adjacent_quote_copy_sanitized": sum(
             "adjacent_quote_borrowed_into_distinct_visual_event"
             in (m.get("sanitization_reasons") or []) for m in records.values()),
@@ -907,7 +1132,18 @@ def _sanitized_guard_is_effective(beat: ScriptSegment, marker: dict) -> bool:
     if not fields:
         return False
     grounded_event = str(marker.get("grounded_event", "") or "")
+    sanitized_values = (dict(marker.get("sanitized_values") or {})
+                        if isinstance(marker.get("sanitized_values"), dict) else {})
     for field in fields:
+        if field in sanitized_values:
+            limit = {"expected_visual": 200, "scene_query": 120,
+                     "required_entity": 80, "quote": 160}.get(field)
+            expected_value = str(sanitized_values[field])
+            if limit:
+                expected_value = expected_value[:limit]
+            if str(getattr(beat, field, "") or "") != expected_value:
+                return False
+            continue
         if field == "quote" and str(getattr(beat, "quote", "") or ""):
             return False
         if field == "expected_visual":
@@ -1068,8 +1304,9 @@ def revalidate_cached_directions(beats, analysis: ScriptAnalysis | None = None) 
             if _sanitized_guard_is_effective(beat, existing_marker):
                 preserved_sanitized_provenance += 1
             continue
-        if isinstance(existing_marker, dict) and _sanitized_guard_is_effective(
-                beat, existing_marker):
+        if (isinstance(existing_marker, dict)
+                and existing_marker.get("guard_schema") == _CACHED_DIRECTION_GUARD_SCHEMA
+                and _sanitized_guard_is_effective(beat, existing_marker)):
             # The current fields prove this sanitizer already ran.  Reconstructing a directive
             # from its post-sanitized state would overwrite the truthful reason with a generic
             # "grounded" reason despite changing nothing.

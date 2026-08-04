@@ -154,6 +154,10 @@ def test_owned_still_title_cast_warning_requires_pixel_resolution_not_title_reje
     # pixels may resolve it (e.g. a correct window inside a compilation).
     sel.image_meta["still_verifier"]["source_title_conflict_resolved"] = True
     sel.image_meta["exact_still_verifier"]["source_title_conflict_resolved"] = True
+    sel.image_meta["still_verifier"]["reason"] = \
+        "The selected pixels show Catelyn Stark facing Littlefinger."
+    sel.image_meta["exact_still_verifier"]["reason"] = \
+        "The selected pixels show Catelyn Stark facing Littlefinger."
     assert R.verified_still_coverage(sel, seg, proj=proj) == (
         True, "source-frame-recovery")
 
@@ -182,6 +186,18 @@ def test_standalone_build_preserve_rejects_unresolved_title_cast_warning(
 
     sel.image_meta["still_verifier"]["source_title_conflict_resolved"] = True
     sel.image_meta["exact_still_verifier"]["source_title_conflict_resolved"] = True
+    sel.image_meta["still_verifier"]["reason"] = \
+        "The dagger is visible, but Catelyn Stark is not present."
+    sel.image_meta["exact_still_verifier"]["reason"] = \
+        "The dagger is visible, but Catelyn Stark is not present."
+    with pytest.raises(NonRetryableBuildError, match="unresolved source-title cast warning"):
+        B._rescue_still_fullres(
+            proj, sel, sel.image_path, lambda _msg: None, seg=seg, eng=None)
+
+    sel.image_meta["still_verifier"]["reason"] = \
+        "The selected pixels show Catelyn Stark facing Littlefinger."
+    sel.image_meta["exact_still_verifier"]["reason"] = \
+        "The selected pixels show Catelyn Stark facing Littlefinger."
     rescue = B._rescue_still_fullres(
         proj, sel, sel.image_path, lambda _msg: None, seg=seg, eng=None)
     assert rescue["semantic_binding_preserved"] is True
@@ -300,9 +316,53 @@ def test_persisted_native_binding_requires_resolved_title_cast_warning(tmp_path)
     assert "source-title cast warning is not resolved" in reason
 
     sel.image_meta["still_verifier"]["source_title_conflict_resolved"] = True
+    sel.image_meta["still_verifier"]["reason"] = \
+        "The dagger is visible, but Catelyn Stark is not present."
+    assert "source-title cast warning is not resolved" in \
+        B._persisted_native_still_semantic_reason(
+            proj, seg, owner, sel.image_meta, image_sha256=image_hash,
+            source_fingerprint=source_fp)
+
+    sel.image_meta["still_verifier"]["reason"] = \
+        "The selected pixels show Catelyn Stark facing Littlefinger."
     assert B._persisted_native_still_semantic_reason(
         proj, seg, owner, sel.image_meta, image_sha256=image_hash,
         source_fingerprint=source_fp) == ""
+
+
+def test_fresh_native_still_verifier_rejects_negative_cast_resolution(
+        monkeypatch, tmp_path):
+    proj, sel = _persisted_native_fixture(tmp_path)
+    proj.source("owner").title = '"Why Littlefinger?" Arya Stark'
+    proj.meta["analysis"]["characters"] = [
+        {"name": "Petyr Baelish", "actor": "Aidan Gillen"},
+        {"name": "Catelyn Stark", "actor": "Michelle Fairley"},
+    ]
+    seg = _segment(scene_query="Littlefinger tells Catelyn the dagger lie in the brothel")
+    seg.required_entity = "Petyr Baelish"
+    seg.expected_visual = "Littlefinger faces Catelyn while telling the dagger lie"
+    owner = B._resolve_indexed_still_owner(proj, sel)
+    source_fp = V._file_fingerprint(proj.source("owner").local_path)
+    negative = dict(
+        STRICT_KEEP,
+        source_title_conflict_resolved=True,
+        reason="The dagger is visible, but Catelyn Stark is not present.",
+        vision_served_by="vision-live",
+    )
+    monkeypatch.setattr(V, "verify_frame", lambda *_args, **_kwargs: dict(negative))
+
+    with pytest.raises(NonRetryableBuildError, match="cast warning was not resolved"):
+        B._strictly_verify_native_still(
+            proj, sel, seg, owner, Path(sel.image_path), NS(anthropic_model="configured"),
+            source_fingerprint=source_fp)
+
+    positive = dict(
+        negative,
+        reason="The selected pixels show Catelyn Stark facing Littlefinger.")
+    monkeypatch.setattr(V, "verify_frame", lambda *_args, **_kwargs: dict(positive))
+    assert B._strictly_verify_native_still(
+        proj, sel, seg, owner, Path(sel.image_path), NS(anthropic_model="configured"),
+        source_fingerprint=source_fp)["strict_reason"] == ""
 
 
 def test_native_rescue_rejects_forged_current_question_binding(monkeypatch, tmp_path):

@@ -392,6 +392,79 @@ def test_exact_storyboard_co_character_conflicts_with_different_title_cast():
     assert V._source_title_exact_cast_conflict(contextual, wrong, roster) == ""
 
 
+def test_cast_warning_resolution_must_name_expected_pixel_cast_not_only_set_boolean():
+    roster = {
+        "joffrey baratheon": "Jack Gleeson",
+        "catelyn stark": "Michelle Fairley",
+    }
+    beat = _seg(
+        "the weapon they left behind is the only thing she has.",
+        visual_policy=P.EXACT, is_specific_claim=True,
+        required_entity="Valyrian steel dagger", required_kind="object",
+        expected_visual=("Exact scene: Game of Thrones catspaw Valyrian steel dagger left "
+                         "behind. Also show: Catelyn."),
+        scene_query="Game of Thrones catspaw Valyrian steel dagger left behind",
+    )
+    wrong_title = "All scenes of Joffrey Baratheon"
+    base = {
+        **_POSITIVE_EXACT,
+        "verdict": "keep",
+        "source_title_conflict_resolved": True,
+        "reason": "The frame clearly shows the Valyrian steel dagger.",
+    }
+
+    rejected = V._strict_keep_rejection_reason(base, beat, wrong_title, roster)
+    accepted = V._strict_keep_rejection_reason(
+        {**base, "reason": "The selected pixels show Catelyn Stark beside the dagger."},
+        beat, wrong_title, roster)
+
+    assert "did not identify any expected co-character" in rejected
+    assert accepted == ""
+
+    negative = V._strict_keep_rejection_reason(
+        {**base, "reason": "The dagger is visible, but Catelyn Stark is not present."},
+        beat, wrong_title, roster)
+    bare_name = V._strict_keep_rejection_reason(
+        {**base, "reason": "The selected scene concerns Catelyn Stark."},
+        beat, wrong_title, roster)
+    faceid = V._strict_keep_rejection_reason(
+        {**base, "reason": "The dagger is visible.", "selection_evidence": {
+            "faceid_names": ["Catelyn Stark"]}}, beat, wrong_title, roster)
+
+    assert "affirmative pixel evidence" in negative
+    assert "affirmative pixel evidence" in bare_name
+    assert faceid == ""
+
+    for uncertain_reason in (
+            "The pixels cannot confirm Catelyn Stark.",
+            "It is unclear whether Catelyn Stark is visible.",
+            "Catelyn Stark may not be present."):
+        assert "affirmative pixel evidence" in V._strict_keep_rejection_reason(
+            {**base, "reason": uncertain_reason}, beat, wrong_title, roster)
+
+
+def test_cast_warning_honorific_surname_is_not_proof_for_an_ambiguous_family():
+    roster = {
+        "catelyn stark": "Michelle Fairley",
+        "arya stark": "Maisie Williams",
+        "sansa stark": "Sophie Turner",
+    }
+    beat = _seg(
+        "Look at the dagger scene.", visual_policy=P.EXACT, is_specific_claim=True,
+        required_entity="Valyrian steel dagger", required_kind="object",
+        expected_visual="Catelyn Stark examines the dagger",
+        scene_query="Catelyn Stark dagger scene")
+    verdict = {
+        **_POSITIVE_EXACT,
+        "verdict": "keep",
+        "source_title_conflict_resolved": True,
+        "reason": "The selected pixels clearly show Lady Stark beside the dagger.",
+    }
+
+    assert "affirmative pixel evidence" in V._cast_warning_resolution_reason(
+        verdict, beat, roster)
+
+
 def test_project_roster_keeps_name_only_rows_without_none_actor_alias():
     proj = type("P", (), {"meta": {"analysis": {"characters": [
         {"name": "Catelyn Stark", "actor": None},

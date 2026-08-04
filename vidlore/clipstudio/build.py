@@ -5681,13 +5681,16 @@ def _persisted_native_still_semantic_reason(
         stale_reasons.append("beat-question fingerprint changed")
     if str(meta.get("native_owner_source_content_fingerprint") or "") != expected_source_fp:
         stale_reasons.append("owner-source fingerprint changed")
-    from .verify import _project_exact_cast_warning
+    from .verify import (_cast_warning_resolution_reason, _project_char2actor,
+                         _project_exact_cast_warning)
     cast_warning = _project_exact_cast_warning(
         proj, seg, str(owner.get("source_id") or ""))
-    if (cast_warning
-            and persisted_verdict.get("source_title_conflict_resolved") is not True):
+    cast_resolution = (_cast_warning_resolution_reason(
+        persisted_verdict, seg, _project_char2actor(proj)) if cast_warning else "")
+    if cast_resolution:
         stale_reasons.append(
-            "source-title cast warning is not resolved by the persisted native-pixel verdict")
+            "source-title cast warning is not resolved by the persisted native-pixel verdict "
+            f"({cast_resolution})")
     return "; ".join(stale_reasons)
 
 
@@ -5706,6 +5709,7 @@ def _strictly_verify_native_still(proj, sel, seg, owner: dict, image_path: Path,
     must_see = _verify_still.effective_deictic_target(seg)
     cast_warning = (_verify_still._project_exact_cast_warning(
         proj, seg, str(owner.get("source_id") or "")) if is_specific else "")
+    char2actor = _verify_still._project_char2actor(proj)
     _require_unchanged_still_source(owner, source_fingerprint)
     image_hash_before = _image_file_sha256(image_path)
     if not image_hash_before:
@@ -5746,9 +5750,11 @@ def _strictly_verify_native_still(proj, sel, seg, owner: dict, image_path: Path,
     verdict = dict(verdict)
     verdict["status"] = "ok"
     why = _relevance_still.strict_still_evidence_reason(verdict, seg)
-    if cast_warning and verdict.get("source_title_conflict_resolved") is not True:
+    cast_resolution = (_verify_still._cast_warning_resolution_reason(
+        verdict, seg, char2actor) if cast_warning else "")
+    if cast_resolution:
         why = ("source-title cast warning was not resolved from the native pixels: "
-               f"{cast_warning}")
+               f"{cast_warning} ({cast_resolution})")
     if why:
         explicit_negative = (
             verdict.get("verdict") == "replace"
@@ -5760,7 +5766,8 @@ def _strictly_verify_native_still(proj, sel, seg, owner: dict, image_path: Path,
             or verdict.get("contradicts_narration") is True
             or verdict.get("era_ok") is False
             or verdict.get("target_visible") is False
-            or verdict.get("source_title_conflict_resolved") is False)
+            or verdict.get("source_title_conflict_resolved") is False
+            or bool(cast_resolution))
         if not explicit_negative:
             raise VisionBackendError(
                 f"native still verifier returned incomplete keep evidence for beat "
@@ -5875,15 +5882,18 @@ def _rescue_still_fullres(proj, sel, img_path: str, log, *, seg=None, eng=None,
             # may resolve it; without that affirmative field an ordinary preserve path cannot air
             # the still.  The refresh lane is allowed through because it asks the corrected native
             # pixel question immediately below.
-            from .verify import _project_exact_cast_warning
+            from .verify import (_cast_warning_resolution_reason, _project_char2actor,
+                                 _project_exact_cast_warning)
             cast_warning = _project_exact_cast_warning(
                 proj, seg, str(owner.get("source_id") or ""))
             evidence = meta.get("still_verifier") or meta.get("exact_still_verifier") or {}
-            if (cast_warning and not refresh_semantic_verdict
-                    and evidence.get("source_title_conflict_resolved") is not True):
+            cast_resolution = (_cast_warning_resolution_reason(
+                evidence, seg, _project_char2actor(proj)) if cast_warning else "")
+            if cast_warning and not refresh_semantic_verdict and cast_resolution:
                 raise NonRetryableBuildError(
                     f"image semantic gate: beat {getattr(seg, 'index', '?')} has an unresolved "
-                    f"source-title cast warning in its persisted pixel verdict ({cast_warning})",
+                    f"source-title cast warning in its persisted pixel verdict ({cast_warning}; "
+                    f"{cast_resolution})",
                     kind="selection_relevance")
         source_fingerprint = _still_owner_source_fingerprint(owner)
         sw, sh = _probe_image_owner_source(owner["source_path"])

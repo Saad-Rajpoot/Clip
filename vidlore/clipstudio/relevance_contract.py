@@ -16,6 +16,7 @@ from pathlib import Path
 from . import policy as _policy
 from .models import SOURCE_OK
 from .verify import (
+    _cast_warning_resolution_reason,
     _contradiction_reason,
     _project_char2actor,
     _source_title_exact_cast_conflict,
@@ -23,10 +24,10 @@ from .verify import (
     selection_verifier_evidence_reason,
 )
 
-# v8 invalidates exhausted semantic-recovery markers after strict candidate arbitration learned to
-# bind a concrete anchor scene to its canonical episode.  Code-only ranking changes are otherwise
-# absent from the retry fingerprint, so an old failed job would silently skip the repaired rung.
-SCHEMA_VERSION = 8
+# v9 also requires a claimed source-title cast-warning resolution to identify the expected
+# co-character in its pixel evidence.  Old audits accepted a bare boolean even when the verdict's
+# own reason named nobody expected, so cached semantic recovery must not inherit that false proof.
+SCHEMA_VERSION = 9
 AUDIT_FILENAME = "selection_relevance_audit.json"
 QUOTE_DIALOGUE_FLOOR = 0.78
 QUOTE_WINDOW_TOLERANCE_SEC = 0.75
@@ -214,7 +215,8 @@ def verified_still_coverage(sel, seg, *, proj=None) -> tuple[bool, str]:
                                    f"{beat_era or 'this beat'}")
                 cast_reason = _source_title_exact_cast_conflict(
                     seg, owner_title, _project_char2actor(proj))
-                if cast_reason and evidence.get("source_title_conflict_resolved") is not True:
+                if cast_reason and _cast_warning_resolution_reason(
+                        evidence, seg, _project_char2actor(proj)):
                     return False, ("owned source-frame still has an unresolved exact-scene cast "
                                    f"warning: {cast_reason}")
             except Exception:
@@ -902,8 +904,8 @@ def evaluate_selection_relevance(proj, segments, *, cfg=None,
                     cast_warning = (_source_title_exact_cast_conflict(
                         seg, _selection_source_title(proj, sel), char2actor)
                         if policy == _policy.EXACT else "")
-                    if (cast_warning
-                            and verifier.get("source_title_conflict_resolved") is not True):
+                    if (cast_warning and _cast_warning_resolution_reason(
+                            verifier, seg, char2actor)):
                         reasons.append("exact_source_title_cast_conflict_unresolved")
                         verifier = {**verifier, "source_title_cast_warning": cast_warning}
 

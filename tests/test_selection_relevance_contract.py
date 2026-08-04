@@ -794,6 +794,7 @@ def test_exact_scene_title_cast_warning_needs_pixel_resolution_but_can_be_resolv
     # correct window inside a compilation; once rebound to that exact question, strict publication
     # is allowed instead of treating the title itself as shot-level truth.
     sel.verifier["source_title_conflict_resolved"] = True
+    sel.verifier["reason"] = "The selected pixels show Catelyn Stark facing Littlefinger."
     sel.verifier["target_visible"] = True
     V.bind_selection_verifier_evidence(
         proj, sel, seg, sel.verifier, shot=shot, model="vision-test",

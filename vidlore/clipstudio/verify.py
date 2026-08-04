@@ -16,6 +16,7 @@ import base64
 import copy
 import json
 import re
+from collections import Counter
 from pathlib import Path
 
 from .models import (ClipProject, ScriptSegment, ClipSelection, FLAG_EXACT_MISSING,
@@ -983,6 +984,40 @@ def _project_char2actor(proj) -> dict[str, str]:
     return roster
 
 
+def _named_roster_characters(text: str, char2actor=None) -> set[str]:
+    """Return canonical roster characters explicitly named by text or a safe actor alias."""
+    normalized = " ".join(re.findall(r"[a-z0-9]+", str(text or "").lower()))
+    found: set[str] = set()
+    for raw_character, raw_actor in (char2actor or {}).items():
+        character = " ".join(re.findall(r"[a-z0-9]+", str(raw_character).lower()))
+        actor = " ".join(re.findall(r"[a-z0-9]+", str(raw_actor).lower()))
+        if not character:
+            continue
+        char_parts = character.split()
+        actor_parts = actor.split()
+        aliases = [character]
+        # Distinctive given names are safe; surnames alone conflate Stark/Lannister relatives.
+        if char_parts and len(char_parts[0]) >= 4:
+            aliases.append(char_parts[0])
+        if actor:
+            aliases.append(actor)
+            if actor_parts and len(actor_parts[0]) >= 4:
+                aliases.append(actor_parts[0])
+        if any(re.search(rf"\b{re.escape(alias)}\b", normalized) for alias in aliases):
+            found.add(character)
+    return found
+
+
+def _exact_cast_expected_characters(seg, char2actor=None) -> set[str]:
+    required = _named_roster_characters(
+        getattr(seg, "required_entity", "") or "", char2actor)
+    storyboard = " ".join((
+        getattr(seg, "expected_visual", "") or "",
+        getattr(seg, "scene_query", "") or "",
+    ))
+    return _named_roster_characters(storyboard, char2actor) - required
+
+
 def _source_title_exact_cast_conflict(seg, source_title: str, char2actor=None) -> str:
     """Return a strict-scene *warning* when a title names different co-character(s).
 
@@ -995,37 +1030,12 @@ def _source_title_exact_cast_conflict(seg, source_title: str, char2actor=None) -
     if not source_title or not char2actor or not _policy.verify_strict(seg):
         return ""
 
-    def _named(text: str) -> set[str]:
-        normalized = " ".join(re.findall(r"[a-z0-9]+", str(text or "").lower()))
-        found: set[str] = set()
-        for raw_character, raw_actor in (char2actor or {}).items():
-            character = " ".join(re.findall(r"[a-z0-9]+", str(raw_character).lower()))
-            actor = " ".join(re.findall(r"[a-z0-9]+", str(raw_actor).lower()))
-            if not character:
-                continue
-            char_parts = character.split()
-            actor_parts = actor.split()
-            aliases = [character]
-            # Distinctive given names are safe; surnames alone conflate Stark/Lannister relatives.
-            if char_parts and len(char_parts[0]) >= 4:
-                aliases.append(char_parts[0])
-            if actor:
-                aliases.append(actor)
-                if actor_parts and len(actor_parts[0]) >= 4:
-                    aliases.append(actor_parts[0])
-            if any(re.search(rf"\b{re.escape(alias)}\b", normalized) for alias in aliases):
-                found.add(character)
-        return found
-
-    required = _named(getattr(seg, "required_entity", "") or "")
-    storyboard = " ".join((
-        getattr(seg, "expected_visual", "") or "",
-        getattr(seg, "scene_query", "") or "",
-    ))
-    expected_secondary = _named(storyboard) - required
+    required = _named_roster_characters(
+        getattr(seg, "required_entity", "") or "", char2actor)
+    expected_secondary = _exact_cast_expected_characters(seg, char2actor)
     if not expected_secondary:
         return ""
-    titled = _named(source_title)
+    titled = _named_roster_characters(source_title, char2actor)
     # The job-local roster is intentionally compact and may omit a character named by a source
     # title.  A different given name attached to an expected character's exact surname is still
     # deterministic negative evidence (expected Catelyn Stark, title says Arya Stark).  This does
@@ -1055,6 +1065,102 @@ def _source_title_exact_cast_conflict(seg, source_title: str, char2actor=None) -
         return (f"exact storyboard names {sorted(expected_secondary)!r}, but source title names "
                 f"different cast {sorted(wrong)!r} and none of the expected co-characters")
     return ""
+
+
+def _cast_warning_resolution_reason(vd, seg, char2actor=None) -> str:
+    """Require a focused cast-warning KEEP to identify expected cast in its pixel evidence.
+
+    A model once set ``source_title_conflict_resolved=true`` on a Joffrey-only dagger shot while
+    its own reason never mentioned Catelyn.  The title still is not treated as frame-level proof;
+    this merely requires the claimed pixel resolution to say whom it actually saw.  Bound Face-ID
+    names may provide the same affirmative evidence.
+    """
+    if not isinstance(vd, dict) or vd.get("source_title_conflict_resolved") is not True:
+        return "source-title cast warning was not affirmatively resolved from selected pixels"
+    expected = _exact_cast_expected_characters(seg, char2actor)
+    if not expected:
+        return "source-title cast warning has no auditable expected co-character"
+    faceid_text = " ".join(str(name) for name in (
+        ((vd.get("selection_evidence") or {}).get("faceid_names") or [])))
+    faceid_characters = _named_roster_characters(faceid_text, char2actor)
+    if expected & faceid_characters:
+        return ""
+    evidence = " ".join((
+        str(vd.get("reason", "") or ""),
+        str(vd.get("source_title_conflict_evidence", "") or ""),
+    ))
+    # A name appearing in a negative explanation is not pixel proof.  Judge each contrast clause
+    # independently so ``not present in frame one, but visible in frame two`` can still resolve.
+    clauses = [" ".join(re.findall(r"[a-z0-9]+", clause.lower()))
+               for clause in re.split(r"[.;]|\bbut\b|\bhowever\b|\balthough\b", evidence,
+                                      flags=re.I)]
+    affirmative = (
+        "show", "shows", "shown", "showing", "depict", "depicts", "depicted",
+        "feature", "features", "featured", "include", "includes", "included",
+        "identify", "identifies", "identified", "confirm", "confirms", "confirmed",
+        "recognize", "recognizes", "recognized", "recognise", "recognises", "recognised",
+        "visible", "present", "seen", "appears", "appearing", "facing", "beside",
+        "holding", "standing", "sitting", "speaking", "walking", "entering", "in frame",
+        "on screen", "selected pixels", "face id",
+    )
+    roster_surname_counts = Counter(
+        parts[-1] for character in (char2actor or {})
+        if len(parts := str(character).lower().split()) >= 2)
+    for character in expected:
+        actor = str((char2actor or {}).get(character, "") or "").lower()
+        aliases = [character]
+        char_parts = character.split()
+        actor_parts = actor.split()
+        if char_parts and len(char_parts[0]) >= 4:
+            aliases.append(char_parts[0])
+        if actor:
+            aliases.append(actor)
+            if actor_parts and len(actor_parts[0]) >= 4:
+                aliases.append(actor_parts[0])
+        # Honorific+surnames are useful only when the roster makes them unambiguous.  A generic
+        # ``Lady Stark`` must not prove Catelyn when Arya/Sansa/another Stark is also in scope.
+        if len(char_parts) >= 2 and roster_surname_counts[char_parts[-1]] == 1:
+            aliases.append(f"lady {char_parts[-1]}")
+        for clause in clauses:
+            # If the full canonical/actor name is present, do not retry its shorter given-name
+            # alias after a negative full-name clause.  Otherwise ``Catelyn Stark is not present``
+            # could be rejected for the full name and then accidentally accepted as ``Catelyn``.
+            if re.search(rf"\b{re.escape(character)}\b", clause):
+                clause_aliases = [character]
+            elif actor and re.search(rf"\b{re.escape(actor)}\b", clause):
+                clause_aliases = [actor]
+            else:
+                clause_aliases = aliases
+            for alias in clause_aliases:
+                match = re.search(rf"\b{re.escape(alias)}\b", clause)
+                if not match:
+                    continue
+                words = clause.split()
+                alias_words = alias.split()
+                try:
+                    start = next(i for i in range(len(words))
+                                 if words[i:i + len(alias_words)] == alias_words)
+                except StopIteration:
+                    continue
+                window = " ".join(words[max(0, start - 6):start + len(alias_words) + 7])
+                alias_rx = rf"\b{re.escape(alias)}\b"
+                negative_before = re.search(
+                    rf"\b(?:no|without)\s+(?:the\s+)?{alias_rx}"
+                    rf"|\b(?:not|never|cannot|can\s+not|can\s+t|unable\s+to)\s+"
+                    rf"(?:(?:show|shows|showing|depict|depicts|feature|features|include|includes|"
+                    rf"identify|identifies|confirm|confirms|see|sees)\s+)?(?:the\s+)?{alias_rx}"
+                    rf"|\b(?:unclear|uncertain)\s+(?:whether|if)\s+(?:the\s+)?{alias_rx}",
+                    clause)
+                negative_after = re.search(
+                    rf"{alias_rx}\s+(?:(?:is|was|does|did|appears|seems|may|might|can|could)\s+)?"
+                    rf"(?:clearly\s+)?(?:not|absent|missing|offscreen|off\s+screen|"
+                    rf"outside\s+the\s+frame)\b", clause)
+                if negative_before or negative_after:
+                    continue
+                if any(re.search(rf"\b{re.escape(term)}\b", window) for term in affirmative):
+                    return ""
+    return ("source-title cast warning resolution did not identify any expected co-character "
+            f"with affirmative pixel evidence ({sorted(expected)!r})")
 
 
 def _project_source_title(proj, source_id: str) -> str:
@@ -1119,9 +1225,10 @@ def _strict_keep_rejection_reason(vd, seg=None, source_title: str = "", char2act
         return contradiction
     cast_warning = (_source_title_exact_cast_conflict(
         seg, source_title, char2actor) if seg is not None else "")
-    if cast_warning and vd.get("source_title_conflict_resolved") is not True:
-        return ("source-title cast warning was not affirmatively resolved from the selected "
-                f"pixels ({cast_warning})")
+    if cast_warning:
+        cast_resolution = _cast_warning_resolution_reason(vd, seg, char2actor)
+        if cast_resolution:
+            return f"{cast_resolution} ({cast_warning})"
     if vd.get("era_ok") is False:
         return "era_ok is false"
     if str(must_see or "").strip() and vd.get("target_visible") is not True:
@@ -1441,7 +1548,8 @@ def _venue_candidates(sel, seg, proj, get_shot, beat_era: str, cap: int = 8):
 def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
                                           exclude=None, beat_era: str = "",
                                           cap: int = 12, radius: int = 6,
-                                          source_cap: int = 4):
+                                          source_cap: int = 4,
+                                          allow_indexed_pool_sources: bool = False):
     """Return a small strict-repair pool around already-ranked, scene-affine seeds.
 
     Match deliberately keeps only a few shots per source in ``alternates``/``deep_alternates``.
@@ -1460,6 +1568,14 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
     orders unseen shots when available; distance from a retained seed is the deterministic fallback.
     The caller still applies the unchanged strict vision, exact-window QC, reuse ledger and
     materialization transaction.
+
+    ``allow_indexed_pool_sources`` is reserved for the scoped publication-recovery pass, after a
+    complete global rematch has already failed.  In that lane only, at most two native-HD sources
+    whose title/acquisition query match at least two non-generic storyboard terms may seed this
+    same bounded pool.  This repairs the measured failure where the exact source was indexed but
+    sat below match's source-diversity/deep-bench cut.  It does not change normal matching, enlarge
+    ``cap``, or approve pixels: every candidate still faces the unchanged strict vision, Window-QC,
+    reuse, materialization, and final publication contracts.
     """
     from .models import ClipCandidate
 
@@ -1484,7 +1600,10 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
     # These words describe the *container*, not the scene.  Removing them keeps a source from
     # qualifying merely because every upload is titled "Game of Thrones scene/episode".
     generic = {"game", "thrones", "scene", "scenes", "episode", "season", "clip", "clips",
-               "full", "hd", "official", "video", "moment", "moments"}
+               "full", "hd", "official", "video", "moment", "moments", "camera", "shot",
+               "shots", "closeup", "wide", "medium", "aerial", "overhead", "establishing",
+               "tracking", "pulling", "framing", "zoom", "pan", "because", "could",
+               "couldn't", "cannot", "test", "tested"}
 
     def _tokens(text):
         return {
@@ -1500,11 +1619,14 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
     if not (q_tokens or visual_tokens):
         return []
 
-    def _hits(wanted, present):
-        return sum(1 for w in wanted if any(
+    def _matching_terms(wanted, present):
+        return {w for w in wanted if any(
             t == w or (t.startswith(w) and len(t) - len(w) <= 2)
             or (w.startswith(t) and len(w) - len(t) <= 2)
-            for t in present))
+            for t in present)}
+
+    def _hits(wanted, present):
+        return len(_matching_terms(wanted, present))
 
     def _episode_code(text):
         """Return a normalized (season, episode) pair from an explicit upload label."""
@@ -1853,6 +1975,96 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
         banned = banned_source_ids(proj, include_auto=True)
     except Exception:
         banned = set()
+
+    # SCOPED INDEXED-POOL SOURCE LANE.  A global rematch can retain the right file only below the
+    # four-source strict-neighborhood cut (beat 51), or omit it from the deep bench entirely despite
+    # an exact acquisition query (beat 3).  Do not re-rank the project or widen normal verification.
+    # Once publication recovery explicitly opts in, admit only the two strongest metadata-bound,
+    # natively publishable sources as *seeds* inside the existing source/candidate caps.  A required
+    # entity alone is insufficient: one additional scene/visual term must independently match.
+    strict_pool_sources: dict[str, dict] = {}
+    if allow_indexed_pool_sources:
+        try:
+            from .quality_contract import native_video_ok as _native_pool_ok
+            from .quality_contract import probe_native_video_info as _probe_native_pool
+
+            ranked_pool_sources = []
+            seen_pool_sources = set()
+            storyboard_tokens = q_tokens | visual_tokens
+            for source_position, src in enumerate(getattr(proj, "sources", None) or []):
+                sid = str(getattr(src, "id", "") or "")
+                if (not sid or sid in seen_pool_sources or sid in banned
+                        or str(getattr(src, "status", "") or "") != "ok"):
+                    continue
+                seen_pool_sources.add(sid)
+                title = str(getattr(src, "title", "") or "")
+                extra = getattr(src, "extra", None) or {}
+                source_text = " ".join((
+                    title, sid.replace("_", " "), str(extra.get("query", "") or "")))
+                if beat_era and _era_conflict(beat_era, source_text):
+                    continue
+                try:
+                    if not _native_pool_ok(_probe_native_pool(
+                            str(getattr(src, "local_path", "") or ""))):
+                        continue
+                except Exception:
+                    continue                         # unknown bytes never gain a recovery seed
+                source_tokens = _tokens(source_text)
+                semantic_matches = _matching_terms(storyboard_tokens, source_tokens)
+                non_entity_matches = semantic_matches - entity_tokens
+                if len(semantic_matches) < 2 or not non_entity_matches:
+                    continue
+                title_matches = _matching_terms(storyboard_tokens, _tokens(title))
+                query_matches = _matching_terms(
+                    storyboard_tokens, _tokens(str(extra.get("query", "") or "")))
+                try:
+                    discovery_relevance = float(extra.get("relevance", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    discovery_relevance = 0.0
+                # The persisted acquisition query records why this file entered the project and
+                # is less vulnerable than a catchy title to incidental prose (measured: "All
+                # because I couldn't..." matched a beat containing "could not be tested").
+                rank = (
+                    len(semantic_matches), len(non_entity_matches), len(query_matches),
+                    len(title_matches), round(discovery_relevance, 4), -source_position)
+                ranked_pool_sources.append((rank, sid))
+
+            ranked_pool_sources.sort(key=lambda row: row[0], reverse=True)
+            # Resolve every prospective seed before mutating the retained-source map.  If source
+            # inspection unexpectedly fails halfway through, the opt-in lane must leave the old
+            # pool byte-for-byte intact rather than silently retaining a partial first mutation.
+            pending_pool_sources = {}
+            pending_new_seeds = []
+            for pool_rank, (_rank, sid) in enumerate(ranked_pool_sources[:2]):
+                if sid in source_seeds:
+                    pending_pool_sources[sid] = {
+                        "match_count": int(_rank[0]),
+                        "branch": "reprioritized_retained",
+                    }
+                    continue
+                try:
+                    pool_shots = sorted(
+                        getattr(get_shot, "all_shots", lambda _s: [])(sid) or [],
+                        key=lambda shot: int(getattr(shot, "index", -1)))
+                    seed_index = next(
+                        int(getattr(shot, "index", -1)) for shot in pool_shots
+                        if int(getattr(shot, "index", -1)) >= 0)
+                except (StopIteration, TypeError, ValueError):
+                    continue
+                pending_pool_sources[sid] = {
+                    "match_count": int(_rank[0]),
+                    "branch": "admitted_new_source",
+                }
+                pending_new_seeds.append((
+                    _deep_base + len(deep_seed_rows) + pool_rank, sid, seed_index))
+            for seed_order, sid, seed_index in pending_new_seeds:
+                _add_seed(seed_order, sid, seed_index, deep=True)
+            strict_pool_sources = pending_pool_sources
+        except Exception:
+            # This is retrieval opportunity, never approval.  Any metadata/probe failure preserves
+            # the old retained-source pool and lets the unchanged strict publication gate block.
+            strict_pool_sources = {}
+
     affine_sources = []
     anchor_episode_sources = set()
     for sid, seeds in source_seeds.items():
@@ -1895,7 +2107,8 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
         # available when the head is sparse, but a late character compilation cannot displace the
         # exact-scene source already present in the normal alternate list merely on noisy CLIP/title
         # overlap.
-        seed_tier = 0 if sid in head_source_ids else 1
+        seed_tier = (-1 if sid in strict_pool_sources else
+                     (0 if sid in head_source_ids else 1))
         affine_sources.append((seed_tier, -priority, source_order[sid], sid, seeds, affinity))
     affine_sources.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
 
@@ -2208,6 +2421,12 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
                        "visual_relevance": round(float(rel), 4) if rel is not None else -1.0,
                        "dialogue": round(dialogue, 3),
                        "quality": round(float(getattr(sh, "quality", 0.0) or 0.0), 3)}
+            if sid in strict_pool_sources:
+                signals["strict_indexed_pool_source"] = True
+                branch = str(strict_pool_sources[sid]["branch"])
+                signals[f"strict_indexed_pool_{branch}"] = 1.0
+                signals["source_metadata_match_count"] = int(
+                    strict_pool_sources[sid]["match_count"])
             if _moment and moment_lock > 0.0:
                 signals["moment_lock"] = round(moment_lock, 3)
                 try:
@@ -2410,7 +2629,8 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
 def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfig,
                       eng_cfg, *, max_replacements: int = 3, only_indices=None, progress=None,
                       materialize_promotions: bool = True,
-                      persist_project: bool = True) -> dict:
+                      persist_project: bool = True,
+                      strict_pool_recovery: bool = False) -> dict:
     """Verify every selection; replace failures with the best passing alternate; re-cut swaps by default.
     Returns a summary. No-op (records 'unavailable') if there's no LLM key.
     `only_indices` (a set of segment indices) restricts verification to just those beats — used by
@@ -2420,7 +2640,10 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
     update selection metadata so the strict contract can judge them, but their deterministic clip
     filenames are not overwritten until the caller commits the accepted scoped selections.
     `persist_project=False` keeps those exploratory metadata mutations in memory as well. Verdict
-    cache writes remain durable because they do not alter the selection/clip lineage transaction."""
+    cache writes remain durable because they do not alter the selection/clip lineage transaction.
+    `strict_pool_recovery=True` is for the publication-recovery transaction only: it permits the
+    bounded strict-neighborhood rung to inspect strongly metadata-bound native-HD sources already
+    indexed but omitted by the global variety/deep-bench cut. It does not alter any acceptance gate."""
     _subset = set(only_indices) if only_indices is not None else None
 
     def log(m):
@@ -3594,7 +3817,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     _npool = _strict_scene_neighborhood_candidates(
                         sel, seg, proj, get_shot, cfg, exclude=strict_tried,
                         beat_era=_era_of(seg), cap=_n_cap, radius=_n_radius,
-                        source_cap=_n_sources)
+                        source_cap=_n_sources,
+                        allow_indexed_pool_sources=bool(strict_pool_recovery))
                 except Exception as _n_exc:              # fail closed; old ladder remains intact
                     _npool = []
                     log(f"verify: seg{sel.segment_index} strict scene-neighborhood unavailable "
