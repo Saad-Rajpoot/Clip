@@ -234,6 +234,21 @@ def _venue_cache_save(proj) -> None:
         pass
 
 
+def _venue_fallback_for(seg) -> bool:
+    """Whether the preliminary still search should ask the exact venue question.
+
+    The first specificity-ladder rung has already changed the promise to character-general.  Asking
+    its candidates to prove the abandoned exact storyboard made that rung unsatisfiable and sent a
+    real Jaime footage gap straight to abstract.  Exact and abstract legacy callers retain their
+    existing venue search; only CHARACTER asks the generic subject question.
+    """
+    try:
+        from . import policy as _P
+        return _P.policy_of(seg) != _P.CHARACTER
+    except Exception:                                  # noqa: BLE001 — uncertainty stays strict
+        return True
+
+
 def _venue_fp(proj, kf_path: str, seg, faces, eng_cfg, model_id: str = "") -> str:
     """Fingerprint of the question _venue_verify ACTUALLY asks.
 
@@ -245,6 +260,7 @@ def _venue_fp(proj, kf_path: str, seg, faces, eng_cfg, model_id: str = "") -> st
     try:
         from . import verify as _V
         from . import policy as _P
+        venue_fallback = _venue_fallback_for(seg)
         return _V.verdict_fingerprint(
             src_hash=_src_hash_of(proj, kf_path), source_id=_sid_of_kf(kf_path),
             shot_start=0.0, shot_end=0.0,
@@ -256,7 +272,8 @@ def _venue_fp(proj, kf_path: str, seg, faces, eng_cfg, model_id: str = "") -> st
             era="", visual_policy=_P.policy_of(seg), is_specific=False,
             faceid_names=list(faces or []), multiframe=False,
             image_id=f"kf:{_V._file_fingerprint(kf_path)}",
-            model=(model_id or _vision_model(eng_cfg)), venue_fallback=True, must_see="")
+            model=(model_id or _vision_model(eng_cfg)),
+            venue_fallback=venue_fallback, must_see="")
     except Exception:                                    # noqa: BLE001 — no key → uncached call
         return ""
 
@@ -310,12 +327,13 @@ def _venue_verify(kf_path: str, seg, faces, eng_cfg, *, proj=None, cache=None):
             _pm_vv.incr("selfheal.venue.cache_hit")
             return dict(_hit)                            # copy: callers mutate their verdict
     _pm_vv.incr("selfheal.venue.call")
+    venue_fallback = _venue_fallback_for(seg)
     v = verify_frame(str(kf_path), seg.text, getattr(seg, "required_entity", "") or "",
                      getattr(seg, "required_kind", "") or "", list(faces or []), eng_cfg,
                      is_specific=False,
                      expected_visual=getattr(seg, "expected_visual", "") or "",
                      scene_query=getattr(seg, "scene_query", "") or "",
-                     venue_fallback=True)
+                     venue_fallback=venue_fallback)
     # Never turn an explicit provider/error status into a successful cached judgment.  Raw
     # ``verify_frame`` replies historically omit status, which is the one legacy-success form the
     # schema accepts; an explicitly non-ok status must remain non-ok all the way to the caller.
@@ -396,6 +414,29 @@ def _still_verdict_schema_error(verdict, seg=None, *, require_keep_facts: bool =
     return ""
 
 
+def _preliminary_still_keep(verdict, seg, *, require_conclusive: bool) -> bool:
+    """Policy-correct positive filter for one recovery candidate.
+
+    A CHARACTER rung exists to show its named person.  A model can occasionally emit ``keep`` for
+    an atmospheric frame while also saying that person is not visible; do not install that frame
+    merely to make the publication-strength pass reject it one call later.
+    """
+    if _still_verdict_schema_error(
+            verdict, seg, require_keep_facts=require_conclusive):
+        return False
+    if verdict.get("verdict") != "keep":
+        return False
+    try:
+        from . import policy as _P
+        character = _P.policy_of(seg) == _P.CHARACTER
+    except Exception:                                  # noqa: BLE001
+        character = False
+    if (character and str(getattr(seg, "required_entity", "") or "").strip()
+            and verdict.get("correct_subject_visible") is not True):
+        return False
+    return True
+
+
 def still_recover(proj, seg, sel, eng_cfg, *, pool=None, cand_n: int = 8,
                   used_paths=None, log=print, require_conclusive: bool = False) -> bool:
     """Pool-wide venue-bar still recovery for one beat.
@@ -420,8 +461,20 @@ def still_recover(proj, seg, sel, eng_cfg, *, pool=None, cand_n: int = 8,
         _discard_invalid_still(sel, why, log)
     pool = pool if pool is not None else _clean_pool(proj)
     used_paths = used_paths if used_paths is not None else set()
-    q = " ".join(x for x in (getattr(seg, "scene_query", ""),
-                             getattr(seg, "expected_visual", "")) if x) or seg.text
+    try:
+        from . import policy as _policy_rank
+        character_general = _policy_rank.policy_of(seg) == _policy_rank.CHARACTER
+    except Exception:                                  # noqa: BLE001
+        character_general = False
+    if character_general:
+        # The exact storyboard was deliberately surrendered before this rung.  Keeping it in the
+        # CLIP query hid ordinary Jaime frames below the same absent street-attack demand that the
+        # verifier no longer asks.  Rank by the current promise: named subject + narration only.
+        q = " ".join(x for x in (
+            getattr(seg, "required_entity", ""), getattr(seg, "text", "")) if x)
+    else:
+        q = " ".join(x for x in (getattr(seg, "scene_query", ""),
+                                 getattr(seg, "expected_visual", "")) if x) or seg.text
 
     # SPEED: rank via the certified persisted-embed path (_shot_relevance is numerically
     # identical to _clip_relevance — the persisted row IS the vector it would recompute;
@@ -482,10 +535,9 @@ def still_recover(proj, seg, sel, eng_cfg, *, pool=None, cand_n: int = 8,
                         pass                             # serial re-ask below
         except Exception:                                # noqa: BLE001
             return False
-        return any(not _still_verdict_schema_error(
+        return any(_preliminary_still_keep(
                        verdicts.get(sh.keyframe_path), seg,
-                       require_keep_facts=require_conclusive)
-                   and verdicts[sh.keyframe_path].get("verdict") == "keep"
+                       require_conclusive=require_conclusive)
                    for _r, _s, sh in batch)
 
     for _i in range(0, len(cands), _wave):
@@ -506,7 +558,8 @@ def still_recover(proj, seg, sel, eng_cfg, *, pool=None, cand_n: int = 8,
                 int(getattr(seg, "index", -1)), "specificity-ladder venue verification",
                 candidate=str(sh.keyframe_path or ""),
                 detail=schema_error)
-        if not schema_error and v.get("verdict") == "keep":
+        if not schema_error and _preliminary_still_keep(
+                v, seg, require_conclusive=require_conclusive):
             _install_still(sel, sh.keyframe_path, sid, int(getattr(sh, "index", -1)), rel)
             used_paths.add(sh.keyframe_path)
             log(f"self-heal: beat {seg.index} — verified still installed "
@@ -927,16 +980,31 @@ def _soften_and_retry(proj, seg, sel, eng, pool, used, log, *,
             used.update(copy.deepcopy(used_before))
 
     try:
+        character_rejects = []
         if _soften_to_character(
-                seg, log, surrender_verbatim_quote=surrender_verbatim_quote) and still_recover(
-                proj, seg, sel, eng, pool=pool, used_paths=used, cand_n=_n, log=log,
-                require_conclusive=True):
-            ok, why = _strictly_confirm_concrete_still(
-                proj, seg, sel, eng, require_conclusive=True)
-            if ok:
-                sel.image_meta["selfheal_rung"] = "character_specific"
-                return True
-            _discard_invalid_still(sel, why, log)
+                seg, log, surrender_verbatim_quote=surrender_verbatim_quote):
+            # A cheap candidate question can produce a false-positive holding image.  Continue the
+            # already-bounded ranked window after the final byte-bound proof rejects it instead of
+            # abandoning CHARACTER after one frame.  Rejected paths remain excluded only during
+            # this rung and are released before return/fall-through for unrelated beats.
+            for _attempt in range(_n):
+                if not still_recover(
+                        proj, seg, sel, eng, pool=pool, used_paths=used, cand_n=_n, log=log,
+                        require_conclusive=True):
+                    break
+                candidate_path = str(getattr(sel, "image_path", "") or "")
+                ok, why = _strictly_confirm_concrete_still(
+                    proj, seg, sel, eng, require_conclusive=True)
+                if ok:
+                    for path in character_rejects:
+                        used.discard(path)
+                    sel.image_meta["selfheal_rung"] = "character_specific"
+                    return True
+                _discard_invalid_still(sel, why, log)
+                if candidate_path:
+                    character_rejects.append(candidate_path)
+            for path in character_rejects:
+                used.discard(path)
         # SECOND AND FINAL RUNG. Dropping the requirement is not enough when the NARRATION itself
         # names the unfindable thing: beat 24 reads "The flayed man banners brought down to the
         # ground", and the still verifier judges candidates against that sentence, so no frame in
@@ -1609,12 +1677,44 @@ def restore_stale_selection_relevance_softenings(proj, segments, *, log=None) ->
         int(getattr(s, "index", -1)): s
         for s in (getattr(proj, "segments", None) or [])
     }
+    selections = {
+        int(getattr(s, "segment_index", -1)): s
+        for s in (getattr(proj, "selections", None) or [])
+    }
+    from .match import banned_source_ids
+    banned = banned_source_ids(proj, include_auto=True)
+    eligible_sources = {
+        str(getattr(src, "id", "") or "")
+        for src in (getattr(proj, "sources", None) or [])
+        if str(getattr(src, "status", "") or "") == SOURCE_OK
+    }
+
+    def _softened_owner_stale_reason(row, idx: int) -> str:
+        """Reject a rebind when its actually installed fallback owner is no longer eligible."""
+        new_state = row.get("new") if isinstance(row.get("new"), dict) else {}
+        saved_meta = (new_state.get("image_meta")
+                      if isinstance(new_state.get("image_meta"), dict) else {})
+        current_sel = selections.get(idx)
+        current_meta = (getattr(current_sel, "image_meta", None) or {}) \
+            if current_sel is not None else {}
+        saved_sid = str(saved_meta.get("src", "") or "")
+        current_sid = str(current_meta.get("src", "") or "")
+        if not saved_sid or not current_sid:
+            return "softened_still_owner_missing"
+        if saved_sid != current_sid:
+            return "softened_still_owner_changed"
+        if saved_sid not in eligible_sources:
+            return "softened_still_owner_not_source_ok"
+        if saved_sid in banned:
+            return "softened_still_owner_banned"
+        return ""
     active_rows = [
         row for row in rows if isinstance(row, dict)
         and row.get("status") == "softened" and row.get("active", True)
     ]
     stale = []
     unchanged = []
+    rebound = []
     stale_reasons = {}
     for row in active_rows:
         idx = int(row.get("segment_index", -1))
@@ -1623,73 +1723,93 @@ def restore_stale_selection_relevance_softenings(proj, segments, *, log=None) ->
             raise RuntimeError(
                 f"softened beat {row.get('segment_index')} lacks a pool fingerprint")
         reason = ""
-        if bound != current_fp:
-            reason = "publishable_pool_changed"
-        else:
-            authorization = row.get("authorization")
-            auth_kind = str((authorization or {}).get("authorization_kind", "") or "") \
-                if isinstance(authorization, dict) else ""
-            original = row.get("original")
-            new_state = row.get("new") if isinstance(row.get("new"), dict) else {}
-            cleared_quote = bool(
-                isinstance(original, dict) and original.get("quote")
-                and not new_state.get("quote"))
-            native_surrender = bool(
-                auth_kind == _NATIVE_HD_GAP_CLASSIFICATION
-                or (isinstance(authorization, dict)
-                    and authorization.get("surrender_verbatim_quote") is True)
-                or (cleared_quote and str(row.get("quote_branch", "") or "") == "verbatim"))
-            evidence_bound = bool(
-                isinstance(authorization, dict)
-                and authorization.get("strict_acquisition_exhausted") is True)
-            if native_surrender and (
-                    auth_kind != _NATIVE_HD_GAP_CLASSIFICATION
-                    or authorization.get("surrender_verbatim_quote") is not True):
-                reason = "native_gap_authorization_missing_or_malformed"
-            elif evidence_bound or native_surrender:
-                original = row.get("original")
-                base = persisted.get(idx) or passed.get(idx)
-                if not isinstance(original, dict) or base is None:
-                    reason = "gap_evidence_original_state_missing"
-                else:
-                    strict_seg = copy.deepcopy(base)
-                    try:
-                        for field in _SOFTENING_SEGMENT_FIELDS:
-                            setattr(strict_seg, field, copy.deepcopy(original[field]))
-                    except Exception:
-                        reason = "gap_evidence_original_state_malformed"
-                    if not reason:
-                        current_evidence, evidence_reason = \
-                            _reviewed_exhaustion_evidence(proj, strict_seg)
-                        if current_evidence is None:
-                            reason = f"gap_evidence_stale:{evidence_reason}"
-                        else:
-                            for field in (
-                                    "authorization_kind", "evidence_source", "evidence_sha256",
-                                    "evidence_schema_version", "nonpublishable_exact_sources"):
-                                if current_evidence.get(field) != authorization.get(field):
-                                    reason = f"gap_authorization_{field}_changed"
-                                    break
-                            if (not reason and native_surrender
-                                    and current_evidence.get(
-                                        "surrender_verbatim_quote") is not True):
-                                reason = "native_gap_quote_surrender_no_longer_authorized"
+        authorization = row.get("authorization")
+        auth_kind = str((authorization or {}).get("authorization_kind", "") or "") \
+            if isinstance(authorization, dict) else ""
+        original = row.get("original")
+        new_state = row.get("new") if isinstance(row.get("new"), dict) else {}
+        cleared_quote = bool(
+            isinstance(original, dict) and original.get("quote")
+            and not new_state.get("quote"))
+        native_surrender = bool(
+            auth_kind == _NATIVE_HD_GAP_CLASSIFICATION
+            or (isinstance(authorization, dict)
+                and authorization.get("surrender_verbatim_quote") is True)
+            or (cleared_quote and str(row.get("quote_branch", "") or "") == "verbatim"))
+        evidence_bound = bool(
+            isinstance(authorization, dict)
+            and authorization.get("strict_acquisition_exhausted") is True)
+        if native_surrender and (
+                auth_kind != _NATIVE_HD_GAP_CLASSIFICATION
+                or authorization.get("surrender_verbatim_quote") is not True):
+            reason = "native_gap_authorization_missing_or_malformed"
+        elif evidence_bound or native_surrender:
+            base = persisted.get(idx) or passed.get(idx)
+            if not isinstance(original, dict) or base is None:
+                reason = "gap_evidence_original_state_missing"
+            else:
+                strict_seg = copy.deepcopy(base)
+                try:
+                    for field in _SOFTENING_SEGMENT_FIELDS:
+                        setattr(strict_seg, field, copy.deepcopy(original[field]))
+                except Exception:
+                    reason = "gap_evidence_original_state_malformed"
+                if not reason:
+                    current_evidence, evidence_reason = \
+                        _reviewed_exhaustion_evidence(proj, strict_seg)
+                    if current_evidence is None:
+                        reason = f"gap_evidence_stale:{evidence_reason}"
+                    else:
+                        for field in (
+                                "authorization_kind", "evidence_source", "evidence_sha256",
+                                "evidence_schema_version", "nonpublishable_exact_sources"):
+                            if current_evidence.get(field) != authorization.get(field):
+                                reason = f"gap_authorization_{field}_changed"
+                                break
+                        if (not reason and native_surrender
+                                and current_evidence.get(
+                                    "surrender_verbatim_quote") is not True):
+                            reason = "native_gap_quote_surrender_no_longer_authorized"
+        if not reason and bound != current_fp:
+            if evidence_bound:
+                # A matcher-only eligibility/ban change can alter the publishable pool while the
+                # stronger content-hashed all-indexed exhaustion proof remains current.  Rebind the
+                # active softening instead of reviving an exact promise that the complete pool is
+                # still proven unable to satisfy.  New/index-changed sources already failed the
+                # evidence validation above and therefore restore normally.
+                reason = _softened_owner_stale_reason(row, idx)
+                if not reason:
+                    row["rebound_from_pool_fingerprint"] = bound
+                    row["rebound_from_pool_source_count"] = row.get("pool_source_count")
+                    row["pool_fingerprint"] = current_fp
+                    row["pool_source_count"] = current_n
+                    row["rebound_reason"] = "current_all_indexed_strict_exhaustion_evidence"
+                    rebound.append(row)
+                    if callable(log):
+                        log(f"semantic-gap: beat {idx} rebound to the current publishable pool; "
+                            "its all-indexed strict-exhaustion evidence is still current")
+            else:
+                reason = "publishable_pool_changed"
         if reason:
             stale.append(row)
             stale_reasons[idx] = reason
         else:
             unchanged.append(row)
     if not stale:
+        if rebound:
+            marker["pool_fingerprint"] = current_fp
+            marker["pool_source_count"] = current_n
+            marker["last_checked_pool_fingerprint"] = current_fp
+            marker["last_checked_pool_source_count"] = current_n
+            marker["rebound_count"] = int(marker.get("rebound_count", 0) or 0) + len(rebound)
+            _persist_softening_payload(proj, marker)
         return {
             "restored": [],
             "unchanged": sorted(int(r.get("segment_index", -1)) for r in unchanged),
+            "rebound": sorted(int(r.get("segment_index", -1)) for r in rebound),
             "pool_fingerprint": current_fp,
         }
 
-    selections = {
-        int(getattr(s, "segment_index", -1)): s
-        for s in (getattr(proj, "selections", None) or [])
-    }
     snapshots = []
     restored = []
     try:
@@ -1738,6 +1858,10 @@ def restore_stale_selection_relevance_softenings(proj, segments, *, log=None) ->
             and str(r.get("status", "")).startswith("restored_"))
         marker["last_checked_pool_fingerprint"] = current_fp
         marker["last_checked_pool_source_count"] = current_n
+        if rebound:
+            marker["pool_fingerprint"] = current_fp
+            marker["pool_source_count"] = current_n
+            marker["rebound_count"] = int(marker.get("rebound_count", 0) or 0) + len(rebound)
         _persist_softening_payload(proj, marker)
     except Exception:
         for obj, state in reversed(snapshots):
@@ -1747,6 +1871,7 @@ def restore_stale_selection_relevance_softenings(proj, segments, *, log=None) ->
     return {
         "restored": sorted(restored),
         "unchanged": sorted(int(r.get("segment_index", -1)) for r in unchanged),
+        "rebound": sorted(int(r.get("segment_index", -1)) for r in rebound),
         "pool_fingerprint": current_fp,
     }
 
@@ -2331,8 +2456,9 @@ def _semantic_gap_authorizations(proj, audit: dict, *, cfg=None) \
            for i in confirmed):
         return {}, "stale_gap_review_beat_changed"
     pool_fp, _pool_n = _gap_pool_fingerprint(proj)
-    if not review.get("pool_fingerprint") or str(review.get("pool_fingerprint")) != pool_fp:
-        return {}, "stale_gap_review_source_pool_changed"
+    review_pool_stale = bool(
+        not review.get("pool_fingerprint")
+        or str(review.get("pool_fingerprint")) != pool_fp)
 
     from .relevance_contract import completed_deliberate_exact_downgrade
     out: dict[int, dict] = {}
@@ -2349,6 +2475,13 @@ def _semantic_gap_authorizations(proj, audit: dict, *, cfg=None) \
         # publishable-HD copy exists.  Indeterminate/missing quote typing can never enter either
         # path.  Nonquoted and confirmed-paraphrase beats retain the existing schema-2 behavior.
         evidence, _evidence_reason = _reviewed_exhaustion_evidence(proj, seg)
+        # Ordinary actual-frame gap classifications are bound to the publishable pool and become
+        # stale when it changes.  A completed strict-exhaustion row is stronger: it is content-
+        # hashed against every indexed OK source, so matcher-only pool drift may still authorize
+        # this one beat after the per-beat evidence validator above succeeds.  Any all-indexed
+        # source/index change makes ``evidence`` None and continues to fail closed.
+        if review_pool_stale and evidence is None:
+            continue
         native_quote_gap = bool(
             quote and branch == "verbatim" and isinstance(evidence, dict)
             and evidence.get("authorization_kind") == _NATIVE_HD_GAP_CLASSIFICATION)
@@ -2394,6 +2527,10 @@ def _semantic_gap_authorizations(proj, audit: dict, *, cfg=None) \
                     evidence.get("nonpublishable_exact_sources") or []),
             })
         out[idx] = authorization
+    if out and review_pool_stale:
+        return out, "current_all_indexed_strict_exhaustion_evidence"
+    if review_pool_stale:
+        return {}, "stale_gap_review_source_pool_changed"
     return out, "confirmed_actual_frame_audit"
 
 

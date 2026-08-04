@@ -368,6 +368,108 @@ def test_concrete_still_recheck_asks_the_current_authorized_policy(
         "exact_scene" if expected_specific else "contextual_fallback")
 
 
+@pytest.mark.parametrize(("policy", "expected_venue"), [
+    (P.EXACT, True),
+    (P.CHARACTER, False),
+])
+def test_preliminary_still_question_follows_the_current_policy(
+        policy, expected_venue, monkeypatch, tmp_path):
+    frame = tmp_path / "candidate.jpg"
+    frame.write_bytes(b"show pixels")
+    seg = Seg(
+        visual_policy=policy, is_specific_claim=(policy == P.EXACT),
+        required_kind="character", required_entity="Jaime Lannister")
+    asked = []
+
+    def verify(*_args, **kwargs):
+        asked.append(kwargs.get("venue_fallback"))
+        return _valid_keep()
+
+    monkeypatch.setattr(V, "verify_frame", verify)
+    verdict = S._venue_verify(
+        str(frame), seg, [], NS(anthropic_model="vision-test"), proj=None, cache=None)
+
+    assert verdict["verdict"] == "keep"
+    assert asked == [expected_venue]
+
+
+def test_character_preliminary_keep_requires_the_named_subject():
+    seg = Seg(
+        visual_policy=P.CHARACTER, is_specific_claim=False,
+        required_kind="character", required_entity="Jaime Lannister")
+    atmosphere_only = _valid_keep(correct_subject_visible=False)
+
+    assert S._preliminary_still_keep(
+        atmosphere_only, seg, require_conclusive=True) is False
+    assert S._preliminary_still_keep(
+        _valid_keep(), seg, require_conclusive=True) is True
+
+
+def test_character_still_ranking_drops_the_abandoned_exact_storyboard(
+        monkeypatch, tmp_path):
+    from vidlore.clipstudio import image_fallback as IF
+
+    frame = tmp_path / "jaime.jpg"
+    frame.write_bytes(b"show pixels")
+    shot = Shot(source_id="show", index=0, start=0.0, end=2.0,
+                keyframe_path=str(frame), transcript="")
+    seg = Seg(
+        text="That order changes Jaime's position.",
+        visual_policy=P.CHARACTER, is_specific_claim=False,
+        required_kind="character", required_entity="Jaime Lannister",
+        scene_query="Jaime attacks Ned on horseback in the street",
+        expected_visual="Jaime orders Ned's men killed during the street attack")
+    sel = NS(segment_index=seg.index, image_path="", image_meta={})
+    queries = []
+
+    def relevance(_shot, _path, query, **_kwargs):
+        queries.append(query)
+        return 0.9
+
+    monkeypatch.setattr(IF, "_shot_relevance", relevance)
+    monkeypatch.setattr(S, "_venue_verify",
+                        lambda *_a, **_k: {"verdict": "replace", "confidence": 1.0})
+    proj = NS(root=str(tmp_path), index_dir=tmp_path, output_dir=tmp_path)
+
+    assert S.still_recover(
+        proj, seg, sel, NS(), pool=[("show", shot)], used_paths=set(),
+        log=lambda _m: None) is False
+    assert queries == ["Jaime Lannister That order changes Jaime's position."]
+    assert "horseback" not in queries[0] and "street attack" not in queries[0]
+
+
+def test_character_rung_continues_after_first_final_proof_rejects(monkeypatch):
+    seg = Seg(required_kind="character", required_entity="Jaime Lannister")
+    sel = NS(segment_index=seg.index, image_path="", image_meta={})
+    used = {"already-used.jpg"}
+    candidates = iter(["false-positive.jpg", "jaime.jpg"])
+    recovery_calls = []
+
+    def recover(_proj, _seg, selection, _eng, *, used_paths, **_kwargs):
+        try:
+            path = next(candidates)
+        except StopIteration:
+            return False
+        recovery_calls.append(path)
+        selection.image_path = path
+        selection.image_meta = {"source": "source-frame-recovery"}
+        used_paths.add(path)
+        return True
+
+    proofs = iter([(False, "Jaime is not identifiable"), (True, "")])
+    monkeypatch.setattr(S, "still_recover", recover)
+    monkeypatch.setattr(S, "_strictly_confirm_concrete_still",
+                        lambda *_a, **_k: next(proofs))
+
+    assert S._soften_and_retry(
+        NS(), seg, sel, NS(), [], used, lambda _m: None) is True
+    assert recovery_calls == ["false-positive.jpg", "jaime.jpg"]
+    assert sel.image_path == "jaime.jpg"
+    assert sel.image_meta["selfheal_rung"] == "character_specific"
+    assert "false-positive.jpg" not in used
+    assert "jaime.jpg" in used
+
+
 def test_softening_candidate_count_excludes_inactive_history(monkeypatch):
     monkeypatch.setattr(S, "_gap_pool_fingerprint", lambda _proj: ("pool-fp", 91))
     historical = {
@@ -804,7 +906,11 @@ def test_bound_completed_exhaustion_runs_ladder_before_acquire(monkeypatch, tmp_
 
     def ladder(_proj, target, selection, *_args, **_kwargs):
         target.visual_policy = P.ABSTRACT
-        selection.image_meta = {"selfheal_rung": "abstract"}
+        selection.image_path = str(tmp_path / "shot_0.jpg")
+        selection.image_meta = {
+            "source": "source-frame-recovery", "src": "show", "shot": 0,
+            "selfheal_rung": "abstract",
+        }
         return True
 
     monkeypatch.setattr(S, "_soften_and_retry", ladder)
@@ -852,6 +958,10 @@ def test_match_auto_ban_does_not_stale_completed_whole_indexed_exhaustion(
     assert S._gap_pool_fingerprint(proj)[0] != review_fp
     assert S._gap_absence_pool_fingerprint(proj)[0] == \
         proj.meta["selection_relevance_gap_review"]["absence_pool_fingerprint"]
+    from vidlore.clipstudio import relevance_contract as R
+    audit = R.evaluate_selection_relevance(proj, [seg])
+    assert S.semantic_gap_candidates(proj, audit) == (
+        [24], "current_all_indexed_strict_exhaustion_evidence")
     _stub_phase1_search(monkeypatch)
     monkeypatch.setattr(S, "beat_unfillable", lambda _seg: False)
     acquired = []
@@ -874,6 +984,98 @@ def test_match_auto_ban_does_not_stale_completed_whole_indexed_exhaustion(
                if r["status"] == "softened")
     assert row["basis"] == "phase1_bound_strict_acquisition_exhausted"
     assert row["pool_fingerprint"] == S._gap_pool_fingerprint(proj)[0]
+
+
+def test_active_strict_exhaustion_softening_rebinds_on_publishable_only_drift(
+        monkeypatch, tmp_path):
+    proj, seg, _sel = _phase1_evidence_fixture(tmp_path, index=24)
+    aux_media = tmp_path / "auxiliary.mp4"
+    aux_media.write_bytes(b"already-reviewed auxiliary footage")
+    proj.sources.append(SourceVideo(
+        id="auxiliary", url="aux", title="Already reviewed scene", permission="owner",
+        status="ok", local_path=str(aux_media)))
+    proj.shots_path("auxiliary").write_text(json.dumps([]))
+    _bind_completed_exhaustion(proj, seg)
+    _stub_phase1_search(monkeypatch)
+    monkeypatch.setattr(S, "beat_unfillable", lambda _seg: False)
+
+    def ladder(_proj, target, selection, *_args, **_kwargs):
+        target.visual_policy = P.ABSTRACT
+        selection.image_path = str(tmp_path / "shot_0.jpg")
+        selection.image_meta = {
+            "source": "source-frame-recovery", "src": "show", "shot": 0,
+            "selfheal_rung": "abstract",
+        }
+        return True
+
+    monkeypatch.setattr(S, "_soften_and_retry", ladder)
+    assert S.heal_blocked_beats(
+        proj, [seg], None, blocked=[24], policy="approved_testing",
+        allow_acquire=True, log=lambda _m: None) == 1
+    old_fp = next(r for r in proj.meta["selection_relevance_gap_softening"]["beats"]
+                  if r["status"] == "softened")["pool_fingerprint"]
+
+    proj.meta["auto_rejected_sources"] = ["auxiliary"]
+    current_fp = S._gap_pool_fingerprint(proj)[0]
+    assert current_fp != old_fp
+    assert S._gap_absence_pool_fingerprint(proj)[0] == \
+        proj.meta["selection_relevance_gap_review"]["absence_pool_fingerprint"]
+
+    result = S.restore_stale_selection_relevance_softenings(proj, [seg])
+
+    assert result["restored"] == []
+    assert result["unchanged"] == result["rebound"] == [24]
+    assert seg.visual_policy == P.ABSTRACT
+    row = next(r for r in proj.meta["selection_relevance_gap_softening"]["beats"]
+               if r["status"] == "softened")
+    assert row["pool_fingerprint"] == current_fp
+    assert row["rebound_from_pool_fingerprint"] == old_fp
+    assert row["rebound_reason"] == "current_all_indexed_strict_exhaustion_evidence"
+    marker = proj.meta["selection_relevance_gap_softening"]
+    assert marker["pool_fingerprint"] == current_fp
+    assert marker["pool_source_count"] == S._gap_pool_fingerprint(proj)[1]
+
+
+def test_active_strict_exhaustion_softening_restores_if_fallback_owner_is_banned(
+        monkeypatch, tmp_path):
+    proj, seg, sel = _phase1_evidence_fixture(tmp_path, index=24)
+    aux_media = tmp_path / "auxiliary.mp4"
+    aux_media.write_bytes(b"already-reviewed auxiliary footage")
+    proj.sources.append(SourceVideo(
+        id="auxiliary", url="aux", title="Already reviewed scene", permission="owner",
+        status="ok", local_path=str(aux_media)))
+    proj.shots_path("auxiliary").write_text(json.dumps([]))
+    _bind_completed_exhaustion(proj, seg)
+    _stub_phase1_search(monkeypatch)
+    monkeypatch.setattr(S, "beat_unfillable", lambda _seg: False)
+
+    def ladder(_proj, target, selection, *_args, **_kwargs):
+        target.visual_policy = P.ABSTRACT
+        selection.image_path = str(tmp_path / "shot_0.jpg")
+        selection.image_meta = {
+            "source": "source-frame-recovery", "src": "show", "shot": 0,
+            "selfheal_rung": "abstract",
+        }
+        return True
+
+    monkeypatch.setattr(S, "_soften_and_retry", ladder)
+    assert S.heal_blocked_beats(
+        proj, [seg], None, blocked=[24], policy="approved_testing",
+        allow_acquire=True, log=lambda _m: None) == 1
+    proj.meta["auto_rejected_sources"] = ["show"]
+    assert S._gap_absence_pool_fingerprint(proj)[0] == \
+        proj.meta["selection_relevance_gap_review"]["absence_pool_fingerprint"]
+
+    result = S.restore_stale_selection_relevance_softenings(proj, [seg])
+
+    assert result["restored"] == [24]
+    assert result["rebound"] == []
+    assert seg.visual_policy == P.EXACT
+    assert sel.image_path == ""
+    row = next(r for r in proj.meta["selection_relevance_gap_softening"]["beats"]
+               if r["segment_index"] == 24)
+    assert row["status"] == "restored_evidence_stale"
+    assert row["restore_reason"] == "softened_still_owner_banned"
 
 
 def test_reviewed_exhaustion_is_consumed_before_an_ordinary_beat_mutates_pool(

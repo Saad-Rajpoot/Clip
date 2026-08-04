@@ -305,6 +305,15 @@ _VAGUE_SUBJECT_RX = re.compile(
     r"\b(?:those|these)\s+people\b|\bsomeone\s+(?:is\s+)?(?:checking|verifying)\b",
     re.I,
 )
+# A bare negative-existence sentence is an analytical claim, not an observable exact moment.
+# The beat model twice completed essay lines (``There is no ledger`` / ``There are no witnesses
+# named``) from global context into a specific dagger/brothel storyboard.  Neither line names that
+# object, venue, or cast, and absence itself cannot be proven from one short shot.  Keep this to a
+# whole, short noun-phrase sentence so ``there was no way to check ...`` in a longer authored
+# argument is not swept up.
+_PURE_NEGATIVE_EXISTENCE_RX = re.compile(
+    r"^\s*there\s+(?:is|are|was|were)\s+no\s+"
+    r"[a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,4}[.!?]?\s*$", re.I)
 # Information-acquisition narration names an exact event, but it does not name the mechanism by
 # which the character learns it.  The beat model has repeatedly turned ``Varys learns she is in the
 # city`` into a literal child-whisper/eye-widening shot that does not exist.  Keep the real event
@@ -740,6 +749,15 @@ def _exact_direction_grounding(beat: ScriptSegment, directive: dict) -> dict:
     if _BEAT_LOCAL_SCENE_POINTER_RX.search(narration):
         return {"grounded": True, "reason": "indirect_scene_reference_in_narration",
                 "shared_terms": sorted(shared)[:8], "entity_grounded": bool(entity_shared)}
+    if _PURE_NEGATIVE_EXISTENCE_RX.fullmatch(narration):
+        return {
+            "grounded": False,
+            "reason": "negative_existence_is_not_an_observable_exact_scene",
+            "shared_terms": sorted(shared)[:8],
+            "entity_grounded": False,
+            "subject_named": False,
+            "fallback_policy": _policy.ABSTRACT,
+        }
 
     expected_visual = str(directive.get("expected_visual", "") or "")
     # Preserve the exact information event, but do not let whole-story context fabricate the
@@ -941,8 +959,9 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
             # ordinary semantic footage and retain the discarded identity only in audit metadata.
             guessed_role_identity = bool(
                 grounding.get("analyzer_guessed_required_entity"))
-            resolved = (_policy.CHARACTER
-                        if subject_named and not guessed_role_identity else _policy.FILLER)
+            resolved = str(grounding.get("fallback_policy") or (
+                _policy.CHARACTER
+                if subject_named and not guessed_role_identity else _policy.FILLER))
             marker["to_policy"] = resolved
             beat.expected_visual = str(getattr(beat, "text", "") or "")[:200]
             grounded_role = str(grounding.get("grounded_subject_role") or "")
@@ -1044,7 +1063,7 @@ def _sanitize_adjacent_quote_borrowing(beats) -> int:
     return changed
 
 
-_BEAT_GROUNDING_AUDIT_SCHEMA = 6
+_BEAT_GROUNDING_AUDIT_SCHEMA = 7
 
 
 def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
@@ -1100,11 +1119,16 @@ def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
         "nominal_guessed_identity_cleared": sum(
             bool(m.get("analyzer_guessed_required_entity"))
             and m.get("to_policy") == _policy.FILLER for m in records.values()),
+        "negative_existence_downgraded": sum(
+            m.get("reason") == "negative_existence_is_not_an_observable_exact_scene"
+            for m in records.values()),
         "downgraded": downgraded,
         "to_character_specific": sum(
             m.get("to_policy") == _policy.CHARACTER for m in records.values()),
         "to_generic_filler": sum(
             m.get("to_policy") == _policy.FILLER for m in records.values()),
+        "to_abstract_effect": sum(
+            m.get("to_policy") == _policy.ABSTRACT for m in records.values()),
     }
     analysis.beat_grounding_audit = {
         "schema": _BEAT_GROUNDING_AUDIT_SCHEMA,
@@ -1303,6 +1327,21 @@ def revalidate_cached_directions(beats, analysis: ScriptAnalysis | None = None) 
             existing_marker["cached_revalidation_schema"] = _CACHED_DIRECTION_GUARD_SCHEMA
             if _sanitized_guard_is_effective(beat, existing_marker):
                 preserved_sanitized_provenance += 1
+            continue
+        if (prior_guard_schema < _CACHED_DIRECTION_GUARD_SCHEMA
+                and isinstance(existing_marker, dict)
+                and _sanitized_guard_is_effective(beat, existing_marker)
+                and not _PURE_NEGATIVE_EXISTENCE_RX.fullmatch(
+                    str(getattr(beat, "text", "") or ""))):
+            # Schema 7 adds one narrow semantic migration.  Effective schema-6 sanitizer markers
+            # already truthfully describe their post-camera/composition fields; replaying those
+            # fields as a fresh directive would erase the measured sanitizer provenance without
+            # changing the contract.  Advance that provenance in place, except for the new pure-
+            # negative class which must actually be revalidated and downgraded.
+            existing_marker["guard_schema"] = _CACHED_DIRECTION_GUARD_SCHEMA
+            existing_marker["cached_revalidation_schema"] = \
+                _CACHED_DIRECTION_GUARD_SCHEMA
+            preserved_sanitized_provenance += 1
             continue
         if (isinstance(existing_marker, dict)
                 and existing_marker.get("guard_schema") == _CACHED_DIRECTION_GUARD_SCHEMA

@@ -299,6 +299,59 @@ def test_shared_abstract_term_does_not_ground_an_invented_subject_for_vague_narr
     assert beat._analyzer_grounding_guard["shared_terms"] == ["verification"]
 
 
+@pytest.mark.parametrize(
+    "text, expected_visual, scene_query, required_entity, required_kind",
+    [
+        (
+            "There is no ledger.",
+            "Close-up of the dagger's blank hilt with no ledger or names",
+            "Game of Thrones dagger brothel no ledger",
+            "the dagger",
+            "object",
+        ),
+        (
+            "There are no witnesses named.",
+            "Wide shot of the brothel with only Catelyn and Littlefinger present",
+            "Game of Thrones brothel interior Catelyn Littlefinger alone",
+            "the brothel",
+            "location",
+        ),
+    ],
+)
+def test_pure_negative_existence_cannot_inherit_an_exact_scene_from_essay_context(
+        text, expected_visual, scene_query, required_entity, required_kind):
+    beat = _apply(
+        text,
+        expected_visual=expected_visual,
+        scene_query=scene_query,
+        required_entity=required_entity,
+        required_kind=required_kind,
+    )
+
+    assert beat.visual_policy == P.ABSTRACT
+    assert beat.is_specific_claim is False
+    assert beat.expected_visual == text
+    assert beat.scene_query == beat.quote == ""
+    assert beat.required_entity == beat.required_kind == ""
+    marker = beat._analyzer_grounding_guard
+    assert marker["reason"] == "negative_existence_is_not_an_observable_exact_scene"
+    assert marker["to_policy"] == P.ABSTRACT
+
+
+def test_embedded_negative_clause_with_a_real_subject_is_not_mass_downgraded():
+    beat = _apply(
+        "It was the fact that in Westeros there was no way to check anything he said.",
+        expected_visual="Littlefinger speaks while nobody can verify his story",
+        scene_query="Game of Thrones Littlefinger speaking",
+        required_entity="Petyr Baelish",
+        required_kind="character",
+    )
+
+    assert beat.visual_policy == P.EXACT
+    assert beat._analyzer_grounding_guard["reason"] != \
+        "negative_existence_is_not_an_observable_exact_scene"
+
+
 def test_physical_event_with_record_intent_keeps_action_but_clears_borrowed_quote():
     text = ("And it tells us again years later when Olenna is holding a cup of poison of her "
             "own wants it on the record.")
@@ -688,11 +741,13 @@ def test_grounding_branches_persist_in_analysis_metadata_and_round_trip():
         "adjacent_quote_copy_sanitized": 0,
         "nominal_role_contract_narrowed": 0,
         "nominal_guessed_identity_cleared": 0,
+        "negative_existence_downgraded": 0,
         "downgraded": 1,
         "to_character_specific": 0,
         "to_generic_filler": 1,
+        "to_abstract_effect": 0,
     }
-    assert analysis.beat_grounding_audit["schema"] == 6
+    assert analysis.beat_grounding_audit["schema"] == 7
     restored = A.ScriptAnalysis.from_dict(analysis.to_dict())
     assert restored.beat_grounding_audit == analysis.beat_grounding_audit
     assert restored.beat_grounding_audit["beats"]["0"]["branch"] == \
@@ -883,7 +938,7 @@ def test_resume_preserves_fresh_sanitizer_reason_when_post_state_changes_nothing
     assert marker["branch"] == "grounded_exact_sanitized"
     assert marker["reason"] == "record_intent_is_not_verbatim_dialogue"
     assert marker["sanitized_fields"] == ["quote"]
-    assert marker["cached_revalidation_schema"] == 6
+    assert marker["cached_revalidation_schema"] == 7
     saved_audit = loaded_analysis.to_dict()["beat_grounding_audit"]
 
     loaded_again = ScriptSegment.from_dict(loaded.to_dict())
@@ -992,7 +1047,7 @@ def test_schema5_migrates_measured_comparison_event_and_cached_nominal_role_cont
     assert grounded_control.visual_policy == P.EXACT
     assert manual_control.required_entity == "Janos Slynt"
     assert manual_control.scene_query == ""
-    assert analysis.beat_grounding_audit["schema"] == 6
+    assert analysis.beat_grounding_audit["schema"] == 7
 
     saved = analysis.to_dict()
     reloaded = [ScriptSegment.from_dict(row.to_dict()) for row in rows]
@@ -1044,7 +1099,7 @@ def test_schema5_corrects_cached_schema4_role_migration_and_preserves_provenance
     assert marker["analyzer_guessed_required_entity"] == "Aron Santagar"
     assert marker["schema_migration"] == "nominal_guessed_identity_contract_v5"
     assert marker["previous_schema_migration"] == "nominal_role_contract_v4"
-    assert marker["cached_revalidation_schema"] == 6
+    assert marker["cached_revalidation_schema"] == 7
 
     saved = analysis.to_dict()
     loaded = ScriptSegment.from_dict(beat.to_dict())
@@ -1059,7 +1114,7 @@ def test_schema5_corrects_cached_schema4_role_migration_and_preserves_provenance
     assert resumed["last_material_revalidation"]["changed_indices"] == [32]
 
 
-def test_schema6_migrates_cached_camera_contracts_once_and_preserves_material_diff():
+def test_schema7_migrates_cached_camera_contracts_once_and_preserves_material_diff():
     dagger = ScriptSegment(
         index=3,
         text="the weapon they left behind is the only thing she has.",
@@ -1109,8 +1164,8 @@ def test_schema6_migrates_cached_camera_contracts_once_and_preserves_material_di
     for beat in (dagger, brothel):
         assert beat.visual_policy == P.EXACT
         assert beat.is_specific_claim is True
-        assert beat._analyzer_grounding_guard["guard_schema"] == 6
-        assert beat._analyzer_grounding_guard["cached_revalidation_schema"] == 6
+        assert beat._analyzer_grounding_guard["guard_schema"] == 7
+        assert beat._analyzer_grounding_guard["cached_revalidation_schema"] == 7
     assert analysis.beat_grounding_audit["counts"][
         "unsupported_camera_composition_sanitized"] == 2
 
@@ -1124,3 +1179,62 @@ def test_schema6_migrates_cached_camera_contracts_once_and_preserves_material_di
     assert second["preserved_sanitized_provenance"] == 2
     assert loaded_analysis.beat_grounding_audit[
         "last_material_revalidation"]["changed_indices"] == [3, 51]
+
+
+def test_schema7_preserves_effective_schema6_sanitizer_but_migrates_negative_existence():
+    camera = ScriptSegment(
+        index=3,
+        text="the weapon they left behind is the only thing she has.",
+        expected_visual=("Exact scene: Game of Thrones catspaw Valyrian steel dagger left "
+                         "behind. Also show: Catelyn."),
+        scene_query="Game of Thrones catspaw Valyrian steel dagger left behind",
+        required_entity="Valyrian steel dagger",
+        required_kind="object",
+        visual_policy=P.EXACT,
+        is_specific_claim=True,
+    )
+    negative = ScriptSegment(
+        index=41,
+        text="There are no witnesses named.",
+        expected_visual="Wide shot of the brothel with only Catelyn and Littlefinger present",
+        scene_query="Game of Thrones brothel interior Catelyn Littlefinger alone",
+        required_entity="the brothel",
+        required_kind="location",
+        visual_policy=P.EXACT,
+        is_specific_claim=True,
+    )
+    camera_marker = {
+        "branch": "grounded_exact_sanitized",
+        "reason": "unsupported_camera_composition_removed",
+        "sanitized_fields": ["expected_visual"],
+        "sanitized_values": {"expected_visual": camera.expected_visual},
+        "guard_schema": 6,
+        "cached_revalidation_schema": 6,
+    }
+    negative_marker = {
+        "branch": "grounded_exact_sanitized",
+        "reason": "unsupported_camera_composition_removed",
+        "sanitized_fields": ["expected_visual"],
+        "sanitized_values": {"expected_visual": negative.expected_visual},
+        "guard_schema": 6,
+        "cached_revalidation_schema": 6,
+    }
+    analysis = A.ScriptAnalysis(beat_grounding_audit={
+        "schema": 6,
+        "beats": {"3": camera_marker, "41": negative_marker},
+    })
+
+    result = A.revalidate_cached_directions([camera, negative], analysis)
+
+    assert result["changed_indices"] == [41]
+    assert result["preserved_sanitized_provenance"] == 1
+    assert camera.visual_policy == P.EXACT
+    assert camera._analyzer_grounding_guard["reason"] == \
+        "unsupported_camera_composition_removed"
+    assert camera._analyzer_grounding_guard["guard_schema"] == 7
+    assert camera._analyzer_grounding_guard["cached_revalidation_schema"] == 7
+    assert negative.visual_policy == P.ABSTRACT
+    assert negative.scene_query == negative.required_entity == negative.required_kind == ""
+    assert negative._analyzer_grounding_guard["reason"] == \
+        "negative_existence_is_not_an_observable_exact_scene"
+    assert negative._analyzer_grounding_guard["cached_revalidation_schema"] == 7

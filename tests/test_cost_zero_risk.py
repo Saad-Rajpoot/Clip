@@ -405,7 +405,7 @@ class TestSelfhealCache(unittest.TestCase):
         self.assertIn("break", seg.split("for _i in range(0, len(cands), _wave):")[1][:200])
         # the accept walk itself is untouched: ranked order, first keep wins
         self.assertIn("for rel, sid, sh in cands:", seg)
-        self.assertIn('v.get("verdict") == "keep"', seg)
+        self.assertIn("_preliminary_still_keep(", seg)
 
     def test_heal_pass_persists_the_cache(self):
         src = (SRC / "selfheal.py").read_text()
