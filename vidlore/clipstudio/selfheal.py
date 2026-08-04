@@ -977,7 +977,29 @@ def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
             _discard_invalid_still(sel, why, log)
         return ok
 
+    # Stable-partition independently exhausted beats ahead of every acquisition-capable beat.
+    # The authorization is read-only and is still recomputed immediately before mutation below.
+    # Without this ordering, an ordinary earlier beat can download/index a new SOURCE_OK file and
+    # correctly stale a later beat's whole-pool absence proof before that proof can be consumed.
+    # Only beats carrying a strict-exhaustion record need the comparatively expensive semantic +
+    # whole-index validation; every other beat retains its original relative order.
+    review = (getattr(proj, "meta", {}) or {}).get(
+        "selection_relevance_gap_review") or {}
+    exhaustion_records = review.get("strict_acquisition_exhaustion") or {}
+    priority, ordinary = [], []
     for bidx in blocked:
+        seg = segs.get(bidx)
+        has_record = isinstance(exhaustion_records, dict) \
+            and isinstance(exhaustion_records.get(str(bidx)), dict)
+        authorized = bool(seg is not None and has_record
+                          and _phase1_reviewed_exhaustion_authorization(proj, seg, cfg)[0])
+        (priority if authorized else ordinary).append(bidx)
+    healing_order = priority + ordinary
+    if priority and healing_order != list(blocked):
+        log("self-heal: consuming audited strict-exhaustion beat(s) before "
+            f"pool-mutating acquisition: {priority}")
+
+    for bidx in healing_order:
         seg = segs.get(bidx)
         sel = sels.get(bidx)
         if seg is None or sel is None:
@@ -1226,14 +1248,22 @@ def _gap_beat_fingerprint(seg) -> str:
     return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
 
 
-def _gap_pool_fingerprint(proj) -> tuple[str, int]:
-    """Bind a footage-gap decision to source bytes and their searchable indexes."""
+def _gap_pool_fingerprint(proj, *, include_banned: bool = False) -> tuple[str, int]:
+    """Bind a footage-pool decision to source bytes and their searchable indexes.
+
+    Active softenings use the publishable pool (the default), because banning the source that
+    supplies a softened still must restore the authored promise.  Absence reviews use the broader
+    all-indexed universe through ``_gap_absence_pool_fingerprint``: matcher source gates may only
+    *remove* media from the publishable pool, and removing an already-reviewed source cannot make a
+    missing scene appear.  Keeping those rows in the absence universe prevents a deterministic
+    match rerun from invalidating completed acquisition evidence before self-heal can consume it.
+    """
     # Eligibility is part of the pool just as much as bytes are.  An operator/automatic ban can
     # remove a source without touching its media or index timestamps; excluding those ids here in
     # the same way as ``_clean_pool`` makes that policy change invalidate any fallback that depended
     # on the old pool.
     from .match import banned_source_ids
-    banned = banned_source_ids(proj, include_auto=True)
+    banned = set() if include_banned else banned_source_ids(proj, include_auto=True)
     rows = []
     for src in sorted((getattr(proj, "sources", None) or []),
                       key=lambda s: str(getattr(s, "id", "") or "")):
@@ -1288,6 +1318,19 @@ def _gap_pool_fingerprint(proj) -> tuple[str, int]:
         })
     raw = json.dumps(rows, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest(), len(rows)
+
+
+def _gap_absence_pool_fingerprint(proj) -> tuple[str, int]:
+    """Fingerprint every indexed OK source for a conservative whole-pool absence claim.
+
+    Operator and automatic bans are deliberately ignored here.  An absence claim that covered a
+    superset remains true when publication gates later shrink that set; a newly downloaded source
+    or any media/index rewrite still changes this fingerprint and invalidates the review.
+    """
+    return _gap_pool_fingerprint(proj, include_banned=True)
+
+
+_GAP_ABSENCE_POOL_SCOPE = "all_source_ok_indexed"
 
 
 _SOFTENING_SCHEMA = 3
@@ -1596,7 +1639,8 @@ def restore_stale_selection_relevance_softenings(proj, segments, *, log=None) ->
     }
 
 
-def _phase1_softening_authorization(proj, seg, cfg=None) -> tuple[bool, str]:
+def _phase1_softening_authorization(proj, seg, cfg=None, *,
+                                    require_eligible_pool: bool = True) -> tuple[bool, str]:
     """Fail-closed authorization for phase-1 exact→character→abstract policy mutation.
 
     The legacy pre-assembly self-heal sees a deliberately incomplete structural blocker set.  It
@@ -1604,6 +1648,9 @@ def _phase1_softening_authorization(proj, seg, cfg=None) -> tuple[bool, str]:
     only when an actual-frame/pool review names this exact authored promise and is still bound to the
     complete current source/index pool.  Acquisition can change that pool inside the same healing
     pass, so callers check this immediately before every mutation rather than caching the answer.
+    The sole ``require_eligible_pool=False`` caller immediately validates a schema-2, content-hashed
+    exhaustion artifact over *all* indexed OK sources; it may ignore a matcher-only pool shrink, but
+    never a new source or changed media/index artifact.
     """
     try:
         review = (getattr(proj, "meta", {}) or {}).get(
@@ -1627,13 +1674,14 @@ def _phase1_softening_authorization(proj, seg, cfg=None) -> tuple[bool, str]:
             return False, "confirmed_beat_fingerprint_missing"
         if expected_beat != current_beat:
             return False, "stale_gap_review_beat_changed"
-        expected_pool = str(review.get("pool_fingerprint", "") or "")
-        if not expected_pool:
-            return False, "gap_review_pool_fingerprint_missing"
-        current_pool, _current_count = _gap_pool_fingerprint(proj)
-        if expected_pool != current_pool:
-            return False, ("stale_gap_review_source_pool_changed:"
-                           f"{expected_pool[:12]}!={current_pool[:12]}")
+        if require_eligible_pool:
+            expected_pool = str(review.get("pool_fingerprint", "") or "")
+            if not expected_pool:
+                return False, "gap_review_pool_fingerprint_missing"
+            current_pool, _current_count = _gap_pool_fingerprint(proj)
+            if expected_pool != current_pool:
+                return False, ("stale_gap_review_source_pool_changed:"
+                               f"{expected_pool[:12]}!={current_pool[:12]}")
         evidence_ok, evidence_reason = _phase1_current_gap_evidence(proj, seg, cfg)
         if not evidence_ok:
             return False, evidence_reason
@@ -1642,7 +1690,7 @@ def _phase1_softening_authorization(proj, seg, cfg=None) -> tuple[bool, str]:
         return False, f"gap_review_validation_error:{type(exc).__name__}"
 
 
-_STRICT_ACQUISITION_EVIDENCE_SCHEMA = 1
+_STRICT_ACQUISITION_EVIDENCE_SCHEMA = 2
 _STRICT_ACQUISITION_CLAIMS = (
     ("classification", "footage_gap", "strict_acquisition_classification_not_footage_gap"),
     ("actual_frame_pool_audit", True,
@@ -1665,7 +1713,9 @@ def _strict_acquisition_evidence(proj, segments, beat_indices, *, source: str,
     The project review is a cached authorization, not the evidence itself.  Therefore neither the
     maker nor a hand-edited ``project.json`` may manufacture claims from a beat list.  Both creation
     and consumption come through this function, which reads the content-hashed JSON artifact and
-    binds every requested beat plus the complete searchable pool before returning normalized rows.
+    binds every requested beat plus the complete all-``SOURCE_OK`` indexed universe before returning
+    normalized rows.  That conservative superset is stable across matcher-only bans while additions
+    and artifact rewrites still invalidate it.
     """
     evidence_source = str(source or "").strip()
     if not evidence_source:
@@ -1701,11 +1751,13 @@ def _strict_acquisition_evidence(proj, segments, beat_indices, *, source: str,
     schema = artifact.get("schema_version")
     if isinstance(schema, bool) or not isinstance(schema, int) \
             or schema != _STRICT_ACQUISITION_EVIDENCE_SCHEMA:
-        return None, "strict_acquisition_evidence_schema_not_1"
+        return None, "strict_acquisition_evidence_schema_not_2"
     if str(artifact.get("status", "") or "") != "complete":
         return None, "strict_acquisition_evidence_status_not_complete"
+    if str(artifact.get("pool_scope", "") or "") != _GAP_ABSENCE_POOL_SCOPE:
+        return None, "strict_acquisition_evidence_pool_scope_not_all_source_ok_indexed"
 
-    current_pool, current_count = _gap_pool_fingerprint(proj)
+    current_pool, current_count = _gap_absence_pool_fingerprint(proj)
     artifact_pool = str(artifact.get("pool_fingerprint", "") or "")
     if not artifact_pool:
         return None, "strict_acquisition_evidence_pool_fingerprint_missing"
@@ -1773,6 +1825,7 @@ def _strict_acquisition_evidence(proj, segments, beat_indices, *, source: str,
     return {
         "evidence_source": str(evidence_path),
         "evidence_sha256": actual_sha,
+        "pool_scope": _GAP_ABSENCE_POOL_SCOPE,
         "pool_fingerprint": current_pool,
         "pool_source_count": current_count,
         "beats": normalized,
@@ -1788,7 +1841,11 @@ def _phase1_reviewed_exhaustion_authorization(proj, seg, cfg=None) -> tuple[bool
     remains authoritative for beat/pool fingerprints, quote typing, current verifier evidence,
     and the semantic-vs-technical distinction.
     """
-    ok, reason = _phase1_softening_authorization(proj, seg, cfg)
+    # Matcher source gates may shrink the publishable pool after the independent audit.  A strict
+    # exhaustion artifact covers the broader all-OK indexed universe, so validate the common beat
+    # and current-semantic checks here but let the content-hashed artifact below own pool identity.
+    ok, reason = _phase1_softening_authorization(
+        proj, seg, cfg, require_eligible_pool=False)
     if not ok:
         return False, reason
     try:
@@ -1806,6 +1863,18 @@ def _phase1_reviewed_exhaustion_authorization(proj, seg, cfg=None) -> tuple[bool
             expected_sha256=record.get("evidence_sha256", ""), stored_records=records)
         if validated is None:
             return False, evidence_reason
+        if str(review.get("absence_pool_scope", "") or "") != \
+                str(validated.get("pool_scope", "") or ""):
+            return False, "strict_acquisition_review_pool_scope_mismatch"
+        if str(review.get("absence_pool_fingerprint", "") or "") != \
+                str(validated.get("pool_fingerprint", "") or ""):
+            return False, "strict_acquisition_review_source_pool_changed"
+        try:
+            review_absence_count = int(review.get("absence_pool_source_count"))
+        except (TypeError, ValueError):
+            return False, "strict_acquisition_review_pool_source_count_malformed"
+        if review_absence_count != int(validated.get("pool_source_count", -1)):
+            return False, "strict_acquisition_review_pool_source_count_changed"
         return True, "authorized_by_bound_completed_strict_acquisition_exhaustion"
     except Exception as exc:                              # noqa: BLE001 — mutation must fail closed
         return False, f"strict_acquisition_review_validation_error:{type(exc).__name__}"
@@ -1826,6 +1895,7 @@ def make_selection_relevance_gap_review(proj, segments, confirmed_gap_beats, *,
     if missing:
         raise ValueError(f"cannot bind unknown gap beat(s): {missing}")
     pool_fp, pool_n = _gap_pool_fingerprint(proj)
+    absence_pool_fp, absence_pool_n = _gap_absence_pool_fingerprint(proj)
     payload = {
         "schema_version": 2,
         "method": str(method or "actual_frame_and_pool_audit"),
@@ -1834,6 +1904,9 @@ def make_selection_relevance_gap_review(proj, segments, confirmed_gap_beats, *,
         "beat_fingerprints": {str(i): _gap_beat_fingerprint(by_idx[i]) for i in wanted},
         "pool_fingerprint": pool_fp,
         "pool_source_count": pool_n,
+        "absence_pool_scope": _GAP_ABSENCE_POOL_SCOPE,
+        "absence_pool_fingerprint": absence_pool_fp,
+        "absence_pool_source_count": absence_pool_n,
     }
     exhausted = sorted({int(i) for i in (strict_acquisition_exhausted_beats or [])})
     if any(i not in wanted for i in exhausted):
