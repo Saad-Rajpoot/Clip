@@ -1,0 +1,387 @@
+"""Cross-copy quote recovery: local alignment plus fail-closed publication binding."""
+from __future__ import annotations
+
+import copy
+import json
+from unittest import mock
+
+import numpy as np
+
+from vidlore.clipstudio import audio_align as A
+from vidlore.clipstudio import index as IX
+from vidlore.clipstudio import orchestrate as O
+from vidlore.clipstudio import policy as P
+from vidlore.clipstudio import relevance_contract as R
+from vidlore.clipstudio import verify as V
+from vidlore.clipstudio.config import ClipConfig, load_clip_config
+from vidlore.clipstudio.models import (
+    ClipCandidate, ClipProject, ClipSelection, ScriptSegment, Shot, SourceVideo,
+)
+
+
+QUOTE = "He's choking!"
+
+
+def _stamp(proj, sid):
+    (proj.index_dir / f"{sid}.index.meta.json").write_text(json.dumps({
+        "schema": IX.INDEX_SCHEMA,
+        "words": True,
+        "asr_prompt_fingerprint": IX.asr_semantic_fingerprint(proj, load_clip_config()),
+    }))
+
+
+def _project(tmp_path):
+    proj = ClipProject(name="audio-transfer", root=str(tmp_path))
+    proj.ensure_dirs()
+    target_media = tmp_path / "clean_hd.mp4"
+    target_media.write_bytes(b"clean-hd-media-bytes")
+    reference_media = tmp_path / "dirty_sd.mp4"
+    reference_media.write_bytes(b"dirty-sd-media-bytes")
+    proj.sources = [
+        SourceVideo(id="clean", url="u-clean", title="Purple Wedding clean scene",
+                    permission="owner", status="ok", local_path=str(target_media),
+                    duration=10.0, width=1920, height=1080),
+        SourceVideo(id="dirty", url="u-dirty", title="Purple Wedding burned subtitles",
+                    permission="owner", status="ok", local_path=str(reference_media),
+                    duration=10.0, width=640, height=360),
+    ]
+    for sid, spans in {
+            "clean": [(0.0, 2.0), (3.5, 5.5)],
+            "dirty": [(0.5, 2.5)],
+    }.items():
+        rows = []
+        for index, (start, end) in enumerate(spans):
+            frame = tmp_path / f"{sid}_{index}.jpg"
+            frame.write_bytes(f"frame-{sid}-{index}".encode())
+            rows.append(Shot(source_id=sid, index=index, start=start, end=end,
+                             keyframe_path=str(frame), quality=.9).to_dict())
+        proj.shots_path(sid).write_text(json.dumps(rows))
+    # The reference has the authoritative words; current ASR on the clean copy missed them.
+    (proj.index_dir / "dirty.words.json").write_text(json.dumps([
+        [1.0, 1.35, "He's"], [1.35, 2.0, "choking"],
+    ]))
+    (proj.index_dir / "clean.words.json").write_text(json.dumps([
+        [0.1, 0.4, "unrelated"], [0.4, 0.7, "dialogue"],
+    ]))
+    _stamp(proj, "dirty")
+    _stamp(proj, "clean")
+    seg = ScriptSegment(
+        index=0, text="Joffrey suddenly cannot breathe.", expected_visual="Joffrey choking",
+        required_entity="Joffrey Baratheon", required_kind="character",
+        scene_query="Joffrey Purple Wedding choking", quote=QUOTE,
+        visual_policy=P.EXACT, is_specific_claim=True, est_duration=2.0)
+    sel = ClipSelection(
+        segment_index=0, source_id="clean", shot_index=0, in_point=0.0, out_point=2.0,
+        confidence=.8, signals={"dialogue": .98})
+    proj.segments = [seg]
+    proj.selections = [sel]
+    return proj, seg, sel
+
+
+def _contract(proj):
+    return {
+        "authored_quote": QUOTE,
+        "branch": "verbatim",
+        "verbatim_required": True,
+        "asr_prompt_fingerprint_expected": IX.asr_semantic_fingerprint(
+            proj, load_clip_config()),
+        "pool_match": {
+            "source_id": "dirty", "source_title": "dirty",
+            "timed_asr_span": [1.0, 2.0], "timed_asr_ratio": 1.0,
+        },
+        "pool_matches": [{
+            "source_id": "dirty", "source_title": "dirty",
+            "timed_asr_span": [1.0, 2.0], "timed_asr_ratio": 1.0,
+        }],
+    }
+
+
+def _alignment(*, correlation=.98, runner=.10, margin=.88):
+    return {
+        "status": "matched", "reason": "",
+        "schema_version": A.AUDIO_QUOTE_TRANSFER_SCHEMA,
+        "algorithm": A.AUDIO_QUOTE_TRANSFER_ALGORITHM,
+        "sample_rate_hz": A.AUDIO_QUOTE_TRANSFER_SAMPLE_RATE,
+        "reference_quote_span": [1.0, 2.0],
+        "reference_extract_window": [0.6, 2.4],
+        "target_search_window": [0.0, 10.0],
+        "target_quote_span": [4.0, 5.0],
+        "correlation": correlation,
+        "runner_up_correlation": runner,
+        "uniqueness_margin": margin,
+        "minimum_correlation": A.AUDIO_QUOTE_TRANSFER_MIN_CORRELATION,
+        "minimum_uniqueness_margin": A.AUDIO_QUOTE_TRANSFER_MIN_UNIQUENESS_MARGIN,
+    }
+
+
+def _evidence(proj, *, alignment=None):
+    return A.make_transfer_evidence(
+        authored_quote=QUOTE, reference_source_id="dirty",
+        reference_source_content_fingerprint=V._file_fingerprint(
+            proj.source("dirty").local_path),
+        reference_asr_ratio=1.0, target_source_id="clean",
+        target_source_content_fingerprint=V._file_fingerprint(
+            proj.source("clean").local_path),
+        target_selected_window=[3.5, 5.5], alignment=alignment or _alignment())
+
+
+def test_pcm_alignment_finds_one_scaled_noisy_copy():
+    rng = np.random.default_rng(713)
+    rate = 4000
+    time = np.arange(rate * 2, dtype=np.float64) / rate
+    reference = (
+        .34 * np.sin(2 * np.pi * (180 * time + 75 * time * time))
+        + .19 * np.sin(2 * np.pi * 431 * time)
+        + .04 * rng.standard_normal(time.size)).astype(np.float32)
+    target = (.01 * rng.standard_normal(rate * 8)).astype(np.float32)
+    expected = rate * 3 + 317
+    target[expected:expected + reference.size] += .72 * reference
+
+    result = A.normalized_pcm_alignment(reference, target, sample_rate=rate)
+
+    assert result["status"] == "matched"
+    assert result["best_start_sample"] == expected
+    assert result["correlation"] > .98
+    assert result["uniqueness_margin"] > .70
+
+
+def test_pcm_alignment_rejects_low_and_nonunique_matches():
+    rng = np.random.default_rng(911)
+    rate = 4000
+    reference = rng.standard_normal(rate).astype(np.float32)
+    unrelated = rng.standard_normal(rate * 5).astype(np.float32)
+    low = A.normalized_pcm_alignment(reference, unrelated, sample_rate=rate)
+    assert low["status"] == "rejected"
+    assert low["reason"] == "correlation_below_floor"
+
+    repeated = (.01 * rng.standard_normal(rate * 7)).astype(np.float32)
+    repeated[rate:rate * 2] += reference
+    repeated[rate * 5:rate * 6] += reference
+    nonunique = A.normalized_pcm_alignment(reference, repeated, sample_rate=rate)
+    assert nonunique["status"] == "rejected"
+    assert nonunique["reason"] == "alignment_not_unique"
+
+
+def test_pcm_alignment_rejects_exactly_back_to_back_duplicate_occurrences():
+    """A second occurrence one template away is distinct, not part of the first peak's lobe."""
+    rng = np.random.default_rng(1201)
+    rate = 4000
+    reference = rng.standard_normal(rate).astype(np.float32)
+    target = (.005 * rng.standard_normal(rate * 5)).astype(np.float32)
+    first = rate
+    second = first + reference.size
+    target[first:first + reference.size] += reference
+    target[second:second + reference.size] += reference
+
+    result = A.normalized_pcm_alignment(reference, target, sample_rate=rate)
+
+    assert result["status"] == "rejected"
+    assert result["reason"] == "alignment_not_unique"
+    assert result["same_peak_tolerance_samples"] < reference.size
+    assert result["runner_up_correlation"] > .99
+
+
+def test_batch_transfer_decodes_long_target_once_for_multiple_references():
+    target = np.zeros(A.AUDIO_QUOTE_TRANSFER_SAMPLE_RATE * 10, dtype=np.float32)
+    short = np.ones(A.AUDIO_QUOTE_TRANSFER_SAMPLE_RATE * 2, dtype=np.float32)
+    decode_paths = []
+
+    def decode(path, _start, _end, *, sample_rate):
+        assert sample_rate == A.AUDIO_QUOTE_TRANSFER_SAMPLE_RATE
+        decode_paths.append(str(path))
+        return (target.copy(), "") if str(path) == "target.mp4" else (short.copy(), "")
+
+    aligned = {
+        "status": "matched", "reason": "", "best_start_sample": 4000,
+        "schema_version": A.AUDIO_QUOTE_TRANSFER_SCHEMA,
+        "algorithm": A.AUDIO_QUOTE_TRANSFER_ALGORITHM,
+        "sample_rate_hz": A.AUDIO_QUOTE_TRANSFER_SAMPLE_RATE,
+        "correlation": .97, "runner_up_correlation": .2, "uniqueness_margin": .77,
+    }
+    references = [(f"ref-{i}.mp4", [1.0, 2.0]) for i in range(3)]
+    with mock.patch.object(A, "_pcm_from_media", side_effect=decode), \
+            mock.patch.object(A, "normalized_pcm_alignment", return_value=aligned):
+        results = A.transfer_quote_spans(
+            references, "target.mp4", target_search_window=[0.0, 10.0])
+
+    assert len(results) == 3 and all(row["status"] == "matched" for row in results)
+    assert decode_paths.count("target.mp4") == 1
+    assert sorted(path for path in decode_paths if path != "target.mp4") == \
+        ["ref-0.mp4", "ref-1.mp4", "ref-2.mp4"]
+
+
+def test_contract_accepts_strong_bound_transfer_when_current_target_asr_missed(tmp_path):
+    proj, seg, sel = _project(tmp_path)
+    sel.in_point, sel.out_point, sel.shot_index = 3.5, 5.5, 1
+    sel.signals[A.AUDIO_QUOTE_TRANSFER_SIGNAL] = _evidence(proj)
+
+    ok, reason, detail = R.exact_quote_dialogue_evidence(
+        proj, sel, seg, quote_contract=_contract(proj))
+
+    assert ok is True and reason == ""
+    assert detail["quote_location_method"] == "audio_transfer"
+    assert detail["audio_transfer"]["correlation"] == .98
+    assert detail["dialogue_signal"] == .98, "the existing dialogue floor remains in force"
+
+
+def test_contract_rejects_stale_low_nonunique_and_fabricated_transfer_evidence(tmp_path):
+    proj, seg, sel = _project(tmp_path)
+    sel.in_point, sel.out_point, sel.shot_index = 3.5, 5.5, 1
+    contract = _contract(proj)
+
+    stale = _evidence(proj)
+    proj.source("clean").local_path += ".replaced"
+    sel.signals[A.AUDIO_QUOTE_TRANSFER_SIGNAL] = stale
+    ok, reason, detail = R.exact_quote_dialogue_evidence(
+        proj, sel, seg, quote_contract=contract)
+    assert ok is False and reason == "exact_quote_audio_transfer_evidence_invalid"
+    assert detail["audio_transfer_status"] == "target_source_content_fingerprint_mismatch"
+    proj.source("clean").local_path = str(tmp_path / "clean_hd.mp4")
+
+    for alignment, expected in [
+        (_alignment(correlation=.89, runner=.10, margin=.79),
+         "alignment_correlation_below_floor"),
+        (_alignment(correlation=.95, runner=.90, margin=.05),
+         "alignment_uniqueness_below_floor"),
+    ]:
+        sel.signals[A.AUDIO_QUOTE_TRANSFER_SIGNAL] = _evidence(proj, alignment=alignment)
+        ok, reason, detail = R.exact_quote_dialogue_evidence(
+            proj, sel, seg, quote_contract=contract)
+        assert ok is False and reason == "exact_quote_audio_transfer_evidence_invalid"
+        assert detail["audio_transfer_status"] == expected
+
+    fabricated = copy.deepcopy(_evidence(proj))
+    fabricated["correlation"] = 1.0  # persisted record edited without its deterministic binding
+    sel.signals[A.AUDIO_QUOTE_TRANSFER_SIGNAL] = fabricated
+    ok, reason, detail = R.exact_quote_dialogue_evidence(
+        proj, sel, seg, quote_contract=contract)
+    assert ok is False and reason == "exact_quote_audio_transfer_evidence_invalid"
+    assert detail["audio_transfer_status"] == "evidence_binding_fingerprint_mismatch"
+
+
+def test_contract_does_not_use_transfer_to_bypass_dialogue_floor_or_quote_typing(tmp_path):
+    proj, seg, sel = _project(tmp_path)
+    sel.in_point, sel.out_point, sel.shot_index = 3.5, 5.5, 1
+    sel.signals[A.AUDIO_QUOTE_TRANSFER_SIGNAL] = _evidence(proj)
+    sel.signals["dialogue"] = R.QUOTE_DIALOGUE_FLOOR - .01
+    ok, reason, _detail = R.exact_quote_dialogue_evidence(
+        proj, sel, seg, quote_contract=_contract(proj))
+    assert ok is False and reason == "exact_quote_dialogue_signal_below_floor"
+
+    sel.signals["dialogue"] = .98
+    unknown = {**_contract(proj), "branch": "indeterminate"}
+    ok, reason, _detail = R.exact_quote_dialogue_evidence(
+        proj, sel, seg, quote_contract=unknown)
+    assert ok is False and reason == "exact_quote_pool_classification_indeterminate"
+
+
+def test_quote_recovery_transfers_sd_reference_only_into_existing_hd_bench(tmp_path):
+    proj, seg, old = _project(tmp_path)
+    contract = _contract(proj)
+
+    def dimensions(path):
+        return ({"width": 640, "height": 360} if path.name == "dirty_sd.mp4"
+                else {"width": 1920, "height": 1080})
+
+    with mock.patch.object(R, "_quote_pool_branches", return_value={0: contract}), \
+            mock.patch("vidlore.clipstudio.ingest.probe", side_effect=dimensions), \
+            mock.patch.object(A, "transfer_quote_spans", return_value=[_alignment()]):
+        built, audit = O._quote_window_recovery_selections(
+            proj, [seg], ClipConfig(), {0})
+
+    assert set(built) == {0}
+    selected = built[0]
+    assert selected.source_id == "clean"
+    assert selected.shot_index == 1
+    assert selected.in_point <= 4.0 and selected.out_point >= 5.0
+    evidence = selected.signals[A.AUDIO_QUOTE_TRANSFER_SIGNAL]
+    assert evidence["reference_source_id"] == "dirty"
+    assert evidence["target_source_id"] == "clean"
+    assert evidence["target_selected_window"] == [selected.in_point, selected.out_point]
+    row = next(row for row in audit["beats"][0]["candidates"]
+               if row["source_id"] == "clean")
+    assert row["status"] == "candidate"
+    assert row["quote_location_method"] == "cross_copy_pcm"
+    assert audit["beats"][0]["candidate_bench_cap"] == 12
+    assert audit["beats"][0]["audio_transfer_target_source_cap"] == 12
+
+
+def test_direct_asr_duplicates_are_filtered_before_audio_target_cap(tmp_path):
+    proj, seg, old = _project(tmp_path)
+    direct_ids = ["dirty"]
+    for number in range(1, 12):
+        sid = f"dirty_{number:02d}"
+        direct_ids.append(sid)
+        media = tmp_path / f"{sid}.mp4"
+        media.write_bytes(f"sd-{sid}".encode())
+        proj.sources.append(SourceVideo(
+            id=sid, url=f"u-{sid}", title=f"SD direct quote {sid}", permission="owner",
+            status="ok", local_path=str(media), duration=10.0, width=640, height=360))
+        frame = tmp_path / f"{sid}.jpg"
+        frame.write_bytes(f"frame-{sid}".encode())
+        proj.shots_path(sid).write_text(json.dumps([
+            Shot(source_id=sid, index=0, start=.5, end=2.5,
+                 keyframe_path=str(frame), quality=.8).to_dict(),
+        ]))
+        (proj.index_dir / f"{sid}.words.json").write_text(json.dumps([
+            [1.0, 1.35, "He's"], [1.35, 2.0, "choking"],
+        ]))
+        _stamp(proj, sid)
+
+    # All twelve leading bench sources already have direct whole-pool ASR. The only transfer target
+    # is the clean copy at position thirteen; duplicates must not spend its bounded slot.
+    old.source_id = direct_ids[0]
+    old.shot_index, old.in_point, old.out_point = 0, .5, 2.5
+    old.alternates = [ClipCandidate(
+        segment_index=0, source_id=sid, shot_index=0, in_point=.5, out_point=2.5)
+        for sid in direct_ids[1:]]
+    # A second twelve-entry prefix is deterministically dead before any PCM work: eleven missing
+    # sources and one local source whose ASR generation is stale. Neither group may spend a target
+    # opportunity either.
+    dead_ids = [f"missing_{number:02d}" for number in range(11)] + ["stale_asr"]
+    stale_media = tmp_path / "stale_asr.mp4"
+    stale_media.write_bytes(b"stale-asr-media")
+    proj.sources.append(SourceVideo(
+        id="stale_asr", url="u-stale", title="stale ASR clean copy", permission="owner",
+        status="ok", local_path=str(stale_media), duration=10.0, width=1920, height=1080))
+    (proj.index_dir / "stale_asr.index.meta.json").write_text(json.dumps({
+        "schema": IX.INDEX_SCHEMA, "words": True,
+        "asr_prompt_fingerprint": "stale-generation",
+    }))
+    old.deep_alternates = [ClipCandidate(
+        segment_index=0, source_id=sid, shot_index=0, in_point=0.0, out_point=2.0)
+        for sid in dead_ids]
+    old.deep_alternates.append(ClipCandidate(
+        segment_index=0, source_id="clean", shot_index=1, in_point=3.5, out_point=5.5))
+    contract = _contract(proj)
+    contract["pool_matches"] = [{
+        "source_id": sid, "source_title": sid,
+        "timed_asr_span": [1.0, 2.0], "timed_asr_ratio": 1.0,
+    } for sid in direct_ids]
+    contract["pool_match_count"] = len(direct_ids)
+
+    def dimensions(path):
+        return ({"width": 640, "height": 360} if path.stem.startswith("dirty")
+                else {"width": 1920, "height": 1080})
+
+    def batch(references, _target_path, *, target_search_window):
+        assert target_search_window == [0.0, 10.0]
+        return [_alignment() for _reference in references]
+
+    with mock.patch.object(R, "_quote_pool_branches", return_value={0: contract}), \
+            mock.patch("vidlore.clipstudio.ingest.probe", side_effect=dimensions), \
+            mock.patch.object(A, "transfer_quote_spans", side_effect=batch):
+        built, audit = O._quote_window_recovery_selections(
+            proj, [seg], ClipConfig(), {0})
+
+    beat = audit["beats"][0]
+    assert built[0].source_id == "clean"
+    assert beat["audio_transfer_bench_source_count"] == 25
+    assert beat["audio_transfer_target_source_count"] == 1
+    assert beat["audio_transfer_target_source_overflow"] == 0
+    assert set(beat["audio_transfer_direct_asr_duplicates_filtered"]) == set(direct_ids)
+    excluded = {row["source_id"]: row["reason"]
+                for row in beat["audio_transfer_pre_cap_excluded"]}
+    assert set(excluded) == set(dead_ids)
+    assert all(excluded[sid] == "source_unavailable" for sid in dead_ids[:-1])
+    assert excluded["stale_asr"].startswith("target_asr_provenance_invalid:")

@@ -327,6 +327,71 @@ def test_unjudged_ladder_candidate_raises_and_restores_full_phase1_state(
     assert used == before_used
 
 
+@pytest.mark.parametrize(("policy", "expected_specific"), [
+    (P.EXACT, True),
+    (P.CHARACTER, False),
+])
+def test_concrete_still_recheck_asks_the_current_authorized_policy(
+        policy, expected_specific, monkeypatch, tmp_path):
+    """The character rung must not silently re-demand the missing exact moment it surrendered.
+
+    This is the 101-beat footage-gap shape: beat 69 can use a clean related ship frame and beat 87
+    can use a clean Ned frame only after the bound review authorizes EXACT -> CHARACTER.  The actual
+    image still has to affirm narration, subject, quality, and non-contradiction and is hash-bound;
+    only the verifier's specificity question follows the now-current policy.
+    """
+    frame = tmp_path / "related-show-frame.jpg"
+    frame.write_bytes(b"real related show pixels")
+    seg = Seg(
+        visual_policy=policy, is_specific_claim=(policy == P.EXACT),
+        required_kind="character", required_entity="Ned Stark")
+    sel = NS(
+        segment_index=seg.index, image_path=str(frame),
+        image_meta={"source": "source-frame-recovery"})
+    proj = NS(meta={"analysis": {"episode_hint": ""}})
+    asked = []
+
+    def verify(*_args, **kwargs):
+        asked.append(kwargs.get("is_specific"))
+        return _valid_keep(status="ok")
+
+    monkeypatch.setattr(V, "verify_frame", verify)
+    ok, why = S._strictly_confirm_concrete_still(
+        proj, seg, sel, NS(anthropic_model="vision-test"), require_conclusive=True)
+
+    assert (ok, why) == (True, "")
+    assert asked == [expected_specific]
+    assert sel.image_meta["still_semantic_verified"] is True
+    assert sel.image_meta["still_image_sha256"] == hashlib.sha256(frame.read_bytes()).hexdigest()
+    assert sel.image_meta["relevance_class"] == (
+        "exact_scene" if expected_specific else "contextual_fallback")
+
+
+def test_softening_candidate_count_excludes_inactive_history(monkeypatch):
+    monkeypatch.setattr(S, "_gap_pool_fingerprint", lambda _proj: ("pool-fp", 91))
+    historical = {
+        "schema_version": S._SOFTENING_SCHEMA,
+        "beats": [{
+            "segment_index": 24,
+            "status": "restored_pool_changed",
+            "active": False,
+        }],
+    }
+    current = [
+        {"segment_index": 69, "status": "softened", "active": True},
+        {"segment_index": 87, "status": "still_blocked", "active": False},
+    ]
+
+    payload = S._merge_softening_payload(
+        NS(sources=[]), current, basis="confirmed_actual_frame_audit",
+        existing=historical)
+
+    assert payload["candidate_count"] == 2
+    assert payload["history_count"] == 3
+    assert payload["candidates"] == [69]
+    assert payload["restored_count"] == 1
+
+
 def test_venue_error_keep_is_inconclusive_and_cannot_soften(monkeypatch, tmp_path):
     """A stale/default keep inside an error wrapper is not a venue judgment."""
     proj, seg, sel = _phase1_evidence_fixture(tmp_path)

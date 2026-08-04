@@ -1446,6 +1446,7 @@ def _quote_window_recovery_selections(proj, segs, cfg, scope, *, quote_pool_cach
     """
     import copy as _copy_quote
 
+    from . import audio_align as _audio_quote
     from . import index as _index_quote
     from . import match as _match_quote
     from . import relevance_contract as _rel_quote
@@ -1524,6 +1525,117 @@ def _quote_window_recovery_selections(proj, segs, cfg, scope, *, quote_pool_cach
         candidate_rows: dict[tuple, dict] = {}
         candidate_shots: dict[tuple, object] = {}
         seen_sources: set[str] = set()
+
+        def _candidate_from_span(sid: str, q0: float, q1: float, ratio: float,
+                                 row: dict, *, transfer_context: dict | None = None) -> bool:
+            """Apply the unchanged HD/window gates to one ASR or PCM-located phrase."""
+            src = proj.source(sid)
+            path = str(getattr(src, "local_path", "") or "") if src is not None else ""
+            if (src is None or str(getattr(src, "status", "") or "") != SOURCE_OK
+                    or not path or not Path(path).is_file()):
+                row["status"] = "source_unavailable"
+                return False
+            if path not in dim_cache:
+                try:
+                    dim_cache[path] = dict(_probe_quote(Path(path)) or {})
+                except Exception:
+                    dim_cache[path] = {}
+            dims = dim_cache[path]
+            row["native_width"] = int(dims.get("width") or 0)
+            row["native_height"] = int(dims.get("height") or 0)
+            row["native_hd"] = bool(_native_video_ok_quote(dims))
+            if not row["native_hd"]:
+                row["status"] = "skipped_non_hd_or_unprobeable"
+                return False
+            try:
+                shots = list(_index_quote.load_shots(proj, sid) or [])
+            except Exception:
+                shots = []
+            overlaps = [shot for shot in shots
+                        if float(getattr(shot, "end", 0.0) or 0.0) >= q0
+                        and float(getattr(shot, "start", 0.0) or 0.0) <= q1]
+            if not overlaps:
+                row["status"] = "quote_span_has_no_indexed_shot"
+                return False
+
+            def _anchor_rank(shot):
+                start = float(getattr(shot, "start", 0.0) or 0.0)
+                end = float(getattr(shot, "end", 0.0) or 0.0)
+                overlap = max(0.0, min(end, q1) - max(start, q0))
+                midpoint = (q0 + q1) / 2.0
+                contains_midpoint = 1 if start <= midpoint <= end else 0
+                return overlap, contains_midpoint, \
+                    float(getattr(shot, "quality", 0.0) or 0.0), \
+                    -int(getattr(shot, "index", 0) or 0)
+
+            anchor = max(overlaps, key=_anchor_rank)
+            selected_window = _window(seg, src, shots, q0, q1)
+            if selected_window is None:
+                row["status"] = "quote_span_outside_source"
+                return False
+            transfer_corr = (float((transfer_context or {}).get(
+                "alignment", {}).get("correlation", 0.0) or 0.0)
+                if transfer_context else 1.0)
+            strength = min(ratio, transfer_corr) if transfer_context else ratio
+            signals = {
+                "dialogue": round(ratio, 3),
+                "moment_lock": 1.0,
+                "moment_ratio": round(strength, 3),
+                "quote_pool_exact": True,
+                "quality": round(float(getattr(anchor, "quality", 0.0) or 0.0), 3),
+                "native_width": row["native_width"],
+                "native_height": row["native_height"],
+            }
+            cand = _ClipCandidate_quote(
+                segment_index=idx, source_id=sid,
+                shot_index=int(getattr(anchor, "index", -1)), score=round(strength, 4),
+                in_point=selected_window[0], out_point=selected_window[1], signals=signals)
+            try:
+                action, reason, _meta = _match_quote.validate_candidate_window(
+                    cand, anchor, shots, cfg, seg)
+            except Exception as exc:
+                row["status"] = f"window_qc_error:{type(exc).__name__}"
+                return False
+            tolerance = float(_rel_quote.QUOTE_WINDOW_TOLERANCE_SEC)
+            contained = (q0 >= float(cand.in_point) - tolerance
+                         and q1 <= float(cand.out_point) + tolerance)
+            if action == "rejected" or not contained:
+                row["status"] = ("window_qc_rejected" if action == "rejected"
+                                 else "window_qc_lost_quote_containment")
+                row["window_qc_reason"] = str(reason or "")
+                return False
+            if transfer_context:
+                evidence = _audio_quote.make_transfer_evidence(
+                    authored_quote=str(getattr(seg, "quote", "") or ""),
+                    reference_source_id=transfer_context["reference_source_id"],
+                    reference_source_content_fingerprint=
+                    transfer_context["reference_source_content_fingerprint"],
+                    reference_asr_ratio=ratio, target_source_id=sid,
+                    target_source_content_fingerprint=
+                    transfer_context["target_source_content_fingerprint"],
+                    target_selected_window=[cand.in_point, cand.out_point],
+                    alignment=transfer_context["alignment"])
+                if not evidence:
+                    row["status"] = "audio_transfer_evidence_not_bound"
+                    return False
+                cand.signals[_audio_quote.AUDIO_QUOTE_TRANSFER_SIGNAL] = evidence
+                cand.signals["quote_audio_transfer"] = True
+                cand.signals["quote_audio_transfer_correlation"] = round(transfer_corr, 6)
+                row["audio_transfer_evidence"] = evidence
+            row.update({
+                "status": "candidate",
+                "anchor_shot_index": int(getattr(anchor, "index", -1)),
+                "selected_window": [round(float(cand.in_point), 3),
+                                    round(float(cand.out_point), 3)],
+                "window_qc": str(action or "ok"),
+                "window_qc_reason": str(reason or ""),
+            })
+            key = (cand.source_id, cand.shot_index, cand.in_point, cand.out_point)
+            candidates.append(cand)
+            candidate_rows[key] = row
+            candidate_shots[key] = anchor
+            return True
+
         for match in raw_matches:
             sid = str((match or {}).get("source_id", "") or "")
             row = {
@@ -1547,88 +1659,226 @@ def _quote_window_recovery_selections(proj, segs, cfg, scope, *, quote_pool_cach
             if ratio < float(_rel_quote.QUOTE_DIALOGUE_FLOOR):
                 row["status"] = "below_quote_floor"
                 continue
+            row["quote_location_method"] = "timed_asr"
+            _candidate_from_span(sid, q0, q1, ratio, row)
+
+        # ASR can miss a short line in one upload even when another copy has authoritative timed
+        # words (measured beat 55: clean 1080p scene vs burned-subtitle/SD reference).  Search no
+        # new footage: only the already-selected source and its existing alternate/deep source
+        # bench are eligible targets, and the same 12-candidate publication cap below still owns
+        # the result.  PCM evidence only locates time; every ordinary gate remains in force.
+        old_selection = sel_by_idx.get(idx)
+        existing_bench = []
+        if old_selection is not None:
+            existing_bench.append(old_selection)
+            existing_bench.extend(list(getattr(old_selection, "alternates", None) or []))
+            existing_bench.extend(list(getattr(old_selection, "deep_alternates", None) or []))
+
+        def _bench_sid(item) -> str:
+            if isinstance(item, dict):
+                return str(item.get("source_id", "") or "")
+            return str(getattr(item, "source_id", "") or "")
+
+        target_source_ids = []
+        target_seen = set()
+        for bench_item in existing_bench:
+            target_sid = _bench_sid(bench_item)
+            if target_sid and target_sid not in target_seen:
+                target_source_ids.append(target_sid)
+                target_seen.add(target_sid)
+        # Whole-pool ASR sources were already attempted directly above. Remove them before—not
+        # after—the bounded target slice, otherwise twelve duplicate bench IDs can consume all
+        # twelve slots and starve a valid later clean-copy target without ever being aligned.
+        beat_row["audio_transfer_bench_source_count"] = len(target_source_ids)
+        duplicate_target_ids = [sid for sid in target_source_ids if sid in seen_sources]
+        target_source_ids = [sid for sid in target_source_ids if sid not in seen_sources]
+        beat_row["audio_transfer_direct_asr_duplicates_filtered"] = duplicate_target_ids
+        pre_cap_excluded = []
+        target_words_cache = {}
+        pre_cap_eligible = []
+        expected_asr_fingerprint = str(
+            branch.get("asr_prompt_fingerprint_expected", "") or "")
+        for target_sid in target_source_ids:
+            target_source = proj.source(target_sid)
+            target_path = str(getattr(target_source, "local_path", "") or "") \
+                if target_source is not None else ""
+            exclusion_reason = ""
+            if (target_source is None
+                    or str(getattr(target_source, "status", "") or "") != SOURCE_OK
+                    or not target_path or not Path(target_path).is_file()):
+                exclusion_reason = "source_unavailable"
+            else:
+                target_asr_ok, _actual, target_asr_reason = \
+                    _rel_quote._source_asr_provenance(
+                        proj, target_sid, expected_asr_fingerprint)
+                if not target_asr_ok:
+                    exclusion_reason = f"target_asr_provenance_invalid:{target_asr_reason}"
+                else:
+                    try:
+                        target_words = _index_quote.load_words(proj, target_sid)
+                        target_words_cache[target_sid] = target_words
+                        target_asr_span = _index_quote.find_quote_span(
+                            target_words, str(getattr(seg, "quote", "") or ""),
+                            min_ratio=float(_rel_quote.QUOTE_DIALOGUE_FLOOR))
+                    except Exception:
+                        target_asr_span = None
+                    if target_asr_span:
+                        exclusion_reason = "target_already_has_timed_asr_quote"
+            if exclusion_reason:
+                pre_cap_excluded.append({
+                    "source_id": target_sid, "reason": exclusion_reason,
+                })
+            else:
+                pre_cap_eligible.append(target_sid)
+        target_source_ids = pre_cap_eligible
+        beat_row["audio_transfer_pre_cap_excluded"] = pre_cap_excluded
+        _audio_target_source_cap = 12
+        beat_row["audio_transfer_target_source_count"] = len(target_source_ids)
+        beat_row["audio_transfer_target_source_cap"] = _audio_target_source_cap
+        beat_row["audio_transfer_target_source_overflow"] = max(
+            0, len(target_source_ids) - _audio_target_source_cap)
+        target_source_ids = target_source_ids[:_audio_target_source_cap]
+
+        def _reference_record(match):
+            sid = str((match or {}).get("source_id", "") or "")
+            try:
+                q0, q1 = (float((match or {}).get("timed_asr_span", [])[0]),
+                          float((match or {}).get("timed_asr_span", [])[1]))
+                ratio = float((match or {}).get("timed_asr_ratio", 0.0) or 0.0)
+            except (IndexError, TypeError, ValueError):
+                return None
             src = proj.source(sid)
             path = str(getattr(src, "local_path", "") or "") if src is not None else ""
-            if (src is None or str(getattr(src, "status", "") or "") != SOURCE_OK
-                    or not path or not Path(path).is_file()):
-                row["status"] = "source_unavailable"
-                continue
-            if path not in dim_cache:
-                try:
-                    dim_cache[path] = dict(_probe_quote(Path(path)) or {})
-                except Exception:
-                    dim_cache[path] = {}
-            dims = dim_cache[path]
-            row["native_width"] = int(dims.get("width") or 0)
-            row["native_height"] = int(dims.get("height") or 0)
-            row["native_hd"] = bool(_native_video_ok_quote(dims))
-            if not row["native_hd"]:
-                row["status"] = "skipped_non_hd_or_unprobeable"
-                continue
-            try:
-                shots = list(_index_quote.load_shots(proj, sid) or [])
-            except Exception:
-                shots = []
-            overlaps = [shot for shot in shots
-                        if float(getattr(shot, "end", 0.0) or 0.0) >= q0
-                        and float(getattr(shot, "start", 0.0) or 0.0) <= q1]
-            if not overlaps:
-                row["status"] = "quote_span_has_no_indexed_shot"
-                continue
-
-            def _anchor_rank(shot):
-                start = float(getattr(shot, "start", 0.0) or 0.0)
-                end = float(getattr(shot, "end", 0.0) or 0.0)
-                overlap = max(0.0, min(end, q1) - max(start, q0))
-                midpoint = (q0 + q1) / 2.0
-                contains_midpoint = 1 if start <= midpoint <= end else 0
-                return overlap, contains_midpoint, float(getattr(shot, "quality", 0.0) or 0.0), \
-                    -int(getattr(shot, "index", 0) or 0)
-
-            anchor = max(overlaps, key=_anchor_rank)
-            selected_window = _window(seg, src, shots, q0, q1)
-            if selected_window is None:
-                row["status"] = "quote_span_outside_source"
-                continue
-            signals = {
-                "dialogue": round(ratio, 3),
-                "moment_lock": 1.0,
-                "moment_ratio": round(ratio, 3),
-                "quote_pool_exact": True,
-                "quality": round(float(getattr(anchor, "quality", 0.0) or 0.0), 3),
-                "native_width": row["native_width"],
-                "native_height": row["native_height"],
+            if (not sid or src is None or str(getattr(src, "status", "") or "") != SOURCE_OK
+                    or not Path(path).is_file()
+                    or ratio < float(_rel_quote.QUOTE_DIALOGUE_FLOOR)):
+                return None
+            provenance_ok, _actual, _reason = _rel_quote._source_asr_provenance(
+                proj, sid, str(branch.get("asr_prompt_fingerprint_expected", "") or ""))
+            if not provenance_ok:
+                return None
+            fingerprint = _verify_quote._file_fingerprint(path)
+            if fingerprint in ("", "missing", "unreadable"):
+                return None
+            return {
+                "source_id": sid, "path": path, "quote_span": [q0, q1], "ratio": ratio,
+                "source_content_fingerprint": fingerprint,
             }
-            cand = _ClipCandidate_quote(
-                segment_index=idx, source_id=sid,
-                shot_index=int(getattr(anchor, "index", -1)), score=round(ratio, 4),
-                in_point=selected_window[0], out_point=selected_window[1], signals=signals)
+
+        reference_records = [record for record in (
+            _reference_record(match) for match in raw_matches) if record is not None]
+        # Strongest ASR copies first; three independent references are ample and bound worst-case
+        # local decoding to 12 targets × 3 short templates without expanding the candidate bench.
+        reference_records.sort(key=lambda item: (item["ratio"], item["source_id"]), reverse=True)
+        _audio_reference_cap = 3
+        beat_row["audio_transfer_reference_count"] = len(reference_records)
+        beat_row["audio_transfer_reference_cap"] = _audio_reference_cap
+        reference_records = reference_records[:_audio_reference_cap]
+
+        for target_sid in target_source_ids:
+            if not target_sid or target_sid in seen_sources:
+                continue
+            seen_sources.add(target_sid)
+            target_row = {
+                "source_id": target_sid,
+                "source_title": str(getattr(proj.source(target_sid), "title", "") or ""),
+                "status": "audio_transfer_not_attempted",
+                "quote_location_method": "cross_copy_pcm",
+                "reference_attempts": [],
+            }
+            beat_row["candidates"].append(target_row)
+            target_source = proj.source(target_sid)
+            target_path = str(getattr(target_source, "local_path", "") or "") \
+                if target_source is not None else ""
+            if (target_source is None
+                    or str(getattr(target_source, "status", "") or "") != SOURCE_OK
+                    or not Path(target_path).is_file()):
+                target_row["status"] = "source_unavailable"
+                continue
+            target_asr_ok, _actual, target_asr_reason = \
+                _rel_quote._source_asr_provenance(
+                    proj, target_sid, expected_asr_fingerprint)
+            if not target_asr_ok:
+                target_row["status"] = f"target_asr_provenance_invalid:{target_asr_reason}"
+                continue
             try:
-                action, reason, _meta = _match_quote.validate_candidate_window(
-                    cand, anchor, shots, cfg, seg)
-            except Exception as exc:
-                row["status"] = f"window_qc_error:{type(exc).__name__}"
+                target_words = target_words_cache.get(target_sid)
+                if target_words is None:
+                    target_words = _index_quote.load_words(proj, target_sid)
+                target_asr_span = _index_quote.find_quote_span(
+                    target_words, str(getattr(seg, "quote", "") or ""),
+                    min_ratio=float(_rel_quote.QUOTE_DIALOGUE_FLOOR))
+            except Exception:
+                target_asr_span = None
+            if target_asr_span:
+                # A current timed-ASR phrase belongs in the ordinary whole-pool path, never a
+                # weaker-looking transfer record.  A fresh contract scan will expose it directly.
+                target_row["status"] = "target_already_has_timed_asr_quote"
                 continue
-            tolerance = float(_rel_quote.QUOTE_WINDOW_TOLERANCE_SEC)
-            contained = (q0 >= float(cand.in_point) - tolerance
-                         and q1 <= float(cand.out_point) + tolerance)
-            if action == "rejected" or not contained:
-                row["status"] = ("window_qc_rejected" if action == "rejected"
-                                 else "window_qc_lost_quote_containment")
-                row["window_qc_reason"] = str(reason or "")
+            try:
+                target_shots = list(_index_quote.load_shots(proj, target_sid) or [])
+            except Exception:
+                target_shots = []
+            target_end = max(
+                float(getattr(target_source, "duration", 0.0) or 0.0),
+                max((float(getattr(shot, "end", 0.0) or 0.0)
+                     for shot in target_shots), default=0.0))
+            if target_end <= 0.0:
+                target_row["status"] = "target_duration_unavailable"
                 continue
-            row.update({
-                "status": "candidate",
-                "anchor_shot_index": int(getattr(anchor, "index", -1)),
-                "selected_window": [round(float(cand.in_point), 3),
-                                    round(float(cand.out_point), 3)],
-                "window_qc": str(action or "ok"),
-                "window_qc_reason": str(reason or ""),
-            })
-            key = (cand.source_id, cand.shot_index, cand.in_point, cand.out_point)
-            candidates.append(cand)
-            candidate_rows[key] = row
-            candidate_shots[key] = anchor
+            target_fp = _verify_quote._file_fingerprint(target_path)
+            if target_fp in ("", "missing", "unreadable"):
+                target_row["status"] = "target_content_fingerprint_unavailable"
+                continue
+
+            accepted_alignments = []
+            target_references = [reference for reference in reference_records
+                                 if reference["source_id"] != target_sid]
+            alignments = _audio_quote.transfer_quote_spans(
+                [(reference["path"], reference["quote_span"])
+                 for reference in target_references],
+                target_path, target_search_window=[0.0, target_end])
+            for reference_index, reference in enumerate(target_references):
+                alignment = (alignments[reference_index]
+                             if reference_index < len(alignments)
+                             else {"status": "rejected", "reason": "alignment_result_missing"})
+                attempt = {
+                    "reference_source_id": reference["source_id"],
+                    "status": str(alignment.get("status", "") or ""),
+                    "reason": str(alignment.get("reason", "") or ""),
+                    "correlation": alignment.get("correlation"),
+                    "uniqueness_margin": alignment.get("uniqueness_margin"),
+                }
+                target_row["reference_attempts"].append(attempt)
+                if alignment.get("status") == "matched":
+                    accepted_alignments.append((alignment, reference))
+            if not accepted_alignments:
+                target_row["status"] = "audio_transfer_no_strict_unique_match"
+                continue
+            accepted_alignments.sort(
+                key=lambda pair: (float(pair[0].get("correlation", 0.0) or 0.0),
+                                  float(pair[0].get("uniqueness_margin", 0.0) or 0.0),
+                                  float(pair[1]["ratio"])), reverse=True)
+            alignment, reference = accepted_alignments[0]
+            try:
+                target_q0, target_q1 = (float(alignment["target_quote_span"][0]),
+                                        float(alignment["target_quote_span"][1]))
+            except (IndexError, KeyError, TypeError, ValueError):
+                target_row["status"] = "audio_transfer_target_span_invalid"
+                continue
+            target_row["reference_source_id"] = reference["source_id"]
+            target_row["timed_asr_span"] = list(reference["quote_span"])
+            target_row["timed_asr_ratio"] = reference["ratio"]
+            target_row["transferred_quote_span"] = [target_q0, target_q1]
+            _candidate_from_span(
+                target_sid, target_q0, target_q1, reference["ratio"], target_row,
+                transfer_context={
+                    "alignment": alignment,
+                    "reference_source_id": reference["source_id"],
+                    "reference_source_content_fingerprint":
+                    reference["source_content_fingerprint"],
+                    "target_source_content_fingerprint": target_fp,
+                })
 
         if not candidates:
             beat_row["status"] = "no_publishable_exact_window"

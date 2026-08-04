@@ -52,6 +52,10 @@ class ScriptAnalysis:
     events: list[str] = field(default_factory=list)
     visual_keywords: list[str] = field(default_factory=list)
     emotional_moments: list[str] = field(default_factory=list)
+    # Persisted audit of the conservative beat-local exact-storyboard guard.  The per-segment
+    # marker is process-local because ScriptSegment deliberately has no free-form metadata field;
+    # this analysis-level copy makes every downgrade and its reason inspectable after resume.
+    beat_grounding_audit: dict = field(default_factory=dict)
     source: str = "heuristic"        # "claude" | "heuristic"
 
     def to_dict(self) -> dict:
@@ -255,8 +259,178 @@ def _llm_analyze(script_text: str, topic: str, movie_hint: str, beats: list[Scri
     return {"analysis": analysis, "beats": beat_out}
 
 
+_GROUNDING_STOP = frozenset(
+    "a an the of to in on at for and or but so then with from into as it its is are was were be "
+    "been being this that these those his her their he she they him them who which what when where "
+    "movie show scene scenes clip clips shot shots footage game thrones got hd official season "
+    "episode part full closeup wide extreme camera".split()
+)
+_GROUNDING_WORD_RX = re.compile(r"[a-z][a-z'-]*", re.I)
+
+# An exact directive may refer indirectly to a moment named immediately before it.  Keep this
+# deliberately narrower than general demonstratives: ``that is a rarer mind`` is commentary, while
+# ``inside that scene`` and ``moments later`` really do point at an authored moment.
+_BEAT_LOCAL_SCENE_POINTER_RX = re.compile(
+    r"\b(?:that|this|those|these)\s+(?:\w+\s+){0,2}"
+    r"(?:scene|moment|meeting|exchange|conversation|attack|betrayal|death|trial|feast|fight|event)\b"
+    r"|\b(?:at that point|right there|there it is|moments? later|seconds? later)\b"
+    r"|^\s*(?:then|next)\b", re.I)
+
+# These are not claims about one observable instant even when they contain a verb.  The narrow
+# forms below are measured analyzer failures; a blanket ``never|always`` rule would incorrectly
+# demote lines such as "Ned never sees the dagger before Jaime attacks".
+_GENERAL_RELATION_RX = re.compile(
+    r"\bnever\s+had\s+to\b|\b(?:was|is|were|are)\s+(?:not\s+)?(?:a\s+)?"
+    r"rarer\s+(?:mind|willingness)\b",
+    re.I,
+)
+_NOMINAL_FRAGMENT_RX = re.compile(r"^\s*to\b", re.I)
+_VAGUE_SUBJECT_RX = re.compile(
+    r"\b(?:those|these)\s+people\b|\bsomeone\s+(?:is\s+)?(?:checking|verifying)\b",
+    re.I,
+)
+_SCENE_ACTION_ROOTS = frozenset({
+    "answer", "arrive", "attack", "betray", "bow", "burn", "carry", "chase", "check",
+    "choke", "collapse", "confess", "confront", "discover", "die", "draw", "drink",
+    "enter", "escape", "fall", "fight", "find", "give", "hand", "hold", "kill", "kneel",
+    "learn", "leave", "look", "open", "order", "persuade", "poison", "push", "read",
+    "realize", "reveal", "ride", "run", "say", "shoot", "stab", "stand", "take", "tell",
+    "touch", "turn", "wait", "walk", "watch", "whisper", "write",
+})
+_NAMED_SUBJECT_KINDS = frozenset({
+    "actor", "character", "object", "prop", "weapon", "animal", "creature", "location",
+    "place", "building", "vehicle",
+})
+_NON_SUBJECT_GROUNDING_TERMS = _SCENE_ACTION_ROOTS | frozenset({
+    "belief", "believe", "check", "clever", "decision", "die", "general", "information",
+    "mind", "motion", "people", "plan", "rare", "rarer", "reason", "verification",
+    "willing", "willingness",
+})
+
+
+def _grounding_stem(word: str) -> str:
+    """Small deterministic stemmer for overlap evidence; it is not a semantic classifier."""
+    w = word.lower().strip("'-")
+    if len(w) <= 3:
+        return w
+    if w.endswith("ies") and len(w) > 4:
+        return w[:-3] + "y"
+    if w.endswith("ing") and len(w) > 5:
+        root = w[:-3]
+        if len(root) > 3 and root[-1:] == root[-2:-1]:
+            root = root[:-1]
+        return root
+    if w.endswith("ed") and len(w) > 4:
+        if w == "died":
+            return "die"
+        root = w[:-2]
+        if len(root) > 3 and root[-1:] == root[-2:-1]:
+            root = root[:-1]
+        return root
+    if w.endswith("es") and len(w) > 4:
+        return w[:-2]
+    if w.endswith("s") and len(w) > 4:
+        return w[:-1]
+    return w
+
+
+def _grounding_terms(value: str) -> set[str]:
+    return {
+        stem for raw in _GROUNDING_WORD_RX.findall(value or "")
+        if raw.lower() not in _GROUNDING_STOP and len(stem := _grounding_stem(raw)) >= 3
+    }
+
+
+def _narrates_authored_quote(narration: str, quote: str) -> bool:
+    """True only when the beat itself says the analyzer-authored dialogue.
+
+    This is intentionally independent of whole-pool quote typing.  A real line from some other
+    scene cannot make a generic narration beat exact, but dialogue actually present in the beat is
+    a beat-local promise and must not be demoted here.
+    """
+    q_raw = " ".join(_GROUNDING_WORD_RX.findall(quote or "")).lower()
+    n_raw = " ".join(_GROUNDING_WORD_RX.findall(narration or "")).lower()
+    if q_raw and q_raw in n_raw:
+        return True
+    q_terms = _grounding_terms(quote)
+    n_terms = _grounding_terms(narration)
+    return bool(q_terms and len(q_terms & n_terms) / len(q_terms) >= 0.8)
+
+
+def _has_scene_action(text: str) -> bool:
+    terms = _grounding_terms(text)
+    if terms & _SCENE_ACTION_ROOTS:
+        return True
+    # Covers productive verbs outside the small root vocabulary while excluding a bare copula.
+    return bool(re.search(r"\b[a-z]{4,}(?:ing|ed)\b", text or "", re.I))
+
+
+def _exact_direction_grounding(beat: ScriptSegment, directive: dict) -> dict:
+    """Classify whether an exact storyboard is supported by this beat's own narration.
+
+    The analyzer sees the entire essay and sometimes assigns a vivid scene from neighbouring/global
+    context to a generic line.  This guard only rejects *obvious* cases: an explicitly vague subject
+    with zero storyboard overlap, a subject-only nominal fragment, or a measured general relationship
+    construction.  Ambiguous, indirect, dialogue-bearing, and genuinely action-bearing lines remain
+    exact; downstream media verification is still responsible for proving their footage.
+    """
+    narration = str(getattr(beat, "text", "") or "")
+    quote = str(directive.get("quote", "") or "")
+    narration_terms = _grounding_terms(narration)
+    entity_terms = _grounding_terms(str(directive.get("required_entity", "") or ""))
+    storyboard_terms = _grounding_terms(" ".join(str(directive.get(k, "") or "") for k in (
+        "expected_visual", "scene_query", "required_entity")))
+    shared = narration_terms & storyboard_terms
+    entity_shared = narration_terms & entity_terms
+
+    if _narrates_authored_quote(narration, quote):
+        return {"grounded": True, "reason": "authored_dialogue_in_narration",
+                "shared_terms": sorted(shared)[:8], "entity_grounded": bool(entity_shared)}
+    if _BEAT_LOCAL_SCENE_POINTER_RX.search(narration):
+        return {"grounded": True, "reason": "indirect_scene_reference_in_narration",
+                "shared_terms": sorted(shared)[:8], "entity_grounded": bool(entity_shared)}
+
+    has_action = _has_scene_action(narration)
+    required_kind = str(directive.get("required_kind", "") or "").strip().lower()
+    subject_terms = shared - _NON_SUBJECT_GROUNDING_TERMS
+    # A canonical entity can be an alias rather than a lexical copy ("the master-at-arms" →
+    # "Aron Santagar").  One shared subject phrase is enough for subject-level footage when the
+    # declared kind is a concrete named thing; it is not enough to prove an exact action.
+    subject_named = bool(entity_shared or len(subject_terms) >= 2
+                         or (subject_terms and required_kind in _NAMED_SUBJECT_KINDS))
+    if _GENERAL_RELATION_RX.search(narration):
+        return {"grounded": False, "reason": "general_relationship_not_exact_moment",
+                "shared_terms": sorted(shared)[:8], "entity_grounded": bool(entity_shared),
+                "subject_named": subject_named}
+    if _NOMINAL_FRAGMENT_RX.search(narration) and not has_action:
+        return {"grounded": False, "reason": "named_subject_without_exact_action",
+                "shared_terms": sorted(shared)[:8], "entity_grounded": bool(entity_shared),
+                "subject_named": subject_named}
+    if not shared and _VAGUE_SUBJECT_RX.search(narration):
+        return {"grounded": False, "reason": "vague_subject_has_no_storyboard_overlap",
+                "shared_terms": [], "entity_grounded": False, "subject_named": False}
+
+    # Once the narration itself names the subject and an action/event, uncertainty belongs to the
+    # footage verifier, not this lexical guard.  Keeping this branch permissive protects indirect
+    # references and verbs/synonyms outside the tiny deterministic vocabulary.
+    if has_action:
+        return {"grounded": True, "reason": "named_subject_and_scene_action",
+                "shared_terms": sorted(shared)[:8], "entity_grounded": bool(entity_shared)}
+    if len(shared) >= 3:
+        return {"grounded": True, "reason": "specific_event_terms_in_narration",
+                "shared_terms": sorted(shared)[:8], "entity_grounded": bool(entity_shared)}
+    # No deterministic signal proved a mismatch.  Fail closed *against demotion*: the exact media
+    # verifier remains the authoritative gate, and this analyzer guard must not mass re-label an
+    # edit merely because a grounded paraphrase has low lexical overlap.
+    return {"grounded": True, "reason": "conservative_no_mismatch_proven",
+            "shared_terms": sorted(shared)[:8], "entity_grounded": bool(entity_shared)}
+
+
 def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
     """Apply one analyzer reply while keeping policy and specificity internally coherent."""
+    resolved = _policy.normalize(directive.get("visual_policy", ""))
+    grounding = (_exact_direction_grounding(beat, directive)
+                 if resolved == _policy.EXACT else None)
     if directive.get("expected_visual"):
         beat.expected_visual = str(directive["expected_visual"])[:200]
     beat.scene_query = str(directive.get("scene_query", ""))[:120]
@@ -265,11 +439,37 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
     beat.required_entity = str(directive.get("required_entity", ""))[:80]
     beat.required_kind = str(directive.get("required_kind", ""))[:20]
     beat.emotion = str(directive.get("emotion", ""))[:24]
-    resolved = _policy.normalize(directive.get("visual_policy", ""))
+    if grounding is not None:
+        marker = {
+            "branch": "grounded_exact" if grounding["grounded"] else "ungrounded_exact_downgrade",
+            "reason": grounding["reason"],
+            "from_policy": _policy.EXACT,
+            "shared_terms": grounding.get("shared_terms", []),
+            "entity_grounded": bool(grounding.get("entity_grounded")),
+        }
+        if not grounding["grounded"]:
+            # A narration-named subject still merits subject-correct footage, but no exact action.
+            # With no named subject, ordinary semantic filler is the honest promise.  Clear every
+            # exact-only field before quote typing: a real quote from another scene must not revive
+            # a storyboard this beat never authored.
+            subject_named = bool(grounding.get("subject_named")
+                                 or grounding.get("entity_grounded"))
+            resolved = _policy.CHARACTER if subject_named else _policy.FILLER
+            marker["to_policy"] = resolved
+            beat.expected_visual = str(getattr(beat, "text", "") or "")[:200]
+            beat.scene_query = ""
+            beat.quote = ""
+            beat.is_specific_claim = False
+            if resolved == _policy.FILLER:
+                beat.required_entity = ""
+                beat.required_kind = ""
+        setattr(beat, "_analyzer_grounding_guard", marker)
     # Policy and specificity are one contract. A character-general or abstract label cannot
     # simultaneously carry an analyzer-invented `specific=true` that steers title affinity and
     # downstream prompts back toward a fabricated exact storyboard.
-    if resolved in (_policy.CHARACTER, _policy.ABSTRACT):
+    if grounding is not None and not grounding["grounded"]:
+        beat.is_specific_claim = False
+    elif resolved in (_policy.CHARACTER, _policy.ABSTRACT):
         beat.is_specific_claim = False
     elif directive.get("specific"):
         beat.is_specific_claim = True
@@ -281,6 +481,32 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
         beat.required_kind = ""
     if resolved:
         beat.visual_policy = resolved
+
+
+def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
+    """Persist process-local grounding markers in the project's serialized analysis metadata."""
+    records = {}
+    for beat in beats or []:
+        marker = getattr(beat, "_analyzer_grounding_guard", None)
+        if isinstance(marker, dict):
+            records[str(int(getattr(beat, "index", -1)))] = dict(marker)
+    grounded = sum(m.get("branch") == "grounded_exact" for m in records.values())
+    downgraded = len(records) - grounded
+    counts = {
+        "exact_directives": len(records),
+        "grounded_exact": grounded,
+        "downgraded": downgraded,
+        "to_character_specific": sum(
+            m.get("to_policy") == _policy.CHARACTER for m in records.values()),
+        "to_generic_filler": sum(
+            m.get("to_policy") == _policy.FILLER for m in records.values()),
+    }
+    analysis.beat_grounding_audit = {
+        "schema": 1,
+        "counts": counts,
+        "beats": records,
+    }
+    return counts
 
 
 _ANCHOR_STOP = set(          # (was `_STOPQ if False else set(...)` — the dead branch never ran,
@@ -424,6 +650,13 @@ def analyze_script(script_text: str, *, topic: str = "", movie_hint: str = "",
         if not o:
             continue
         _apply_beat_direction(b, o)
+    _grounding_counts = _record_beat_grounding_audit(analysis, beats)
+    if _grounding_counts["exact_directives"]:
+        log("analyze: beat-local exact grounding — "
+            f"grounded={_grounding_counts['grounded_exact']}, "
+            f"downgraded={_grounding_counts['downgraded']} "
+            f"(character={_grounding_counts['to_character_specific']}, "
+            f"filler={_grounding_counts['to_generic_filler']})")
     # ROBUSTNESS: the LLM returns anchor_scenes inconsistently under load. If it omitted them, derive
     # the recurring (anchor) scene + video_type from the per-beat scene_queries so the footage strategy
     # never silently degrades to "scatter clips".

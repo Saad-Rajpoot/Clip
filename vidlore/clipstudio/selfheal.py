@@ -836,11 +836,17 @@ def _strictly_confirm_concrete_still(proj, seg, sel, eng, *,
         analysis = (getattr(proj, "meta", {}) or {}).get("analysis", {}) or {}
         era = str(analysis.get("episode_hint", "") or "")
         exact = P.policy_of(seg) == P.EXACT
+        # The bound gap review has already authorized EXACT -> CHARACTER before this helper is
+        # reached.  Requiring the original exact-scene question here made that first rung
+        # unsatisfiable by construction: a clean related ship/Ned frame passed the venue filter,
+        # then was asked to prove the same missing exact moment that caused the downgrade.  Ask the
+        # current policy's question while retaining every positive pixel/subject/quality fact below.
+        # EXACT callers remain strict; only the deliberately softened CHARACTER rung is general.
         verdict = V.verify_frame(
             path, getattr(seg, "text", "") or "",
             getattr(seg, "required_entity", "") or "",
             getattr(seg, "required_kind", "") or "", [], eng,
-            getattr(eng, "anthropic_model", ""), is_specific=True,
+            getattr(eng, "anthropic_model", ""), is_specific=exact,
             expected_visual=getattr(seg, "expected_visual", "") or "",
             scene_query=getattr(seg, "scene_query", "") or "", era_hint=era,
             venue_fallback=False, must_see=P.deictic_target(seg))
@@ -1447,7 +1453,11 @@ def _merge_softening_payload(proj, new_rows: list[dict], *, basis: str,
         "basis": str(basis or existing.get("basis", "") or ""),
         "pool_fingerprint": pool_fp,
         "pool_source_count": pool_n,
-        "candidate_count": len(rows),
+        # This is the number attempted by the CURRENT invocation.  Counting every historical row
+        # made a later two-beat pass report "2/3" merely because an old, inactive restoration was
+        # still retained for audit.  Keep total history explicit instead of conflating the two.
+        "candidate_count": len(new_rows),
+        "history_count": len(rows),
         "candidates": sorted({int(r.get("segment_index", -1)) for r in active}),
         "softened_count": len(active),
         "still_blocked_count": sum(

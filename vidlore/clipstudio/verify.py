@@ -1294,10 +1294,13 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
 
     Source affinity is derived from the beat's scene query + expected visual + required entity and
     the source title/acquisition query.  A required-entity-only match is intentionally insufficient:
-    every compilation about a lead character would otherwise become a neighborhood source.  Within
-    the top affine sources, persisted CLIP similarity orders unseen shots when available; distance
-    from a retained seed is the deterministic fallback.  The caller still applies the unchanged
-    strict vision, exact-window QC, reuse ledger and materialization transaction.
+    every compilation about a lead character would otherwise become a neighborhood source.  One
+    disjoint five-shot region may also be reserved when the already-retained source's *timed shot
+    transcripts* contain at least two rare scene-specific anchors.  This is a local verifier repair,
+    not a new global retrieval channel.  Within the top affine sources, persisted CLIP similarity
+    orders unseen shots when available; distance from a retained seed is the deterministic fallback.
+    The caller still applies the unchanged strict vision, exact-window QC, reuse ledger and
+    materialization transaction.
     """
     from .models import ClipCandidate
 
@@ -1344,6 +1347,200 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
             or (w.startswith(t) and len(w) - len(t) <= 2)
             for t in present))
 
+    # Transcript prose is useful for finding a *passage* inside a retained long source, but only
+    # when it says something genuinely diagnostic about the storyboard.  These are common visual
+    # directions, not scene identifiers.  Letting any pair of them open a distant region ("man
+    # talks", "woman in room") would turn the strict local rung into another global search.
+    timed_text_generic = {
+        "appears", "close", "closeup", "dark", "face", "faces", "girl", "girls",
+        "give", "gives", "giving", "gave", "hand", "hands", "holding", "holds",
+        "inside", "light", "look", "looking", "looks", "man", "men", "outside",
+        "people", "person", "room", "said", "says", "show", "showing", "shown",
+        "sit", "sits", "someone", "something", "speak", "speaks", "stand", "stands",
+        "take", "takes", "taking", "talk", "talking", "talks", "tell", "tells",
+        "visible", "walk", "walking", "walks", "watch", "wear", "wearing", "wears",
+        "woman", "women",
+    }
+
+    # Possessives and short inflections are one semantic anchor, not independent proof.  Without
+    # this collapse, one ASR word ("betrayed") matched both storyboard targets ``betray`` and
+    # ``betrayed`` and falsely satisfied the two-anchor contract.
+    raw_timed_fields = tuple(
+        {token[:-2] if token.endswith("'s") else token for token in field}
+        for field in (q_tokens, visual_tokens, entity_tokens))
+    raw_timed_targets = set().union(*raw_timed_fields)
+    timed_aliases = {}
+    ordered_targets = sorted(raw_timed_targets, key=lambda token: (len(token), token))
+    for token in ordered_targets:
+        alias = next((shorter for shorter in ordered_targets
+                      if (shorter != token and len(shorter) >= 5
+                          and token.startswith(shorter)
+                          and len(token) - len(shorter) <= 3)), token)
+        timed_aliases[token] = alias
+    timed_fields = tuple({timed_aliases[token] for token in field}
+                         for field in raw_timed_fields)
+    timed_entity_tokens = timed_fields[2]
+    timed_targets = set().union(*timed_fields) - timed_text_generic
+    timed_field_count = {
+        token: sum(1 for field in timed_fields if token in field)
+        for token in timed_targets
+    }
+
+    def _timed_token_match(target: str, actual_tokens: list[str]) -> bool:
+        """ASR-tolerant token match, including split proper names such as don+toes -> Dontos.
+
+        Fuzz never decides a region by itself: `_timed_text_region` requires two distinct target
+        tokens in one compact rolling passage, including at least one source-rare token.
+        """
+        target = re.sub(r"[^a-z0-9]", "", str(target or "").lower())
+        if len(target) < 4:
+            return False
+        for pos, raw in enumerate(actual_tokens):
+            actual = re.sub(r"[^a-z0-9]", "", str(raw or "").lower())
+            if not actual:
+                continue
+            if actual == target:
+                return True
+            # Conservative morphology (poison/poisoned), then Whisper-style single-token garble.
+            if (min(len(actual), len(target)) >= 5
+                    and abs(len(actual) - len(target)) <= 3
+                    and (actual.startswith(target) or target.startswith(actual))):
+                return True
+            try:
+                if (actual[0] == target[0] and min(len(actual), len(target)) >= 5
+                        and _index._tok_close(
+                            actual, target, thresh=0.84)):
+                    return True
+            except Exception:
+                pass
+            # Proper names are often split into two phonetic words by ASR.  Do not concatenate
+            # arbitrary long phrases: two/three short adjacent tokens is the measured failure.
+            for width in (2, 3):
+                if pos + width > len(actual_tokens):
+                    continue
+                compound = "".join(re.sub(r"[^a-z0-9]", "", str(piece).lower())
+                                   for piece in actual_tokens[pos:pos + width])
+                if len(target) < 5 or abs(len(compound) - len(target)) > 3:
+                    continue
+                try:
+                    if (compound and compound[0] == target[0]
+                            and _index._tok_close(compound, target, thresh=0.84)):
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    def _timed_text_region(shots, seeds):
+        """Return one strong disjoint transcript passage, or ``None``.
+
+        Per-shot transcripts retain timing via each shot's start/end.  A five-shot rolling window
+        tolerates dialogue crossing edits while remaining local.  Source rarity prevents a common
+        character name repeated throughout a compilation from carrying the decision.
+        """
+        if len(timed_targets) < 2 or not shots:
+            return None
+        rows = []
+        for shot in shots:
+            try:
+                shot_index = int(getattr(shot, "index", -1))
+            except (TypeError, ValueError):
+                continue
+            raw_tokens = re.findall(r"[a-z0-9']+", str(
+                getattr(shot, "transcript", "") or "").lower())
+            matched = {
+                target for target in timed_targets
+                if _timed_token_match(target, raw_tokens)
+            }
+            rows.append((shot_index, shot, matched))
+        if not rows:
+            return None
+        # A token appearing throughout a source is contextual chatter, not a locator.  Five per
+        # cent (with a two-shot floor for short clips) keeps genuine repeated proper names usable
+        # while giving one-off object/name pairs the intended discriminative weight.
+        rare_limit = max(2, (len(rows) + 19) // 20)
+        doc_freq = {
+            target: sum(1 for _index_v, _shot, matched in rows if target in matched)
+            for target in timed_targets
+        }
+        rare_targets = {target for target, count in doc_freq.items()
+                        if 0 < count <= rare_limit}
+        if not rare_targets:
+            return None
+
+        best = None
+        roll_radius = 2                  # at most five adjacent timed shots establish a passage
+        reserve_radius = 2               # the same five shots may consume strict-vision calls
+        for center in range(len(rows)):
+            lo = max(0, center - roll_radius)
+            hi = min(len(rows), center + roll_radius + 1)
+            local = rows[lo:hi]
+            matches = set().union(*(row[2] for row in local))
+            rare_matches = matches & rare_targets
+            if len(matches) < 2 or not rare_matches:
+                continue
+            non_entity_matches = matches - timed_entity_tokens
+            required_kind = str(getattr(seg, "required_kind", "") or "").lower()
+            # On event/character beats, a name plus one generic mood word is not a scene locator
+            # (measured false anchors: Catelyn+"honor" for Ned's betrayal, Stark+"trust" in an
+            # unrelated council). Require two scene terms beyond the named entity. Object beats may
+            # use the stricter object+one-participant shape (Dontos + necklace).
+            min_non_entity = 1 if "object" in required_kind else 2
+            if len(non_entity_matches) < min_non_entity:
+                continue
+            # Map every matching token back to a timed shot.  Centre the reserve between the first
+            # and last evidence-bearing edits rather than on an arbitrary rolling-window edge.
+            evidence_positions = [
+                pos for pos in range(lo, hi) if rows[pos][2] & matches
+            ]
+            if not evidence_positions:
+                continue
+            first_pos, last_pos = min(evidence_positions), max(evidence_positions)
+            anchor_pos = (first_pos + last_pos) // 2
+            anchor_index = rows[anchor_pos][0]
+            # A transcript reserve exists only for a passage the ordinary +/-radius scan cannot
+            # already reach.  Requiring the whole +/-2 reserve to be disjoint keeps the old local
+            # candidate set byte-for-byte intact for nearby evidence.
+            try:
+                if min(abs(anchor_index - int(seed)) for seed in seeds) \
+                        <= radius + reserve_radius:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            try:
+                span_start = float(rows[first_pos][1].start)
+                span_end = float(rows[last_pos][1].end)
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if span_end - span_start > 45.0:
+                continue                  # not one local utterance/passage
+            field_coverage = sum(1 for field in timed_fields if matches & field)
+            weighted = sum(
+                1.0 + 0.35 * timed_field_count.get(token, 0)
+                + (1.0 / max(1, doc_freq.get(token, 1)))
+                for token in matches)
+            # Leading tier 2 means "two-or-more explicit semantic transcript anchors".  It beats a
+            # CLIP/object-only deep reserve (tier 0) and a weak per-shot transcript hint (tier 1),
+            # but not an independently located quote/moment lock (tier 3).
+            rarest_df = min(doc_freq[token] for token in rare_matches)
+            # The rarest local identifier leads: Dontos spoken once is more diagnostic than three
+            # broad words repeated across an essay's later poison recap. Count/coverage break ties.
+            explicit_strength = (2, round(1.0 / rarest_df, 4), field_coverage,
+                                 len(matches), round(weighted, 4))
+            rank_key = (explicit_strength, -(last_pos - first_pos), -anchor_index)
+            record = {
+                "anchor": anchor_index,
+                "reserve_radius": reserve_radius,
+                "matches": tuple(sorted(matches)),
+                "rare_matches": tuple(sorted(rare_matches)),
+                "score": round(weighted, 4),
+                "strength": explicit_strength,
+                "first_match_index": rows[first_pos][0],
+                "last_match_index": rows[last_pos][0],
+            }
+            if best is None or rank_key > best[0]:
+                best = (rank_key, record)
+        return best[1] if best else None
+
     # The retained candidates are evidence about *where* match believed the scene could be.  Keep
     # their first-seen order as the final deterministic tiebreak, while collecting every seed shot
     # from a source so a sibling can be near any of them.
@@ -1362,7 +1559,8 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
     # unreachable.  Preserve at most ONE evidence-backed disjoint region per head source; candidate
     # generation later gives that region its own tiny, hard-bounded nearest-shot reserve instead of
     # letting it widen or crowd the ordinary neighborhood.
-    supported_deep_regions: dict[str, tuple[tuple, int]] = {}
+    # value = (existing deterministic rank evidence, anchor shot, explicit-text strength)
+    supported_deep_regions: dict[str, tuple[tuple, int, tuple]] = {}
 
     def _deep_region_evidence(candidate, order: int):
         signals = getattr(candidate, "signals", None) or {}
@@ -1373,7 +1571,10 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
             except (TypeError, ValueError):
                 return 0.0
 
-        text_evidence = max(_num("dialogue"), _num("transcript"), _num("moment_lock"))
+        dialogue_evidence = _num("dialogue")
+        transcript_evidence = _num("transcript")
+        moment_evidence = _num("moment_lock")
+        text_evidence = max(dialogue_evidence, transcript_evidence, moment_evidence)
         clip_evidence = _num("clip")
         try:
             retained_score = float(getattr(candidate, "score", 0.0) or 0.0)
@@ -1391,8 +1592,15 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
         # Timed/text evidence disambiguates two distant regions in the same upload (the measured
         # throne-room source retained an early Ned shot and the later betrayal; only the latter had
         # transcript overlap).  CLIP and the retained score are deterministic fallbacks.
-        return (1 if text_evidence > 0.0 else 0, text_evidence,
-                clip_evidence, retained_score, -int(order))
+        evidence = (1 if text_evidence > 0.0 else 0, text_evidence,
+                    clip_evidence, retained_score, -int(order))
+        if moment_evidence > 0.0 or dialogue_evidence >= 0.78:
+            explicit_strength = (3, round(max(moment_evidence, dialogue_evidence), 4))
+        elif text_evidence > 0.0:
+            explicit_strength = (1, round(text_evidence, 4))
+        else:
+            explicit_strength = (0, 0.0)
+        return evidence, explicit_strength
 
     def _add_seed(order, sid, shot_index, *, deep=False):
         sid = str(sid or "")
@@ -1432,10 +1640,13 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
             # the same-source blind-spot repair.
             if sid not in head_source_ids:
                 continue
-            evidence = _deep_region_evidence(candidate, _deep_base + offset)
+            evidence_row = _deep_region_evidence(candidate, _deep_base + offset)
             previous = supported_deep_regions.get(sid)
-            if evidence is not None and (previous is None or evidence > previous[0]):
-                supported_deep_regions[sid] = (evidence, shot_index)
+            if evidence_row is not None:
+                evidence, explicit_strength = evidence_row
+                if previous is None or evidence > previous[0]:
+                    supported_deep_regions[sid] = (
+                        evidence, shot_index, explicit_strength)
             continue
         _add_seed(_deep_base + offset, sid, shot_index, deep=True)
 
@@ -1479,7 +1690,51 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
         seed_tier = 0 if sid in head_source_ids else 1
         affine_sources.append((seed_tier, -priority, source_order[sid], sid, seeds, affinity))
     affine_sources.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
-    affine_sources = affine_sources[:source_cap]
+
+    # Scan transcript text only in sources the matcher already retained and the affinity gate just
+    # accepted.  This may inspect a deep-bench source that sits below the four-source vision cap;
+    # explicit local text can replace (never add to) the last source slot.  No image/API call is
+    # spent by this scan and the global matcher remains untouched.
+    all_affine_sources = list(affine_sources)
+    shots_cache: dict[str, list] = {}
+    timed_regions: dict[str, dict] = {}
+    for _row in all_affine_sources:
+        _sid, _seeds = _row[3], _row[4]
+        try:
+            _shots = sorted(getattr(get_shot, "all_shots", lambda _s: [])(_sid) or [],
+                            key=lambda sh: int(getattr(sh, "index", -1)))
+        except Exception:
+            _shots = []
+        shots_cache[_sid] = _shots
+        _timed = _timed_text_region(_shots, _seeds)
+        if _timed:
+            # Keep this evidence even when it overlaps the old deep anchor.  It reuses the SAME
+            # five-call reserve, but carries stronger ordering and a post-dialogue action trim; the
+            # measured throne-room miss had deep#61 and timed#62 pointing at the same passage.
+            timed_regions[_sid] = _timed
+
+    affine_sources = all_affine_sources[:source_cap]
+    protected_timed_sid = ""
+    if timed_regions:
+        _timed_rows = [row for row in all_affine_sources if row[3] in timed_regions]
+        _best_timed_row = max(
+            _timed_rows,
+            key=lambda row: (timed_regions[row[3]]["strength"], int(row[5]),
+                             -int(row[2]), row[3]))
+        _best_timed_sid = _best_timed_row[3]
+        _deep_strength = max(
+            (supported_deep_regions[row[3]][2]
+             for row in affine_sources if row[3] in supported_deep_regions),
+            default=(0, 0.0))
+        # A deep source below the normal source cap enters only when two-or-more explicit timed
+        # anchors are stronger than the best old deep evidence.  Replace the last slot so the
+        # unchanged source_cap remains a hard bound.
+        if timed_regions[_best_timed_sid]["strength"] > _deep_strength:
+            protected_timed_sid = _best_timed_sid
+            if all(row[3] != _best_timed_sid for row in affine_sources):
+                if len(affine_sources) >= source_cap:
+                    affine_sources = affine_sources[:-1]
+                affine_sources.append(_best_timed_row)
     if not affine_sources:
         return []
 
@@ -1491,6 +1746,43 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
     except (TypeError, ValueError):
         selected_shot_index = -1
     excluded.add((str(getattr(sel, "source_id", "") or ""), selected_shot_index))
+
+    # The shallow normal promotion may stop at max_replacements=3 even though match already ranked
+    # an exact candidate fifth.  Keep a score-ordered list of at most one reserve opportunity here;
+    # hard-shot eligibility is checked below before its source can consume one of source_cap's slots.
+    affine_by_sid = {row[3]: row for row in all_affine_sources}
+    unseen_retained_rows = []
+    for alt_order, alt in enumerate(getattr(sel, "alternates", None) or []):
+        sid = str(getattr(alt, "source_id", "") or "")
+        try:
+            shot_index = int(getattr(alt, "shot_index", -1))
+            retained_score = float(getattr(alt, "score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if (sid, shot_index) in excluded or not sid or shot_index < 0:
+            continue
+        source_row = affine_by_sid.get(sid)
+        if source_row is None:
+            # Candidate-level semantic affinity is allowed only for this ONE already-ranked frame,
+            # never for a +/- neighborhood.  This covers an exact frame inside a poorly titled
+            # compilation (measured beat98) without declaring the whole source scene-affine.
+            signals = getattr(alt, "signals", None) or {}
+            try:
+                clip_affinity = float(signals.get("clip", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                clip_affinity = 0.0
+            try:
+                src = proj.source(sid)
+            except Exception:
+                src = None
+            title = str(getattr(src, "title", "") or "") if src is not None else ""
+            if (retained_score < 0.70 or clip_affinity < 0.90 or src is None
+                    or str(getattr(src, "status", "") or "") != "ok" or sid in banned
+                    or (beat_era and _era_conflict(beat_era, title + " " + sid))):
+                continue
+        unseen_retained_rows.append(
+            ((-retained_score, alt_order, sid, shot_index), alt, source_row))
+    unseen_retained_rows.sort(key=lambda row: row[0])
 
     from . import image_fallback as _IF_n
     from . import match as _M_n
@@ -1545,6 +1837,81 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
         graphics_tier_cache[sid] = (tiers, sum(1 for value in tiers.values() if value >= 2))
         return graphics_tier_cache[sid]
 
+    from .match import (_shot_unreadable, _shot_featureless, _ocr_is_junk,
+                        _ocr_text_heavy, _shot_overlay_badge,
+                        _shot_static_collage, _shot_numeral_overlay,
+                        _shot_subtitle_band)
+
+    def _hard_shot_eligible(sid, shot, shots):
+        """Mirror match's deterministic hard-shot admission before any reserve is allocated."""
+        try:
+            shot_index = int(getattr(shot, "index", -1))
+            kf = str(getattr(shot, "keyframe_path", "") or "")
+            if not kf or not Path(kf).is_file():
+                return False
+            tiers, hard_graphics = _graphics_tiers(sid, shots)
+            tier = int(tiers.get(shot_index, -1))
+            quality_raw = getattr(shot, "quality", None)
+            quality = 1.0 if quality_raw is None else float(quality_raw)
+            return not (
+                _shot_unreadable(shot) or _shot_featureless(shot)
+                or _ocr_is_junk(shot) or _ocr_text_heavy(shot)
+                or _shot_overlay_badge(shot) or _shot_static_collage(shot)
+                or _shot_numeral_overlay(shot) or _shot_subtitle_band(shot)
+                or tier >= 2 or (tier == 1 and hard_graphics >= 3)
+                or int((getattr(shot, "scores", None) or {}).get("bonus_tail", 0) or 0)
+                or (_black_floor > 0 and quality < _black_floor))
+        except Exception:
+            return False
+
+    # Reserve at most ONE normal alternate that the shallow promotion did not reach.  Its source
+    # replaces the weakest unprotected source slot when necessary; explicit timed-text evidence is
+    # never displaced.  Strict vision, Window-QC, reuse and materialization remain downstream.
+    retained_alt_choice = None
+    retained_direct_only_sid = ""
+    for _rank, alt, source_row in unseen_retained_rows:
+        sid = str(getattr(alt, "source_id", "") or "")
+        try:
+            shot_index = int(getattr(alt, "shot_index", -1))
+        except (TypeError, ValueError):
+            continue
+        shots = shots_cache.get(sid)
+        if shots is None:
+            try:
+                shots = sorted(getattr(get_shot, "all_shots", lambda _s: [])(sid) or [],
+                               key=lambda sh: int(getattr(sh, "index", -1)))
+            except Exception:
+                shots = []
+            shots_cache[sid] = shots
+        shot = next((candidate_shot for candidate_shot in shots
+                     if int(getattr(candidate_shot, "index", -1)) == shot_index), None)
+        if shot is None or not _hard_shot_eligible(sid, shot, shots):
+            continue
+        if all(row[3] != sid for row in affine_sources):
+            direct_only = source_row is None
+            if source_row is None:
+                # Strong persisted candidate-level CLIP admits only this exact matcher-ranked shot,
+                # not its surrounding source.  A synthetic one-seed row lets the shared hard/vision
+                # path process it while `retained_direct_only_sid` blocks every sibling.
+                source_row = (0, 0, int(source_order.get(sid, 10_000)), sid,
+                              [shot_index], 0)
+            if len(affine_sources) < source_cap:
+                affine_sources.append(source_row)
+            else:
+                replace_index = next(
+                    (pos for pos in range(len(affine_sources) - 1, -1, -1)
+                     if affine_sources[pos][3] != protected_timed_sid), None)
+                if replace_index is None:
+                    continue
+                affine_sources[replace_index] = source_row
+            if direct_only:
+                retained_direct_only_sid = sid
+        retained_alt_choice = alt
+        break
+    retained_alt_key = ((str(getattr(retained_alt_choice, "source_id", "") or ""),
+                         int(getattr(retained_alt_choice, "shot_index", -1)))
+                        if retained_alt_choice is not None else None)
+
     query = " ".join(x for x in (
         getattr(seg, "scene_query", "") or "",
         getattr(seg, "expected_visual", "") or "",
@@ -1553,29 +1920,38 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
     moment_cache: dict = {}
     ranked = []
     deep_region_ranked: dict[int, list] = {}
+    timed_region_ranked: dict[int, list] = {}
+    retained_normal_ranked = []
     for source_rank, (_seed_tier, _neg_aff, _seed_order, sid, seeds, affinity) \
             in enumerate(affine_sources):
-        try:
-            shots = sorted(getattr(get_shot, "all_shots", lambda _s: [])(sid) or [],
-                           key=lambda sh: int(getattr(sh, "index", -1)))
-        except Exception:
+        shots = shots_cache.get(sid, [])
+        if not shots:
             continue
-        _tiers, _hard_graphics = _graphics_tiers(sid, shots)
-        _deep_anchor = (supported_deep_regions.get(sid) or (None, None))[1]
+        _deep_anchor = (supported_deep_regions.get(sid) or (None, None, None))[1]
+        _timed_info = timed_regions.get(sid)
+        _timed_anchor = int(_timed_info["anchor"]) if _timed_info else None
+        _timed_radius = int(_timed_info["reserve_radius"]) if _timed_info else 0
         for sh in shots:
             try:
                 shot_index = int(getattr(sh, "index", -1))
                 distance = min(abs(shot_index - seed) for seed in seeds)
             except (TypeError, ValueError):
                 continue
+            if retained_direct_only_sid == sid and (sid, shot_index) != retained_alt_key:
+                continue
             deep_distance = (abs(shot_index - int(_deep_anchor))
                              if _deep_anchor is not None else radius + 1)
+            timed_distance = (abs(shot_index - _timed_anchor)
+                              if _timed_anchor is not None else radius + 1)
             # A supported deep region owns only pixels which the ordinary head neighborhood could
             # not already reach.  This prevents double counting when its anchor is just beyond the
             # radius and keeps the old head-region search byte-for-byte unchanged.
             in_deep_region = deep_distance <= radius and distance > radius
+            in_timed_region = bool(
+                _timed_info and timed_distance <= _timed_radius and distance > radius)
             key = (sid, shot_index)
-            if key in excluded or (distance > radius and not in_deep_region):
+            if (key in excluded
+                    or (distance > radius and not in_deep_region and not in_timed_region)):
                 continue
             kf = str(getattr(sh, "keyframe_path", "") or "")
             if not kf or not Path(kf).is_file():
@@ -1584,24 +1960,7 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
             # deterministic hard-shot predicate from `_load_pool` + `_score_pool` before they can
             # consume a vision call.  Strict vision is not permission to resurrect pixels which
             # match already ruled unairable (featureless cards, sub bands, hard graphics, etc.).
-            try:
-                from .match import (_shot_unreadable, _shot_featureless, _ocr_is_junk,
-                                    _ocr_text_heavy, _shot_overlay_badge,
-                                    _shot_static_collage, _shot_numeral_overlay,
-                                    _shot_subtitle_band)
-                _tier = int(_tiers.get(shot_index, -1))
-                _quality_raw = getattr(sh, "quality", None)
-                _quality = 1.0 if _quality_raw is None else float(_quality_raw)
-                if (_shot_unreadable(sh) or _shot_featureless(sh)
-                        or _ocr_is_junk(sh) or _ocr_text_heavy(sh)
-                        or _shot_overlay_badge(sh) or _shot_static_collage(sh)
-                        or _shot_numeral_overlay(sh) or _shot_subtitle_band(sh)
-                        or _tier >= 2 or (_tier == 1 and _hard_graphics >= 3)
-                        or int((getattr(sh, "scores", None) or {}).get(
-                            "bonus_tail", 0) or 0)
-                        or (_black_floor > 0 and _quality < _black_floor)):
-                    continue
-            except Exception:
+            if not _hard_shot_eligible(sid, sh, shots):
                 continue
             try:
                 rel = _IF_n._shot_relevance(
@@ -1637,23 +1996,39 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
             score = max(0.0, min(1.0, float(rel))) if rel is not None and rel >= 0 else 0.0
             signals = {"strict_scene_neighborhood": True,
                        "scene_affinity": int(affinity),
-                       "neighbor_distance": int(deep_distance if in_deep_region else distance),
+                       "neighbor_distance": int(distance),
                        "visual_relevance": round(float(rel), 4) if rel is not None else -1.0,
                        "dialogue": round(dialogue, 3),
                        "quality": round(float(getattr(sh, "quality", 0.0) or 0.0), 3)}
-            if in_deep_region:
-                signals["strict_scene_deep_region"] = True
             if _moment and moment_lock > 0.0:
                 signals["moment_lock"] = round(moment_lock, 3)
                 try:
                     signals["moment_ratio"] = round(float(_moment[2]), 3)
                 except Exception:
                     pass
-            cand = ClipCandidate(
-                segment_index=int(getattr(sel, "segment_index", -1)), source_id=sid,
-                shot_index=shot_index, score=round(score, 4),
-                in_point=round(float(in_point), 3), out_point=round(float(out_point), 3),
-                signals=signals)
+            def _candidate(_in, _out, _signals):
+                return ClipCandidate(
+                    segment_index=int(getattr(sel, "segment_index", -1)), source_id=sid,
+                    shot_index=shot_index, score=round(score, 4),
+                    in_point=round(float(_in), 3), out_point=round(float(_out), 3),
+                    signals=_signals)
+            is_retained_reserve = retained_alt_key == (sid, shot_index)
+            if is_retained_reserve:
+                retained_signals = dict(
+                    getattr(retained_alt_choice, "signals", None) or {})
+                retained_signals.update(signals)
+                retained_signals["strict_scene_retained_alternate"] = True
+                try:
+                    retained_in = float(getattr(retained_alt_choice, "in_point"))
+                    retained_out = float(getattr(retained_alt_choice, "out_point"))
+                    if retained_out <= retained_in:
+                        raise ValueError("empty retained window")
+                except (TypeError, ValueError):
+                    retained_in, retained_out = float(in_point), float(out_point)
+                retained_normal_ranked.append(
+                    ((-float(getattr(retained_alt_choice, "score", 0.0) or 0.0),
+                      source_rank, shot_index),
+                     _candidate(retained_in, retained_out, retained_signals)))
             # Real persisted/live CLIP scores lead. If CLIP is unavailable, source affinity then
             # nearest-shot distance provides a fully deterministic fallback.
             order_key = ((0, -float(rel), distance, shot_index)
@@ -1663,10 +2038,47 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
                 # Distance leads only inside the five-call reserve.  A low-CLIP transition/action
                 # sibling two shots from a strong deep seed must still be seen by strict vision;
                 # this is exactly how the gold-cloak swords frame survived noisy CLIP ordering.
+                deep_signals = dict(signals)
+                deep_signals["neighbor_distance"] = int(deep_distance)
+                deep_signals["strict_scene_deep_region"] = True
                 deep_region_ranked.setdefault(source_rank, []).append(
-                    ((deep_distance, order_key, shot_index), cand))
-            else:
-                ranked.append((source_rank, order_key, cand))
+                    ((deep_distance, order_key, shot_index),
+                     _candidate(in_point, out_point, deep_signals)))
+            if in_timed_region:
+                timed_signals = dict(signals)
+                timed_signals.update({
+                    "neighbor_distance": int(timed_distance),
+                    "strict_scene_timed_text_region": True,
+                    "timed_text_matches": list(_timed_info["matches"]),
+                    "timed_text_rare_matches": list(_timed_info["rare_matches"]),
+                    "timed_text_score": float(_timed_info["score"]),
+                })
+                timed_in, timed_out = float(in_point), float(out_point)
+                # Dialogue often names an action immediately before the edit that shows it.  For a
+                # long, silent action shot after the first matched line, the ordinary midpoint trim
+                # can omit the resolving tail (measured: gold-cloak swords, then Ned enters frame).
+                # Bias only this explicitly timed action candidate to its tail; all other windows
+                # retain `_trim_window` unchanged and downstream exact-window QC still adjudicates.
+                try:
+                    action_intent = str(getattr(seg, "shot_intent", "") or "").lower() == "action"
+                    shot_start, shot_end = float(sh.start), float(sh.end)
+                    window_len = max(0.0, timed_out - timed_in)
+                    post_dialogue = (
+                        shot_index > int(_timed_info["first_match_index"])
+                        and not str(getattr(sh, "transcript", "") or "").strip())
+                    if (action_intent and post_dialogue and window_len > 0.0
+                            and shot_end - shot_start > window_len + 0.5):
+                        timed_out = shot_end
+                        timed_in = max(shot_start, timed_out - window_len)
+                        timed_signals["timed_text_tail_window"] = True
+                except (TypeError, ValueError, AttributeError):
+                    pass
+                timed_region_ranked.setdefault(source_rank, []).append(
+                    ((timed_distance, order_key, shot_index),
+                     _candidate(timed_in, timed_out, timed_signals)))
+            if not in_deep_region and not in_timed_region and not is_retained_reserve:
+                ranked.append((source_rank, order_key,
+                               _candidate(in_point, out_point, signals)))
 
     # Source identity is stronger than cross-source CLIP noise for this rung: the whole reason it
     # exists is that match already found the right file but retained the neighboring second. Rank by
@@ -1680,11 +2092,9 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
         rows.sort(key=lambda row: row[0])
     chosen = []
     chosen_keys = set()
-    # Prefer a supported disjoint region in the SELECTED source; that is the strongest possible
-    # evidence that match found the right upload but the wrong passage (necklace and dagger cases).
-    # Otherwise use only the highest-affinity supported source (gold-cloak case). Five nearest shots
-    # cover the anchor and +/-2 siblings while leaving seven of the default twelve calls for the
-    # old head search. This is a reallocation inside the existing cap, not a larger cap or rerank.
+    # First resolve the old evidence-backed deep reserve exactly as before: prefer a competitive
+    # selected source, otherwise the highest-affinity supported source.
+    deep_source_rank = None
     if deep_region_ranked:
         selected_sid = str(getattr(sel, "source_id", "") or "")
         selected_deep_rank = next((rank for rank, row in enumerate(affine_sources)
@@ -1701,16 +2111,49 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
             and int(affine_sources[selected_deep_rank][5])
             >= int(affine_sources[strongest_deep_rank][5]) - 5)
         deep_source_rank = selected_deep_rank if selected_is_affine else strongest_deep_rank
-        deep_rows = sorted(deep_region_ranked[deep_source_rank], key=lambda row: row[0])
-        for _key, cand in deep_rows[:min(5, cap)]:
+
+    # There may likewise be only ONE transcript reserve.  It displaces the old deep reserve only
+    # when its explicit two-token timed evidence is strictly stronger; equality preserves the old
+    # path.  Thus a real quote/moment lock still wins, while CLIP-only and one-token hints do not
+    # hide the measured Dontos/necklace passage.
+    timed_source_rank = None
+    if timed_region_ranked:
+        timed_source_rank = max(
+            timed_region_ranked,
+            key=lambda rank: (timed_regions[affine_sources[rank][3]]["strength"],
+                              int(affine_sources[rank][5]), -rank))
+    deep_strength = ((supported_deep_regions.get(
+        affine_sources[deep_source_rank][3]) or (None, None, (0, 0.0)))[2]
+        if deep_source_rank is not None else (0, 0.0))
+    timed_strength = (timed_regions[affine_sources[timed_source_rank][3]]["strength"]
+                      if timed_source_rank is not None else (0, 0.0))
+    reserve_rows = []
+    if timed_source_rank is not None and timed_strength > deep_strength:
+        reserve_rows = sorted(timed_region_ranked[timed_source_rank], key=lambda row: row[0])
+    elif deep_source_rank is not None:
+        reserve_rows = sorted(deep_region_ranked[deep_source_rank], key=lambda row: row[0])
+    # Five nearest shots cover the evidence anchor and +/-2 siblings while leaving seven of the
+    # default twelve calls for the old head search. This reallocates the existing cap; it does not
+    # enlarge the source/candidate caps or alter global ranking.
+    for _key, cand in reserve_rows[:min(5, cap)]:
+        ck = (cand.source_id, cand.shot_index)
+        if ck not in chosen_keys:
             chosen.append(cand)
-            chosen_keys.add((cand.source_id, cand.shot_index))
+            chosen_keys.add(ck)
+    # One matcher-ranked normal alternate can otherwise remain invisible solely because the
+    # shallow strict pass stopped at three.  Spend one slot from this same cap, never an extra call.
+    for _key, cand in sorted(retained_normal_ranked, key=lambda row: row[0])[:1]:
+        if len(chosen) >= cap:
+            break
+        ck = (cand.source_id, cand.shot_index)
+        if ck not in chosen_keys:
+            chosen.append(cand)
+            chosen_keys.add(ck)
     top_source_ranks = sorted(by_source)[:2]
     remaining = max(0, cap - len(chosen))
     if chosen and len(top_source_ranks) >= 2:
-        # The deep reserve consumes five calls from the unchanged twelve-call cap. Split the seven
-        # ordinary calls 4/3 across the same top two sources; retaining the old six-per-source loop
-        # here produced 5+6+1 and silently crowded almost the entire second source out.
+        # The local reserve consumes at most five calls from the unchanged twelve-call cap. Split
+        # the remainder across the same top two ordinary sources.
         quotas = {
             rank: remaining // 2 + (1 if pos < remaining % 2 else 0)
             for pos, rank in enumerate(top_source_ranks)

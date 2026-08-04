@@ -17,7 +17,7 @@ from . import policy as _policy
 from .models import SOURCE_OK
 from .verify import _contradiction_reason, selection_verifier_evidence_reason
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 AUDIT_FILENAME = "selection_relevance_audit.json"
 QUOTE_DIALOGUE_FLOOR = 0.78
 QUOTE_WINDOW_TOLERANCE_SEC = 0.75
@@ -475,6 +475,144 @@ class _RequestQuotePoolClassificationCache:
         self.__contracts = None
 
 
+def _exact_quote_audio_transfer_evidence(
+        proj, sel, authored_quote: str, quote_contract: dict, evidence: dict) \
+        -> tuple[bool, str, dict]:
+    """Validate a cross-copy PCM quote location against current immutable inputs.
+
+    The authoritative reference remains the whole-pool timed-ASR match.  Audio alignment merely
+    transfers that already-typed phrase into a clean copy whose *current* ASR missed it.  Every
+    byte/time/score binding is checked again here; a target cannot type its own quote, and changing
+    either media file or the final trim invalidates the proof.
+    """
+    import math as _math_transfer
+
+    from . import audio_align as _audio_transfer
+    from . import verify as _verify_transfer
+
+    detail = dict(evidence or {}) if isinstance(evidence, dict) else {}
+    shape_reason = _audio_transfer.transfer_evidence_shape_reason(evidence)
+    if shape_reason:
+        return False, shape_reason, detail
+    # This path is never a substitute for whole-pool quote typing.
+    if str((quote_contract or {}).get("branch", "") or "") != "verbatim":
+        return False, "quote_contract_not_verbatim", detail
+
+    quote = " ".join(str(authored_quote or "").strip().split())
+    if str(evidence.get("authored_quote", "") or "") != quote:
+        return False, "authored_quote_mismatch", detail
+    target_sid = str(getattr(sel, "source_id", "") or "")
+    reference_sid = str(evidence.get("reference_source_id", "") or "")
+    if str(evidence.get("target_source_id", "") or "") != target_sid:
+        return False, "target_source_mismatch", detail
+
+    def _pair(value):
+        try:
+            start, end = float(value[0]), float(value[1])
+        except (IndexError, TypeError, ValueError):
+            return None
+        if not (_math_transfer.isfinite(start) and _math_transfer.isfinite(end)
+                and end > start >= 0.0):
+            return None
+        return start, end
+
+    reference_span = _pair(evidence.get("reference_quote_span"))
+    reference_extract = _pair(evidence.get("reference_extract_window"))
+    target_span = _pair(evidence.get("target_quote_span"))
+    target_search = _pair(evidence.get("target_search_window"))
+    selected_bound = _pair(evidence.get("target_selected_window"))
+    if None in (reference_span, reference_extract, target_span, target_search, selected_bound):
+        return False, "evidence_window_invalid", detail
+    assert reference_span is not None and reference_extract is not None
+    assert target_span is not None and target_search is not None and selected_bound is not None
+    if not (reference_extract[0] <= reference_span[0] < reference_span[1]
+            <= reference_extract[1]):
+        return False, "reference_quote_outside_extract", detail
+    if not (target_search[0] <= target_span[0] < target_span[1] <= target_search[1]):
+        return False, "target_quote_outside_search", detail
+    # Direct PCM correlation preserves duration; a record claiming time-warped words was not made
+    # by this algorithm generation.
+    if abs((reference_span[1] - reference_span[0])
+           - (target_span[1] - target_span[0])) > 0.002:
+        return False, "transferred_quote_duration_mismatch", detail
+
+    selection_window = (
+        float(getattr(sel, "in_point", 0.0) or 0.0),
+        float(getattr(sel, "out_point", 0.0) or 0.0),
+    )
+    if (not (selection_window[1] > selection_window[0] >= 0.0)
+            or max(abs(selection_window[0] - selected_bound[0]),
+                   abs(selection_window[1] - selected_bound[1])) > 0.001):
+        return False, "target_selected_window_mismatch", detail
+    tolerance = float(QUOTE_WINDOW_TOLERANCE_SEC)
+    if not (target_span[0] >= selection_window[0] - tolerance
+            and target_span[1] <= selection_window[1] + tolerance):
+        return False, "transferred_quote_outside_selected_window", detail
+
+    raw_matches = list((quote_contract or {}).get("pool_matches") or [])
+    if not raw_matches and isinstance((quote_contract or {}).get("pool_match"), dict):
+        raw_matches = [quote_contract["pool_match"]]
+    authoritative_match = None
+    for match in raw_matches:
+        if str((match or {}).get("source_id", "") or "") != reference_sid:
+            continue
+        pool_span = _pair((match or {}).get("timed_asr_span"))
+        try:
+            pool_ratio = float((match or {}).get("timed_asr_ratio", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if (pool_span is not None
+                and max(abs(pool_span[0] - reference_span[0]),
+                        abs(pool_span[1] - reference_span[1])) <= 0.001
+                and abs(pool_ratio - float(evidence["reference_asr_ratio"])) <= 0.001
+                and pool_ratio >= QUOTE_DIALOGUE_FLOOR):
+            authoritative_match = match
+            break
+    if authoritative_match is None:
+        return False, "reference_match_not_authoritative_in_current_contract", detail
+
+    expected_asr = str((quote_contract or {}).get(
+        "asr_prompt_fingerprint_expected", "") or "")
+    ref_asr_ok, _actual_ref_asr, ref_asr_reason = _source_asr_provenance(
+        proj, reference_sid, expected_asr)
+    if not ref_asr_ok:
+        return False, f"reference_asr_provenance_{ref_asr_reason}", detail
+
+    reference_source = proj.source(reference_sid)
+    target_source = proj.source(target_sid)
+    if reference_source is None or target_source is None:
+        return False, "bound_source_missing", detail
+    reference_fp = _verify_transfer._file_fingerprint(
+        getattr(reference_source, "local_path", "") or "")
+    target_fp = _verify_transfer._file_fingerprint(
+        getattr(target_source, "local_path", "") or "")
+    if reference_fp in ("", "missing", "unreadable") \
+            or reference_fp != evidence.get("reference_source_content_fingerprint"):
+        return False, "reference_source_content_fingerprint_mismatch", detail
+    if target_fp in ("", "missing", "unreadable") \
+            or target_fp != evidence.get("target_source_content_fingerprint"):
+        return False, "target_source_content_fingerprint_mismatch", detail
+
+    try:
+        correlation = float(evidence["correlation"])
+        runner_up = float(evidence["runner_up_correlation"])
+        uniqueness = float(evidence["uniqueness_margin"])
+    except (KeyError, TypeError, ValueError):
+        return False, "alignment_scores_invalid", detail
+    if not all(_math_transfer.isfinite(value)
+               for value in (correlation, runner_up, uniqueness)):
+        return False, "alignment_scores_nonfinite", detail
+    if not (0.0 <= runner_up <= correlation <= 1.000001):
+        return False, "alignment_score_order_invalid", detail
+    if abs((correlation - runner_up) - uniqueness) > 0.00001:
+        return False, "alignment_uniqueness_margin_inconsistent", detail
+    if correlation < _audio_transfer.AUDIO_QUOTE_TRANSFER_MIN_CORRELATION:
+        return False, "alignment_correlation_below_floor", detail
+    if uniqueness < _audio_transfer.AUDIO_QUOTE_TRANSFER_MIN_UNIQUENESS_MARGIN:
+        return False, "alignment_uniqueness_below_floor", detail
+    return True, "", detail
+
+
 def exact_quote_dialogue_evidence(proj, sel, seg, *, quote_contract=None) \
         -> tuple[bool, str, dict]:
     """Prove an authored quote is spoken at the selected source window.
@@ -525,6 +663,17 @@ def exact_quote_dialogue_evidence(proj, sel, seg, *, quote_contract=None) \
     except Exception:
         span = None
     if not span:
+        transfer = signals.get("quote_audio_transfer_evidence")
+        if transfer is not None:
+            transfer_ok, transfer_reason, transfer_detail = \
+                _exact_quote_audio_transfer_evidence(
+                    proj, sel, quote, detail, transfer)
+            detail["audio_transfer"] = transfer_detail
+            detail["quote_location_method"] = "audio_transfer"
+            if transfer_ok:
+                return True, "", detail
+            detail["audio_transfer_status"] = transfer_reason
+            return False, "exact_quote_audio_transfer_evidence_invalid", detail
         return False, "exact_quote_timed_asr_span_absent", detail
     q0, q1, ratio = float(span[0]), float(span[1]), float(span[2])
     w0 = float(getattr(sel, "in_point", 0.0) or 0.0)
