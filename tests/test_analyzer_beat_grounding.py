@@ -86,7 +86,7 @@ def test_zero_overlap_global_storyboards_downgrade_to_generic_and_clear_exact_fi
 
 
 @pytest.mark.parametrize(
-    "text, directive",
+    "text, directive, grounded_role",
     [
         (
             "to the master-at-arms of the Red Keep.",
@@ -97,6 +97,7 @@ def test_zero_overlap_global_storyboards_downgrade_to_generic_and_clear_exact_fi
                 "required_entity": "Aron Santagar",
                 "required_kind": "character",
             },
+            "master-at-arms",
         ),
         (
             "the master-at-arms of the Red Keep.",
@@ -106,6 +107,7 @@ def test_zero_overlap_global_storyboards_downgrade_to_generic_and_clear_exact_fi
                 "required_entity": "master-at-arms",
                 "required_kind": "character",
             },
+            "master-at-arms",
         ),
         (
             "He never had to persuade Olenna Tyrell of anything.",
@@ -116,22 +118,126 @@ def test_zero_overlap_global_storyboards_downgrade_to_generic_and_clear_exact_fi
                 "required_entity": "Olenna Tyrell",
                 "required_kind": "character",
             },
+            "",
         ),
     ],
 )
 def test_named_subject_without_a_narrated_exact_moment_becomes_character_specific(
-        text, directive):
+        text, directive, grounded_role):
     beat = _apply(text, **directive)
 
     assert beat.visual_policy == P.CHARACTER
     assert beat.is_specific_claim is False
     assert beat.expected_visual == text
-    assert beat.scene_query == beat.quote == ""
+    assert beat.scene_query == grounded_role
+    assert beat.quote == ""
     # The narration names the role/person, so subject correctness remains required.
-    assert beat.required_entity == directive["required_entity"]
+    assert beat.required_entity == (grounded_role or directive["required_entity"])
     assert beat.required_kind == directive["required_kind"]
     assert beat._analyzer_grounding_guard["branch"] == "ungrounded_exact_downgrade"
     assert beat._analyzer_grounding_guard["to_policy"] == P.CHARACTER
+    if grounded_role:
+        assert beat._analyzer_grounding_guard["grounded_subject_role"] == grounded_role
+
+
+def test_generic_the_one_comparison_cannot_inherit_an_unrelated_exact_scene_or_quote():
+    text = ("The one who was always three moves ahead of people who were physically stronger, "
+            "better born, and better protected.")
+    beat = _apply(
+        text,
+        expected_visual="Littlefinger holds a knife to Ned Stark's throat, betraying him",
+        scene_query="Game of Thrones Littlefinger betrays Ned Stark knife",
+        quote="I did warn you not to trust me.",
+        required_entity="Petyr Baelish",
+        required_kind="character",
+    )
+
+    assert beat.visual_policy == P.FILLER
+    assert beat.is_specific_claim is False
+    assert beat.expected_visual == text
+    assert beat.scene_query == beat.quote == ""
+    assert beat.required_entity == beat.required_kind == ""
+    assert beat._analyzer_grounding_guard["reason"] == \
+        "generic_relative_comparison_has_no_grounded_entity_or_event"
+
+
+@pytest.mark.parametrize(
+    "text, expected_visual, required_entity",
+    [
+        (
+            "The one who killed Joffrey was stronger than either guard: Petyr Baelish.",
+            "Petyr Baelish kills Joffrey in front of two guards",
+            "Petyr Baelish",
+        ),
+        (
+            "The one who survived the Red Wedding was better protected afterwards.",
+            "A survivor escapes the Red Wedding",
+            "Red Wedding",
+        ),
+    ],
+)
+def test_the_one_comparison_keeps_a_locally_grounded_entity_or_event_exact(
+        text, expected_visual, required_entity):
+    beat = _apply(
+        text,
+        expected_visual=expected_visual,
+        scene_query=f"Example Show {expected_visual}",
+        required_entity=required_entity,
+        required_kind="character",
+    )
+
+    assert beat.visual_policy == P.EXACT
+    assert beat.is_specific_claim is True
+    assert beat.expected_visual == expected_visual
+    assert beat._analyzer_grounding_guard["branch"] == "grounded_exact"
+
+
+def test_bare_named_event_keeps_event_exact_but_removes_invented_composite_contract():
+    text = "The obvious objection arrives early, so let us take it early. The Purple Wedding."
+    beat = _apply(
+        text,
+        expected_visual=("Establishing shot of the Purple Wedding feast in the throne room, "
+                         "Joffrey and Margaery raising goblets"),
+        scene_query="Game of Thrones Purple Wedding feast Joffrey Margaery goblets",
+        quote="He's choking!",
+        required_entity="Purple Wedding feast",
+        required_kind="event",
+    )
+
+    assert beat.visual_policy == P.EXACT
+    assert beat.is_specific_claim is True
+    assert beat.expected_visual == "The Purple Wedding"
+    assert beat.scene_query == "The Purple Wedding"
+    assert beat.required_entity == "The Purple Wedding"
+    assert beat.required_kind == "event"
+    assert beat.quote == ""
+    marker = beat._analyzer_grounding_guard
+    assert marker["branch"] == "grounded_exact_sanitized"
+    assert marker["reason"] == "bare_named_event_staging_removed"
+    assert marker["grounded_event"] == "The Purple Wedding"
+    assert marker["sanitized_fields"] == [
+        "expected_visual", "scene_query", "required_entity", "quote"]
+
+
+def test_named_event_guard_does_not_strip_a_narrated_physical_event_or_non_event_title():
+    physical = _apply(
+        "At the Purple Wedding, Joffrey raises his goblet.",
+        expected_visual="Joffrey raises his goblet at the Purple Wedding",
+        scene_query="Game of Thrones Joffrey goblet Purple Wedding",
+        required_entity="Purple Wedding",
+        required_kind="event",
+    )
+    non_event = _apply(
+        "The comparison ends here. The Purple Wedding.",
+        expected_visual="Margaery at the Purple Wedding",
+        scene_query="Game of Thrones Margaery Purple Wedding",
+        required_entity="Margaery Tyrell",
+        required_kind="character",
+    )
+
+    for beat in (physical, non_event):
+        assert beat.visual_policy == P.EXACT
+        assert beat._analyzer_grounding_guard["branch"] == "grounded_exact"
 
 
 @pytest.mark.parametrize(
@@ -414,12 +520,14 @@ def test_grounding_branches_persist_in_analysis_metadata_and_round_trip():
         "sanitized_exact": 1,
         "information_staging_sanitized": 1,
         "record_intent_quote_sanitized": 0,
+        "bare_named_event_sanitized": 0,
         "adjacent_quote_copy_sanitized": 0,
+        "nominal_role_contract_narrowed": 0,
         "downgraded": 1,
         "to_character_specific": 0,
         "to_generic_filler": 1,
     }
-    assert analysis.beat_grounding_audit["schema"] == 3
+    assert analysis.beat_grounding_audit["schema"] == 4
     restored = A.ScriptAnalysis.from_dict(analysis.to_dict())
     assert restored.beat_grounding_audit == analysis.beat_grounding_audit
     assert restored.beat_grounding_audit["beats"]["0"]["branch"] == \
@@ -610,7 +718,7 @@ def test_resume_preserves_fresh_sanitizer_reason_when_post_state_changes_nothing
     assert marker["branch"] == "grounded_exact_sanitized"
     assert marker["reason"] == "record_intent_is_not_verbatim_dialogue"
     assert marker["sanitized_fields"] == ["quote"]
-    assert marker["cached_revalidation_schema"] == 3
+    assert marker["cached_revalidation_schema"] == 4
     saved_audit = loaded_analysis.to_dict()["beat_grounding_audit"]
 
     loaded_again = ScriptSegment.from_dict(loaded.to_dict())
@@ -619,3 +727,111 @@ def test_resume_preserves_fresh_sanitizer_reason_when_post_state_changes_nothing
 
     assert second["changed_count"] == 0
     assert analysis_again.to_dict()["beat_grounding_audit"] == saved_audit
+
+
+def test_schema4_migrates_measured_comparison_event_and_cached_nominal_role_contracts():
+    comparison = ScriptSegment(
+        index=15,
+        text=("The one who was always three moves ahead of people who were physically stronger, "
+              "better born, and better protected."),
+        expected_visual="Littlefinger holds a knife to Ned Stark's throat, betraying him",
+        scene_query="Game of Thrones Littlefinger betrays Ned Stark knife",
+        quote="I did warn you not to trust me.",
+        required_entity="Petyr Baelish",
+        required_kind="character",
+        visual_policy=P.EXACT,
+        is_specific_claim=True,
+        breakout_candidate=True,
+    )
+    nominal = ScriptSegment(
+        index=32,
+        text="to the master-at-arms of the Red Keep.",
+        expected_visual="to the master-at-arms of the Red Keep.",
+        scene_query="",
+        quote="",
+        required_entity="Aron Santagar",
+        required_kind="character",
+        visual_policy=P.CHARACTER,
+        is_specific_claim=False,
+    )
+    event = ScriptSegment(
+        index=54,
+        text="The obvious objection arrives early, so let us take it early. The Purple Wedding.",
+        expected_visual=("Establishing shot of the Purple Wedding feast in the throne room, "
+                         "Joffrey and Margaery raising goblets"),
+        scene_query="Game of Thrones Purple Wedding feast Joffrey Margaery goblets",
+        quote="He's choking!",
+        required_entity="Purple Wedding feast",
+        required_kind="event",
+        visual_policy=P.EXACT,
+        is_specific_claim=True,
+        breakout_candidate=True,
+    )
+    grounded_control = ScriptSegment(
+        index=70,
+        text="Joffrey collapses at the wedding feast, clawing at his throat.",
+        expected_visual="Joffrey choking at the Purple Wedding feast",
+        scene_query="Game of Thrones Joffrey choking Purple Wedding",
+        required_entity="Joffrey Baratheon",
+        required_kind="character",
+        visual_policy=P.EXACT,
+        is_specific_claim=True,
+    )
+    # Same surface shape, but no persisted downgrade provenance: a manual character contract is
+    # not schema-migration authority and must remain byte-for-byte unchanged.
+    manual_control = ScriptSegment(
+        index=90,
+        text="to the commander of the city watch.",
+        expected_visual="to the commander of the city watch.",
+        scene_query="",
+        required_entity="Janos Slynt",
+        required_kind="character",
+        visual_policy=P.CHARACTER,
+        is_specific_claim=False,
+    )
+    analysis = A.ScriptAnalysis(beat_grounding_audit={
+        "schema": 3,
+        "beats": {
+            "15": {"branch": "grounded_exact", "reason": "named_subject_and_scene_action",
+                   "cached_revalidation_schema": 3},
+            "32": {"branch": "ungrounded_exact_downgrade",
+                   "reason": "named_subject_without_exact_action",
+                   "to_policy": P.CHARACTER, "cached_revalidation_schema": 3},
+            "54": {"branch": "grounded_exact", "reason": "named_subject_and_scene_action",
+                   "cached_revalidation_schema": 3},
+            "70": {"branch": "grounded_exact", "reason": "named_subject_and_scene_action",
+                   "cached_revalidation_schema": 3},
+        },
+        "breakout_provenance": {"15": "quote_derived", "54": "quote_derived"},
+    })
+    rows = [comparison, nominal, event, grounded_control, manual_control]
+
+    first = A.revalidate_cached_directions(rows, analysis)
+
+    assert first["exact_revalidated"] == 3
+    assert first["cached_nominal_roles_migrated"] == 1
+    assert first["changed_indices"] == [15, 32, 54]
+    assert comparison.visual_policy == P.FILLER
+    assert comparison.quote == "" and comparison.breakout_candidate is False
+    assert nominal.visual_policy == P.CHARACTER
+    assert nominal.required_entity == nominal.scene_query == "master-at-arms"
+    assert first["changes"]["32"]["changed_fields"] == ["scene_query", "required_entity"]
+    assert first["changes"]["32"]["guard"]["schema_migration"] == \
+        "nominal_role_contract_v4"
+    assert event.visual_policy == P.EXACT
+    assert event.expected_visual == event.scene_query == event.required_entity == \
+        "The Purple Wedding"
+    assert event.quote == "" and event.breakout_candidate is False
+    assert grounded_control.visual_policy == P.EXACT
+    assert manual_control.required_entity == "Janos Slynt"
+    assert manual_control.scene_query == ""
+    assert analysis.beat_grounding_audit["schema"] == 4
+
+    saved = analysis.to_dict()
+    reloaded = [ScriptSegment.from_dict(row.to_dict()) for row in rows]
+    second = A.revalidate_cached_directions(
+        reloaded, A.ScriptAnalysis.from_dict(saved))
+
+    assert second["changed_count"] == 0
+    assert second["exact_revalidated"] == 0
+    assert second["cached_nominal_roles_migrated"] == 0

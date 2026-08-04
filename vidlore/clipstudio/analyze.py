@@ -288,6 +288,16 @@ _GENERAL_RELATION_RX = re.compile(
     r"rarer\s+(?:mind|willingness)\b",
     re.I,
 )
+# A context-dependent comparison beginning with ``the one who`` does not identify a person or an
+# observable event by itself.  The analyzer repeatedly completed that ellipsis from whole-essay
+# context and attached an unrelated betrayal scene/quote.  Keep this narrower than a general
+# pronoun rule: it applies only to a relative-clause comparison, and the grounding check below still
+# preserves it when the narration and storyboard share a named entity or at least two event terms.
+_GENERIC_RELATIVE_COMPARISON_RX = re.compile(
+    r"^\s*(?:the|that)\s+one\s+who\b(?=[^.!?]{0,240}\b(?:always|never|more|less|"
+    r"stronger|weaker|better|worse|ahead\s+of|protected|better\s+born)\b)",
+    re.I,
+)
 _NOMINAL_FRAGMENT_RX = re.compile(r"^\s*to\b", re.I)
 _VAGUE_SUBJECT_RX = re.compile(
     r"\b(?:those|these)\s+people\b|\bsomeone\s+(?:is\s+)?(?:checking|verifying)\b",
@@ -383,6 +393,71 @@ def _grounding_terms(value: str) -> set[str]:
     }
 
 
+_NARRATED_ROLE_PREFIX_RX = re.compile(
+    r"^\s*(?:to\s+)?(?:the|a|an)\s+"
+    r"(?P<role>[a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,3}?)"
+    r"(?=\s+(?:of|in|at|from|for|with|under|inside|outside)\b|[,.!?;:]|$)",
+    re.I,
+)
+
+
+def _narrated_subject_role(narration: str, directive: dict) -> str:
+    """Return a determiner-led role literally named by a nominal character fragment.
+
+    ``to the master-at-arms of the Red Keep`` grounds the role *master-at-arms*, not the
+    analyzer's canonical guess ``Aron Santagar``.  This extractor intentionally accepts only a
+    sentence-initial, determiner-led role and only character/actor contracts.  It therefore cannot
+    rewrite ordinary named-character narration or infer aliases from global story context.
+    """
+    if str(directive.get("required_kind", "") or "").strip().lower() not in {
+            "actor", "character"}:
+        return ""
+    match = _NARRATED_ROLE_PREFIX_RX.search(str(narration or ""))
+    if not match:
+        return ""
+    role = " ".join(match.group("role").split()).strip(" -'\"")
+    role_terms = _grounding_terms(role)
+    if not role_terms or len(role_terms) > 4 or role_terms & _SCENE_ACTION_ROOTS:
+        return ""
+    return role
+
+
+def _bare_final_named_event(narration: str, directive: dict) -> str:
+    """Return a literal multi-word event title used as the narration's final bare clause.
+
+    A beat ending ``The Purple Wedding.`` promises that recognizable event, but it does not promise
+    a venue, simultaneous character action, banners, or remembered dialogue.  Requiring a final
+    title-cased clause, an ``event`` contract, and two terms shared with ``required_entity`` keeps
+    this from broadening into a semantic event classifier.
+    """
+    if str(directive.get("required_kind", "") or "").strip().lower() != "event":
+        return ""
+    parts = [part.strip(" \t\r\n.,!?;:") for part in re.split(
+        r"(?<=[.!?])\s+|[;:]\s+", str(narration or ""))]
+    parts = [part for part in parts if part]
+    if not parts:
+        return ""
+    clause = parts[-1]
+    words = _GROUNDING_WORD_RX.findall(clause)
+    if words and words[0].lower() in {"the", "a", "an"}:
+        title_words = words[1:]
+    else:
+        title_words = words
+    if not 2 <= len(title_words) <= 6:
+        return ""
+    # Bare canonical event names are title-cased; a finite/action sentence such as ``The Purple
+    # Wedding begins`` necessarily contains a lower-case content word and stays untouched.
+    if any(not word[:1].isupper() for word in title_words):
+        return ""
+    event_terms = _grounding_terms(" ".join(title_words))
+    entity_terms = _grounding_terms(str(directive.get("required_entity", "") or ""))
+    if len(event_terms) < 2 or len(event_terms & entity_terms) < 2:
+        return ""
+    if event_terms & _SCENE_ACTION_ROOTS:
+        return ""
+    return " ".join(words)
+
+
 def _determiner_named_subject_fragment(narration: str, required_entity: str) -> bool:
     """Recognize only a tightly structured determiner-led noun phrase, never infer verbhood.
 
@@ -452,6 +527,20 @@ def _exact_direction_grounding(beat: ScriptSegment, directive: dict) -> dict:
     shared = narration_terms & storyboard_terms
     entity_shared = narration_terms & entity_terms
 
+    bare_event = _bare_final_named_event(narration, directive)
+    if bare_event:
+        sanitize_fields = ["expected_visual", "scene_query", "required_entity"]
+        if quote and not _narrates_authored_quote(narration, quote):
+            sanitize_fields.append("quote")
+        return {
+            "grounded": True,
+            "reason": "bare_named_event_staging_removed",
+            "shared_terms": sorted(shared)[:8],
+            "entity_grounded": bool(entity_shared),
+            "grounded_event": bare_event,
+            "sanitize_fields": sanitize_fields,
+        }
+
     if _narrates_authored_quote(narration, quote):
         return {"grounded": True, "reason": "authored_dialogue_in_narration",
                 "shared_terms": sorted(shared)[:8], "entity_grounded": bool(entity_shared)}
@@ -500,6 +589,17 @@ def _exact_direction_grounding(beat: ScriptSegment, directive: dict) -> dict:
     # declared kind is a concrete named thing; it is not enough to prove an exact action.
     subject_named = bool(entity_shared or len(subject_terms) >= 2
                          or (subject_terms and required_kind in _NAMED_SUBJECT_KINDS))
+    comparison_grounded = bool(entity_shared or len(shared) >= 2
+                               or shared & _SCENE_ACTION_ROOTS)
+    if (_GENERIC_RELATIVE_COMPARISON_RX.search(narration)
+            and not comparison_grounded):
+        return {
+            "grounded": False,
+            "reason": "generic_relative_comparison_has_no_grounded_entity_or_event",
+            "shared_terms": sorted(shared)[:8],
+            "entity_grounded": False,
+            "subject_named": False,
+        }
     if _GENERAL_RELATION_RX.search(narration):
         return {"grounded": False, "reason": "general_relationship_not_exact_moment",
                 "shared_terms": sorted(shared)[:8], "entity_grounded": bool(entity_shared),
@@ -511,9 +611,17 @@ def _exact_direction_grounding(beat: ScriptSegment, directive: dict) -> dict:
             narration, str(directive.get("required_entity", "") or ""))
     )
     if (_NOMINAL_FRAGMENT_RX.search(narration) or verb_less_named_subject) and not has_action:
-        return {"grounded": False, "reason": "named_subject_without_exact_action",
-                "shared_terms": sorted(shared)[:8], "entity_grounded": bool(entity_shared),
-                "subject_named": subject_named}
+        grounded_role = _narrated_subject_role(narration, directive)
+        result = {
+            "grounded": False,
+            "reason": "named_subject_without_exact_action",
+            "shared_terms": sorted(shared)[:8],
+            "entity_grounded": bool(entity_shared),
+            "subject_named": bool(subject_named or grounded_role),
+        }
+        if grounded_role:
+            result["grounded_subject_role"] = grounded_role
+        return result
     if _VAGUE_SUBJECT_RX.search(narration) and not subject_named:
         return {"grounded": False, "reason": "vague_subject_has_no_grounded_subject",
                 "shared_terms": sorted(shared)[:8], "entity_grounded": False,
@@ -559,10 +667,20 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
             "shared_terms": grounding.get("shared_terms", []),
             "entity_grounded": bool(grounding.get("entity_grounded")),
         }
+        if grounding.get("grounded_event"):
+            marker["grounded_event"] = str(grounding["grounded_event"])
+        if grounding.get("grounded_subject_role"):
+            marker["grounded_subject_role"] = str(grounding["grounded_subject_role"])
         if sanitize_fields:
             marker["sanitized_fields"] = sanitize_fields
             if "expected_visual" in sanitize_fields:
-                beat.expected_visual = str(getattr(beat, "text", "") or "")[:200]
+                beat.expected_visual = str(
+                    grounding.get("grounded_event")
+                    or getattr(beat, "text", "") or "")[:200]
+            if "scene_query" in sanitize_fields:
+                beat.scene_query = str(grounding.get("grounded_event") or "")[:120]
+            if "required_entity" in sanitize_fields:
+                beat.required_entity = str(grounding.get("grounded_event") or "")[:80]
             if "quote" in sanitize_fields:
                 beat.quote = ""
         if not grounding["grounded"]:
@@ -575,9 +693,15 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
             resolved = _policy.CHARACTER if subject_named else _policy.FILLER
             marker["to_policy"] = resolved
             beat.expected_visual = str(getattr(beat, "text", "") or "")[:200]
-            beat.scene_query = ""
+            grounded_role = str(grounding.get("grounded_subject_role") or "")
+            beat.scene_query = grounded_role[:120]
             beat.quote = ""
             beat.is_specific_claim = False
+            if resolved == _policy.CHARACTER and grounded_role:
+                old_entity = str(getattr(beat, "required_entity", "") or "")
+                beat.required_entity = grounded_role[:80]
+                if old_entity.lower() != grounded_role.lower():
+                    marker["required_entity_replaced"] = old_entity
             if resolved == _policy.FILLER:
                 beat.required_entity = ""
                 beat.required_kind = ""
@@ -667,7 +791,7 @@ def _sanitize_adjacent_quote_borrowing(beats) -> int:
     return changed
 
 
-_BEAT_GROUNDING_AUDIT_SCHEMA = 3
+_BEAT_GROUNDING_AUDIT_SCHEMA = 4
 
 
 def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
@@ -708,9 +832,14 @@ def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
         "record_intent_quote_sanitized": sum(
             m.get("reason") == "record_intent_is_not_verbatim_dialogue"
             for m in records.values()),
+        "bare_named_event_sanitized": sum(
+            m.get("reason") == "bare_named_event_staging_removed"
+            for m in records.values()),
         "adjacent_quote_copy_sanitized": sum(
             "adjacent_quote_borrowed_into_distinct_visual_event"
             in (m.get("sanitization_reasons") or []) for m in records.values()),
+        "nominal_role_contract_narrowed": sum(
+            bool(m.get("grounded_subject_role")) for m in records.values()),
         "downgraded": downgraded,
         "to_character_specific": sum(
             m.get("to_policy") == _policy.CHARACTER for m in records.values()),
@@ -742,13 +871,24 @@ def _sanitized_guard_is_effective(beat: ScriptSegment, marker: dict) -> bool:
     fields = list(marker.get("sanitized_fields") or [])
     if not fields:
         return False
+    grounded_event = str(marker.get("grounded_event", "") or "")
     for field in fields:
         if field == "quote" and str(getattr(beat, "quote", "") or ""):
             return False
-        if field == "expected_visual" and str(getattr(beat, "expected_visual", "") or "") != \
-                str(getattr(beat, "text", "") or "")[:200]:
+        if field == "expected_visual":
+            expected = (grounded_event or str(getattr(beat, "text", "") or ""))[:200]
+            if str(getattr(beat, "expected_visual", "") or "") != expected:
+                return False
+        if field == "scene_query" and (
+                not grounded_event
+                or str(getattr(beat, "scene_query", "") or "") != grounded_event[:120]):
             return False
-    return all(field in {"quote", "expected_visual"} for field in fields)
+        if field == "required_entity" and (
+                not grounded_event
+                or str(getattr(beat, "required_entity", "") or "") != grounded_event[:80]):
+            return False
+    return all(field in {"quote", "expected_visual", "scene_query", "required_entity"}
+               for field in fields)
 
 
 def _cached_direction(beat: ScriptSegment) -> dict:
@@ -770,10 +910,12 @@ def revalidate_cached_directions(beats, analysis: ScriptAnalysis | None = None) 
     """Re-apply today's deterministic analyzer guards to cached LLM directives, in place.
 
     Resuming an old job normally loads ``ScriptSegment`` rows without their process-local guard
-    marker.  This helper restores any persisted markers, revalidates only rows that still claim
-    ``exact_scene``, then re-runs the cross-beat quote-copy sanitizer.  It never calls an LLM and it
-    is field-idempotent: a second pass reports zero new changes.  When ``analysis`` is supplied, the
-    complete guard audit and the first material revalidation diff are persisted for later review.
+    marker.  This helper restores any persisted markers, revalidates rows that still claim
+    ``exact_scene``, migrates a previously downgraded nominal-role contract when a new guard schema
+    can narrow it from a guessed canonical identity to the narrated role, then re-runs the
+    cross-beat quote-copy sanitizer.  It never calls an LLM and it is field-idempotent: a second pass
+    reports zero new changes.  When ``analysis`` is supplied, the complete guard audit and the first
+    material revalidation diff are persisted for later review.
     """
     rows = list(beats or [])
     prior_audit = (dict(analysis.beat_grounding_audit)
@@ -807,10 +949,36 @@ def revalidate_cached_directions(beats, analysis: ScriptAnalysis | None = None) 
     }
     exact_revalidated = 0
     preserved_sanitized_provenance = 0
+    cached_nominal_roles_migrated = 0
     for beat in rows:
-        if _policy.normalize(getattr(beat, "visual_policy", "")) != _policy.EXACT:
-            continue
+        current_policy = _policy.normalize(getattr(beat, "visual_policy", ""))
         existing_marker = getattr(beat, "_analyzer_grounding_guard", None)
+        if current_policy != _policy.EXACT:
+            # Schema 3 could already have honestly softened a nominal fragment to character-level
+            # footage while leaving the analyzer's unsupported canonical identity behind.  The
+            # original exact fields are gone, so migrate only rows carrying that precise persisted
+            # guard provenance; ordinary/manual character contracts are never inferred or changed.
+            if (prior_guard_schema < _CACHED_DIRECTION_GUARD_SCHEMA
+                    and current_policy == _policy.CHARACTER
+                    and isinstance(existing_marker, dict)
+                    and existing_marker.get("branch") == "ungrounded_exact_downgrade"
+                    and existing_marker.get("reason") == "named_subject_without_exact_action"):
+                grounded_role = _narrated_subject_role(
+                    str(getattr(beat, "text", "") or ""), _cached_direction(beat))
+                if grounded_role:
+                    old_entity = str(getattr(beat, "required_entity", "") or "")
+                    old_query = str(getattr(beat, "scene_query", "") or "")
+                    beat.required_entity = grounded_role[:80]
+                    beat.scene_query = grounded_role[:120]
+                    existing_marker["grounded_subject_role"] = grounded_role
+                    if old_entity.lower() != grounded_role.lower():
+                        existing_marker["required_entity_replaced"] = old_entity
+                    existing_marker["cached_revalidation_schema"] = \
+                        _CACHED_DIRECTION_GUARD_SCHEMA
+                    existing_marker["schema_migration"] = "nominal_role_contract_v4"
+                    if (old_entity != beat.required_entity or old_query != beat.scene_query):
+                        cached_nominal_roles_migrated += 1
+            continue
         if (isinstance(existing_marker, dict)
                 and existing_marker.get("cached_revalidation_schema")
                 == _CACHED_DIRECTION_GUARD_SCHEMA):
@@ -890,6 +1058,7 @@ def revalidate_cached_directions(beats, analysis: ScriptAnalysis | None = None) 
         "scanned": len(rows),
         "exact_revalidated": exact_revalidated,
         "preserved_sanitized_provenance": preserved_sanitized_provenance,
+        "cached_nominal_roles_migrated": cached_nominal_roles_migrated,
         "changed_count": len(changes),
         "changed_indices": sorted(int(index) for index in changes),
         "changes": changes,

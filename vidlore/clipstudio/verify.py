@@ -26,6 +26,8 @@ from . import cut as _cut
 from . import policy as _policy
 from . import era as _era
 
+REUSE_CAP_OVERFLOW_EXACT_CONTRACT = "reuse_cap_overflow_exact_contract"
+
 _VSYS = (
     "You are a strict film-footage QC editor. You judge whether ONE clip's representative frame "
     "correctly illustrates a narration line. Be skeptical: if the specific person/character/object "
@@ -2284,8 +2286,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
     # is where the per-shot reuse cap lives; without its own ledger it promoted ONE high-scoring
     # alternate into many beats (observed: a single Jaqen closeup into 9 beats vs a cap of 2), which
     # then re-aired that look across the timeline. Seed a counter from the CURRENT selections and skip
-    # an over-reused alternate on promotion (falling to the next relevance-ranked one; if all are
-    # exhausted, allow the least-used so repair success is preserved).
+    # an over-reused alternate on promotion (falling to the next relevance-ranked one). The sole
+    # bounded exception below is an exact, quote-locked contract after every ordinary under-cap
+    # candidate fails; that path selects the least-used strict pass and records the overflow.
     from collections import Counter as _Counter
     _reuse = _Counter()
     for _s in proj.selections:
@@ -3091,6 +3094,20 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 alt.signals = alt_signals
                 return True
 
+            def _ordered_promotion_alts(pool=None):
+                """Return the exact stable order consumed by one promotion rung."""
+                import os as _os_aff
+                _alts = list(pool if pool is not None else (sel.alternates or []))
+                if pool is None and _exact \
+                        and _os_aff.environ.get(
+                            "VIDLORE_CLIPSTUDIO_SCENE_AFFINITY", "1").strip() \
+                        not in ("0", "false", "no", ""):
+                    try:
+                        _alts = _scene_affinity_order(_alts, seg, proj, sel.source_id)
+                    except Exception:
+                        pass
+                return _alts
+
             def _try_promote(downgrade: bool, pool=None, label: str = "",
                              attempt_cap: int | None = None) -> bool:
                 """Scan the beat's relevance-ranked alternates and promote the first acceptable one.
@@ -3110,26 +3127,52 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 # still fallback below rather than silently declared satisfied.
                 _look_scope["on"] = not downgrade
                 try:
-                    return _try_promote_inner(downgrade, pool, label, attempt_cap)
+                    # A real-quote recovery may have only one canonical shot while the authored
+                    # script deliberately returns to that exact moment more often than the soft
+                    # variety cap.  Under-cap candidates retain absolute priority.  Only after
+                    # that ordinary bounded walk fails do we consider a previously capped-out
+                    # candidate, least-used first.  The second walk re-runs the unchanged strict
+                    # vision, Window-QC and quote-containment checks; this is not an approval and
+                    # does not change the global cap or any publication threshold.
+                    if not downgrade and _exact and _quote_locked:
+                        ordered = _ordered_promotion_alts(pool)
+                        under_cap = [alt for alt in ordered if _reuse[
+                            (str(getattr(alt, "source_id", "") or ""),
+                             int(getattr(alt, "shot_index", -1)))] < _reuse_cap]
+                        if _try_promote_inner(
+                                False, under_cap, label, attempt_cap,
+                                allow_reuse_overflow=False):
+                            return True
+                        if _promotion_materialization_error["detail"]:
+                            return False
+                        original_rank = {id(alt): rank for rank, alt in enumerate(ordered)}
+                        over_cap = [alt for alt in ordered if _reuse[
+                            (str(getattr(alt, "source_id", "") or ""),
+                             int(getattr(alt, "shot_index", -1)))] >= _reuse_cap]
+                        over_cap.sort(key=lambda alt: (
+                            _reuse[(str(getattr(alt, "source_id", "") or ""),
+                                    int(getattr(alt, "shot_index", -1)))],
+                            original_rank.get(id(alt), len(ordered))))
+                        if over_cap:
+                            return _try_promote_inner(
+                                False, over_cap, label, attempt_cap,
+                                allow_reuse_overflow=True)
+                        return False
+                    return _try_promote_inner(
+                        downgrade, pool, label, attempt_cap,
+                        allow_reuse_overflow=False)
                 finally:
                     _look_scope["on"] = _prior_look_scope
 
             def _try_promote_inner(downgrade: bool, pool=None, label: str = "",
-                                   attempt_cap: int | None = None) -> bool:
+                                   attempt_cap: int | None = None, *,
+                                   allow_reuse_overflow: bool = False) -> bool:
                 nonlocal swapped, replaced, _errored, _materialization_errors
                 tried = 0
                 _attempt_cap = max_replacements if attempt_cap is None else max(0, int(attempt_cap))
                 # SCENE-AFFINITY ordering for exact beats — try same-scene sources first (see
                 # _scene_affinity_order). Ordering only; every gate below still applies.
-                import os as _os_aff
-                _alts = pool if pool is not None else sel.alternates
-                if pool is None and _exact \
-                        and _os_aff.environ.get("VIDLORE_CLIPSTUDIO_SCENE_AFFINITY", "1").strip() \
-                        not in ("0", "false", "no", ""):
-                    try:
-                        _alts = _scene_affinity_order(sel.alternates, seg, proj, sel.source_id)
-                    except Exception:
-                        _alts = sel.alternates
+                _alts = _ordered_promotion_alts(pool)
                 for alt in _alts:
                     if tried >= _attempt_cap:
                         break
@@ -3203,8 +3246,18 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     # REUSE LEDGER — do not promote a look that already airs on >= cap beats (that is
                     # how one clip got re-aired 9×). Skip to the next relevance-ranked alternate; if
                     # none survive, the beat stays flagged and image-fallback gives it a DISTINCT still.
-                    if _reuse[(alt.source_id, alt.shot_index)] >= _reuse_cap:
+                    _reuse_before = _reuse[(alt.source_id, alt.shot_index)]
+                    _overflow_contract = bool(
+                        allow_reuse_overflow and not downgrade and _exact and _quote_locked
+                        and _reuse_before >= _reuse_cap)
+                    if (_reuse[(alt.source_id, alt.shot_index)] >= _reuse_cap
+                            and not _overflow_contract):
                         failed_wins.append((alt.source_id, float(alt.in_point)))
+                        continue
+                    if allow_reuse_overflow and not _overflow_contract:
+                        # The deferred pool is constructed only from capped-out exact-quote
+                        # candidates.  If shared state ever makes that premise stale, fail closed
+                        # instead of turning this path into an ordinary reorder/bypass.
                         continue
                     # Snapshot the deterministic clip bytes BEFORE any selection mutation. A failed
                     # ffmpeg invocation may leave a non-empty partial at this same filename, so the
@@ -3224,7 +3277,10 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         sel.shot_index = alt.shot_index
                         sel.in_point = alt.in_point
                         sel.out_point = alt.out_point
-                        sel.signals = alt.signals
+                        sel.signals = (dict(alt.signals or {})
+                                       if _overflow_contract else alt.signals)
+                        if _overflow_contract:
+                            sel.signals[REUSE_CAP_OVERFLOW_EXACT_CONTRACT] = 1.0
                         sel.confidence = alt.score
                         sel.source_url = (proj.source(alt.source_id).url
                                           if proj.source(alt.source_id) else "")
@@ -3248,6 +3304,13 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                             av["verdict"] = "keep"
                             av["downgraded"] = label or "exact→contextual"
                             av["relevance_class"] = "contextual_fallback"
+                        if _overflow_contract:
+                            # Do not write this selection-specific fact into the reusable vision
+                            # cache. `_cached_verify_ctx` returns a copy, so the marker belongs only
+                            # to the promoted selection/verifier audit record.
+                            av[REUSE_CAP_OVERFLOW_EXACT_CONTRACT] = True
+                            av["reuse_count_before"] = int(_reuse_before)
+                            av["reuse_cap"] = int(_reuse_cap)
                         _bind_evidence(av, sel, seg, ashot, _alt_strict, anames,
                                        _av_used_sheet, _alt_must_see)
                         sel.verifier = av
@@ -3298,9 +3361,16 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         _reuse[_old_key] -= 1                       # the replaced pick no longer airs here
                     replaced += 1
                     swapped = True
-                    log(f"verify: seg{sel.segment_index} "
-                        f"{'exact→contextual' if downgrade else 'replaced'} → "
-                        f"{alt.source_id}#{alt.shot_index}")
+                    if _overflow_contract:
+                        log(f"verify: seg{sel.segment_index} "
+                            f"{REUSE_CAP_OVERFLOW_EXACT_CONTRACT} → "
+                            f"{alt.source_id}#{alt.shot_index} "
+                            f"(reuse {_reuse_before}/{_reuse_cap}; all ordinary under-cap "
+                            "strict candidates failed)")
+                    else:
+                        log(f"verify: seg{sel.segment_index} "
+                            f"{'exact→contextual' if downgrade else 'replaced'} → "
+                            f"{alt.source_id}#{alt.shot_index}")
                     return True
                 return False
 
