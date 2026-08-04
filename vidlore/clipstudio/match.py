@@ -573,6 +573,34 @@ def _load_pool(proj: ClipProject, cfg: Optional[ClipConfig] = None, progress=Non
                          f"({(src.title or '')[:48]!r})")
             _reject(src.id, "talking_head_title")
             continue
+        # NATIVE PUBLICATION FLOOR — unconditional and based on the downloaded BYTES, never the
+        # discovery/download metadata.  The final build gate already refuses anything below a real
+        # 1280x720 raster, but match used to admit 360p sources and verifier could install them after
+        # clean-copy arbitration.  Reject before loading the index: an unpublishable source should
+        # neither consume expensive visual gates nor enter match/still/breakout/shot-walk pools.
+        # Quote classification intentionally scans ASR separately because SD audio can still prove
+        # that an authored phrase is real while its pixels are never allowed to air.
+        from .quality_contract import native_video_ok as _native_video_ok
+        from .quality_contract import probe_native_video_info as _probe_native
+        _native_path = str(getattr(src, "local_path", "") or "")
+        _native_info = dict(_probe_native(_native_path) or {})
+        if not _native_info.get("width") or not _native_info.get("height"):
+            # Unknown is a PIPELINE/probe fault, not evidence that the footage itself is SD. Stop
+            # before persisting a replaceable quality rejection; Resume must get a genuine retry.
+            raise RuntimeError(
+                f"native-resolution probe unavailable for source {src.id} ({_native_path or 'no path'})")
+        if not _native_video_ok(_native_info):
+            try:
+                _nw = int(_native_info.get("width") or 0)
+                _nh = int(_native_info.get("height") or 0)
+            except (TypeError, ValueError):
+                _nw = _nh = 0
+            _why_native = f"{_nw}x{_nh}" if _nw and _nh else "unprobeable"
+            if progress:
+                progress(f"match: dropping sub-native-HD source {src.id} "
+                         f"({_why_native} actual bytes; publication requires 1280x720)")
+            _reject(src.id, "sub_native_hd")
+            continue
         shots = _index.load_shots(proj, src.id)
         embeds = _index.load_embeds(proj, src.id)
         if face_gate_on and _source_is_modern_talkinghead(shots, embeds):

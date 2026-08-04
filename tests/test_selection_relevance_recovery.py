@@ -108,6 +108,20 @@ def _append_bound_rejected_beat(proj, segs, *, index=1):
     return seg, sel, shot
 
 
+def _install_completed_exact_downgrade(proj, seg, sel, *, contextual=True):
+    """Persist the exact audit shape produced by verify's completed lenient fallback."""
+    sel.verifier = {
+        **GOOD,
+        "downgraded": "exact→contextual" if contextual else "exact→generic_filler",
+        "relevance_class": "contextual_fallback" if contextual else "generic_filler",
+    }
+    shot = Shot.from_dict(json.loads(proj.shots_path(sel.source_id).read_text())[0])
+    V.bind_selection_verifier_evidence(
+        proj, sel, seg, sel.verifier, shot=shot, model="vision",
+        is_specific=False, multiframe=True, faceid_names=[], era="", must_see="")
+    return sel
+
+
 def _call(proj, segs):
     return O._retry_selection_relevance(
         proj, segs, ClipConfig(), SimpleNamespace(movie_title="Game of Thrones"),
@@ -325,6 +339,73 @@ def test_exact_non_strict_provenance_with_semantic_negative_still_skips_reverify
         "reasons": ["exact_verifier_evidence_not_strict", "matches_narration_false"],
     }]}
     assert O._unverifiable_relevance_indices(audit) == set()
+
+
+@pytest.mark.parametrize("contextual", [True, False], ids=["contextual", "generic"])
+def test_completed_bound_exact_downgrade_is_content_and_skips_redundant_reverify(
+        tmp_path, contextual):
+    from vidlore.clipstudio import relevance_contract as R
+
+    proj, segs, sel = _fixture(tmp_path, GOOD)
+    _install_completed_exact_downgrade(proj, segs[0], sel, contextual=contextual)
+    audit = R.evaluate_selection_relevance(proj, segs)
+    entry = audit["blockers"][0]
+
+    assert R.completed_deliberate_exact_downgrade(entry) is True
+    assert O._unverifiable_relevance_indices(audit) == set()
+    assert O._persistent_verifier_technical_indices(audit) == set()
+
+
+def test_completed_downgrade_mixed_with_real_binding_fault_stays_technical(tmp_path):
+    from vidlore.clipstudio import relevance_contract as R
+
+    proj, segs, sel = _fixture(tmp_path, GOOD)
+    _install_completed_exact_downgrade(proj, segs[0], sel)
+    audit = R.evaluate_selection_relevance(proj, segs)
+    entry = audit["blockers"][0]
+    entry["reasons"].append("verifier_evidence_mismatch")
+
+    assert R.completed_deliberate_exact_downgrade(entry) is False
+    assert O._unverifiable_relevance_indices(audit) == {0}
+    assert O._persistent_verifier_technical_indices(audit) == {0}
+
+
+def test_completed_downgrade_plus_real_quote_floor_remains_content_recoverable(tmp_path):
+    """A selected-window quote miss is content, even beside the deliberate downgrade shape."""
+    from vidlore.clipstudio import relevance_contract as R
+
+    proj, segs, sel = _fixture(tmp_path, GOOD)
+    _install_completed_exact_downgrade(proj, segs[0], sel)
+    audit = R.evaluate_selection_relevance(proj, segs)
+    entry = audit["blockers"][0]
+    entry["reasons"].append("exact_quote_dialogue_signal_below_floor")
+    entry["quote_evidence"] = {"branch": "verbatim"}
+
+    assert R.completed_deliberate_exact_downgrade(entry) is True
+    assert O._unverifiable_relevance_indices(audit) == set()
+    assert O._persistent_verifier_technical_indices(audit) == set()
+
+
+def test_retry_routes_completed_downgrade_to_content_recovery_without_reverify(tmp_path):
+    proj, segs, sel = _fixture(tmp_path, GOOD)
+    _install_completed_exact_downgrade(proj, segs[0], sel)
+
+    def exhausted(_proj, _segs, _analysis, _cfg, _eng, **kw):
+        assert kw["only_indices"] == {0}
+        _write_mock_recovery_page(_proj, kw)
+        return 0
+
+    env = {"VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK": "0",
+           "VIDLORE_CLIPSTUDIO_SELFHEAL": "0"}
+    with mock.patch.dict(os.environ, env), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair") as reverify, \
+            mock.patch.object(O, "_recover_unresolved_beats", side_effect=exhausted) as recover:
+        audit = _call(proj, segs)
+
+    assert audit["status"] == "blocked"
+    reverify.assert_not_called()
+    recover.assert_called_once()
+    assert proj.meta["selection_relevance_recovery"]["technical_blockers"] == []
 
 
 def test_absent_moving_source_does_not_enter_impossible_scoped_reverify():
@@ -2603,6 +2684,22 @@ def test_phase2_denies_mixed_or_unknown_evidence_reasons(tmp_path):
         audit = {"blockers": [{
             "segment_index": 0, "reasons": reasons, "quote_evidence": {}}]}
         assert S.semantic_gap_candidates(proj, audit)[0] == []
+
+
+@pytest.mark.parametrize("contextual", [True, False], ids=["contextual", "generic"])
+def test_phase2_bound_review_admits_completed_deliberate_exact_downgrade(
+        tmp_path, contextual):
+    from vidlore.clipstudio import relevance_contract as R
+    from vidlore.clipstudio import selfheal as S
+
+    proj, segs, sel = _fixture(tmp_path, GOOD)
+    _install_completed_exact_downgrade(proj, segs[0], sel, contextual=contextual)
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, segs, [0], method="actual_frame_and_pool_audit")
+    audit = R.evaluate_selection_relevance(proj, segs)
+
+    assert R.completed_deliberate_exact_downgrade(audit["blockers"][0]) is True
+    assert S.semantic_gap_candidates(proj, audit) == ([0], "confirmed_actual_frame_audit")
 
 
 def test_phase2_confirmed_paraphrase_with_only_semantic_negatives_remains_eligible(tmp_path):

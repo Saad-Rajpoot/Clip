@@ -12,6 +12,11 @@ MIN_NATIVE_LONG_EDGE = 1280
 # vertical floor.  Admission itself now checks both decoded dimensions.
 MIN_NATIVE_VIDEO_HEIGHT = MIN_NATIVE_SHORT_EDGE
 
+# Backfill and match can rebuild the same pool several times in one process. Cache actual-byte
+# probes by immutable file identity so the native invariant does not spawn hundreds of redundant
+# ffprobe processes. The final publication assertion below deliberately keeps its own probe.
+_NATIVE_PROBE_CACHE: dict[tuple[str, int, int], dict] = {}
+
 
 def native_video_ok(info, minimum: int = MIN_NATIVE_SHORT_EDGE,
                     minimum_long: int = MIN_NATIVE_LONG_EDGE) -> bool:
@@ -30,6 +35,43 @@ def native_video_ok(info, minimum: int = MIN_NATIVE_SHORT_EDGE,
         return short >= int(minimum) and long >= int(minimum_long)
     except (TypeError, ValueError, OverflowError):
         return False
+
+
+def probe_native_video_info(path: Path | str) -> dict:
+    """Probe decoded dimensions from local bytes; missing/unreadable media returns ``{}``.
+
+    Discovery metadata is never consulted.  Replacing the file changes its stat identity and
+    therefore forces a fresh probe before those new bytes can enter a visual pool.
+    """
+    try:
+        media = Path(path)
+        stat = media.stat()
+        if not media.is_file() or stat.st_size <= 0:
+            return {}
+        key = (str(media.resolve()), int(stat.st_size), int(stat.st_mtime_ns))
+    except (OSError, TypeError, ValueError):
+        return {}
+    cached = _NATIVE_PROBE_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
+    try:
+        from .ingest import probe
+        raw = probe(media) or {}
+        info = {"width": int(raw.get("width") or 0),
+                "height": int(raw.get("height") or 0)}
+    except Exception:                                  # noqa: BLE001 — unknown fails closed
+        info = {}
+    # A zero/unknown result is a technical observation, not stable media identity. Never memoize
+    # it: a transient ffprobe failure must be retryable within this same process.
+    if not info.get("width") or not info.get("height"):
+        return {}
+    while len(_NATIVE_PROBE_CACHE) >= 512:
+        try:
+            _NATIVE_PROBE_CACHE.pop(next(iter(_NATIVE_PROBE_CACHE)))
+        except (KeyError, StopIteration):
+            break
+    _NATIVE_PROBE_CACHE[key] = dict(info)
+    return info
 
 
 def assert_native_hd_selections(proj, selections, audit_path: Path,

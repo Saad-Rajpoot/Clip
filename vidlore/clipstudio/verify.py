@@ -34,6 +34,96 @@ _VSYS = (
 )
 
 
+_ABSENCE_PLACE_RX = (
+    r"room|chamber|hall|castle|tent|garden|ship|boat|bay|harbour|"
+    r"harbor|city|street|road|court|tower|island|"
+    r"forest|camp|gate|wall|keep|palace|bedroom|brothel|cell|dungeon"
+)
+
+
+def _absence_elsewhere_context(narration: str, required_entity: str, *,
+                               expected_visual: str = "", scene_query: str = "") -> bool:
+    """Whether a locative absence at place A is storyboarded at a distinct place B.
+
+    This deliberately requires both named-subject grammar and two concrete, different location
+    nouns.  Merely supplying a generic character close-up cannot turn ``X is absent`` into a pass.
+    """
+    text = " ".join(str(narration or "").replace("\u2019", "'").split())
+    entity = str(required_entity or "").strip()
+    storyboard = " ".join(x for x in (
+        str(expected_visual or ""), str(scene_query or "")) if x)
+    if not text or not entity or not storyboard:
+        return False
+    aliases = [tok for tok in re.findall(r"[A-Za-z][A-Za-z'-]{2,}", entity)
+               if tok.lower() not in {"ser", "lord", "lady", "king", "queen", "prince"}]
+    if not aliases:
+        return False
+    excluded_places: set[str] = set()
+    absence_rx = re.compile(
+        rf"\s*\b(?:is|was|are|were)\s+not(?:\s+even)?\s+"
+        rf"(?:in|at|inside)\s+(?:the\s+)?(?P<place>{_ABSENCE_PLACE_RX})\b|"
+        rf"\s*\b(?:isn't|wasn't|aren't|weren't)\s+"
+        rf"(?:in|at|inside)\s+(?:the\s+)?(?P<place_short>{_ABSENCE_PLACE_RX})\b",
+        re.I)
+    for alias in aliases:
+        for named in re.finditer(rf"\b{re.escape(alias)}\b", text, re.I):
+            # The absence predicate must belong grammatically to THIS subject. Searching anywhere
+            # later in the sentence misread ``Baelish accused Varys, who was not in the room`` as
+            # an assertion about Baelish. An anchored match still handles either full-name token:
+            # ``Petyr`` is skipped, while the adjacent ``Baelish is not...`` token succeeds.
+            match = absence_rx.match(text, named.end(), min(len(text), named.end() + 96))
+            if match is not None:
+                excluded_places.add(str(match.group("place") or match.group("place_short") or "")
+                                    .lower())
+    if not excluded_places:
+        return False
+    storyboard_places = {
+        match.group(0).lower()
+        for match in re.finditer(rf"\b(?:{_ABSENCE_PLACE_RX})\b", storyboard, re.I)
+    }
+    equivalent_place = {
+        "harbour": "harbor",
+        "boat": "ship",
+        "keep": "castle", "palace": "castle",
+        "chamber": "room",
+        "road": "street",
+    }
+    excluded_places = {equivalent_place.get(place, place) for place in excluded_places}
+    storyboard_places = {equivalent_place.get(place, place) for place in storyboard_places}
+    # Mentioning the excluded room anywhere in the storyboard is ambiguous, even when another
+    # place also appears (``the council room aboard a ship``). Require a wholly distinct concrete
+    # location; uncertainty retains the ordinary contradiction rule.
+    return bool(storyboard_places) and storyboard_places.isdisjoint(excluded_places)
+
+
+def _absence_elsewhere_instruction(narration: str, required_entity: str, *,
+                                   expected_visual: str = "", scene_query: str = "") -> str:
+    """Clarify an authored *absence at place A* visualized by the subject at place B.
+
+    The verifier's ordinary contradiction example deliberately rejects ``X is absent`` over a
+    frame showing X.  That is right unless the storyboard explicitly asks to show X somewhere
+    else: e.g. ``Baelish is not even in the room`` over Baelish aboard the escape ship.  In that
+    case his presence at the different location is the visual proof, not a contradiction.
+
+    Keep this narrow and deterministic.  It activates only when a token from the required entity
+    is named in the narration, followed by an explicit locative absence, and a concrete storyboard
+    was authored for the alternate location. A generic negation (``X is not the killer``) does not
+    match and retains the normal strict rule.
+    """
+    if not _absence_elsewhere_context(
+            narration, required_entity, expected_visual=expected_visual,
+            scene_query=scene_query):
+        return ""
+    return (
+        "ABSENCE-ELSEWHERE CONTEXT — the narration says the required subject is absent from a "
+        "particular place, while the storyboard intentionally shows that subject somewhere else. "
+        "Seeing the subject at the storyboard's different location SUPPORTS the narration; do not "
+        "mark a contradiction merely because the subject is visible. Still mark 'replace' if the "
+        "frame shows the subject in the excluded place, or if it is a different scene/location "
+        "than the storyboard.\n"
+    )
+
+
 def _img_block(path: Path) -> dict:
     data = base64.standard_b64encode(Path(path).read_bytes()).decode()
     return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}}
@@ -93,6 +183,12 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         _story += f"The exact moment should LOOK LIKE: {expected_visual}\n"
     if scene_query and (is_specific or venue_fallback):
         _story += f"Target scene: {scene_query}\n"
+    _absence_elsewhere = (
+        _absence_elsewhere_instruction(
+            narration, required_entity, expected_visual=expected_visual,
+            scene_query=scene_query)
+        if is_specific or venue_fallback else ""
+    )
     if era_hint:
         _story += (f"Era/season context: {era_hint} — footage from a clearly different era/season "
                    f"than the moment described is WRONG even if the character matches.\n"
@@ -166,7 +262,7 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         f'Narration line: "{narration}"\n'
         f"This clip should show: {required_entity or '(a general scene fitting the line)'} "
         f"(kind: {required_kind or 'any'}).\n"
-        + _story + _look + _mf + _rule + _nonshow + _obj + _venue +
+        + _story + _absence_elsewhere + _look + _mf + _rule + _nonshow + _obj + _venue +
         f"Automatic Face-ID on this frame detected: {', '.join(faceid_names) if faceid_names else 'none'}.\n\n"
         "For wrong_subject_visible: set true ONLY if a DIFFERENT specific character (clearly NOT the "
         "one this line is about) is the main subject of the frame; set false for a wide / crowd / "
@@ -368,6 +464,8 @@ def verdict_fingerprint(*, src_hash: str, source_id: str, shot_start: float, sho
     if not is_specific and not venue_fallback:
         expected_visual = ""
         scene_query = ""
+    absence_elsewhere = bool(_absence_elsewhere_instruction(
+        beat_text, required_entity, expected_visual=expected_visual, scene_query=scene_query))
     # Exact prompts did not change, so preserve their warm v9 cache. Every non-specific question
     # uses the rewritten generic rule (including venue fallback) and must cold-miss under v10.
     prompt_version = PROMPT_VERSION if is_specific else LENIENT_PROMPT_VERSION
@@ -382,6 +480,10 @@ def verdict_fingerprint(*, src_hash: str, source_id: str, shot_start: float, sho
              prompt_version, SHEET_VERSION]
     if venue_fallback:
         parts.append("venue")
+    # This is a conditional prompt clause, so only affected absence-at-A / subject-at-B questions
+    # cold-miss. Every unrelated exact verdict keeps its warm v9 cache.
+    if absence_elsewhere:
+        parts.append("absence-elsewhere-v1")
     # must_see changes the QUESTION ("is the dagger visible?"), so a verdict cached without it
     # answers something else entirely and must not be reused. Appended only when set, so every
     # pre-existing key stays valid.
@@ -743,6 +845,15 @@ def _direct_negative_contradiction(seg, vd) -> str:
     text = (getattr(seg, "text", "") or "").lower()
     absence = _DIRECT_ABSENCE_RX.search(text)
     if absence is None:
+        return ""
+    # A different concrete location is sometimes the authored visual proof of the absence (the
+    # measured line says Baelish is not in the room while intentionally showing him on the escape
+    # ship).  The vision reply must still explicitly deny contradiction; this only prevents the
+    # deterministic backstop from undoing that valid judgment based on subject presence alone.
+    if _absence_elsewhere_context(
+            getattr(seg, "text", "") or "", getattr(seg, "required_entity", "") or "",
+            expected_visual=getattr(seg, "expected_visual", "") or "",
+            scene_query=getattr(seg, "scene_query", "") or ""):
         return ""
     ent = (getattr(seg, "required_entity", "") or "").lower()
     name_tokens = [t for t in re.findall(r"[a-z0-9]+", ent)
@@ -1237,11 +1348,49 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
     head_seed_rows = [(getattr(sel, "source_id", ""), getattr(sel, "shot_index", -1))]
     head_seed_rows += [(getattr(c, "source_id", ""), getattr(c, "shot_index", -1))
                        for c in (getattr(sel, "alternates", None) or [])]
-    deep_seed_rows = [(getattr(c, "source_id", ""), getattr(c, "shot_index", -1))
+    deep_seed_rows = [(getattr(c, "source_id", ""), getattr(c, "shot_index", -1), c)
                       for c in (getattr(sel, "deep_alternates", None) or [])]
     source_seeds: dict[str, list[int]] = {}
     source_order: dict[str, int] = {}
     head_source_ids = {str(sid or "") for sid, _shot_index in head_seed_rows if sid}
+    # A long exact-scene upload can contain two useful regions.  Match deliberately retains only a
+    # few shots per source, so the normal bench may point at a contextual face while a later deep
+    # candidate points at the actual action (measured: necklace 22 -> 1, dagger 29 -> 20, gold-cloak
+    # betrayal 17 -> 61).  The old blanket same-source suppression below made those exact regions
+    # unreachable.  Preserve at most ONE evidence-backed disjoint region per head source; candidate
+    # generation later gives that region its own tiny, hard-bounded nearest-shot reserve instead of
+    # letting it widen or crowd the ordinary neighborhood.
+    supported_deep_regions: dict[str, tuple[tuple, int]] = {}
+
+    def _deep_region_evidence(candidate, order: int):
+        signals = getattr(candidate, "signals", None) or {}
+
+        def _num(key):
+            try:
+                return float(signals.get(key, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        text_evidence = max(_num("dialogue"), _num("transcript"), _num("moment_lock"))
+        clip_evidence = _num("clip")
+        try:
+            retained_score = float(getattr(candidate, "score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            retained_score = 0.0
+        # A bare late bench sibling is not permission to scan another part of a long compilation.
+        # It must carry candidate-level retrieval evidence and a solid retained score.  The source
+        # still has to pass the unchanged scene-affinity test below, and strict vision remains the
+        # acceptance authority.
+        supported = retained_score >= 0.65 and (
+            text_evidence > 0.0 or clip_evidence >= 0.65
+            or _num("object") > 0.0 or _num("faceid") > 0.0)
+        if not supported:
+            return None
+        # Timed/text evidence disambiguates two distant regions in the same upload (the measured
+        # throne-room source retained an early Ned shot and the later betrayal; only the latter had
+        # transcript overlap).  CLIP and the retained score are deterministic fallbacks.
+        return (1 if text_evidence > 0.0 else 0, text_evidence,
+                clip_evidence, retained_score, -int(order))
 
     def _add_seed(order, sid, shot_index, *, deep=False):
         sid = str(sid or "")
@@ -1264,9 +1413,28 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
     for order, (sid, shot_index) in enumerate(head_seed_rows):
         _add_seed(order, sid, shot_index)
     _deep_base = len(head_seed_rows)
-    for offset, (sid, shot_index) in enumerate(deep_seed_rows):
+    for offset, (sid, shot_index, candidate) in enumerate(deep_seed_rows):
         # For a deep-only source, its first retained shot is the bounded anchor. Later sibling
         # entries from the same source are ranking evidence, not permission to scan many regions.
+        sid = str(sid or "")
+        if sid in source_seeds:
+            try:
+                shot_index = int(shot_index)
+            except (TypeError, ValueError):
+                continue
+            if shot_index < 0 or min(abs(shot_index - seed)
+                                     for seed in source_seeds[sid]) <= radius:
+                continue
+            # A second deep-only sibling is ranking evidence, not permission to open another
+            # distant region. Only a source already retained by the primary/normal bench may use
+            # the same-source blind-spot repair.
+            if sid not in head_source_ids:
+                continue
+            evidence = _deep_region_evidence(candidate, _deep_base + offset)
+            previous = supported_deep_regions.get(sid)
+            if evidence is not None and (previous is None or evidence > previous[0]):
+                supported_deep_regions[sid] = (evidence, shot_index)
+            continue
         _add_seed(_deep_base + offset, sid, shot_index, deep=True)
 
     try:
@@ -1382,6 +1550,7 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
     ) if x)
     moment_cache: dict = {}
     ranked = []
+    deep_region_ranked: dict[int, list] = {}
     for source_rank, (_seed_tier, _neg_aff, _seed_order, sid, seeds, affinity) \
             in enumerate(affine_sources):
         try:
@@ -1390,14 +1559,21 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
         except Exception:
             continue
         _tiers, _hard_graphics = _graphics_tiers(sid, shots)
+        _deep_anchor = (supported_deep_regions.get(sid) or (None, None))[1]
         for sh in shots:
             try:
                 shot_index = int(getattr(sh, "index", -1))
                 distance = min(abs(shot_index - seed) for seed in seeds)
             except (TypeError, ValueError):
                 continue
+            deep_distance = (abs(shot_index - int(_deep_anchor))
+                             if _deep_anchor is not None else radius + 1)
+            # A supported deep region owns only pixels which the ordinary head neighborhood could
+            # not already reach.  This prevents double counting when its anchor is just beyond the
+            # radius and keeps the old head-region search byte-for-byte unchanged.
+            in_deep_region = deep_distance <= radius and distance > radius
             key = (sid, shot_index)
-            if key in excluded or distance > radius:
+            if key in excluded or (distance > radius and not in_deep_region):
                 continue
             kf = str(getattr(sh, "keyframe_path", "") or "")
             if not kf or not Path(kf).is_file():
@@ -1458,10 +1634,12 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
             score = max(0.0, min(1.0, float(rel))) if rel is not None and rel >= 0 else 0.0
             signals = {"strict_scene_neighborhood": True,
                        "scene_affinity": int(affinity),
-                       "neighbor_distance": int(distance),
+                       "neighbor_distance": int(deep_distance if in_deep_region else distance),
                        "visual_relevance": round(float(rel), 4) if rel is not None else -1.0,
                        "dialogue": round(dialogue, 3),
                        "quality": round(float(getattr(sh, "quality", 0.0) or 0.0), 3)}
+            if in_deep_region:
+                signals["strict_scene_deep_region"] = True
             if _moment and moment_lock > 0.0:
                 signals["moment_lock"] = round(moment_lock, 3)
                 try:
@@ -1478,7 +1656,14 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
             order_key = ((0, -float(rel), distance, shot_index)
                          if rel is not None and rel >= 0 else
                          (1, 0.0, distance, shot_index))
-            ranked.append((source_rank, order_key, cand))
+            if in_deep_region:
+                # Distance leads only inside the five-call reserve.  A low-CLIP transition/action
+                # sibling two shots from a strong deep seed must still be seen by strict vision;
+                # this is exactly how the gold-cloak swords frame survived noisy CLIP ordering.
+                deep_region_ranked.setdefault(source_rank, []).append(
+                    ((deep_distance, order_key, shot_index), cand))
+            else:
+                ranked.append((source_rank, order_key, cand))
 
     # Source identity is stronger than cross-source CLIP noise for this rung: the whole reason it
     # exists is that match already found the right file but retained the neighboring second. Rank by
@@ -1492,9 +1677,46 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
         rows.sort(key=lambda row: row[0])
     chosen = []
     chosen_keys = set()
-    quota = max(1, min(6, (cap + 1) // 2))
-    for source_rank in sorted(by_source)[:2]:
-        for _key, cand in by_source[source_rank][:quota]:
+    # Prefer a supported disjoint region in the SELECTED source; that is the strongest possible
+    # evidence that match found the right upload but the wrong passage (necklace and dagger cases).
+    # Otherwise use only the highest-affinity supported source (gold-cloak case). Five nearest shots
+    # cover the anchor and +/-2 siblings while leaving seven of the default twelve calls for the
+    # old head search. This is a reallocation inside the existing cap, not a larger cap or rerank.
+    if deep_region_ranked:
+        selected_sid = str(getattr(sel, "source_id", "") or "")
+        selected_deep_rank = next((rank for rank, row in enumerate(affine_sources)
+                                   if row[3] == selected_sid and rank in deep_region_ranked), None)
+        strongest_deep_rank = min(
+            deep_region_ranked,
+            key=lambda rank: (-int(affine_sources[rank][5]), rank))
+        # "Selected source" is useful evidence only when its literal scene affinity is competitive.
+        # A contextual wrong-source pick may itself have a distant bench region (measured beat 94);
+        # preferring it over a source whose title/query is 26 affinity points stronger would merely
+        # repeat the original mismatch. One scene-token weight (5) is the existing affinity unit.
+        selected_is_affine = (
+            selected_deep_rank is not None
+            and int(affine_sources[selected_deep_rank][5])
+            >= int(affine_sources[strongest_deep_rank][5]) - 5)
+        deep_source_rank = selected_deep_rank if selected_is_affine else strongest_deep_rank
+        deep_rows = sorted(deep_region_ranked[deep_source_rank], key=lambda row: row[0])
+        for _key, cand in deep_rows[:min(5, cap)]:
+            chosen.append(cand)
+            chosen_keys.add((cand.source_id, cand.shot_index))
+    top_source_ranks = sorted(by_source)[:2]
+    remaining = max(0, cap - len(chosen))
+    if chosen and len(top_source_ranks) >= 2:
+        # The deep reserve consumes five calls from the unchanged twelve-call cap. Split the seven
+        # ordinary calls 4/3 across the same top two sources; retaining the old six-per-source loop
+        # here produced 5+6+1 and silently crowded almost the entire second source out.
+        quotas = {
+            rank: remaining // 2 + (1 if pos < remaining % 2 else 0)
+            for pos, rank in enumerate(top_source_ranks)
+        }
+    else:
+        old_quota = max(1, min(6, (cap + 1) // 2))
+        quotas = {rank: old_quota for rank in top_source_ranks}
+    for source_rank in top_source_ranks:
+        for _key, cand in by_source[source_rank][:quotas[source_rank]]:
             if len(chosen) >= cap:
                 break
             chosen.append(cand)

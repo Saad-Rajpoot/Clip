@@ -1223,6 +1223,11 @@ def _phase1_current_gap_evidence(proj, seg, cfg=None) -> tuple[bool, str]:
         ]
         if technical:
             return False, f"phase1_technical_or_evidence_blocker:{technical[0]}"
+        if _rel.completed_deliberate_exact_downgrade(entry):
+            # A bound lenient KEEP is positive evidence for the looser scene and negative evidence
+            # for the authored exact promise.  The review still has to be current and pool-bound;
+            # this only types the current failure so that authorization may reach that ladder.
+            return True, "phase1_confirmed_deliberate_exact_downgrade"
         semantic = [
             reason for reason in reasons
             if reason in _SEMANTIC_NEGATIVE_REASONS
@@ -1971,6 +1976,7 @@ def semantic_gap_candidates(proj, audit: dict) -> tuple[list[int], str]:
     if not review.get("pool_fingerprint") or str(review.get("pool_fingerprint")) != pool_fp:
         return [], "stale_gap_review_source_pool_changed"
 
+    from .relevance_contract import completed_deliberate_exact_downgrade
     out = []
     for entry in (audit.get("blockers") or []):
         idx = int(entry.get("segment_index", -1))
@@ -1987,6 +1993,7 @@ def semantic_gap_candidates(proj, audit: dict) -> tuple[list[int], str]:
             continue
         if any(any(r.startswith(p) for p in _SEMANTIC_TECHNICAL_REASONS) for r in reasons):
             continue                                    # a code/evidence fault cannot buy a downgrade
+        deliberate_downgrade = completed_deliberate_exact_downgrade(entry)
         semantic = [
             reason for reason in reasons
             if reason in _SEMANTIC_NEGATIVE_REASONS
@@ -1994,9 +2001,9 @@ def semantic_gap_candidates(proj, audit: dict) -> tuple[list[int], str]:
         # Fail closed on every reason outside the narrow semantic-negative vocabulary.  A mixed
         # blocker (for example verdict_replace + stale evidence) is still a technical blocker; the
         # viewer's pool-gap review cannot turn it into permission to mutate the beat contract.
-        if len(semantic) != len(reasons):
+        if not deliberate_downgrade and len(semantic) != len(reasons):
             continue
-        if idx in confirmed and semantic:
+        if idx in confirmed and (semantic or deliberate_downgrade):
             out.append(idx)
     return sorted(set(out)), "confirmed_actual_frame_audit"
 

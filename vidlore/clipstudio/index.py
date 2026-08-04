@@ -596,6 +596,8 @@ def find_quote_span(words, quote: str, *, min_ratio: float = 0.72,
     n = len(qt)
     best = None
     gapped_best = None
+    best_raw_ratio = None
+    gapped_best_raw_ratio = None
     for i in range(len(st)):
         if not _tok_close(st[i][0], qt[0]) and not any(_tok_close(st[i][0], q) for q in qt[:2]):
             continue                      # cheap anchor: only start where the head plausibly begins
@@ -620,12 +622,31 @@ def find_quote_span(words, quote: str, *, min_ratio: float = 0.72,
             fuzzy = sum(1 for a, b in zip(win, qt) if a != b and _tok_close(a, b))
             ratio = (2.0 * (hits + fuzzy)) / float(L + n)
             target = gapped_best if gapped else best
-            if ratio >= min_ratio and (target is None or ratio > target[2]):
-                target = (st[i][1], st[i + L - 1][2], round(min(1.0, ratio), 3))
+            target_raw_ratio = gapped_best_raw_ratio if gapped else best_raw_ratio
+            candidate_start = st[i][1]
+            candidate_end = st[i + L - 1][2]
+            # Whisper occasionally emits the same words twice: an early alignment whose first
+            # word is stretched across several seconds, followed by the real compact utterance.
+            # Both alignments have the same phrase ratio, and the old first-wins tie-break kept the
+            # smeared span.  That made Window-QC shorten across several intervening shots and then
+            # (correctly) reject the candidate for losing quote containment.  Phrase strength is
+            # still the primary criterion; for an exact tie prefer the tighter temporal alignment.
+            # This cannot turn a non-match into a match or lower the verbatim floor.
+            tighter_tie = bool(
+                target is not None
+                and target_raw_ratio is not None
+                and abs(float(ratio) - float(target_raw_ratio)) <= 1e-12
+                and (float(candidate_end) - float(candidate_start))
+                < (float(target[1]) - float(target[0])))
+            if ratio >= min_ratio and (
+                    target is None or ratio > float(target_raw_ratio) or tighter_tie):
+                target = (candidate_start, candidate_end, round(min(1.0, ratio), 3))
                 if gapped:
                     gapped_best = target
+                    gapped_best_raw_ratio = ratio
                 else:
                     best = target
+                    best_raw_ratio = ratio
     return best or gapped_best
 
 

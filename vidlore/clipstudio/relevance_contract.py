@@ -22,6 +22,84 @@ AUDIT_FILENAME = "selection_relevance_audit.json"
 QUOTE_DIALOGUE_FLOOR = 0.78
 QUOTE_WINDOW_TOLERANCE_SEC = 0.75
 
+# A lenient verifier is allowed to say that the selected bytes are usable context while also
+# recording that they do not prove the authored exact moment.  That is a completed CONTENT
+# judgment, not missing verifier evidence.  Keep the vocabulary here beside the publication
+# contract that emits it so recovery, self-heal, and audit tooling cannot drift apart.
+DELIBERATE_EXACT_DOWNGRADE_REASONS = frozenset({
+    "exact_verifier_evidence_not_strict",
+    "exact_moving_verdict_was_downgraded",
+    "exact_moving_relevance_is_contextual",
+})
+_REQUIRED_DELIBERATE_EXACT_DOWNGRADE_REASONS = frozenset({
+    "exact_verifier_evidence_not_strict",
+    "exact_moving_verdict_was_downgraded",
+})
+_CONCLUSIVE_CONTENT_REASONS = frozenset({
+    "verdict_replace",
+    "matches_narration_false",
+    "specific_enough_false",
+    "quality_ok_false",
+    "wrong_subject_visible_true",
+    "correct_subject_visible_false",
+    "target_visible_false",
+    "contradicts_narration_true",
+    "era_ok_false",
+    "deterministic_contradiction",
+    # A located real quote still takes the quote-window recovery rung and can never be softened,
+    # but its failed selected window is conclusive content evidence rather than a verifier outage.
+    "exact_quote_dialogue_signal_below_floor",
+    "exact_quote_timed_asr_span_absent",
+    "exact_quote_timed_asr_outside_selected_window",
+})
+
+
+def completed_deliberate_exact_downgrade(entry: dict) -> bool:
+    """Whether an audit blocker is a fresh, bound lenient KEEP of an exact beat.
+
+    The strict gate must continue to block this selection: lenient evidence cannot prove an exact
+    promise.  Recovery typing is the only thing that changes.  A completed exact→contextual/generic
+    judgment belongs in the content lane, where strict recovery and an independently bound gap
+    review can act on it; it must not be re-asked as though its verifier evidence were absent.
+
+    This predicate is intentionally fail-closed.  Both downgrade markers, a complete immutable
+    evidence identity, and the lenient ``is_specific=false`` question are required.  Any unknown or
+    technical reason (including stale binding or indeterminate ASR provenance) makes the shape
+    false, so a real pipeline fault can never buy content recovery or specificity loss.
+    """
+    if not isinstance(entry, dict):
+        return False
+    reasons = {str(reason) for reason in (entry.get("reasons") or []) if str(reason)}
+    if not _REQUIRED_DELIBERATE_EXACT_DOWNGRADE_REASONS.issubset(reasons):
+        return False
+    allowed = DELIBERATE_EXACT_DOWNGRADE_REASONS | _CONCLUSIVE_CONTENT_REASONS
+    if not reasons or not reasons.issubset(allowed):
+        return False
+
+    verifier = entry.get("verifier") or {}
+    if not isinstance(verifier, dict):
+        return False
+    if verifier.get("status") != "ok" or verifier.get("verdict") != "keep":
+        return False
+    evidence = verifier.get("selection_evidence") or {}
+    if not isinstance(evidence, dict) or evidence.get("is_specific") is not False:
+        return False
+    if evidence.get("multiframe") is not True:
+        return False
+    for field in (
+            "fingerprint", "question_fingerprint", "source_content_fingerprint",
+            "source_id", "image_id", "model"):
+        if not str(evidence.get(field, "") or "").strip():
+            return False
+    try:
+        if int(evidence.get("schema_version", 0) or 0) <= 0:
+            return False
+        selection_in = float(evidence.get("selection_in"))
+        selection_out = float(evidence.get("selection_out"))
+    except (TypeError, ValueError):
+        return False
+    return selection_out > selection_in >= 0.0
+
 
 def _strict_semantic_beat(seg) -> bool:
     """Exact scenes and concrete character beats need affirmative persisted verification."""

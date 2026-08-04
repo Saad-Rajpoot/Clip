@@ -227,6 +227,77 @@ def test_lenient_fingerprint_ignores_unused_storyboard_but_strict_does_not():
     assert V.LENIENT_PROMPT_VERSION == "v10-2026-08"
 
 
+def test_locative_absence_storyboard_is_not_a_subject_presence_contradiction(
+        tmp_path, monkeypatch):
+    """Showing Baelish elsewhere proves he was absent from the feast; it does not negate the VO."""
+    from vidlore.clipstudio import llm as L
+
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"frame")
+    prompts = []
+
+    def complete_ex(**kwargs):
+        prompts.append(kwargs["messages"][0]["content"][1]["text"])
+        return ('{"matches_narration":true,"correct_subject_visible":true,'
+                '"wrong_subject_visible":false,"contradicts_narration":false,'
+                '"specific_enough":true,"quality_ok":true,"confidence":0.9,'
+                '"verdict":"keep","reason":"shown elsewhere"}', {"served": "test"})
+
+    monkeypatch.setattr(L, "complete_ex", complete_ex)
+    common = dict(
+        narration="and Baelish is not even in the room.",
+        required_entity="Petyr Baelish", required_kind="character", faceid_names=[],
+        eng_cfg=NS(), is_specific=True,
+        expected_visual="Littlefinger stands on a ship with Sansa, outside King's Landing.",
+        scene_query="Game of Thrones Littlefinger Sansa escape ship")
+    assert V.verify_frame(frame, **common)["verdict"] == "keep"
+    assert "ABSENCE-ELSEWHERE CONTEXT" in prompts[0]
+    assert "Seeing the subject at the storyboard's different location SUPPORTS" in prompts[0]
+
+    base_fp = dict(
+        src_hash="a", source_id="s", shot_start=0.0, shot_end=2.0,
+        beat_text=common["narration"], required_entity=common["required_entity"],
+        required_kind="character", expected_visual=common["expected_visual"],
+        scene_query=common["scene_query"], visual_policy=P.EXACT, is_specific=True,
+        faceid_names=[], multiframe=True, image_id="sheet:x", model="vision")
+    special = V.verdict_fingerprint(**base_fp)
+    ordinary = V.verdict_fingerprint(
+        **{**base_fp, "beat_text": "Baelish is not the killer."})
+    assert special != ordinary, "the conditional prompt clause must invalidate only its own cache"
+    assert not V._absence_elsewhere_instruction(
+        "Baelish is not the killer.", "Petyr Baelish",
+        expected_visual=common["expected_visual"], scene_query=common["scene_query"])
+    assert not V._absence_elsewhere_instruction(
+        common["narration"], common["required_entity"],
+        expected_visual="Baelish stands in the council room.",
+        scene_query="Game of Thrones council room")
+    assert not V._absence_elsewhere_instruction(
+        "Baelish accused Varys, who was not in the room.", "Petyr Baelish",
+        expected_visual=common["expected_visual"], scene_query=common["scene_query"])
+    assert not V._absence_elsewhere_instruction(
+        common["narration"], common["required_entity"],
+        expected_visual="Baelish waits in the room aboard a ship.",
+        scene_query="Game of Thrones council room escape ship")
+    for excluded, storyboard in (
+        ("harbor", "harbour"), ("boat", "ship"), ("castle", "keep"),
+        ("room", "chamber"),
+    ):
+        assert not V._absence_elsewhere_instruction(
+            f"Baelish is not in the {excluded}.", common["required_entity"],
+            expected_visual=f"Baelish waits in the {storyboard}.",
+            scene_query=f"Game of Thrones Baelish {storyboard}")
+
+    seg = NS(text=common["narration"], required_entity=common["required_entity"],
+             required_kind="character", expected_visual=common["expected_visual"],
+             scene_query=common["scene_query"])
+    assert V._direct_negative_contradiction(seg, {
+        "correct_subject_visible": True, "contradicts_narration": False}) == ""
+    seg.expected_visual = "Baelish stands in the council room."
+    seg.scene_query = "Game of Thrones council room"
+    assert "absent" in V._direct_negative_contradiction(seg, {
+        "correct_subject_visible": True, "contradicts_narration": False})
+
+
 _EXPLICIT_MISMATCH = {
     "verdict": "replace", "matches_narration": False, "specific_enough": False,
     "correct_subject_visible": True, "wrong_subject_visible": False,

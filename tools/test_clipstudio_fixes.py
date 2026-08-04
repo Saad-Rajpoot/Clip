@@ -2784,11 +2784,18 @@ def test_nonscene_footage_gate():
         ]
         shots_by  = {"pod": pod_sh,  "scene": scn_sh}
         embeds_by = {"pod": pod_emb, "scene": scn_emb}
+        from vidlore.clipstudio import quality_contract as _QC_native_fixture
         save = (MM._index.load_shots, MM._index.load_embeds, MM._source_is_nonphotographic)
+        save_native_probe = _QC_native_fixture.probe_native_video_info
         try:
             MM._index.load_shots = lambda p, sid: shots_by.get(sid, [])
             MM._index.load_embeds = lambda p, sid: embeds_by.get(sid)
             MM._source_is_nonphotographic = lambda *a, **k: False
+            # This fixture isolates the modern-talking-head gate and uses synthetic, nonexistent
+            # media paths.  Certify HD here so the independent actual-byte native-HD admission
+            # contract does not (correctly) reject both rows before the gate under test runs.
+            _QC_native_fixture.probe_native_video_info = \
+                lambda _path: {"width": 1920, "height": 1080}
             IF._vr = lambda: _FakeVR()
             ids = {ps.sid for ps in MM._load_pool(proj)}
             check("_load_pool DROPS the title-clean modern talking-head source", "pod" not in ids)
@@ -2799,6 +2806,7 @@ def test_nonscene_footage_gate():
         finally:
             os.environ.pop("VIDLORE_CLIPSTUDIO_FACE_FOOTAGE_GATE", None)
             MM._index.load_shots, MM._index.load_embeds, MM._source_is_nonphotographic = save
+            _QC_native_fixture.probe_native_video_info = save_native_probe
     finally:
         IF._vr = _savevr
 

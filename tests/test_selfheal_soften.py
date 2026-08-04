@@ -73,7 +73,7 @@ def _stub_phase1_search(monkeypatch):
 
 
 def _phase1_evidence_fixture(tmp_path, *, index=2, quote="", words=None,
-                             verdict_patch=None, cfg=None):
+                             verdict_patch=None, cfg=None, evidence_is_specific=True):
     """A bound phase-1 review plus recomputable current-window verifier evidence."""
     proj = ClipProject(name="phase1-evidence", root=str(tmp_path))
     proj.ensure_dirs()
@@ -119,7 +119,8 @@ def _phase1_evidence_fixture(tmp_path, *, index=2, quote="", words=None,
                 proj, cfg or load_clip_config()),
         }))
     V.bind_selection_verifier_evidence(
-        proj, sel, seg, verdict, shot=shots[0], model="vision-test", is_specific=True,
+        proj, sel, seg, verdict, shot=shots[0], model="vision-test",
+        is_specific=evidence_is_specific,
         multiframe=True, faceid_names=[], era=V._project_beat_era(proj, seg),
         must_see=P.deictic_target(seg))
     proj.segments = [seg]
@@ -1108,6 +1109,31 @@ def test_phase1_bound_paraphrase_with_pure_content_negative_can_still_soften(
     proj, seg, _sel = _phase1_evidence_fixture(
         tmp_path, quote="The essayist's paraphrase is not spoken dialogue.",
         words=[[0.1, 0.2, "completely"], [0.3, 0.4, "unrelated"]])
+
+    resolved, called, lines = _run_phase1_authorization(monkeypatch, proj, seg)
+
+    assert resolved == 1 and called == [seg.index]
+    assert P.policy_of(seg) == P.ABSTRACT
+    assert not any("specificity softening DENIED" in line for line in lines)
+
+
+@pytest.mark.parametrize("relevance_class,downgraded", [
+    ("contextual_fallback", "exact→contextual"),
+    ("generic_filler", "exact→generic_filler"),
+])
+def test_phase1_bound_review_admits_completed_deliberate_exact_downgrade(
+        monkeypatch, tmp_path, relevance_class, downgraded):
+    proj, seg, _sel = _phase1_evidence_fixture(
+        tmp_path,
+        verdict_patch={
+            "status": "ok", "verdict": "keep", "matches_narration": True,
+            "specific_enough": True, "correct_subject_visible": True,
+            "wrong_subject_visible": False, "contradicts_narration": False,
+            "quality_ok": True, "era_ok": True, "downgraded": downgraded,
+            "relevance_class": relevance_class,
+        },
+        evidence_is_specific=False,
+    )
 
     resolved, called, lines = _run_phase1_authorization(monkeypatch, proj, seg)
 

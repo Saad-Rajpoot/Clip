@@ -117,8 +117,8 @@ _PIPELINE_CKPT_VERSION = 2   # bump when a stage's semantics change so old check
 # Narrow semantic versions for stages whose code-level content gates are not otherwise represented
 # by their data/config inputs.  Keep these separate from _PIPELINE_CKPT_VERSION: changing a source
 # admission rule must replay backfill + match, but it must not throw away valid downloads/indexes.
-_MATCH_GATE_VERSION = "gatev3-wrong-installment-mixed-title"
-_BACKFILL_SIGNATURE_VERSION = "backfillv5-wrong-installment-mixed-title"
+_MATCH_GATE_VERSION = "gatev4-native-hd-actual-bytes"
+_BACKFILL_SIGNATURE_VERSION = "backfillv6-native-hd-actual-bytes"
 
 
 def _sig(*parts) -> str:
@@ -173,13 +173,36 @@ def _footage_stage_signatures(download_sig: str, sources, *, force_index: bool,
     selections, so every Resume needlessly rematches and re-runs backfill.  Source ids are canonical
     because duplicate records with the same id resolve to one searchable index namespace.
     """
-    source_ids = tuple(sorted({str(getattr(s, "id", "") or "") for s in (sources or [])
-                               if str(getattr(s, "id", "") or "")}))
+    # A source id names an index namespace, but it does not prove the bytes under that id stayed
+    # unchanged.  HD recovery can replace a file in place; signing ids alone then let Resume skip
+    # index+match+cut and pair stale SD clips with newly-HD source metadata. Keep the first record
+    # for each canonical id (matching ``proj.source`` semantics) and bind every downstream stage to
+    # path/stat/checksum identity. Duplicate manifest rows remain inert.
+    canonical_sources = {}
+    for source in (sources or []):
+        sid = str(getattr(source, "id", "") or "")
+        if sid:
+            canonical_sources.setdefault(sid, source)
+
+    def _source_byte_identity(sid, source):
+        path = str(getattr(source, "local_path", "") or "")
+        try:
+            stat = Path(path).stat() if path else None
+            size = int(stat.st_size) if stat is not None else 0
+            mtime_ns = int(stat.st_mtime_ns) if stat is not None else 0
+        except OSError:
+            size = mtime_ns = 0
+        return (sid, path, size, mtime_ns,
+                str(getattr(source, "checksum", "") or ""))
+
+    source_identity = tuple(
+        _source_byte_identity(sid, canonical_sources[sid])
+        for sid in sorted(canonical_sources))
     # Match consumes persisted shot transcripts, so the ASR decoder/model/prompt identity is an
     # index input even when the downloaded files themselves have not changed.  Without this edge,
     # a fully checkpointed Resume can skip index + match and silently reuse words decoded under an
     # older vocabulary (or even another Whisper build).
-    sig_index = _sig(download_sig, source_ids, bool(force_index), str(asr_signature or ""))
+    sig_index = _sig(download_sig, source_identity, bool(force_index), str(asr_signature or ""))
     sig_match = _sig(sig_index, _seg_sig(segments), _MATCH_GATE_VERSION)
     sig_cut = _sig(sig_match)
     sig_verify = _sig(sig_cut, bool(verify))
@@ -2098,7 +2121,7 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
         # "Arya and Bran Stark actors on growing up on the set".
         _why = (proj.meta or {}).get("auto_rejected_reasons") or {}
         _replaceable = {"subtitled_copy", "watermarked", "promo_overlay", "numeral_overlay",
-                        "screen_recording"}
+                        "screen_recording", "sub_native_hd"}
         rejected = [s for s in proj.sources
                     if s.id in set((proj.meta or {}).get("auto_rejected_sources") or [])
                     and _why.get(s.id, "subtitled_copy") in _replaceable]
@@ -2287,12 +2310,42 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
                 return "behind-the-scenes"
             return ""
 
+        from .quality_contract import native_video_ok as _backfill_native_ok
+        from .quality_contract import probe_native_video_info as _probe_backfill_native
         kept, dead = [], []
+        dead_reasons: dict[str, str] = {}
         for s in newly:
             _why_bad = _title_ok(s.title or "")
             if _why_bad:
                 dead.append((s, 0, 0))
+                dead_reasons[s.id] = _why_bad
                 log(f"5b/9 · backfill: rejected {(s.title or s.id)[:44]!r} — {_why_bad}")
+                continue
+            # `usable_shot_yield` measures frame/content gates, not native raster. A newly fetched
+            # 360p copy could therefore be counted as "admitted" in the last configured round even
+            # though the next match pass and final build must reject it. Probe the actual bytes here
+            # and make the audit honest in the same invocation.
+            _native_path = str(getattr(s, "local_path", "") or "")
+            _native_info = dict(_probe_backfill_native(_native_path) or {})
+            if not _native_info.get("width") or not _native_info.get("height"):
+                # An unavailable decoder/probe is technical uncertainty, not a conclusive bad
+                # copy. Roll back the unscreened batch so this URL remains retryable on Resume.
+                _rollback_download_attempt()
+                log(f"5b/9 · backfill: native-resolution probe unavailable for "
+                    f"{(s.title or s.id)[:44]!r} — leaving checkpoint retryable")
+                return _finish("incomplete", f"native_probe_unavailable:{s.id}")
+            if not _backfill_native_ok(_native_info):
+                try:
+                    _nw = int(_native_info.get("width") or 0)
+                    _nh = int(_native_info.get("height") or 0)
+                except (TypeError, ValueError):
+                    _nw = _nh = 0
+                _native_reason = (f"sub-native-HD actual bytes {_nw}x{_nh}"
+                                  if _nw and _nh else "native resolution unprobeable")
+                dead.append((s, 0, 0))
+                dead_reasons[s.id] = _native_reason
+                log(f"5b/9 · backfill: rejected {(s.title or s.id)[:44]!r} — "
+                    f"{_native_reason}; publication requires 1280x720")
                 continue
             try:
                 ok, tot = _M.usable_shot_yield(proj, s.id, cfg)
@@ -2304,17 +2357,21 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
                 log(f"5b/9 · backfill: shot-yield measurement failed "
                     f"({type(e).__name__}: {str(e)[:60]})")
                 return _finish("incomplete", f"yield_measurement_failed:{type(e).__name__}")
+            if not ok:
+                dead_reasons[s.id] = "no usable indexed shots"
             (kept if ok else dead).append((s, ok, tot))
         admitted_total += len(kept)
         audit["rounds"][-1]["downloaded"] = [
-            {"id": s.id, "title": (s.title or "")[:70], "usable_shots": ok, "shots": tot}
+            {"id": s.id, "title": (s.title or "")[:70], "usable_shots": ok, "shots": tot,
+             "rejection_reason": dead_reasons.get(s.id, "")}
             for s, ok, tot in kept + dead]
         for s, ok, tot in dead:
             proj.meta.setdefault("banned_sources", [])
             if s.id not in proj.meta["banned_sources"]:
                 proj.meta["banned_sources"].append(s.id)
+            _dead_reason = dead_reasons.get(s.id, "burned text / graphics / too dark")
             log(f"5b/9 · backfill: {(s.title or s.id)[:44]!r} has 0 usable shots of {tot} "
-                f"(burned text / graphics / too dark) — banned, not a replacement")
+                f"({_dead_reason}) — banned, not a replacement")
         if kept:
             log(f"5b/9 · backfill: +{len(kept)} usable source(s) indexed — "
                 + ", ".join(f"{(s.title or s.id)[:36]} ({ok}/{tot} shots)" for s, ok, tot in kept[:3]))
@@ -2936,10 +2993,12 @@ def _unverifiable_relevance_indices(audit: dict) -> set[int]:
         "target_visible_false", "contradicts_narration_true", "era_ok_false",
         "deterministic_contradiction",
     )
+    from .relevance_contract import completed_deliberate_exact_downgrade
     return {
         int(e.get("segment_index", -1))
         for e in (audit.get("blockers") or [])
-        if any(str(r).startswith(prefixes) for r in (e.get("reasons") or []))
+        if not completed_deliberate_exact_downgrade(e)
+        and any(str(r).startswith(prefixes) for r in (e.get("reasons") or []))
         and not any(str(r).startswith(cannot_reverify_in_place)
                     for r in (e.get("reasons") or []))
     }
@@ -2970,11 +3029,18 @@ def _persistent_verifier_technical_indices(audit: dict) -> set[int]:
     selected bytes but lacks a current, schema-complete, provenance-bound judgment.  Such beats
     stay blocked, while independent conclusive blockers may continue through bounded recovery.
     """
+    from .relevance_contract import completed_deliberate_exact_downgrade
     out: set[int] = set()
     for entry in (audit.get("blockers") or []):
         reasons = [str(reason) for reason in (entry.get("reasons") or [])]
         if any(reason.startswith(("selection_absent", "moving_source_absent"))
                for reason in reasons):
+            continue
+        # The strict gate still rejects these bytes, but a fresh bound lenient KEEP has already
+        # answered its verifier question.  It is an exact-footage/content shortfall, not a
+        # persistent schema/backend/binding fault.  Mixed real technical reasons fail the shared
+        # predicate and remain in this lane.
+        if completed_deliberate_exact_downgrade(entry):
             continue
         if any(reason.startswith(_PERSISTENT_VERIFIER_TECHNICAL_PREFIXES)
                for reason in reasons):

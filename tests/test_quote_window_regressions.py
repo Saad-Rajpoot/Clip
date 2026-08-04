@@ -48,6 +48,41 @@ def test_quote_locator_retains_only_gapped_verbatim_phrase_as_fallback():
     assert span == (10.0, 16.8, 1.0)
 
 
+def test_quote_locator_prefers_compact_duplicate_when_phrase_ratio_ties():
+    # Measured beat-55 ASR: Whisper emitted a six-second-wide ``he's`` alignment, then the same
+    # line again with normal timings.  Both scored 1.0, so first-wins returned 26.78--33.28 and
+    # crossed four shots; the actual compact utterance is 35.20--36.18 in one local action beat.
+    words = [
+        (26.78, 32.82, "he's"),
+        (32.82, 33.28, "charking"),
+        (33.94, 34.16, "I'm"),
+        (34.16, 34.26, "the"),
+        (34.26, 34.50, "poor"),
+        (34.50, 34.86, "boy"),
+        (35.20, 35.64, "he's"),
+        (35.64, 36.18, "charking"),
+    ]
+
+    span = IX.find_quote_span(words, "He's choking!", min_ratio=0.78)
+
+    assert span == (35.2, 36.18, 1.0)
+
+
+def test_quote_locator_compact_tie_uses_unrounded_fuzzy_ratio():
+    # 8/9 is stored as .889. Comparing a later raw 8/9 against that rounded value made an exact
+    # tie look weaker and preserved the first, six-second smeared Whisper alignment.
+    words = [
+        (0.0, 4.8, "alpha"), (5.0, 5.2, "beta"), (5.2, 5.4, "gamma"),
+        (5.4, 5.6, "epsilon"),
+        (6.0, 6.2, "alpha"), (6.2, 6.4, "beta"), (6.4, 6.6, "gamma"),
+        (6.6, 6.8, "epsilon"),
+    ]
+
+    span = IX.find_quote_span(words, "alpha beta gamma delta epsilon", min_ratio=0.78)
+
+    assert span == (6.0, 6.8, 0.889)
+
+
 def test_quote_locator_requires_a_substantive_token_not_common_prefix_only():
     # Actual beat-65 false positive: slack shortened the candidate to "he was a", giving the
     # authored "He was a monster" a 0.857 score even though ASR says a different noun.

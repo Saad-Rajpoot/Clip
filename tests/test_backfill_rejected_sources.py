@@ -63,6 +63,9 @@ def _wire(monkeypatch, *, cands=None, downloads=None):
     monkeypatch.setattr("vidlore.clipstudio.discover.discover_sources", _disc)
     monkeypatch.setattr("vidlore.clipstudio.download.download_candidates", _dl)
     monkeypatch.setattr("vidlore.clipstudio.index.index_all", _idx)
+    monkeypatch.setattr(
+        "vidlore.clipstudio.quality_contract.probe_native_video_info",
+        lambda _path: {"width": 1920, "height": 1080})
     return seen
 
 
@@ -120,6 +123,56 @@ def test_searches_with_the_lost_upload_s_own_title(monkeypatch):
     q = seen["queries"][0]
     assert any("Trial of Petyr Baelish" in x for x in q)
     assert any("Catspaw Dagger" in x for x in q)
+
+
+def test_sub_native_hd_rejection_is_replaceable(monkeypatch):
+    seen = _wire(monkeypatch, cands=[])
+    proj = _Proj([_Src("sd", "Ned Stark execution scene 360p")], ["sd"])
+    proj.meta["auto_rejected_reasons"] = {"sd": "sub_native_hd"}
+
+    _run(proj)
+
+    assert any("Ned Stark execution scene" in q for q in seen["queries"][0])
+
+
+def test_downloaded_sd_copy_is_not_reported_as_admitted(monkeypatch):
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_BACKFILL_ROUNDS", "1")
+    low = _Src("low", "Trial replacement", url="https://y/low")
+    low.local_path = "/tmp/low.mp4"
+    _wire(
+        monkeypatch,
+        cands=[types.SimpleNamespace(url="https://y/low", title="Trial replacement")],
+        downloads=[low])
+    monkeypatch.setattr(
+        "vidlore.clipstudio.quality_contract.probe_native_video_info",
+        lambda _path: {"width": 640, "height": 360})
+    proj = _Proj([_Src("sd", "The Trial of Petyr Baelish")], ["sd"])
+    proj.meta["auto_rejected_reasons"] = {"sd": "sub_native_hd"}
+
+    assert _run(proj) == 0
+    row = proj.meta["backfill_audit"]["rounds"][0]["downloaded"][0]
+    assert row["rejection_reason"].startswith("sub-native-HD")
+    assert "low" in proj.meta["banned_sources"]
+
+
+def test_unprobeable_download_leaves_backfill_retryable(monkeypatch):
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_BACKFILL_ROUNDS", "1")
+    unknown = _Src("unknown", "Trial replacement", url="https://y/unknown")
+    unknown.local_path = "/tmp/unknown.mp4"
+    _wire(
+        monkeypatch,
+        cands=[types.SimpleNamespace(url="https://y/unknown", title="Trial replacement")],
+        downloads=[unknown])
+    monkeypatch.setattr(
+        "vidlore.clipstudio.quality_contract.probe_native_video_info", lambda _path: {})
+    proj = _Proj([_Src("sd", "The Trial of Petyr Baelish")], ["sd"])
+    proj.meta["auto_rejected_reasons"] = {"sd": "sub_native_hd"}
+
+    assert _run(proj) == 0
+    assert proj.meta["backfill_audit"]["status"] == "incomplete"
+    assert proj.meta["backfill_audit"]["reason"].startswith("native_probe_unavailable:")
+    assert all(s.id != "unknown" for s in proj.sources), \
+        "the URL must remain discoverable on Resume after a technical probe failure"
 
 
 def test_channel_furniture_is_stripped_from_the_query(monkeypatch):
@@ -219,6 +272,26 @@ def test_footage_signatures_use_the_post_backfill_pool_and_ignore_duplicate_reco
 
     assert duplicate_only == before
     assert after != before
+
+
+def test_same_source_id_byte_rewrite_invalidates_index_and_every_downstream_stage(tmp_path):
+    seg = types.SimpleNamespace(
+        index=0, text="beat", visual_policy="exact_scene", required_entity="",
+        required_kind="", scene_query="scene", quote="")
+    media = tmp_path / "source.mp4"
+    media.write_bytes(b"old-sd")
+    src = _Src("same", "same source")
+    src.local_path = str(media)
+    src.checksum = "old"
+    kwargs = dict(force_index=False, segments=[seg], verify=True, asr_signature="asr-v1")
+
+    before = O._footage_stage_signatures("download", [src], **kwargs)
+    media.write_bytes(b"new-native-hd-bytes")
+    src.checksum = "new"
+    after = O._footage_stage_signatures("download", [src], **kwargs)
+
+    assert all(a != b for a, b in zip(before, after)), \
+        "same-id media replacement must replay index, match, cut, verify and recover"
 
 
 def test_completed_backfill_checkpoint_skips_but_incomplete_audit_retries():

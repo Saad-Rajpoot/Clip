@@ -18,10 +18,10 @@ from vidlore.clipstudio.models import (ClipCandidate, ClipProject, ClipSelection
                                        Shot, SourceVideo)
 
 
-def _cand(sid: str, shot_index: int) -> ClipCandidate:
+def _cand(sid: str, shot_index: int, *, score: float = 0.5, signals=None) -> ClipCandidate:
     return ClipCandidate(segment_index=0, source_id=sid, shot_index=shot_index,
                          in_point=float(shot_index), out_point=float(shot_index) + 2.5,
-                         score=0.5)
+                         score=score, signals=dict(signals or {}))
 
 
 def _fixture(tmp_path: Path):
@@ -117,6 +117,102 @@ def test_candidate_cap_is_explicit_and_hard_bounded(tmp_path, monkeypatch):
     target = [c for c in huge if c.source_id == "target"]
     distances = [c.signals["neighbor_distance"] for c in target]
     assert distances == sorted(distances)
+
+
+def test_evidence_backed_same_source_deep_region_gets_five_nearest_strict_calls(
+        tmp_path, monkeypatch):
+    proj, seg, sel, get_shot = _fixture(tmp_path)
+    # This mirrors the three production misses without broadening match: the normal seed points at
+    # a contextual region, while a strong retained deep candidate points at a distant exact-scene
+    # region in the SAME upload.  The exact action is a low-CLIP sibling two shots after that seed
+    # (gold-cloak swords 17 -> 61 -> 63; dagger 29 -> 20 -> 18; necklace 22 -> 1).
+    sel.deep_alternates = [
+        _cand("target", 20, score=0.8,
+              signals={"clip": 0.88, "anchor_bonus": 0.46, "title_affinity": 0.34})]
+
+    def relevance(sh, _kf, _query, **_kwargs):
+        if sh.source_id == "wrong":
+            return 0.99
+        if sh.index == 22:
+            return 0.01                    # noisy action frame must not lose to face-heavy CLIP
+        return 0.90 - sh.index / 1000.0
+
+    monkeypatch.setattr(IF, "_shot_relevance", relevance)
+    out = V._strict_scene_neighborhood_candidates(
+        sel, seg, proj, get_shot, ClipConfig(),
+        exclude={("wrong", 5), ("wrong", 4), ("target", 5)})
+    keys = [(c.source_id, c.shot_index) for c in out]
+
+    assert len(out) == 12, "the new region must reuse, never enlarge, the twelve-call bound"
+    assert ("target", 22) in keys, \
+        "the +/-2 action sibling must receive strict vision even when its CLIP score is weakest"
+    deep = [c for c in out if c.signals.get("strict_scene_deep_region")]
+    assert [(c.source_id, c.shot_index) for c in deep] == [
+        ("target", 20), ("target", 19), ("target", 21), ("target", 18), ("target", 22)]
+    assert not any(c.signals.get("strict_scene_deep_region") and c.shot_index >= 23 for c in out), \
+        "one disjoint seed may reserve only its five nearest new candidates"
+    ordinary_counts = {
+        sid: sum(1 for c in out if c.source_id == sid
+                 and not c.signals.get("strict_scene_deep_region"))
+        for sid in ("wrong", "target")
+    }
+    assert min(ordinary_counts.values()) >= 3, \
+        "the five-call reserve must leave a balanced 4/3 bench, not crowd source two to one call"
+
+
+def test_deep_only_source_cannot_open_a_second_distant_region(tmp_path, monkeypatch):
+    proj, seg, sel, get_shot = _fixture(tmp_path)
+    sel.alternates = [_cand("wrong", 4)]
+    sel.deep_alternates = [
+        _cand("target", 20, score=0.8, signals={"clip": 0.88}),
+        _cand("target", 5, score=0.9, signals={"clip": 0.95}),
+    ]
+    monkeypatch.setattr(IF, "_shot_relevance", lambda *_a, **_k: 0.5)
+
+    out = V._strict_scene_neighborhood_candidates(
+        sel, seg, proj, get_shot, ClipConfig(), exclude={("wrong", 5), ("wrong", 4)})
+
+    assert not any(c.signals.get("strict_scene_deep_region") for c in out)
+
+
+def test_same_source_deep_region_requires_persisted_candidate_evidence(tmp_path, monkeypatch):
+    proj, seg, sel, get_shot = _fixture(tmp_path)
+    # The fixture's target#20 is a bare score=.5 deep sibling.  It recreates the earlier trial where
+    # blindly widening from a distant deep seed crowded a proven +6 exact shot out of the pool.
+    monkeypatch.setattr(IF, "_shot_relevance", lambda *_a, **_k: 0.5)
+
+    out = V._strict_scene_neighborhood_candidates(
+        sel, seg, proj, get_shot, ClipConfig(),
+        exclude={("wrong", 5), ("wrong", 4), ("target", 5)})
+
+    assert not any(c.signals.get("strict_scene_deep_region") for c in out)
+    assert not any(c.source_id == "target" and c.shot_index >= 14 for c in out), \
+        "unsupported distant bench siblings must retain the old no-widen behavior"
+
+
+def test_contextual_selected_source_cannot_steal_stronger_affine_deep_region(
+        tmp_path, monkeypatch):
+    proj, seg, sel, get_shot = _fixture(tmp_path)
+    wrong = proj.source("wrong")
+    wrong.title = "Littlefinger character compilation"
+    wrong.extra = {"query": "Littlefinger scenes"}
+    # Both the contextual selected source and the exact-scene alternate carry supported distant
+    # seeds. Beat 94 reproduced this shape: selected Catelyn footage had a deep region, but the
+    # Joffrey/Ned throne-room source had 26 more literal affinity points and the actual betrayal.
+    sel.deep_alternates = [
+        _cand("wrong", 12, score=0.9, signals={"clip": 0.99}),
+        _cand("target", 20, score=0.8, signals={"clip": 0.88}),
+    ]
+    monkeypatch.setattr(IF, "_shot_relevance", lambda *_a, **_k: 0.5)
+
+    out = V._strict_scene_neighborhood_candidates(
+        sel, seg, proj, get_shot, ClipConfig(),
+        exclude={("wrong", 5), ("wrong", 4), ("target", 5)})
+    deep = [(c.source_id, c.shot_index) for c in out
+            if c.signals.get("strict_scene_deep_region")]
+
+    assert deep == [("target", 20), ("target", 19), ("target", 21),
+                    ("target", 18), ("target", 22)]
 
 
 def test_neighborhood_never_resurrects_match_gated_pixels(tmp_path, monkeypatch):
