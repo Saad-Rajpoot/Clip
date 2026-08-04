@@ -1347,6 +1347,45 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
             or (w.startswith(t) and len(w) - len(t) <= 2)
             for t in present))
 
+    def _episode_code(text):
+        """Return a normalized (season, episode) pair from an explicit upload label."""
+        value = str(text or "").lower()
+        match = re.search(
+            r"\bs(?:eason)?\s*0*(\d{1,2})\s*[:._ -]*"
+            r"e(?:pisode)?\s*#?\s*0*(\d{1,2})\b",
+            value)
+        if not match:
+            match = re.search(r"\b0*(\d{1,2})\s*x\s*0*(\d{1,2})\b", value)
+        return ((int(match.group(1)), int(match.group(2))) if match else None)
+
+    # An anchor's explicit episode is authoritative *source-location* evidence.  Literal title
+    # overlap alone cannot distinguish the episode that depicts an event from a later recap or
+    # confession about it (measured: the S04E02 necklace action lost all five reserve slots to an
+    # Olenna compilation discussing the poison). Bind only when at least two storyboard terms
+    # identify one configured anchor; one broad word such as "wedding" is intentionally insufficient.
+    anchor_episode = None
+    anchor_rank = None
+    storyboard_tokens = q_tokens | visual_tokens
+    for anchor_order, anchor in enumerate(ana.get("anchor_scenes") or []):
+        if not isinstance(anchor, dict):
+            continue
+        episode = _episode_code(" ".join((
+            str(anchor.get("episode", "") or ""),
+            str(anchor.get("query", "") or ""),
+        )))
+        if episode is None:
+            continue
+        anchor_tokens = _tokens(" ".join((
+            str(anchor.get("name", "") or ""),
+            str(anchor.get("query", "") or ""),
+        )))
+        overlap = _hits(storyboard_tokens, anchor_tokens)
+        if overlap < 2:
+            continue
+        rank = (overlap, -anchor_order)
+        if anchor_rank is None or rank > anchor_rank:
+            anchor_rank, anchor_episode = rank, episode
+
     # Transcript prose is useful for finding a *passage* inside a retained long source, but only
     # when it says something genuinely diagnostic about the storyboard.  These are common visual
     # directions, not scene identifiers.  Letting any pair of them open a distant region ("man
@@ -1656,6 +1695,7 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
     except Exception:
         banned = set()
     affine_sources = []
+    anchor_episode_sources = set()
     for sid, seeds in source_seeds.items():
         try:
             src = proj.source(sid)
@@ -1677,7 +1717,16 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
             continue
         if beat_era and _era_conflict(beat_era, title + " " + sid):
             continue
-        affinity = (100 if anchored else 0) + 5 * qh + 3 * vh + 2 * eh
+        source_episode = _episode_code(source_text)
+        anchor_episode_match = bool(
+            anchor_episode is not None and source_episode == anchor_episode)
+        if anchor_episode_match:
+            anchor_episode_sources.add(sid)
+        # Exact episode identity is stronger than noisy title prose, while explicit
+        # ``anchor_verified`` remains the strongest source contract. This changes only the bounded
+        # strict-repair ordering; it neither widens the retained source set nor bypasses vision/QC.
+        affinity = ((100 if anchored else 0) + (50 if anchor_episode_match else 0)
+                    + 5 * qh + 3 * vh + 2 * eh)
         # Source affinity is primary, with a small penalty for how far down the already-ranked seed
         # list this source appeared. This keeps strong literal sources ahead of generic ones while
         # preserving the useful matcher fact that an early alternate is more plausible than a late
@@ -2132,7 +2181,18 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
     timed_strength = (timed_regions[affine_sources[timed_source_rank][3]]["strength"]
                       if timed_source_rank is not None else (0, 0.0))
     reserve_rows = []
-    if timed_source_rank is not None and timed_strength > deep_strength:
+    deep_sid = (affine_sources[deep_source_rank][3]
+                if deep_source_rank is not None else "")
+    timed_sid = (affine_sources[timed_source_rank][3]
+                 if timed_source_rank is not None else "")
+    # Two timed words in a recap locate discussion of the event, not necessarily the pixels which
+    # depict it. When the analyzer bound this beat to a concrete anchor episode and match retained
+    # a supported distant region from that episode, a non-episode transcript reserve must not evict
+    # it. The reserve is still exactly five calls and every frame still faces strict vision/QC.
+    episode_deep_protected = bool(
+        deep_sid in anchor_episode_sources and timed_sid not in anchor_episode_sources)
+    if (timed_source_rank is not None and timed_strength > deep_strength
+            and not episode_deep_protected):
         reserve_rows = sorted(timed_region_ranked[timed_source_rank], key=lambda row: row[0])
     elif deep_source_rank is not None:
         reserve_rows = sorted(deep_region_ranked[deep_source_rank], key=lambda row: row[0])
@@ -2939,6 +2999,97 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             # Window-QC mutations made while searching.
             _promotion_base_state = copy.deepcopy(vars(sel))
             _promotion_materialization_error = {"detail": ""}
+            # The semantic quote-window rung marks hypotheses whose selected bytes are bound to a
+            # whole-pool verbatim location.  The ordinary neighborhood verifier used to replace
+            # such a hypothesis with a visually convincing adjacent shot that did not contain the
+            # quote (measured beat 55: quote window 125.254--130.853 -> shot39 120.587--123.557).
+            # The final contract caught the loss and rolled back, but recovery could never install
+            # the clean copy.  Preserve that constraint across every promotion: another prebuilt
+            # quote candidate already carries its own proof; a same-target PCM candidate may be
+            # rebound only when its final Window-QC trim still contains the transferred phrase.
+            _quote_locked_signals = dict(getattr(sel, "signals", None) or {})
+            _quote_locked = bool(_quote_locked_signals.get("quote_pool_exact"))
+            _quote_transfer = _quote_locked_signals.get("quote_audio_transfer_evidence")
+
+            def _preserve_quote_lock(alt) -> bool:
+                if not _quote_locked:
+                    return True
+                alt_signals = dict(getattr(alt, "signals", None) or {})
+                if alt_signals.get("quote_pool_exact"):
+                    return True
+                # A direct-ASR quote source does not need PCM evidence.  Preserve the neighborhood
+                # rescue that existed before this guard, but re-derive it from current timed words
+                # and the candidate's *post-Window-QC* trim instead of trusting matcher signals.
+                # The final publication contract independently rechecks ASR provenance and the
+                # whole-pool verbatim branch before this candidate can be committed.
+                try:
+                    from . import index as _index_quote_lock
+                    from .relevance_contract import (
+                        QUOTE_DIALOGUE_FLOOR as _quote_floor,
+                        QUOTE_WINDOW_TOLERANCE_SEC as _quote_tol,
+                    )
+                    direct = _index_quote_lock.find_quote_span(
+                        _index_quote_lock.load_words(proj, str(alt.source_id or "")),
+                        str(getattr(seg, "quote", "") or ""),
+                        min_ratio=float(_quote_floor))
+                    window0, window1 = float(alt.in_point), float(alt.out_point)
+                    direct_contained = bool(
+                        direct and window1 > window0 >= 0.0
+                        and float(direct[1]) > float(direct[0]) >= 0.0
+                        and float(direct[0]) >= window0 - float(_quote_tol)
+                        and float(direct[1]) <= window1 + float(_quote_tol))
+                except (IndexError, TypeError, ValueError, OSError):
+                    direct = None
+                    direct_contained = False
+                if direct_contained and direct is not None:
+                    try:
+                        dialogue_signal = max(
+                            float(alt_signals.get("dialogue", 0.0) or 0.0),
+                            float(direct[2]))
+                    except (IndexError, TypeError, ValueError):
+                        return False
+                    alt_signals["quote_pool_exact"] = True
+                    alt_signals["dialogue"] = dialogue_signal
+                    alt.signals = alt_signals
+                    return True
+                if not isinstance(_quote_transfer, dict):
+                    return False
+                if str(_quote_transfer.get("target_source_id", "") or "") != \
+                        str(getattr(alt, "source_id", "") or ""):
+                    return False
+                try:
+                    target_q0, target_q1 = (
+                        float(_quote_transfer["target_quote_span"][0]),
+                        float(_quote_transfer["target_quote_span"][1]))
+                    window0, window1 = float(alt.in_point), float(alt.out_point)
+                    from .relevance_contract import QUOTE_WINDOW_TOLERANCE_SEC as _quote_tol
+                    contained = (
+                        window1 > window0 >= 0.0 and target_q1 > target_q0 >= 0.0
+                        and target_q0 >= window0 - float(_quote_tol)
+                        and target_q1 <= window1 + float(_quote_tol))
+                except (IndexError, KeyError, TypeError, ValueError):
+                    contained = False
+                if not contained:
+                    return False
+                try:
+                    from . import audio_align as _audio_quote_lock
+                    rebound = _audio_quote_lock.rebind_transfer_evidence_window(
+                        _quote_transfer, [window0, window1])
+                except Exception:
+                    rebound = {}
+                if not rebound:
+                    return False
+                alt_signals[_audio_quote_lock.AUDIO_QUOTE_TRANSFER_SIGNAL] = rebound
+                alt_signals["quote_audio_transfer"] = True
+                alt_signals["quote_pool_exact"] = True
+                try:
+                    alt_signals["dialogue"] = max(
+                        float(alt_signals.get("dialogue", 0.0) or 0.0),
+                        float(rebound.get("reference_asr_ratio", 0.0) or 0.0))
+                except (TypeError, ValueError):
+                    return False
+                alt.signals = alt_signals
+                return True
 
             def _try_promote(downgrade: bool, pool=None, label: str = "",
                              attempt_cap: int | None = None) -> bool:
@@ -3009,6 +3160,12 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         if _wact == "shortened":
                             log(f"window-qc: shortened verify-promotion seg{sel.segment_index} "
                                 f"{_wqc_log_line(_wact, _wmeta, _wwhy)}")
+                    if not _preserve_quote_lock(alt):
+                        # A visually plausible neighbour without the phrase is not a valid quote
+                        # recovery candidate.  Reject it before spending vision; the unchanged
+                        # final contract remains the authoritative backstop.
+                        failed_wins.append((alt.source_id, float(alt.in_point)))
+                        continue
                     if _breaker_open:
                         break                           # backend is down — promotion cannot verify
                     _alt_strict = False if downgrade else _exact

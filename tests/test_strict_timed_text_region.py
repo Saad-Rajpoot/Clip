@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace as NS
 
 import pytest
 
@@ -339,3 +340,84 @@ def test_unseen_fifth_normal_alternate_gets_one_slot_inside_same_cap(tmp_path, m
 
     assert exact_out.signals.get("strict_scene_retained_alternate") is True
     assert len(out) <= 12, "the fifth alternate consumes, never adds, a strict call slot"
+
+
+def test_anchor_episode_deep_region_survives_later_recap_transcript(tmp_path, monkeypatch):
+    """A later recap can name the prop while the canonical episode silently depicts the action."""
+    proj = ClipProject(name="anchor-episode", root=str(tmp_path))
+    proj.ensure_dirs()
+    proj.meta["analysis"] = {
+        "movie_title": "Game of Thrones",
+        "anchor_scenes": [{
+            "name": "The Purple Wedding",
+            "query": "Game of Thrones Purple Wedding death scene S04E02",
+            "episode": "S04E02 The Lion and the Rose",
+        }],
+    }
+    proj.sources = [
+        _source(tmp_path, "recap", "Season 4 Episode 4: Olenna on the Purple Wedding",
+                "Olenna poison confession Purple Wedding"),
+        _source(tmp_path, "canonical", "S4E2 Purple Wedding Part 1/4",
+                "Purple Wedding death scene S04E02"),
+    ]
+    shots = {sid: _shots(tmp_path, sid, count=42) for sid in ("recap", "canonical")}
+    # The recap explicitly says the discriminative words far from its retained seed. It is useful
+    # semantic prose, but cannot outrank the configured episode which actually depicts the event.
+    shots["recap"][30].transcript = "The purple poison was hidden in the necklace."
+    get_shot = _lookup(shots)
+    seg = ScriptSegment(
+        index=0, text="The hand that took the stone was Olenna's.",
+        expected_visual="Olenna removes the poisoned stone from Sansa's necklace at the Purple Wedding.",
+        required_entity="Olenna Tyrell", required_kind="character",
+        scene_query="Olenna takes poison stone from Sansa necklace Purple Wedding",
+        visual_policy="exact_scene", is_specific_claim=True, shot_intent="action",
+        est_duration=4.6)
+    sel = ClipSelection(
+        segment_index=0, source_id="recap", shot_index=2, in_point=6.0, out_point=8.5,
+        confidence=0.8, alternates=[_candidate("canonical", 35, score=0.8)],
+        deep_alternates=[
+            _candidate("recap", 30, score=0.9, signals={"clip": 0.95}),
+            _candidate("canonical", 12, score=0.78, signals={"clip": 0.96}),
+        ])
+    proj.selections = [sel]
+    monkeypatch.setattr(IF, "_shot_relevance", lambda *_a, **_k: 0.5)
+
+    out = V._strict_scene_neighborhood_candidates(
+        sel, seg, proj, get_shot, ClipConfig(), cap=12, source_cap=2)
+    deep = [candidate for candidate in out
+            if candidate.signals.get("strict_scene_deep_region")]
+
+    assert [candidate.source_id for candidate in deep] == ["canonical"] * 5
+    assert {candidate.shot_index for candidate in deep} == {10, 11, 12, 13, 14}
+    assert any(candidate.shot_index == 14 for candidate in out), \
+        "the exact action at deep-anchor +2 must reach strict vision inside the same five slots"
+    assert len(out) <= 12
+
+    # Prove the real repair ladder can promote that fourth reserved frame, rather than merely
+    # returning it from the helper. All other pixels receive a strict negative verdict.
+    def verdict(path, *_args, **_kwargs):
+        keep = Path(path).name == "canonical_14.jpg"
+        return {
+            "verdict": "keep" if keep else "replace",
+            "matches_narration": keep,
+            "correct_subject_visible": keep,
+            "wrong_subject_visible": False,
+            "contradicts_narration": False,
+            "specific_enough": keep,
+            "quality_ok": True,
+            "confidence": 0.95,
+            "reason": "exact action" if keep else "wrong moment",
+        }
+
+    monkeypatch.setattr(V, "_shot_lookup", lambda _proj: get_shot)
+    monkeypatch.setattr(V, "verify_frame", verdict)
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", "1")
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "0")
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_WINDOW_QC", "0")
+    summary = V.verify_and_repair(
+        proj, [seg], ClipConfig(), NS(anthropic_model="m", anthropic_key="k"),
+        max_replacements=1, materialize_promotions=False, persist_project=False)
+
+    assert summary["replaced"] == 1
+    assert (sel.source_id, sel.shot_index) == ("canonical", 14)
+    assert not sel.verifier.get("downgraded")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -224,6 +225,20 @@ def test_contract_accepts_strong_bound_transfer_when_current_target_asr_missed(t
     assert detail["dialogue_signal"] == .98, "the existing dialogue floor remains in force"
 
 
+def test_transfer_evidence_can_only_rebind_its_selected_window_with_fresh_fingerprint(tmp_path):
+    proj, _seg, _sel = _project(tmp_path)
+    old = _evidence(proj)
+
+    rebound = A.rebind_transfer_evidence_window(old, [3.6, 5.5])
+
+    assert rebound["target_selected_window"] == [3.6, 5.5]
+    assert rebound["binding_fingerprint"] != old["binding_fingerprint"]
+    assert A.transfer_evidence_shape_reason(rebound) == ""
+    fabricated = copy.deepcopy(old)
+    fabricated["correlation"] = 1.0
+    assert A.rebind_transfer_evidence_window(fabricated, [3.6, 5.5]) == {}
+
+
 def test_contract_rejects_stale_low_nonunique_and_fabricated_transfer_evidence(tmp_path):
     proj, seg, sel = _project(tmp_path)
     sel.in_point, sel.out_point, sel.shot_index = 3.5, 5.5, 1
@@ -304,6 +319,69 @@ def test_quote_recovery_transfers_sd_reference_only_into_existing_hd_bench(tmp_p
     assert row["quote_location_method"] == "cross_copy_pcm"
     assert audit["beats"][0]["candidate_bench_cap"] == 12
     assert audit["beats"][0]["audio_transfer_target_source_cap"] == 12
+
+
+def test_quote_locked_verifier_skips_out_of_phrase_neighbor_and_rebinds_contained_one(
+        tmp_path, monkeypatch):
+    proj, seg, sel = _project(tmp_path)
+    sel.shot_index, sel.in_point, sel.out_point = 1, 3.5, 5.5
+    sel.signals = {
+        "dialogue": 1.0,
+        "quote_pool_exact": True,
+        A.AUDIO_QUOTE_TRANSFER_SIGNAL: _evidence(proj),
+    }
+    contained_frame = tmp_path / "clean_2.jpg"
+    contained_frame.write_bytes(b"contained quote action frame")
+    clean_shots = json.loads(proj.shots_path("clean").read_text())
+    clean_shots.append(Shot(
+        source_id="clean", index=2, start=3.6, end=5.5,
+        keyframe_path=str(contained_frame), quality=.9).to_dict())
+    proj.shots_path("clean").write_text(json.dumps(clean_shots))
+    bad = ClipCandidate(
+        segment_index=0, source_id="clean", shot_index=0, score=.99,
+        in_point=0.0, out_point=2.0, signals={"dialogue": 0.0})
+    contained = ClipCandidate(
+        segment_index=0, source_id="clean", shot_index=2, score=.90,
+        in_point=3.6, out_point=5.5, signals={"dialogue": 0.0})
+    monkeypatch.setattr(V, "_strict_scene_neighborhood_candidates",
+                        lambda *_a, **_k: [bad, contained])
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", "1")
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "0")
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_WINDOW_QC", "0")
+    calls = []
+
+    def verdict(path, *_args, **_kwargs):
+        calls.append(str(path))
+        keep = str(path).endswith("clean_2.jpg")
+        return {
+            "verdict": "keep" if keep else "replace",
+            "matches_narration": keep,
+            "correct_subject_visible": keep,
+            "wrong_subject_visible": False,
+            "contradicts_narration": False,
+            "era_ok": True,
+            "specific_enough": keep,
+            "quality_ok": True,
+            "confidence": .95,
+            "reason": "exact action" if keep else "reaction only",
+        }
+
+    monkeypatch.setattr(V, "verify_frame", verdict)
+    summary = V.verify_and_repair(
+        proj, [seg], ClipConfig(),
+        SimpleNamespace(anthropic_model="vision", anthropic_key="key"),
+        materialize_promotions=False, persist_project=False)
+
+    assert summary["replaced"] == 1
+    assert len(calls) == 2, "the out-of-quote neighbor must be rejected before vision"
+    assert (sel.shot_index, sel.in_point, sel.out_point) == (2, 3.6, 5.5)
+    assert sel.signals["quote_pool_exact"] is True
+    assert sel.signals["dialogue"] == 1.0
+    rebound = sel.signals[A.AUDIO_QUOTE_TRANSFER_SIGNAL]
+    assert rebound["target_selected_window"] == [3.6, 5.5]
+    ok, reason, _detail = R.exact_quote_dialogue_evidence(
+        proj, sel, seg, quote_contract=_contract(proj))
+    assert ok is True and reason == ""
 
 
 def test_direct_asr_duplicates_are_filtered_before_audio_target_cap(tmp_path):

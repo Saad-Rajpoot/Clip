@@ -358,6 +358,29 @@ def make_transfer_evidence(*, authored_quote: str, reference_source_id: str,
     return evidence
 
 
+def rebind_transfer_evidence_window(evidence: dict, target_selected_window) -> dict:
+    """Bind an existing immutable PCM alignment to another window of the same target bytes.
+
+    Strict verification may choose a neighbouring shot which depicts the action more clearly than
+    the initial audio-centred window.  Reusing the old record unchanged is correctly rejected as a
+    stale-window forgery; editing its window without rebuilding the binding is equally invalid.
+    This helper changes *only* the selected-window field after first validating the complete old
+    record.  The caller still owns quote containment and must run the ordinary visual/window/HD and
+    publication gates on the rebound candidate.
+    """
+    if transfer_evidence_shape_reason(evidence):
+        return {}
+    selected = _span(target_selected_window)
+    if selected is None:
+        return {}
+    rebound = dict(evidence)
+    rebound["target_selected_window"] = [round(selected[0], 6), round(selected[1], 6)]
+    rebound["binding_fingerprint"] = evidence_binding_fingerprint(rebound)
+    if transfer_evidence_shape_reason(rebound):
+        return {}
+    return rebound
+
+
 def transfer_evidence_shape_reason(evidence: dict) -> str:
     """Return a stable fail-closed reason for malformed or fabricated transfer evidence."""
     if not isinstance(evidence, dict):

@@ -210,15 +210,19 @@ def _llm_analyze(script_text: str, topic: str, movie_hint: str, beats: list[Scri
             "You know this film/show scene-by-scene. For EACH beat, first classify only the visual "
             "promise actually made by its NARRATION. Do not invent an exact action, location, pose, "
             "camera angle, or scene from whole-story context for a generic, character-general, or "
-            "abstract line. Only after a beat genuinely names a precise moment should you identify "
-            "that exact scene. Reply ONLY a JSON array, one "
+            "abstract line. If a beat says a character learns/discovers something but does not name "
+            "how, keep that information event exact without inventing a child, whisper, letter, or "
+            "other delivery mechanism. Only after a beat genuinely names a precise moment should "
+            "you identify that exact scene. Reply ONLY a JSON array, one "
             "object per beat, same order:\n"
             '[{"i":int,"expected_visual":"concrete shot description of the exact moment",'
             '"scene_query":"a precise search string to find THIS exact scene clip — movie + character + '
             "the specific action/location (e.g. 'Game of Thrones Daenerys walks into fire unburnt "
             "Drogo funeral pyre'), or '' if the line is generic\",\"quote\":\"the iconic line of "
-            "DIALOGUE actually spoken in this exact moment, verbatim if known (e.g. 'I am the dragon's "
-            "daughter'), or '' if none. NEVER put the essayist's narration/paraphrase here, and "
+            "DIALOGUE actually spoken in the SAME CONTINUOUS <=8-SECOND WINDOW as expected_visual, "
+            "verbatim if known (e.g. 'I am the dragon's daughter'), or '' if none. A line from the "
+            "same scene but before/after that window is NOT a match. NEVER put the essayist's "
+            "narration/paraphrase here, and "
             "NEVER borrow an iconic line from another scene or copy one across adjacent beats just "
             "because the same character appears; if you are not confident it is spoken in THIS "
             "scene, use ''\",\"shot_intent\":\"the KIND of shot that best serves this beat: "
@@ -287,6 +291,32 @@ _GENERAL_RELATION_RX = re.compile(
 _NOMINAL_FRAGMENT_RX = re.compile(r"^\s*to\b", re.I)
 _VAGUE_SUBJECT_RX = re.compile(
     r"\b(?:those|these)\s+people\b|\bsomeone\s+(?:is\s+)?(?:checking|verifying)\b",
+    re.I,
+)
+# Information-acquisition narration names an exact event, but it does not name the mechanism by
+# which the character learns it.  The beat model has repeatedly turned ``Varys learns she is in the
+# city`` into a literal child-whisper/eye-widening shot that does not exist.  Keep the real event
+# exact, while removing only that unsupported staging.  These patterns are intentionally narrow:
+# physical actions (putting a dagger on a table, holding a poison cup, an actual attack) never enter
+# this branch.
+_INFORMATION_EVENT_RX = re.compile(
+    r"\b(?:learns?|learned|discovers?|discovered|finds?\s+out|found\s+out|"
+    r"realizes?|realized|is\s+told|was\s+told|hears?|heard)\b",
+    re.I,
+)
+_INFORMATION_MECHANISM_RX = re.compile(
+    r"\b(?:whispers?|whispered|whispering|ravens?|letters?|messages?|child|children|"
+    r"spies|spy|reads?|reading|informs?|informed)\b",
+    re.I,
+)
+# A quote copied onto a neighbouring, independently narrated physical beat creates an impossible
+# conjunction even when both pieces occur somewhere in the same long scene.  We only remove the
+# copy when a nearby beat carries the identical line with substantially stronger beat-local support.
+_DISTINCT_PHYSICAL_EVENT_RX = re.compile(
+    r"\b(?:holds?|holding|held|carries|carrying|carried|wears?|wearing|wore|drinks?|"
+    r"drinking|drank|pushes|pushing|pushed|stabs?|stabbing|stabbed|shoots?|shooting|"
+    r"burns?|burning|burned|places?|placing|placed|puts?|putting|falls?|falling|fell|"
+    r"collapses?|collapsing|collapsed)\b",
     re.I,
 )
 _SCENE_ACTION_ROOTS = frozenset({
@@ -390,6 +420,26 @@ def _exact_direction_grounding(beat: ScriptSegment, directive: dict) -> dict:
         return {"grounded": True, "reason": "indirect_scene_reference_in_narration",
                 "shared_terms": sorted(shared)[:8], "entity_grounded": bool(entity_shared)}
 
+    expected_visual = str(directive.get("expected_visual", "") or "")
+    # Preserve the exact information event, but do not let whole-story context fabricate the
+    # physical delivery mechanism.  ``scene_query`` is retained: it is often the clean, grounded
+    # event query ("Varys learns Catelyn is in the city") while only the prose storyboard and its
+    # borrowed line contain the invented child/whisper staging.
+    if (_INFORMATION_EVENT_RX.search(narration)
+            and entity_shared and len(shared) >= 2
+            and not _INFORMATION_MECHANISM_RX.search(narration)
+            and _INFORMATION_MECHANISM_RX.search(expected_visual)):
+        sanitize_fields = ["expected_visual"]
+        if quote and not _narrates_authored_quote(narration, quote):
+            sanitize_fields.append("quote")
+        return {
+            "grounded": True,
+            "reason": "unsupported_information_staging_removed",
+            "shared_terms": sorted(shared)[:8],
+            "entity_grounded": bool(entity_shared),
+            "sanitize_fields": sanitize_fields,
+        }
+
     has_action = _has_scene_action(narration)
     required_kind = str(directive.get("required_kind", "") or "").strip().lower()
     subject_terms = shared - _NON_SUBJECT_GROUNDING_TERMS
@@ -440,13 +490,22 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
     beat.required_kind = str(directive.get("required_kind", ""))[:20]
     beat.emotion = str(directive.get("emotion", ""))[:24]
     if grounding is not None:
+        sanitize_fields = list(grounding.get("sanitize_fields") or [])
         marker = {
-            "branch": "grounded_exact" if grounding["grounded"] else "ungrounded_exact_downgrade",
+            "branch": ("grounded_exact_sanitized" if grounding["grounded"] and sanitize_fields
+                       else "grounded_exact" if grounding["grounded"]
+                       else "ungrounded_exact_downgrade"),
             "reason": grounding["reason"],
             "from_policy": _policy.EXACT,
             "shared_terms": grounding.get("shared_terms", []),
             "entity_grounded": bool(grounding.get("entity_grounded")),
         }
+        if sanitize_fields:
+            marker["sanitized_fields"] = sanitize_fields
+            if "expected_visual" in sanitize_fields:
+                beat.expected_visual = str(getattr(beat, "text", "") or "")[:200]
+            if "quote" in sanitize_fields:
+                beat.quote = ""
         if not grounding["grounded"]:
             # A narration-named subject still merits subject-correct footage, but no exact action.
             # With no named subject, ordinary semantic filler is the honest promise.  Clear every
@@ -483,6 +542,72 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
         beat.visual_policy = resolved
 
 
+def _normalized_grounding_quote(value: str) -> str:
+    """Stable identity for detecting an analyzer line copied across neighbouring beats."""
+    return " ".join(_GROUNDING_WORD_RX.findall(value or "")).lower()
+
+
+def _quote_narration_support(narration: str, quote: str) -> float:
+    """Beat-local support only; this does not attempt to decide whether dialogue is real."""
+    if _narrates_authored_quote(narration, quote):
+        return 1.0
+    q_terms = _grounding_terms(quote)
+    if not q_terms:
+        return 0.0
+    return len(q_terms & _grounding_terms(narration)) / len(q_terms)
+
+
+def _sanitize_adjacent_quote_borrowing(beats) -> int:
+    """Remove only a demonstrably copied quote from a distinct, grounded visual event.
+
+    The beat analyzer works in global-context batches and can paste the strongest line from a long
+    scene onto several adjacent beats.  When one beat narrates a concrete physical instant and a
+    nearby beat carries the identical quote with strong local wording support, requiring both in one
+    <=8-second window is an analyzer-authored conjunction—not a narration promise.  The event remains
+    EXACT and all visual fields remain intact; only the copied quote requirement is removed.
+    """
+    rows = list(beats or [])
+    changed = 0
+    for beat in rows:
+        quote = str(getattr(beat, "quote", "") or "")
+        qkey = _normalized_grounding_quote(quote)
+        marker = getattr(beat, "_analyzer_grounding_guard", None)
+        narration = str(getattr(beat, "text", "") or "")
+        expected = str(getattr(beat, "expected_visual", "") or "")
+        if (not qkey or not isinstance(marker, dict)
+                or not str(marker.get("branch", "")).startswith("grounded_exact")
+                or not _DISTINCT_PHYSICAL_EVENT_RX.search(narration)
+                or len(_grounding_terms(narration) & _grounding_terms(expected)) < 3):
+            continue
+        local_support = _quote_narration_support(narration, quote)
+        stronger = []
+        for other in rows:
+            if other is beat or abs(int(getattr(other, "index", -9999))
+                                    - int(getattr(beat, "index", 9999))) > 3:
+                continue
+            if _normalized_grounding_quote(str(getattr(other, "quote", "") or "")) != qkey:
+                continue
+            support = _quote_narration_support(str(getattr(other, "text", "") or ""), quote)
+            if support >= 0.8 and support >= local_support + 0.35:
+                stronger.append((support, int(getattr(other, "index", -1))))
+        if not stronger:
+            continue
+        strongest_support, strongest_index = max(stronger)
+        beat.quote = ""
+        marker["branch"] = "grounded_exact_sanitized"
+        fields = list(marker.get("sanitized_fields") or [])
+        if "quote" not in fields:
+            fields.append("quote")
+        marker["sanitized_fields"] = fields
+        reasons = list(marker.get("sanitization_reasons") or [])
+        reasons.append("adjacent_quote_borrowed_into_distinct_visual_event")
+        marker["sanitization_reasons"] = reasons
+        marker["quote_support_beat"] = strongest_index
+        marker["quote_support"] = round(strongest_support, 4)
+        changed += 1
+    return changed
+
+
 def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
     """Persist process-local grounding markers in the project's serialized analysis metadata."""
     records = {}
@@ -490,11 +615,22 @@ def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
         marker = getattr(beat, "_analyzer_grounding_guard", None)
         if isinstance(marker, dict):
             records[str(int(getattr(beat, "index", -1)))] = dict(marker)
-    grounded = sum(m.get("branch") == "grounded_exact" for m in records.values())
-    downgraded = len(records) - grounded
+    grounded = sum(str(m.get("branch", "")).startswith("grounded_exact")
+                   for m in records.values())
+    downgraded = sum(m.get("branch") == "ungrounded_exact_downgrade"
+                     for m in records.values())
+    sanitized = sum(m.get("branch") == "grounded_exact_sanitized"
+                    for m in records.values())
     counts = {
         "exact_directives": len(records),
         "grounded_exact": grounded,
+        "sanitized_exact": sanitized,
+        "information_staging_sanitized": sum(
+            m.get("reason") == "unsupported_information_staging_removed"
+            for m in records.values()),
+        "adjacent_quote_copy_sanitized": sum(
+            "adjacent_quote_borrowed_into_distinct_visual_event"
+            in (m.get("sanitization_reasons") or []) for m in records.values()),
         "downgraded": downgraded,
         "to_character_specific": sum(
             m.get("to_policy") == _policy.CHARACTER for m in records.values()),
@@ -502,7 +638,7 @@ def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
             m.get("to_policy") == _policy.FILLER for m in records.values()),
     }
     analysis.beat_grounding_audit = {
-        "schema": 1,
+        "schema": 2,
         "counts": counts,
         "beats": records,
     }
@@ -650,10 +786,12 @@ def analyze_script(script_text: str, *, topic: str = "", movie_hint: str = "",
         if not o:
             continue
         _apply_beat_direction(b, o)
+    _sanitize_adjacent_quote_borrowing(beats)
     _grounding_counts = _record_beat_grounding_audit(analysis, beats)
     if _grounding_counts["exact_directives"]:
         log("analyze: beat-local exact grounding — "
-            f"grounded={_grounding_counts['grounded_exact']}, "
+            f"retained={_grounding_counts['grounded_exact']} "
+            f"(sanitized={_grounding_counts['sanitized_exact']}), "
             f"downgraded={_grounding_counts['downgraded']} "
             f"(character={_grounding_counts['to_character_specific']}, "
             f"filler={_grounding_counts['to_generic_filler']})")

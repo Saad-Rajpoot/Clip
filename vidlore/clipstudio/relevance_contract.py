@@ -17,7 +17,10 @@ from . import policy as _policy
 from .models import SOURCE_OK
 from .verify import _contradiction_reason, selection_verifier_evidence_reason
 
-SCHEMA_VERSION = 7
+# v8 invalidates exhausted semantic-recovery markers after strict candidate arbitration learned to
+# bind a concrete anchor scene to its canonical episode.  Code-only ranking changes are otherwise
+# absent from the retry fingerprint, so an old failed job would silently skip the repaired rung.
+SCHEMA_VERSION = 8
 AUDIT_FILENAME = "selection_relevance_audit.json"
 QUOTE_DIALOGUE_FLOOR = 0.78
 QUOTE_WINDOW_TOLERANCE_SEC = 0.75
