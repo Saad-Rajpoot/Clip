@@ -4000,7 +4000,10 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
         })
         proj.meta["selection_relevance_recovery"] = _marker
     proj.save()
-    if after:
+    if after and _recovery_deferred:
+        log(f"semantic-recovery: {len(after)} content beat(s) still fail positive semantic "
+            f"evidence {after}; {len(_recovery_deferred)} audited deferred beat(s) remain queued")
+    elif after:
         log(f"semantic-recovery: {len(after)} content beat(s) still fail positive semantic "
             f"evidence {after}; stopping before render")
     elif not _technical_details:
@@ -4018,6 +4021,128 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
             f"beat(s) {_technical_indices}: missing/schema evidence {_technical_reasons}"
             f"{_summary}; independent content recovery was saved")
     return final
+
+
+def _pending_semantic_recovery_page(proj, segs, audit: dict) \
+        -> tuple[list[int], tuple[str, tuple[int, ...], str]]:
+    """Validate and identify the next persisted strict-semantic page.
+
+    ``deferred`` is executable recovery state, not a diagnostic hint.  Before an autonomous build
+    spends another bounded page, bind that cursor to the exact current blocker facts and source/
+    index bytes.  A stale, malformed, or partially-written marker is a retryable technical fault;
+    it must never cause either an infinite retry or a false claim that content is exhausted.
+    """
+    from . import relevance_contract as _R_page
+
+    if not isinstance(audit, dict):
+        raise PipelineError("semantic recovery page returned no current relevance audit")
+    technical = _persistent_verifier_technical_indices(audit)
+    content_audit = _selection_relevance_audit_without(audit, technical)
+    blockers = sorted({
+        int(entry.get("segment_index", -1))
+        for entry in (content_audit.get("blockers") or [])
+    })
+    # A strict-clear page is authoritative; an old marker may legitimately survive from an earlier
+    # generation because the marker is progress metadata, not publication state. The independent
+    # assertion after the drain proves the clear result again against persisted selections.
+    if not blockers:
+        return [], ("", (), "")
+    marker = (getattr(proj, "meta", {}) or {}).get("selection_relevance_recovery") or {}
+    raw_deferred = marker.get("deferred") or []
+    if not raw_deferred:
+        return [], ("", (), "")
+    if (not isinstance(raw_deferred, list)
+            or any(isinstance(i, bool) or not isinstance(i, int) for i in raw_deferred)
+            or len(raw_deferred) != len(set(raw_deferred))):
+        raise PipelineError("semantic recovery deferred cursor is malformed")
+    deferred = sorted(raw_deferred)
+
+    raw_after = marker.get("after")
+    if (not isinstance(raw_after, list)
+            or any(isinstance(i, bool) or not isinstance(i, int) for i in raw_after)
+            or len(raw_after) != len(set(raw_after))
+            or sorted(raw_after) != blockers):
+        raise PipelineError(
+            "semantic recovery deferred cursor does not match current content blockers")
+    if not set(deferred).issubset(set(blockers)):
+        raise PipelineError(
+            "semantic recovery deferred cursor contains a non-blocked beat")
+    if int(marker.get("schema_version", 0) or 0) != int(_R_page.SCHEMA_VERSION):
+        raise PipelineError("semantic recovery deferred cursor schema mismatch")
+
+    current_pool = _semantic_recovery_pool_fingerprint(proj)
+    if str(marker.get("pool_fingerprint", "") or "") != current_pool:
+        raise PipelineError(
+            "semantic recovery deferred cursor source/index pool changed before continuation")
+    current_content = _selection_relevance_retry_fingerprint(proj, segs, content_audit)
+    if str(marker.get("post_fingerprint", "") or "") != current_content:
+        raise PipelineError(
+            "semantic recovery deferred cursor blocker fingerprint changed before continuation")
+
+    completed = marker.get("completed_page_scope")
+    if (not isinstance(completed, list)
+            or any(isinstance(i, bool) or not isinstance(i, int) for i in completed)
+            or len(completed) != len(set(completed))):
+        raise PipelineError("semantic recovery completed-page receipt is malformed")
+    return deferred, (current_content, tuple(deferred), current_pool)
+
+
+def _drain_semantic_recovery_pages(proj, segs, recover_page, *, rebind_page=None,
+                                   log=print) -> dict:
+    """Run every audited deferred page inside one build, preserving the per-page work cap.
+
+    The recovery helper deliberately caps each page (normally eight beats/four sources).  That cap
+    protects cost and remains unchanged here.  What must not happen is exposing the cap boundary as
+    a terminal content verdict: a page that enlarges the pool explicitly promises to re-check its
+    out-of-page blockers.  Continue only from a current hash-bound cursor, reject repeated states,
+    and retain a finite whole-walk ceiling.  The caller still runs the unchanged publication
+    assertion after this returns, so a genuinely exhausted blocker remains a hard failure.
+    """
+    import math as _math_pages
+    import os as _os_pages
+
+    seen: set[tuple[str, tuple[int, ...], str]] = set()
+    page_count = 0
+    max_pages = None
+    last_audit: dict = {}
+    while True:
+        page_count += 1
+        last_audit = recover_page()
+        if rebind_page is not None:
+            rebind_page()
+        deferred, state = _pending_semantic_recovery_page(proj, segs, last_audit)
+        if not deferred:
+            return last_audit
+
+        marker = (getattr(proj, "meta", {}) or {}).get("selection_relevance_recovery") or {}
+        if max_pages is None:
+            page_cap = max(1, int(_os_pages.environ.get(
+                "VIDLORE_CLIPSTUDIO_RECOVERY_MAX_BEATS", "8") or 8))
+            generation_size = max(
+                len(marker.get("before") or []), len(marker.get("after") or []), len(deferred), 1)
+            # Two complete walks cover the normal tail plus one pool-growth rebound; four spare
+            # pages cover newly-restored softened beats without turning a malformed cursor into an
+            # unbounded downloader. Operators may set a larger explicit ceiling for unusual jobs.
+            default_max = max(4, 2 * int(_math_pages.ceil(generation_size / page_cap)) + 4)
+            try:
+                max_pages = max(1, int(_os_pages.environ.get(
+                    "VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY_MAX_PAGES", str(default_max))
+                    or default_max))
+            except (TypeError, ValueError) as exc:
+                raise PipelineError(
+                    "VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY_MAX_PAGES is not an integer") from exc
+
+        if state in seen:
+            raise PipelineError(
+                "semantic recovery pagination made no forward progress: repeated current "
+                f"deferred scope {deferred}")
+        seen.add(state)
+        if page_count >= max_pages:
+            raise PipelineError(
+                f"semantic recovery pagination reached its finite {max_pages}-page guard with "
+                f"current deferred scope {deferred}")
+        log(f"semantic-recovery: page {page_count} complete; continuing {len(deferred)} "
+            f"audited deferred beat(s) inside this render {deferred}")
 
 
 def produce_auto_resilient(project_dir, **kw):
@@ -4738,7 +4863,7 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
             return None
 
     def _recover_selection_relevance_or_raise(_original_error):
-        """Run the one bounded strict-semantic retry, then prove the current state passes.
+        """Drain bounded strict-semantic pages, then prove the current state passes.
 
         This belongs only to the pre-assembly semantic preflight. Technical failures remain
         retryable/fail-closed, recovery may never demote policy, and a claimed clear result is
@@ -4754,34 +4879,40 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
                 or _os_sr.environ.get("VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY", "1")
                 .strip().lower() in ("0", "false", "no")):
             raise _original_error
-        try:
-            _retry_selection_relevance(
-                proj, segs, cfg, analysis, eng, faceid_obj=faceid_obj, refs=refs,
-                roster=roster, policy=policy, log=log)
-        except Exception as _se:                     # technical repair fault cannot bypass gate
-            _raise_semantic_recovery_failure(_original_error, _se, log)
 
         # A completed semantic page is the same scoped transaction as stage 8a, only later in the
         # pipeline. It may have added an unusable-but-indexed source while retaining an audited
         # deferred tail. Bind the already-reconciled artifacts to that pool so Resume continues the
         # tail directly instead of rebuilding Face-ID/global match/cut/verify and restarting at the
         # first page. Never bless an incomplete ASR pool or an absent prior stage checkpoint.
-        _usable_after_semantic = [s for s in proj.sources if s.status == "ok"]
-        if asr_pool_current(proj, cfg, _usable_after_semantic):
-            (_sr_sig_index, _sr_sig_match, _sr_sig_cut, _sr_sig_verify,
-             _sr_sig_recover) = _footage_stage_signatures(
-                _sig_download, _usable_after_semantic, force_index=force_index,
-                segments=segs, verify=verify, asr_signature=_asr_signature)
-            _rebind_completed_footage_stages(
-                proj,
-                {"match": _sr_sig_match, "cut": _sr_sig_cut,
-                 **({"verify": _sr_sig_verify} if verify else {}),
-                 "recover": _sr_sig_recover},
-                reason="conclusive_semantic_recovery_pool")
+        def _rebind_semantic_page():
+            _usable_after_semantic = [s for s in proj.sources if s.status == "ok"]
+            if asr_pool_current(proj, cfg, _usable_after_semantic):
+                (_sr_sig_index, _sr_sig_match, _sr_sig_cut, _sr_sig_verify,
+                 _sr_sig_recover) = _footage_stage_signatures(
+                    _sig_download, _usable_after_semantic, force_index=force_index,
+                    segments=segs, verify=verify, asr_signature=_asr_signature)
+                _rebind_completed_footage_stages(
+                    proj,
+                    {"match": _sr_sig_match, "cut": _sr_sig_cut,
+                     **({"verify": _sr_sig_verify} if verify else {}),
+                     "recover": _sr_sig_recover},
+                    reason="conclusive_semantic_recovery_pool")
+
+        try:
+            _drain_semantic_recovery_pages(
+                proj, segs,
+                lambda: _retry_selection_relevance(
+                    proj, segs, cfg, analysis, eng, faceid_obj=faceid_obj, refs=refs,
+                    roster=roster, policy=policy, log=log),
+                rebind_page=_rebind_semantic_page, log=log)
+        except Exception as _se:                     # technical repair fault cannot bypass gate
+            _raise_semantic_recovery_failure(_original_error, _se, log)
 
         # Never trust the retry helper's summary as an authorization. Re-run the exact publication
-        # assertion against the now-persisted project, whether the helper reported blockers or a
-        # clear page. This is also what build_video independently does before any encoding.
+        # assertion against the now-persisted project after the audited cursor is empty, whether the
+        # helper reported blockers or a clear page. This is also what build_video independently does
+        # before any encoding.
         from .relevance_contract import assert_selection_relevance as _assert_sr_recovered
         return _assert_sr_recovered(
             proj, segs, proj.output_dir / "selection_relevance_audit.json", cfg=cfg)
