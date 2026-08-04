@@ -8076,10 +8076,12 @@ def _probe_duration_s(path: Path) -> float:
 
 
 def _write_export_metrics(final_mp4: Path, fps: int) -> dict:
-    """Write a `render_export_metrics.json` sidecar next to the FINAL
-    delivered MP4 (post-mux), recording its filename, absolute path,
-    streamed sha256, probed duration and fps. This is the authoritative
-    final-output fingerprint — distinct from the PRE-mux
+    """Write a `render_export_metrics.json` sidecar next to the current
+    renderer-boundary MP4 (post-mux), recording its filename, absolute path,
+    streamed sha256, probed duration and fps. It is the authoritative
+    fingerprint at this boundary — wrappers that mutate or rename the returned
+    artifact must refresh it after their last successful post-pass. This is
+    distinct from the PRE-mux
     render_black_frame_metrics.json (which describes the shorter
     intermediate the repair pass scanned). Returns the metrics dict (also
     useful for tests/logging). Best-effort: never raises — a hash/probe

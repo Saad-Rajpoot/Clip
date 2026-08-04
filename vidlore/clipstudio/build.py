@@ -3890,21 +3890,111 @@ def _align_words_to_hyp(flat: list, hyp: list):
     if not any(s_norm) or not any(h_norm):
         return None
     times: list = [None] * len(flat)
+    # Keep the hypothesis index behind every exact anchor.  Leading/trailing script words are
+    # commonly substitutions rather than missing speech (for example the authored tail
+    # ``liar something`` is heard by Whisper as one token, ``liars``).  The old edge fill threw
+    # away that real hypothesis span and assigned every unmatched edge token ``(t, t)``.  One
+    # zero-duration word then failed the all-positive validation and replaced an otherwise
+    # 98%-aligned authored caption stream with Whisper's entire transcript.
+    hyp_anchor: list[int | None] = [None] * len(flat)
     sm = SequenceMatcher(a=s_norm, b=h_norm, autojunk=False)
     for i1, j1, nn in sm.get_matching_blocks():
         for k in range(nn):
             _, st, en = hyp[j1 + k]
             times[i1 + k] = (st, en)
+            hyp_anchor[i1 + k] = j1 + k
     n_anchor = sum(1 for t in times if t is not None)
     if n_anchor < max(8, int(0.45 * len(flat))):        # too little matched → unreliable
         return None
     anchors = [(i, t) for i, t in enumerate(times) if t is not None]
+
+    def _edge_has_lexical_evidence(script_edge, hyp_edge) -> bool:
+        """True only when every donated edge word is lexically supported by the other stream.
+
+        Timing alone is not evidence that two edge phrases are the same speech.  The previous fix
+        would put arbitrary authored words over any unrelated ASR prefix/suffix merely because the
+        audio had positive duration.  Accept exact token fusions/splits (``Little finger`` vs
+        ``Littlefinger``), or require every token on BOTH sides to have a strong fuzzy counterpart.
+        This deliberately rejects the measured ambiguous tail ``liar something`` vs ``liars``:
+        ``liar`` is supported, ``something`` is not, and stronger ASR found that the recording cuts
+        off at ``some``.  In that case the accurate-ASR fallback must win.
+        """
+        from difflib import SequenceMatcher as _SM
+
+        def _edge_norm(value):
+            return _r.sub(r"[^\w]", "", str(value).lower(), flags=_r.UNICODE)
+
+        authored = [_edge_norm(x) for x in script_edge]
+        heard = [_edge_norm(x[0] if isinstance(x, (tuple, list)) else x) for x in hyp_edge]
+        authored = [x for x in authored if x]
+        heard = [x for x in heard if x]
+        if not authored or not heard or len(authored) > 4 or len(heard) > 4:
+            return False
+        if "".join(authored) == "".join(heard):
+            return True
+
+        def _supported(token, others):
+            if len(token) < 3:
+                return token in others
+            return max((_SM(None, token, other).ratio() for other in others), default=0.0) >= 0.72
+
+        return (all(_supported(token, heard) for token in authored)
+                and all(_supported(token, authored) for token in heard))
+
+    def _spread_edge(first: int, stop: int, start_t: float, end_t: float) -> bool:
+        """Give ``times[first:stop]`` ordered positive spans inside REAL hypothesis time.
+
+        Refuse when the hypothesis has no positive interval to donate.  Synthesising time outside
+        the ASR envelope would hide a genuinely unspoken script prefix/tail and weaken the existing
+        mismatch contract; returning ``False`` keeps that case on the ASR fallback path.
+        """
+        import math
+        count = stop - first
+        if count <= 0:
+            return True
+        if not (math.isfinite(start_t) and math.isfinite(end_t)) or end_t <= start_t:
+            return False
+        step = (end_t - start_t) / count
+        if not math.isfinite(step) or step <= 0.0:
+            return False
+        for off in range(count):
+            a = start_t + step * off
+            b = end_t if off == count - 1 else start_t + step * (off + 1)
+            if not (math.isfinite(a) and math.isfinite(b)) or b <= a:
+                return False
+            times[first + off] = (a, b)
+        return True
+
     fi, ft = anchors[0]
-    for i in range(fi):
-        times[i] = (max(0.0, ft[0]), ft[0])
+    if fi:
+        first_h = hyp_anchor[fi]
+        # An unmatched script prefix is safe only when Whisper also heard preceding material.  Its
+        # exact spelling/token count may differ, but its real time span can be divided among the
+        # authored words without inventing speech before the file begins.
+        if first_h is None or first_h <= 0:
+            return None
+        prefix = hyp[:first_h]
+        if not _edge_has_lexical_evidence(flat[:fi], prefix):
+            return None
+        p0 = min(float(s) for _, s, _ in prefix)
+        p1 = min(float(ft[0]), max(float(e) for _, _, e in prefix))
+        if not _spread_edge(0, fi, max(0.0, p0), p1):
+            return None
     li, lt = anchors[-1]
-    for i in range(li + 1, len(times)):
-        times[i] = (lt[1], lt[1])
+    if li + 1 < len(times):
+        last_h = hyp_anchor[li]
+        # Same rule at EOF: borrow only the real suffix that Whisper tokenised differently.  If
+        # there is no heard suffix, the authored tail is genuinely unsupported and alignment must
+        # fail instead of fabricating positive time past the audio.
+        if last_h is None or last_h + 1 >= len(hyp):
+            return None
+        suffix = hyp[last_h + 1:]
+        if not _edge_has_lexical_evidence(flat[li + 1:], suffix):
+            return None
+        t0 = max(float(lt[1]), min(float(s) for _, s, _ in suffix))
+        t1 = max(float(e) for _, _, e in suffix)
+        if not _spread_edge(li + 1, len(times), t0, t1):
+            return None
     for (ia, ta), (ib, tb) in zip(anchors, anchors[1:]):
         if ib - ia <= 1:
             continue
@@ -3916,6 +4006,152 @@ def _align_words_to_hyp(flat: list, hyp: list):
             e = t0 + stepv * k
             times[ia + k] = (s, max(s, e))
     return [t if t is not None else (0.0, 0.0) for t in times]
+
+
+def _truncated_voiceover_tail_evidence(flat: list, hyp: list, total: float):
+    """Identify a near-exact uploaded voiceover that runs into EOF before its script tail.
+
+    A genuinely different recording is allowed to use ASR captions.  This only fires when at
+    least 90% of both complete streams are exact anchors, no more than five tokens remain at
+    either edge, and decoded speech reaches the final 200 ms.  That combination is evidence of a
+    cut-off upload, not permission to invent the missing authored words or publish an ASR guess.
+    """
+    import math
+    import re as _rt
+    from difflib import SequenceMatcher as _SM
+    if not flat or not hyp or not math.isfinite(total) or total <= 0.0:
+        return None
+
+    def _norm(value):
+        return _rt.sub(r"[^\w]", "", str(value).lower(), flags=_rt.UNICODE)
+
+    authored = [_norm(word) for word in flat]
+    heard = [_norm(word) for word, _, _ in hyp]
+    blocks = [block for block in _SM(a=authored, b=heard, autojunk=False).get_matching_blocks()
+              if block.size]
+    if not blocks:
+        return None
+    matched = sum(block.size for block in blocks)
+    anchor_ratio = matched / max(len(authored), len(heard), 1)
+    last = blocks[-1]
+    script_tail = authored[last.a + last.size:]
+    asr_tail = heard[last.b + last.size:]
+    if (anchor_ratio < 0.90 or not script_tail
+            or len(script_tail) > 5 or len(asr_tail) > 5):
+        return None
+    # A different complete final phrase is a legitimate script/recording mismatch and belongs on
+    # the accurate-ASR fallback.  Truncation requires the heard tail itself to be only a strict
+    # lexical prefix of the authored tail (measured: ``liars`` vs ``liar something``).
+    script_joined = "".join(script_tail)
+    asr_joined = "".join(asr_tail)
+    if not asr_joined or not script_joined.startswith(asr_joined) \
+            or len(asr_joined) >= len(script_joined):
+        return None
+    try:
+        speech_end = max(float(end) for _, _, end in hyp)
+    except Exception:
+        return None
+    if not math.isfinite(speech_end) or total - speech_end > 0.20:
+        return None
+    return {
+        "exact_anchor_ratio": round(anchor_ratio, 4),
+        "script_tail": script_tail,
+        "asr_tail": asr_tail,
+        "speech_end_s": round(speech_end, 3),
+        "audio_end_s": round(float(total), 3),
+    }
+
+
+def _restore_secure_script_tokens(narration, flat: list, log=None,
+                                  protected_terms=None) -> int:
+    """Correct high-confidence ASR spellings without rewriting what the recording says.
+
+    This is intentionally narrower than replacing an ASR transcript with the script.  Only a
+    one-ASR-token ↔ one-script-token replacement is allowed only for an independently identified
+    proper name supplied in ``protected_terms``; an insertion, deletion, split, merge, generic
+    fuzzy word or unrelated word is left exactly as heard.  For otherwise equal tokens, authored
+    internal apostrophes/hyphens are restored while ASR sentence punctuation remains in place.
+    Thus a known ``Stanis`` can become ``Stannis``, but ``horse`` never replaces heard ``house``
+    and ambiguous ``liar something`` never replaces ``liars``.  Word count/order/times stay fixed.
+    """
+    import re as _rs
+    from difflib import SequenceMatcher as _SM
+
+    words = [w for sc in (getattr(narration, "scenes", None) or [])
+             for w in (getattr(sc, "words", None) or [])]
+    if not flat or not words:
+        return 0
+
+    token_re = _rs.compile(r"^(\W*)([\w]+(?:[-'’][\w]+)*)(\W*)$", _rs.UNICODE)
+
+    def _parts(raw):
+        m = token_re.match(str(raw or "").strip())
+        return m.groups() if m else None
+
+    def _norm(raw):
+        return _rs.sub(r"[^\w]", "", str(raw or "").lower(), flags=_rs.UNICODE)
+
+    s_norm = [_norm(x) for x in flat]
+    h_norm = [_norm(getattr(w, "word", "")) for w in words]
+    protected = {_norm(value) for value in (protected_terms or []) if _norm(value)}
+    sm = _SM(a=s_norm, b=h_norm, autojunk=False)
+    opcodes = sm.get_opcodes()
+    exact = sum(i2 - i1 for tag, i1, i2, _j1, _j2 in opcodes if tag == "equal")
+    # Script spelling is evidence only when these are overwhelmingly the same narration.  On a
+    # genuinely different uploaded recording, even a coincidentally similar word must remain ASR.
+    if exact / max(len(s_norm), len(h_norm), 1) < 0.90:
+        return 0
+    rewrites: list[tuple[int, int]] = []
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            rewrites.extend((i1 + k, j1 + k) for k in range(i2 - i1))
+        elif tag == "replace" and i2 - i1 == j2 - j1:
+            # Fuzzy spelling is safe only for a separately identified proper name.  Similarity
+            # alone is not semantic proof (horse/house, three/there, trial/trail all look close).
+            for off in range(i2 - i1):
+                a, b = s_norm[i1 + off], h_norm[j1 + off]
+                authored_parts = _parts(flat[i1 + off])
+                authored_word = authored_parts[1] if authored_parts else ""
+                if authored_word.lower().endswith(("'s", "’s")):
+                    authored_word = authored_word[:-2]
+                elif authored_word.endswith(("'", "’")):
+                    authored_word = authored_word[:-1]
+                authored_base = _norm(authored_word)
+                if (a in protected or authored_base in protected) \
+                        and (b not in protected or b == authored_base) \
+                        and min(len(a), len(b)) >= 4 \
+                        and _SM(None, a, b).ratio() >= 0.72:
+                    rewrites.append((i1 + off, j1 + off))
+
+    fixed = 0
+    examples = []
+    for si, hi in rewrites:
+        authored = _parts(flat[si])
+        heard = _parts(getattr(words[hi], "word", ""))
+        if authored is None or heard is None:
+            continue
+        _apre, abody, _apost = authored
+        hpre, hbody, hpost = heard
+        similar_replace = s_norm[si] != h_norm[hi]
+        internal_mark_restore = (s_norm[si] == h_norm[hi]
+                                 and any(ch in abody for ch in "-'’")
+                                 and abody != hbody)
+        if not (similar_replace or internal_mark_restore):
+            continue
+        new = f"{hpre}{abody}{hpost}"
+        old = str(getattr(words[hi], "word", "") or "")
+        # Preserve Whisper's leading whitespace convention used by WordTiming streams.
+        new = old[:len(old) - len(old.lstrip())] + new + old[len(old.rstrip()):]
+        if new == old:
+            continue
+        words[hi].word = new
+        fixed += 1
+        if len(examples) < 5:
+            examples.append(f"{old.strip()}→{new.strip()}")
+    if fixed and log:
+        log(f"build: script-guided ASR spelling restored — {fixed} token(s) "
+            f"(e.g. {', '.join(examples)})")
+    return fixed
 
 
 def _canonicalize_caption_names(narration, proj, log, script_text: str = "") -> int:
@@ -4150,6 +4386,14 @@ def _synced_narration_from_file(script, audio_path: str, workdir: Path, log=None
                          for i in range(1, len(aligned)))
                  and aligned[-1][1] >= 0.5 * total)
     if not _align_ok:
+        _tail_evidence = _truncated_voiceover_tail_evidence(flat, hyp, total)
+        if _tail_evidence:
+            raise RuntimeError(
+                "uploaded voiceover appears cut off at EOF: near-exact script alignment leaves "
+                f"unproven final words {_tail_evidence['script_tail']} while ASR ends with "
+                f"{_tail_evidence['asr_tail']} at {_tail_evidence['speech_end_s']:.3f}s / "
+                f"{_tail_evidence['audio_end_s']:.3f}s; supply a complete voiceover"
+            )
         # The pasted script does NOT align to the uploaded voiceover (far too few sequence anchors —
         # the script and the voiceover are different content, or a wrong file was uploaded). DON'T
         # fall through to the engine's proportional split — over a long VO it drifts captions seconds
@@ -4161,6 +4405,7 @@ def _synced_narration_from_file(script, audio_path: str, workdir: Path, log=None
                  "(verify the script and voiceover are the same content)")
             _nar = _narration_from_hyp(hyp, n, total, master, workdir)
             if _nar is not None:
+                _restore_secure_script_tokens(_nar, flat, _log)
                 try:
                     from vidlore.captions import _caption_schedule, caption_schedule_problems
                     _hp = caption_schedule_problems(
@@ -4224,6 +4469,7 @@ def _synced_narration_from_file(script, audio_path: str, workdir: Path, log=None
              f"issue(s); trying the voiceover's own timestamped transcription")
         _hyp_nar = _narration_from_hyp(hyp, n, total, master, workdir) if hyp else None
         if _hyp_nar is not None:
+            _restore_secure_script_tokens(_hyp_nar, flat, _log)
             try:
                 _hp = caption_schedule_problems(
                     _caption_schedule(_hyp_nar.all_words()), hard_cps=float("inf"))
@@ -7156,10 +7402,23 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     if os.environ.get("VIDLORE_CLIPSTUDIO_CAPTION_NAME_FIX", "1").strip() \
             not in ("0", "false", "no"):
         try:
+            _script_caption_tokens = [
+                word for scene in (getattr(script, "scenes", []) or [])
+                for word in (getattr(scene, "narration", "") or "").split()
+            ]
+            _proper_caption_terms = set()
+            for _seg_term in segments:
+                for _entity_term in ((getattr(_seg_term, "entities", None) or [])
+                                     + [getattr(_seg_term, "required_entity", "") or ""]):
+                    for _term_token in re.findall(r"[A-Za-z][A-Za-z'’-]*", str(_entity_term)):
+                        if len(_term_token) >= 4 and _term_token[:1].isupper():
+                            _proper_caption_terms.add(_term_token)
+            _restore_secure_script_tokens(
+                narration, _script_caption_tokens, log,
+                protected_terms=_proper_caption_terms)
             _canonicalize_caption_names(
                 narration, proj, log,
-                script_text=" ".join((getattr(s, "narration", "") or "")
-                                     for s in (getattr(script, "scenes", []) or [])))
+                script_text=" ".join(_script_caption_tokens))
         except Exception as _e_cn:                        # noqa: BLE001
             log(f"build: caption name canonicalization skipped ({str(_e_cn)[:60]})")
 
@@ -8968,5 +9227,18 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         except Exception as _e_rd:                       # a rename must never lose a finished render
             log(f"build: ⚠ REVIEW DRAFT (could not rename: {type(_e_rd).__name__}) — "
                 f"{result.name} is NOT for publication")
+
+    # assemble() fingerprints the MP4 at its own renderer boundary, but ClipStudio subsequently
+    # re-encodes it for cinematic bars and breakout captions, and a review build may rename it.
+    # Refresh only after every successful byte/path mutation so this sidecar describes the exact
+    # artifact returned to the portal.  Keep the writer best-effort, matching assemble()'s contract.
+    try:
+        from ..assemble import FPS as _EXPORT_FPS
+        from ..assemble import _write_export_metrics as _write_final_export_metrics
+        _xm = _write_final_export_metrics(result, _EXPORT_FPS)
+        log(f"build: delivered export metrics refreshed — {result.name} · "
+            f"dur={_xm.get('duration_s')}s · sha256={(_xm.get('sha256') or '')[:12]}…")
+    except Exception as _e_xm:                           # noqa: BLE001 — metadata never kills render
+        log(f"build: delivered export metrics refresh skipped ({type(_e_xm).__name__}: {_e_xm})")
     log(f"build: done → {result}")
     return result
