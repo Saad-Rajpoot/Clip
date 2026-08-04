@@ -7,9 +7,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+import pytest
 
 from vidlore.clipstudio import audio_align as A
 from vidlore.clipstudio import index as IX
+from vidlore.clipstudio import ledger as L
 from vidlore.clipstudio import orchestrate as O
 from vidlore.clipstudio import policy as P
 from vidlore.clipstudio import relevance_contract as R
@@ -237,6 +239,38 @@ def test_transfer_evidence_can_only_rebind_its_selected_window_with_fresh_finger
     fabricated = copy.deepcopy(old)
     fabricated["correlation"] = 1.0
     assert A.rebind_transfer_evidence_window(fabricated, [3.6, 5.5]) == {}
+
+
+def test_ledger_preserves_valid_transfer_proof_outside_numeric_signals(tmp_path):
+    proj, seg, sel = _project(tmp_path)
+    sel.in_point, sel.out_point, sel.shot_index = 3.5, 5.5, 1
+    evidence = _evidence(proj)
+    sel.signals = {
+        "dialogue": .98,
+        "quote_audio_transfer": True,
+        A.AUDIO_QUOTE_TRANSFER_SIGNAL: evidence,
+    }
+
+    L.write_ledger(proj, [seg])
+
+    record = json.loads(proj.ledger_path.read_text().strip())
+    assert record["signals"] == {"dialogue": .98, "quote_audio_transfer": 1.0}
+    assert record[A.AUDIO_QUOTE_TRANSFER_SIGNAL] == evidence
+
+
+def test_ledger_rejects_malformed_or_unrecognized_structured_signal_evidence(tmp_path):
+    proj, seg, sel = _project(tmp_path)
+
+    sel.signals = {A.AUDIO_QUOTE_TRANSFER_SIGNAL: {"fabricated": True}}
+    with pytest.raises(ValueError, match="evidence_schema_mismatch"):
+        L.write_ledger(proj, [seg])
+
+    # The named, shape-validated quote proof is the only structured exception.  An arbitrary
+    # object or list remains a hard QC error instead of being discarded or treated as truthy.
+    for unknown in ({"fabricated": True}, ["fabricated"]):
+        sel.signals = {"unknown_structured_evidence": unknown}
+        with pytest.raises(TypeError):
+            L.write_ledger(proj, [seg])
 
 
 def test_contract_rejects_stale_low_nonunique_and_fabricated_transfer_evidence(tmp_path):

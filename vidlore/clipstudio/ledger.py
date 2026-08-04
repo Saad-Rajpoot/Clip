@@ -38,9 +38,38 @@ _LEGACY_SIGNAL_COUNT_FIELDS = {
     "timed_text_rare_matches": "timed_text_rare_match_count",
 }
 
+# One relevance proof is intentionally structured: cross-copy quote recovery binds two immutable
+# media fingerprints, five time spans and the measured PCM correlation in a tamper-evident record.
+# It cannot live in the numeric score map, but dropping it would make the ledger less useful than
+# the selection it audits.  This is an explicit one-field allow-list, not a generic structured-
+# signal escape hatch; every other dict/list still reaches float() and fails closed below.
+_QUOTE_AUDIO_TRANSFER_EVIDENCE = "quote_audio_transfer_evidence"
 
-def _numeric_ledger_signals(signals: dict) -> dict:
+
+def _ledger_signal_payload(signals: dict) -> tuple[dict, Optional[dict]]:
     normalized = dict(signals or {})
+    quote_transfer_evidence = None
+
+    if _QUOTE_AUDIO_TRANSFER_EVIDENCE in normalized:
+        evidence = normalized.pop(_QUOTE_AUDIO_TRANSFER_EVIDENCE)
+        # Validate the complete self-binding before admitting this known evidence record to the
+        # audit.  A malformed/stale/fabricated object must stop QC; it must never be converted into
+        # a truthy numeric score merely because its field name is recognized.
+        from .audio_align import transfer_evidence_shape_reason
+        reason = transfer_evidence_shape_reason(evidence)
+        if reason:
+            raise ValueError(
+                f"invalid selection signal {_QUOTE_AUDIO_TRANSFER_EVIDENCE}: {reason}")
+        try:
+            # Detach the emitted audit object from the mutable selection and enforce JSON-safe,
+            # finite evidence now rather than allowing json.dumps(record) to fail ambiguously.
+            evidence_copy = json.loads(json.dumps(evidence, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"invalid selection signal {_QUOTE_AUDIO_TRANSFER_EVIDENCE}: not_json_safe") \
+                from exc
+        quote_transfer_evidence = evidence_copy
+
     for legacy_key, count_key in _LEGACY_SIGNAL_COUNT_FIELDS.items():
         value = normalized.get(legacy_key)
         if not isinstance(value, list):
@@ -52,7 +81,12 @@ def _numeric_ledger_signals(signals: dict) -> dict:
         normalized[count_key] = count
     # Deliberately retain the old hard failure for unknown non-numeric evidence.  Treating an
     # arbitrary list/dict as a positive score would let malformed relevance evidence look valid.
-    return {k: round(float(v), 4) for k, v in normalized.items()}
+    numeric = {k: round(float(v), 4) for k, v in normalized.items()}
+    return numeric, quote_transfer_evidence
+
+
+def _numeric_ledger_signals(signals: dict) -> dict:
+    return _ledger_signal_payload(signals)[0]
 
 
 def evaluate_flags(
@@ -145,6 +179,7 @@ def write_ledger(proj: ClipProject, segments: list[ScriptSegment]) -> Path:
     for sel in sorted(proj.selections, key=lambda s: s.segment_index):
         src = proj.source(sel.source_id)
         seg = by_idx.get(sel.segment_index)
+        _numeric_signals, _quote_transfer_evidence = _ledger_signal_payload(sel.signals)
         # HONEST relevance class (req. 4) — one of: exact_scene (verifier-kept moving footage on an
         # exact beat, or a validated web-exact-scene still) · contextual_fallback (right character/
         # scene/era but the exact moment is unconfirmed) · generic_filler (thematic) · exact_scene_
@@ -200,11 +235,15 @@ def write_ledger(proj: ClipProject, segments: list[ScriptSegment]) -> Path:
             "relevance_class": _rclass,
             "reuse_count": sel.reuse_count,
             "confidence": round(sel.confidence, 4),
-            "signals": _numeric_ledger_signals(sel.signals),
+            "signals": _numeric_signals,
             "flagged": sel.flagged,
             "flag_reasons": sel.flag_reasons,
             "approved": sel.approved,
         }
+        if _quote_transfer_evidence is not None:
+            # Keep score consumers on the stable numeric ``signals`` contract while retaining the
+            # complete quote-transfer proof for viewer's-eye / publication audits.
+            rec[_QUOTE_AUDIO_TRANSFER_EVIDENCE] = _quote_transfer_evidence
         lines.append(json.dumps(rec))
     proj.ledger_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
     return proj.ledger_path
