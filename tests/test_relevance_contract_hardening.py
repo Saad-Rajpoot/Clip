@@ -360,6 +360,85 @@ def test_source_title_is_negative_evidence_for_a_different_named_death_only():
         "a foreign name elsewhere in the title is not automatically the person who died"
 
 
+def test_exact_storyboard_co_character_conflicts_with_different_title_cast():
+    roster = {
+        "petyr baelish": "Aidan Gillen",
+        "catelyn stark": "Michelle Fairley",
+    }
+    beat = _seg(
+        "Now look at the shape of the lie he tells her.",
+        visual_policy=P.EXACT, is_specific_claim=True,
+        required_entity="Petyr Baelish", required_kind="character",
+        expected_visual="Littlefinger faces Catelyn before telling the dagger lie",
+        scene_query="Game of Thrones Littlefinger brothel Catelyn dagger lie",
+    )
+    wrong = '"Why do they call you Littlefinger?" Game of Thrones S01E04 Arya Stark'
+    why = V._source_title_exact_cast_conflict(beat, wrong, roster)
+    assert why and "catelyn stark" in why and "arya stark" in why
+    assert V._source_title_exact_cast_conflict(
+        beat, "Catelyn confronts Littlefinger about the dagger", roster) == ""
+    assert V._source_title_exact_cast_conflict(
+        beat, "Sansa reacts while Catelyn confronts Littlefinger", roster) == ""
+    assert V._source_title_exact_cast_conflict(
+        beat, "Littlefinger lies to Lady Stark about the dagger", roster) == ""
+    assert V._source_title_exact_cast_conflict(
+        beat, "How Littlefinger betrayed House Stark", roster) == ""
+    assert V._source_title_exact_cast_conflict(
+        beat, "The dagger that started The Stark-Lannister war", roster) == ""
+
+    contextual = _seg(**beat.__dict__)
+    contextual.visual_policy = P.CHARACTER
+    contextual.is_specific_claim = False
+    assert V._source_title_exact_cast_conflict(contextual, wrong, roster) == ""
+
+
+def test_project_roster_keeps_name_only_rows_without_none_actor_alias():
+    proj = type("P", (), {"meta": {"analysis": {"characters": [
+        {"name": "Catelyn Stark", "actor": None},
+        {"name": "Petyr Baelish", "actor": "Aidan Gillen"},
+    ]}}})()
+    assert V._project_char2actor(proj) == {
+        "catelyn stark": "", "petyr baelish": "Aidan Gillen"}
+
+
+def test_exact_title_cast_warning_is_resolved_from_pixels_and_fingerprinted(
+        tmp_path, monkeypatch):
+    from vidlore.clipstudio import llm as L
+
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"frame")
+    prompts = []
+
+    def complete_ex(**kwargs):
+        prompts.append(kwargs["messages"][0]["content"][1]["text"])
+        return ('{"matches_narration":true,"correct_subject_visible":true,'
+                '"wrong_subject_visible":false,"contradicts_narration":false,'
+                '"source_title_conflict_resolved":true,"specific_enough":true,'
+                '"quality_ok":true,"confidence":0.9,"verdict":"keep",'
+                '"reason":"pixels prove the target scene"}', {"served": "test"})
+
+    monkeypatch.setattr(L, "complete_ex", complete_ex)
+    warning = "storyboard names Catelyn Stark but title names Arya Stark"
+    verdict = V.verify_frame(
+        frame, "Look at the lie.", "Petyr Baelish", "character", [], NS(),
+        is_specific=True, expected_visual="Petyr faces Catelyn in the brothel",
+        scene_query="Littlefinger Catelyn dagger lie", exact_cast_warning=warning)
+    assert verdict["source_title_conflict_resolved"] is True
+    assert "title describes the whole upload" in prompts[0].lower()
+    assert "ACTUAL PIXELS" in prompts[0]
+
+    base = dict(
+        src_hash="a", source_id="s", shot_start=0.0, shot_end=2.0,
+        beat_text="Look at the lie.", required_entity="Petyr Baelish",
+        required_kind="character", expected_visual="Petyr faces Catelyn",
+        scene_query="Littlefinger Catelyn dagger lie", visual_policy=P.EXACT,
+        faceid_names=[], multiframe=True, image_id="sheet:x", model="vision")
+    assert V.verdict_fingerprint(**base, is_specific=True) != V.verdict_fingerprint(
+        **base, is_specific=True, exact_cast_warning=warning)
+    assert V.verdict_fingerprint(**base, is_specific=False) == V.verdict_fingerprint(
+        **base, is_specific=False, exact_cast_warning=warning)
+
+
 def _verify_fixture(tmp_path, policy_name: str):
     from vidlore.clipstudio.config import ClipConfig
     from vidlore.clipstudio.models import ClipProject, ClipSelection, ScriptSegment, Shot, SourceVideo
@@ -424,6 +503,40 @@ def test_exact_keep_that_denies_required_subject_enters_repair_instead_of_stalli
     assert selection.verifier["verdict"] == "replace"
     assert "required subject" in selection.verifier["contract_rejected"]
     assert V.FLAG_EXACT_MISSING in selection.flag_reasons
+
+
+def test_warned_keep_missing_resolution_is_technical_not_content_softening(
+        tmp_path, monkeypatch):
+    proj, segs, shot, cfg = _verify_fixture(tmp_path, P.EXACT)
+    seg = segs[0]
+    seg.text = "Now look at the shape of the lie he tells her."
+    seg.required_entity = "Petyr Baelish"
+    seg.expected_visual = "Littlefinger faces Catelyn before telling the dagger lie"
+    seg.scene_query = "Game of Thrones Littlefinger brothel Catelyn dagger lie"
+    proj.sources[0].title = '"Why Littlefinger?" Arya Stark'
+    proj.meta["analysis"]["characters"] = [
+        {"name": "Petyr Baelish", "actor": "Aidan Gillen"},
+        {"name": "Catelyn Stark", "actor": "Michelle Fairley"},
+    ]
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "0")
+    monkeypatch.setattr(V, "_shot_lookup", lambda _p: lambda sid, ix: shot)
+    malformed_keep = {
+        "verdict": "keep", "matches_narration": True, "specific_enough": True,
+        "correct_subject_visible": True, "wrong_subject_visible": False,
+        "contradicts_narration": False, "quality_ok": True, "confidence": 0.8,
+        # source_title_conflict_resolved is intentionally missing.
+    }
+    monkeypatch.setattr(V, "verify_frame", lambda *a, **k: dict(malformed_keep))
+
+    summary = V.verify_and_repair(
+        proj, segs, cfg, NS(anthropic_model="m", anthropic_key="k"), progress=None)
+
+    selection = proj.selections[0]
+    assert summary["failed"] == 1
+    assert selection.verifier["status"] == "error"
+    assert "field is missing or malformed" in selection.verifier["reason"]
+    assert "verdict" not in selection.verifier
+    assert V.FLAG_VERIFIER_UNVERIFIED in selection.flag_reasons
 
 
 def test_strict_promotion_refuses_keep_that_denies_required_subject(tmp_path, monkeypatch):

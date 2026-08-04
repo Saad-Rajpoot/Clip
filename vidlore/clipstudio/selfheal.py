@@ -1197,6 +1197,7 @@ _SEMANTIC_NEGATIVE_REASONS = (
     "correct_subject_visible_false", "wrong_subject_visible_true",
     "target_visible_false", "contradicts_narration_true",
     "deterministic_contradiction", "era_ok_false",
+    "exact_source_title_cast_conflict_unresolved",
 )
 
 

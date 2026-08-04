@@ -135,7 +135,7 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
                  faceid_names: list[str], eng_cfg, model: str = "", is_specific: bool = True,
                  *, expected_visual: str = "", scene_query: str = "", era_hint: str = "",
                  multiframe: bool = False, venue_fallback: bool = False,
-                 must_see: str = "") -> dict | None:
+                 must_see: str = "", exact_cast_warning: str = "") -> dict | None:
     """One vision verdict for a frame (Gemini brain → Claude fallback). None on error.
 
     `is_specific` carries the beat's is_specific_claim: a SPECIFIC line ("Tyrion shoots Tywin with a
@@ -213,6 +213,17 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
            "right). Judge whether the described ACTION actually happens across them — a single frame "
            "cannot prove an action, so require visible progression consistent with the line.\n"
            if multiframe else "")
+    _cast_warning = ""
+    if exact_cast_warning and is_specific:
+        _cast_warning = (
+            "SOURCE-TITLE CAST WARNING — the upload title conflicts with co-character(s) named "
+            "by the exact storyboard: " + str(exact_cast_warning).strip() + "\n"
+            "A title describes the whole upload and is NOT proof that this selected shot is wrong. "
+            "Resolve the warning from the ACTUAL PIXELS only. Set source_title_conflict_resolved="
+            "true only when this frame/contact sheet itself gives affirmative visual evidence for "
+            "the storyboard's exact scene and expected co-character(s), not merely the required "
+            "main character. If the expected scene/cast cannot be established from the pixels, set "
+            "it false and mark replace.\n")
     # MICRO-OBJECT beats: 'the poison stone' / 'a vial' / 'a coin' cannot be resolved in a frame,
     # so demanding the object itself made the verifier reject the beat's OWN scene at every layer
     # (measured: frames of the exact gem-plucking moment — right characters, right table, necklace
@@ -275,7 +286,7 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         f'Narration line: "{narration}"\n'
         f"This clip should show: {required_entity or '(a general scene fitting the line)'} "
         f"(kind: {required_kind or 'any'}).\n"
-        + _story + _absence_elsewhere + _look + _mf + _rule + _nonshow + _obj + _venue +
+        + _story + _absence_elsewhere + _look + _mf + _cast_warning + _rule + _nonshow + _obj + _venue +
         f"Automatic Face-ID on this frame detected: {', '.join(faceid_names) if faceid_names else 'none'}.\n\n"
         "For wrong_subject_visible: set true ONLY if a DIFFERENT specific character (clearly NOT the "
         "one this line is about) is the main subject of the frame; set false for a wide / crowd / "
@@ -285,6 +296,8 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         '{"matches_narration": true/false, "correct_subject_visible": true/false, '
         '"wrong_subject_visible": true/false, "contradicts_narration": true/false, '
         + ('"target_visible": true/false, ' if must_see else "")
+        + ('"source_title_conflict_resolved": true/false, '
+           if exact_cast_warning and is_specific else "")
         # era_ok is asked whenever the beat declares an era. It gates the CONTEXTUAL FALLBACK, which
         # used to re-admit a clip on "the subject is visible" alone and shipped season-1 child Bran
         # under season-8 lines.
@@ -456,7 +469,7 @@ def verdict_fingerprint(*, src_hash: str, source_id: str, shot_start: float, sho
                         visual_policy: str = "", is_specific: bool = True,
                         faceid_names=(), multiframe: bool = False, image_id: str = "",
                         model: str = "", venue_fallback: bool = False,
-                        must_see: str = "") -> str:
+                        must_see: str = "", exact_cast_warning: str = "") -> str:
     """Identity of a verdict: EVERY input that can change the answer.
 
     A verdict is reusable only when the QUESTION is byte-identical. The first cut of this keyed on
@@ -511,6 +524,10 @@ def verdict_fingerprint(*, src_hash: str, source_id: str, shot_start: float, sho
     # pre-existing key stays valid.
     if must_see:
         parts.append("look:" + must_see.strip().lower())
+    # A source-title mismatch does not prove a shot wrong. It changes the strict question by asking
+    # vision to resolve that warning from pixels, so only warned exact calls cold-miss their cache.
+    if exact_cast_warning and is_specific:
+        parts.append("exact-cast-warning:" + " ".join(exact_cast_warning.lower().split()))
     for part in parts:
         h.update(str(part).encode("utf-8", "replace"))
         h.update(b"\x1f")
@@ -587,6 +604,7 @@ def selection_verifier_evidence_record(
     if not model_id:
         return {}
     faces = list(faceid_names or [])
+    exact_cast_warning = _project_exact_cast_warning(proj, seg, sid) if is_specific else ""
     question_fp = verdict_fingerprint(
         src_hash=source_fp, source_id=sid,
         shot_start=(selection_in if multiframe else getattr(shot, "start", 0.0)),
@@ -598,7 +616,8 @@ def selection_verifier_evidence_record(
         scene_query=getattr(seg, "scene_query", "") or "", era=str(era or ""),
         visual_policy=_policy.policy_of(seg), is_specific=bool(is_specific),
         faceid_names=faces, multiframe=bool(multiframe), image_id=image_id,
-        model=model_id, must_see=str(must_see or ""))
+        model=model_id, must_see=str(must_see or ""),
+        exact_cast_warning=exact_cast_warning)
     import hashlib as _hashlib_ev
     parts = [
         f"selection-evidence-v{SELECTION_EVIDENCE_SCHEMA}", question_fp, sid,
@@ -624,6 +643,7 @@ def selection_verifier_evidence_record(
         "faceid_names": sorted({str(x).strip().lower() for x in faces if str(x).strip()}),
         "era": str(era or ""),
         "must_see": str(must_see or ""),
+        "exact_cast_warning": exact_cast_warning,
         "prompt_version": (PROMPT_VERSION if is_specific else LENIENT_PROMPT_VERSION),
         "sheet_version": SHEET_VERSION,
     }
@@ -697,7 +717,7 @@ def _hit_provider_ok(entry, expected_model: str) -> bool:
 
 
 def _verdict_schema_ok(v, *, required_entity: str = "", must_see: str = "",
-                       complete_keep: bool = True) -> bool:
+                       complete_keep: bool = True, exact_cast_warning: str = "") -> bool:
     """Whether a verdict is complete enough to store in, or serve from, the vision cache.
 
     A ``replace`` is conclusive negative evidence once its status/verdict/confidence envelope is
@@ -725,6 +745,9 @@ def _verdict_schema_ok(v, *, required_entity: str = "", must_see: str = "",
             and not isinstance(v.get("correct_subject_visible"), bool):
         return False
     if str(must_see or "").strip() and not isinstance(v.get("target_visible"), bool):
+        return False
+    if str(exact_cast_warning or "").strip() \
+            and not isinstance(v.get("source_title_conflict_resolved"), bool):
         return False
     return True
 
@@ -942,6 +965,110 @@ def _source_title_named_death_conflict(seg, source_title: str, char2actor=None) 
     return ""
 
 
+def _project_char2actor(proj) -> dict[str, str]:
+    """Return one canonical project roster for verification, relevance and build.
+
+    Character names remain useful even when the analyzer omitted an actor.  Empty/``None`` actor
+    values are deliberately not turned into aliases (the three publication paths previously built
+    subtly different maps, including an accidental ``"none"`` actor in the still path).
+    """
+    analysis = (getattr(proj, "meta", {}) or {}).get("analysis", {}) or {}
+    roster: dict[str, str] = {}
+    for row in (analysis.get("characters") or []):
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip().lower()
+        if name:
+            roster[name] = str(row.get("actor") or "").strip()
+    return roster
+
+
+def _source_title_exact_cast_conflict(seg, source_title: str, char2actor=None) -> str:
+    """Return a strict-scene *warning* when a title names different co-character(s).
+
+    A source title describes a whole upload, not necessarily the selected shot, so this signal is
+    never a general narration contradiction.  Strict verification uses it to demand affirmative
+    pixel-level resolution; the contextual/abstract softening ladder remains available.  It
+    requires an EXACT beat, a secondary roster character explicitly named in the storyboard, and
+    a title that names different cast while naming none of the expected secondary cast.
+    """
+    if not source_title or not char2actor or not _policy.verify_strict(seg):
+        return ""
+
+    def _named(text: str) -> set[str]:
+        normalized = " ".join(re.findall(r"[a-z0-9]+", str(text or "").lower()))
+        found: set[str] = set()
+        for raw_character, raw_actor in (char2actor or {}).items():
+            character = " ".join(re.findall(r"[a-z0-9]+", str(raw_character).lower()))
+            actor = " ".join(re.findall(r"[a-z0-9]+", str(raw_actor).lower()))
+            if not character:
+                continue
+            char_parts = character.split()
+            actor_parts = actor.split()
+            aliases = [character]
+            # Distinctive given names are safe; surnames alone conflate Stark/Lannister relatives.
+            if char_parts and len(char_parts[0]) >= 4:
+                aliases.append(char_parts[0])
+            if actor:
+                aliases.append(actor)
+                if actor_parts and len(actor_parts[0]) >= 4:
+                    aliases.append(actor_parts[0])
+            if any(re.search(rf"\b{re.escape(alias)}\b", normalized) for alias in aliases):
+                found.add(character)
+        return found
+
+    required = _named(getattr(seg, "required_entity", "") or "")
+    storyboard = " ".join((
+        getattr(seg, "expected_visual", "") or "",
+        getattr(seg, "scene_query", "") or "",
+    ))
+    expected_secondary = _named(storyboard) - required
+    if not expected_secondary:
+        return ""
+    titled = _named(source_title)
+    # The job-local roster is intentionally compact and may omit a character named by a source
+    # title.  A different given name attached to an expected character's exact surname is still
+    # deterministic negative evidence (expected Catelyn Stark, title says Arya Stark).  This does
+    # not guess unrelated names and is suppressed whenever the expected character is also named.
+    title_text = str(source_title or "")
+    non_names = {
+        "the", "this", "that", "lady", "lord", "ser", "sir", "king", "queen",
+        "prince", "princess", "house", "family", "clan", "team", "young", "old",
+    }
+    for expected in expected_secondary:
+        parts = expected.split()
+        if len(parts) < 2 or expected in titled:
+            continue
+        expected_given, expected_surname = parts[0], parts[-1]
+        # The compact job roster may omit a character named by a title (e.g. Arya/Bran Stark).
+        # Accept only a title-cased or all-caps person-shaped token and explicitly exclude common
+        # honorific/family grammar.  The old normalized regex invented people named "Lady Stark",
+        # "House Stark" and "The Stark".
+        for match in re.finditer(
+                rf"\b([A-Z][a-z]{{2,}}|[A-Z]{{3,}})\s+"
+                rf"{re.escape(parts[-1].title())}\b", title_text):
+            other_given = match.group(1).lower()
+            if other_given != expected_given and other_given not in non_names:
+                titled.add(f"{other_given} {expected_surname}")
+    wrong = titled - required - expected_secondary
+    if wrong and not (titled & expected_secondary):
+        return (f"exact storyboard names {sorted(expected_secondary)!r}, but source title names "
+                f"different cast {sorted(wrong)!r} and none of the expected co-characters")
+    return ""
+
+
+def _project_source_title(proj, source_id: str) -> str:
+    getter = getattr(proj, "source", None) if proj is not None else None
+    source = getter(str(source_id or "")) if callable(getter) and source_id else None
+    return ((getattr(source, "title", "") or "") + " " + str(source_id or ""))
+
+
+def _project_exact_cast_warning(proj, seg, source_id: str) -> str:
+    """Compute the conditional strict-prompt warning from the canonical project roster."""
+    return _source_title_exact_cast_conflict(
+        seg, _project_source_title(proj, source_id), _project_char2actor(proj))
+
+
 def _contradiction_reason(seg, vd, source_title: str = "", char2actor=None) -> str:
     """Combine explicit vision evidence with narrowly deterministic contradiction checks."""
     if isinstance(vd, dict) and vd.get("contradicts_narration") is True:
@@ -990,6 +1117,11 @@ def _strict_keep_rejection_reason(vd, seg=None, source_title: str = "", char2act
               if vd.get("contradicts_narration") is True else "")
     if contradiction:
         return contradiction
+    cast_warning = (_source_title_exact_cast_conflict(
+        seg, source_title, char2actor) if seg is not None else "")
+    if cast_warning and vd.get("source_title_conflict_resolved") is not True:
+        return ("source-title cast warning was not affirmatively resolved from the selected "
+                f"pixels ({cast_warning})")
     if vd.get("era_ok") is False:
         return "era_ok is false"
     if str(must_see or "").strip() and vd.get("target_visible") is not True:
@@ -2343,15 +2475,17 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                          event_eras=_event_eras, anchor_eras=_anchor_eras)
 
     def _src_title_of(_sel):
-        _s = proj.source(_sel.source_id)
-        return ((getattr(_s, "title", "") or "") + " " + (_sel.source_id or ""))
+        return _project_source_title(proj, _sel.source_id)
 
     # character -> actor. Face-ID reports ACTOR names while beats name CHARACTERS, so confirming
     # "Joffrey is on screen" from a face labelled 'jack gleeson' needs the roster mapping.
-    _char2actor: dict = {}
-    for _c in ((proj.meta.get("analysis", {}) or {}).get("characters") or []):
-        if isinstance(_c, dict) and _c.get("name") and _c.get("actor"):
-            _char2actor[str(_c["name"]).strip().lower()] = str(_c["actor"]).strip()
+    _char2actor = _project_char2actor(proj)
+
+    def _cast_warning_of(_seg, source_id: str, strict_flag: bool) -> str:
+        if not strict_flag:
+            return ""
+        return _source_title_exact_cast_conflict(
+            _seg, _project_source_title(proj, source_id), _char2actor)
 
     _vcache = _load_verdict_cache(proj)
     _vcache_n0 = len(_vcache)
@@ -2457,12 +2591,15 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             except Exception:
                 sheet, is_mf = kf_path, False              # any sheet failure → single-frame path
         try:
+            _cast_warning = _cast_warning_of(
+                _seg, getattr(ashot, "source_id", "") or "", bool(_exact))
             return verify_frame(sheet, _seg.text, _seg.required_entity, _seg.required_kind, faceids,
                                 eng_cfg, model, is_specific=_exact,
                                 expected_visual=getattr(_seg, "expected_visual", "") or "",
                                 scene_query=getattr(_seg, "scene_query", "") or "",
                                 era_hint=_era_of(_seg), multiframe=is_mf,
-                                must_see=_must_see(_seg)), is_mf
+                                must_see=_must_see(_seg),
+                                exact_cast_warning=_cast_warning), is_mf
         finally:
             if is_mf:
                 try:
@@ -2524,7 +2661,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             era=_era_of(_seg), visual_policy=_policy.policy_of(_seg),
             is_specific=strict_flag, faceid_names=list(faceids or []),
             multiframe=_ws, image_id=_image_id(_kf_a, ashot, _ws, window),
-            model=(model_id or _vmodel), must_see=_must_see(_seg)), _ws
+            model=(model_id or _vmodel), must_see=_must_see(_seg),
+            exact_cast_warning=_cast_warning_of(
+                _seg, getattr(ashot, "source_id", "") or "", strict_flag)), _ws
 
     def _cached_verify_ctx(
             kf_path, ashot, _seg, strict_flag: bool, faceids, window, rung: str):
@@ -2541,9 +2680,12 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         _fp_r, _ws_r = _rung_fingerprint(ashot, _seg, strict_flag, faceids, window)
         _required_r = getattr(_seg, "required_entity", "") or ""
         _must_see_r = _must_see(_seg)
+        _cast_warning_r = _cast_warning_of(
+            _seg, getattr(ashot, "source_id", "") or "", strict_flag)
         _hit = _vcache.get(_fp_r) if _fp_r else None
         if _hit is not None and _verdict_schema_ok(
-                _hit, required_entity=_required_r, must_see=_must_see_r) \
+                _hit, required_entity=_required_r, must_see=_must_see_r,
+                exact_cast_warning=_cast_warning_r) \
                 and _hit_provider_ok(_hit, _vmodel):
             _pm_r.incr(f"verify.rung.{rung}.cache_hit")
             return dict(_hit), _ws_r                     # copy: callers mutate their verdict
@@ -2552,7 +2694,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         if _fp_r and v_r is not None and used_r == _ws_r \
                 and _verdict_schema_ok(
                     {**v_r, "status": "ok"}, required_entity=_required_r,
-                    must_see=_must_see_r):
+                    must_see=_must_see_r, exact_cast_warning=_cast_warning_r):
             # store under the ACTUAL server's key — a Claude fallback answer must never sit
             # under a Gemini-predicted fingerprint (and vice versa)
             _served_r = _served_model_of(v_r)
@@ -2619,13 +2761,16 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 era=_era_of(seg), visual_policy=_policy.policy_of(seg), is_specific=_exact,
                 faceid_names=faceid_names, multiframe=_want_sheet,
                 image_id=_image_id(kf, shot, _want_sheet, _window), model=_vmodel,
-                must_see=_must_see(seg))
+                must_see=_must_see(seg),
+                exact_cast_warning=_cast_warning_of(seg, sel.source_id, _exact))
             _c0 = _vcache.get(_fp)
             if _fp:
                 _prim_items.append((_fp, sel, seg, shot, kf, faceid_names, _exact, _window))
             if _fp and (_c0 is None or not _verdict_schema_ok(
                             _c0, required_entity=getattr(seg, "required_entity", "") or "",
-                            must_see=_must_see(seg))
+                            must_see=_must_see(seg),
+                            exact_cast_warning=_cast_warning_of(
+                                seg, sel.source_id, _exact))
                         or not _hit_provider_ok(_c0, _vmodel)):
                 _pending.append(
                     (_fp, seg, shot, kf, faceid_names, _exact, _want_sheet, _window))
@@ -2636,10 +2781,10 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             _pf_fail = _pf_ok = 0
             with _cf.ThreadPoolExecutor(max_workers=_pf_workers) as _ex:
                 _futs = {_ex.submit(_verify_ctx, kf9, shot9, seg9, ex9, fids9, win9):
-                         (fp9, ws9, seg9)
+                         (fp9, ws9, seg9, shot9, ex9)
                          for (fp9, seg9, shot9, kf9, fids9, ex9, ws9, win9) in _pending}
                 for _fu in _cf.as_completed(_futs):
-                    _fp9, _ws9, _seg_schema9 = _futs[_fu]
+                    _fp9, _ws9, _seg_schema9, _shot_schema9, _exact_schema9 = _futs[_fu]
                     try:
                         _v9, _us9 = _fu.result()
                     except Exception:                     # noqa: BLE001
@@ -2649,7 +2794,11 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                                 {**_v9, "status": "ok"},
                                 required_entity=getattr(
                                     _seg_schema9, "required_entity", "") or "",
-                                must_see=_must_see(_seg_schema9)):
+                                must_see=_must_see(_seg_schema9),
+                                exact_cast_warning=_cast_warning_of(
+                                    _seg_schema9,
+                                    getattr(_shot_schema9, "source_id", "") or "",
+                                    _exact_schema9)):
                         _served9 = _served_model_of(_v9)
                         _fp_store9 = _fp9
                         if _served9 != _vmodel:
@@ -2672,7 +2821,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                                 is_specific=_ex9b, faceid_names=_fids9,
                                 multiframe=_ws9b,
                                 image_id=_image_id(_kf9, _shot9, _ws9b, _win9),
-                                model=_served9, must_see=_must_see(_seg9))
+                                model=_served9, must_see=_must_see(_seg9),
+                                exact_cast_warning=_cast_warning_of(
+                                    _seg9, getattr(_shot9, "source_id", "") or "", _ex9b))
                         _vcache[_fp_store9] = {k: val for k, val in _v9.items()
                                                if k != "reused"}
                         _pf_ok += 1
@@ -2722,7 +2873,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 _v0 = _vcache.get(_fpP)
                 if not (_v0 is not None and _verdict_schema_ok(
                             _v0, required_entity=getattr(segP, "required_entity", "") or "",
-                            must_see=_must_see(segP))
+                            must_see=_must_see(segP),
+                            exact_cast_warning=_cast_warning_of(
+                                segP, selP.source_id, _exP))
                         and _hit_provider_ok(_v0, _vmodel)):
                     continue                             # primary not warm → serial pays as today
                 _primary_strict_reject = (
@@ -2881,14 +3034,16 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 era=_era_of(seg), visual_policy=_policy.policy_of(seg), is_specific=_exact,
                 faceid_names=faceid_names, multiframe=_want_sheet,
                 image_id=_image_id(kf, shot, _want_sheet, _window), model=_vmodel,
-                must_see=_must_see(seg))
+                must_see=_must_see(seg),
+                exact_cast_warning=_cast_warning_of(seg, sel.source_id, _exact))
         # only a SUCCESSFUL, schema-valid verdict is reusable — never an error stub or a malformed
         # reply whose missing "verdict" key would read as falsy and quietly pass
         _cached = _vcache.get(_fp) if _fp else None
         _used_sheet = _want_sheet
         if _cached is not None and _verdict_schema_ok(
                 _cached, required_entity=getattr(seg, "required_entity", "") or "",
-                must_see=_must_see(seg)) \
+                must_see=_must_see(seg),
+                exact_cast_warning=_cast_warning_of(seg, sel.source_id, _exact)) \
                 and _hit_provider_ok(_cached, _vmodel):
             from . import perf_metrics as _pm_v
             _pm_v.incr("verify.primary.cache_hit")
@@ -2907,12 +3062,23 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             else:
                 v, _used_sheet = _verify_ctx(
                     kf, shot, seg, _exact, faceid_names, (sel.in_point, sel.out_point))
+        _schema_failure = ""
+        _current_cast_warning = _cast_warning_of(seg, sel.source_id, _exact)
+        if (v is not None and _current_cast_warning and v.get("verdict") == "keep"
+                and not isinstance(v.get("source_title_conflict_resolved"), bool)):
+            # This is a malformed answer to the focused question, not evidence that the footage is
+            # wrong.  Route it through the same technical retry/breaker lane as native-still schema
+            # failures; otherwise a missing JSON field could buy acquisition or specificity loss.
+            _schema_failure = "focused source-title conflict field is missing or malformed"
+            v = None
         if v is None:
             # FAIL CLOSED. "No judgment" is not a synonym for "acceptable". The old code set
             # status=error and `continue`d, so a beat nobody could check looked exactly like a beat
             # that passed — and a TOTAL outage produced zero rejections, which the release gate read
             # as "nothing wrong" and shipped.
             sel.verifier = {"status": "breaker_open" if _breaker_open else "error"}
+            if _schema_failure:
+                sel.verifier["reason"] = _schema_failure
             _errored += 1
             if _breaker_open:
                 _skipped_breaker += 1
@@ -2941,7 +3107,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         if _fp and not v.get("reused") and _verdict_schema_ok(
                 {**v, "status": "ok"},
                 required_entity=getattr(seg, "required_entity", "") or "",
-                must_see=_must_see(seg)):
+                must_see=_must_see(seg),
+                exact_cast_warning=_cast_warning_of(seg, sel.source_id, _exact)):
             if _used_sheet == _want_sheet:
                 # key by the ACTUAL server (a fallback provider's answer must never sit under
                 # the predicted provider's fingerprint)
@@ -2964,7 +3131,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         is_specific=_exact, faceid_names=faceid_names,
                         multiframe=_want_sheet,
                         image_id=_image_id(kf, shot, _want_sheet, _window),
-                        model=_served_p, must_see=_must_see(seg))
+                        model=_served_p, must_see=_must_see(seg),
+                        exact_cast_warning=_cast_warning_of(seg, sel.source_id, _exact))
                 _vcache[_fp_store_p] = {k: val for k, val in v.items() if k != "reused"}
                 _vcache_dirty += 1
             else:

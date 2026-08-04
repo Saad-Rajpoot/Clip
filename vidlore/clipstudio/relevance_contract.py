@@ -17,6 +17,8 @@ from . import policy as _policy
 from .models import SOURCE_OK
 from .verify import (
     _contradiction_reason,
+    _project_char2actor,
+    _source_title_exact_cast_conflict,
     effective_deictic_target,
     selection_verifier_evidence_reason,
 )
@@ -53,6 +55,7 @@ _CONCLUSIVE_CONTENT_REASONS = frozenset({
     "contradicts_narration_true",
     "era_ok_false",
     "deterministic_contradiction",
+    "exact_source_title_cast_conflict_unresolved",
     # A located real quote still takes the quote-window recovery rung and can never be softened,
     # but its failed selected window is conclusive content evidence rather than a verifier outage.
     "exact_quote_dialogue_signal_below_floor",
@@ -166,6 +169,7 @@ def verified_still_coverage(sel, seg, *, proj=None) -> tuple[bool, str]:
     if not p.is_file() or p.stat().st_size <= 0:
         return False, "image_path is missing or empty"
     meta = getattr(sel, "image_meta", {}) or {}
+    evidence = meta.get("still_verifier") or meta.get("exact_still_verifier") or {}
     source = str(meta.get("source", "") or "")
     relevance_class = str(meta.get("relevance_class", "") or "")
     policy = _policy.policy_of(seg)
@@ -208,6 +212,11 @@ def verified_still_coverage(sel, seg, *, proj=None) -> tuple[bool, str]:
                 if title_era_conflicts(beat_era, owner_title):
                     return False, (f"owned source-frame still declares the wrong era for "
                                    f"{beat_era or 'this beat'}")
+                cast_reason = _source_title_exact_cast_conflict(
+                    seg, owner_title, _project_char2actor(proj))
+                if cast_reason and evidence.get("source_title_conflict_resolved") is not True:
+                    return False, ("owned source-frame still has an unresolved exact-scene cast "
+                                   f"warning: {cast_reason}")
             except Exception:
                 return False, "owned source-frame still era provenance is unprovable"
             # Resolve exact indexed ownership now, not hours later in build.  A native image is
@@ -234,7 +243,6 @@ def verified_still_coverage(sel, seg, *, proj=None) -> tuple[bool, str]:
             except Exception as exc:
                 return False, f"owned source-frame still indexed provenance is invalid: {exc}"
 
-    evidence = meta.get("still_verifier") or meta.get("exact_still_verifier") or {}
     proven = meta.get("still_semantic_verified") is True
     if policy == _policy.EXACT:
         proven = proven and meta.get("exact_still_verified") is True
@@ -776,12 +784,7 @@ def evaluate_selection_relevance(proj, segments, *, cfg=None,
     callers omit it and retain the fail-closed, freshly-computed behaviour.
     """
     by_idx = {int(getattr(s, "segment_index", -1)): s for s in (proj.selections or [])}
-    analysis = (getattr(proj, "meta", {}) or {}).get("analysis", {}) or {}
-    char2actor = {
-        str(c.get("name", "")).strip().lower(): str(c.get("actor", "")).strip()
-        for c in (analysis.get("characters") or [])
-        if isinstance(c, dict) and c.get("name") and c.get("actor")
-    }
+    char2actor = _project_char2actor(proj)
     if quote_pool_cache is None:
         quote_contracts = _quote_pool_branches(proj, segments, cfg=cfg)
     elif type(quote_pool_cache) is _RequestQuotePoolClassificationCache:
@@ -896,6 +899,13 @@ def evaluate_selection_relevance(proj, segments, *, cfg=None,
                     if deterministic and "contradicts_narration_true" not in reasons:
                         reasons.append("deterministic_contradiction")
                         verifier = {**verifier, "contract_contradiction_reason": deterministic}
+                    cast_warning = (_source_title_exact_cast_conflict(
+                        seg, _selection_source_title(proj, sel), char2actor)
+                        if policy == _policy.EXACT else "")
+                    if (cast_warning
+                            and verifier.get("source_title_conflict_resolved") is not True):
+                        reasons.append("exact_source_title_cast_conflict_unresolved")
+                        verifier = {**verifier, "source_title_cast_warning": cast_warning}
 
         # A verified still suppresses the moving selection entirely, so its old moving-video
         # verdict is audit context rather than a publication blocker.
@@ -915,6 +925,7 @@ def evaluate_selection_relevance(proj, segments, *, cfg=None,
                     "status", "verdict", "matches_narration", "specific_enough",
                     "correct_subject_visible", "wrong_subject_visible",
                     "contradicts_narration", "quality_ok", "era_ok", "target_visible",
+                    "source_title_conflict_resolved", "source_title_cast_warning",
                     "contract_contradiction_reason", "selection_evidence") if k in verifier
             },
         }

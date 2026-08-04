@@ -769,6 +769,47 @@ def test_narrow_deterministic_contradictions_block_legacy_verdicts(tmp_path):
     assert "deterministic_contradiction" in _block_reasons(death, dseg)
 
 
+def test_exact_scene_title_cast_warning_needs_pixel_resolution_but_can_be_resolved(tmp_path):
+    proj, seg, sel = _fixture(
+        tmp_path, text="Now look at the shape of the lie he tells her.",
+        entity="Petyr Baelish", title='"Why do they call you Littlefinger?" S01E04 Arya Stark')
+    seg.expected_visual = "Littlefinger faces Catelyn before telling the dagger lie"
+    seg.scene_query = "Game of Thrones Littlefinger brothel Catelyn dagger lie"
+    proj.meta["analysis"]["characters"] = [
+        {"name": "Petyr Baelish", "actor": "Aidan Gillen"},
+        {"name": "Catelyn Stark", "actor": "Michelle Fairley"},
+        {"name": "Arya Stark", "actor": "Maisie Williams"},
+    ]
+    shot = V._shot_lookup(proj)("s1", 0)
+    V.bind_selection_verifier_evidence(
+        proj, sel, seg, sel.verifier, shot=shot, model="vision-test",
+        is_specific=True, multiframe=True, faceid_names=[],
+        era=V._project_beat_era(proj, seg), must_see=P.deictic_target(seg))
+
+    reasons = _block_reasons(proj, seg)
+    assert "exact_source_title_cast_conflict_unresolved" in reasons
+    assert "deterministic_contradiction" not in reasons
+
+    # A title describes the upload, not necessarily this shot. A focused pixel verdict can prove a
+    # correct window inside a compilation; once rebound to that exact question, strict publication
+    # is allowed instead of treating the title itself as shot-level truth.
+    sel.verifier["source_title_conflict_resolved"] = True
+    sel.verifier["target_visible"] = True
+    V.bind_selection_verifier_evidence(
+        proj, sel, seg, sel.verifier, shot=shot, model="vision-test",
+        is_specific=True, multiframe=True, faceid_names=[],
+        era=V._project_beat_era(proj, seg), must_see=P.deictic_target(seg))
+    assert R.evaluate_selection_relevance(proj, [seg])["status"] == "pass"
+
+    # The warning is strict-rung evidence only. It must not masquerade as a direct contradiction
+    # and disable the exact->contextual softening ladder.
+    contextual = dict(GOOD)
+    assert V._exact_contextual_ok(
+        contextual, seg, proj.sources[0].title, V._project_char2actor(proj))
+    from vidlore.clipstudio import selfheal as S
+    assert "exact_source_title_cast_conflict_unresolved" in S._SEMANTIC_NEGATIVE_REASONS
+
+
 def test_audit_is_atomic_and_block_is_nonretryable(tmp_path):
     good, gseg, _ = _fixture(tmp_path / "good")
     dest = good.output_dir / R.AUDIT_FILENAME

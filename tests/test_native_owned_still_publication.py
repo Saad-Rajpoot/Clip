@@ -130,6 +130,63 @@ def test_fullres_exact_verified_owned_still_passes_publication_contract(tmp_path
         _owned_selection(native), _segment(), proj=proj) == (True, "source-frame-recovery")
 
 
+def test_owned_still_title_cast_warning_requires_pixel_resolution_not_title_rejection(tmp_path):
+    proj = _project(tmp_path, title='"Why Littlefinger?" Arya Stark')
+    proj.meta["analysis"]["characters"] = [
+        {"name": "Petyr Baelish", "actor": "Aidan Gillen"},
+        {"name": "Catelyn Stark", "actor": None},
+    ]
+    seg = _segment(scene_query="Littlefinger tells Catelyn the dagger lie in the brothel")
+    seg.required_entity = "Petyr Baelish"
+    seg.expected_visual = "Littlefinger faces Catelyn while telling the dagger lie"
+    native = _jpg(tmp_path / "cast-warning.native.jpg", (1920, 1080))
+    (proj.index_dir / "owner.shots.json").write_text(json.dumps([{
+        "source_id": "owner", "index": 7, "start": 10.0, "end": 14.0,
+        "keyframe_path": str(native),
+    }]), encoding="utf-8")
+    sel = _owned_selection(native)
+
+    ok, reason = R.verified_still_coverage(sel, seg, proj=proj)
+    assert ok is False
+    assert "unresolved exact-scene cast warning" in reason
+
+    # The title is upload-level evidence only. A focused strict verdict on these exact native
+    # pixels may resolve it (e.g. a correct window inside a compilation).
+    sel.image_meta["still_verifier"]["source_title_conflict_resolved"] = True
+    sel.image_meta["exact_still_verifier"]["source_title_conflict_resolved"] = True
+    assert R.verified_still_coverage(sel, seg, proj=proj) == (
+        True, "source-frame-recovery")
+
+
+def test_standalone_build_preserve_rejects_unresolved_title_cast_warning(
+        monkeypatch, tmp_path):
+    proj = _project(tmp_path, title='"Why Littlefinger?" Arya Stark')
+    proj.meta["analysis"]["characters"] = [
+        {"name": "Petyr Baelish", "actor": "Aidan Gillen"},
+        {"name": "Catelyn Stark", "actor": None},
+    ]
+    seg = _segment(scene_query="Littlefinger tells Catelyn the dagger lie in the brothel")
+    seg.required_entity = "Petyr Baelish"
+    seg.expected_visual = "Littlefinger faces Catelyn while telling the dagger lie"
+    native = _jpg(tmp_path / "build-cast-warning.native.jpg", (1920, 1080))
+    (proj.index_dir / "owner.shots.json").write_text(json.dumps([{
+        "source_id": "owner", "index": 7, "start": 10.0, "end": 14.0,
+        "keyframe_path": str(native),
+    }]), encoding="utf-8")
+    sel = _owned_selection(native)
+    monkeypatch.setattr(B, "_probe_image_owner_source", lambda _path: (1920, 1080))
+
+    with pytest.raises(NonRetryableBuildError, match="unresolved source-title cast warning"):
+        B._rescue_still_fullres(
+            proj, sel, sel.image_path, lambda _msg: None, seg=seg, eng=None)
+
+    sel.image_meta["still_verifier"]["source_title_conflict_resolved"] = True
+    sel.image_meta["exact_still_verifier"]["source_title_conflict_resolved"] = True
+    rescue = B._rescue_still_fullres(
+        proj, sel, sel.image_path, lambda _msg: None, seg=seg, eng=None)
+    assert rescue["semantic_binding_preserved"] is True
+
+
 def test_unproven_separately_extracted_hd_still_is_blocked_before_build(tmp_path):
     """HD dimensions and a legacy SHA cannot prove source ownership or the current question."""
     proj = _project(tmp_path)
@@ -219,6 +276,33 @@ def test_native_rescue_revalidates_current_question_before_preserving(monkeypatc
 
     assert rescue["preserved_original"] is True
     assert rescue["semantic_binding_preserved"] is True
+
+
+def test_persisted_native_binding_requires_resolved_title_cast_warning(tmp_path):
+    proj, sel = _persisted_native_fixture(tmp_path)
+    proj.source("owner").title = '"Why Littlefinger?" Arya Stark'
+    proj.meta["analysis"]["characters"] = [
+        {"name": "Petyr Baelish", "actor": "Aidan Gillen"},
+        {"name": "Catelyn Stark", "actor": None},
+    ]
+    seg = _segment(scene_query="Littlefinger tells Catelyn the dagger lie in the brothel")
+    seg.required_entity = "Petyr Baelish"
+    seg.expected_visual = "Littlefinger faces Catelyn while telling the dagger lie"
+    _bind_current_native_question(proj, sel, seg)
+    owner = B._resolve_indexed_still_owner(proj, sel)
+    image_hash = R.image_sha256(sel.image_path)
+    source_fp = V._file_fingerprint(proj.source("owner").local_path)
+
+    sel.image_meta["still_verifier"]["source_title_conflict_resolved"] = False
+    reason = B._persisted_native_still_semantic_reason(
+        proj, seg, owner, sel.image_meta, image_sha256=image_hash,
+        source_fingerprint=source_fp)
+    assert "source-title cast warning is not resolved" in reason
+
+    sel.image_meta["still_verifier"]["source_title_conflict_resolved"] = True
+    assert B._persisted_native_still_semantic_reason(
+        proj, seg, owner, sel.image_meta, image_sha256=image_hash,
+        source_fingerprint=source_fp) == ""
 
 
 def test_native_rescue_rejects_forged_current_question_binding(monkeypatch, tmp_path):
