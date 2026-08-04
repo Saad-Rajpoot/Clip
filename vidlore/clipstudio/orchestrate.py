@@ -777,7 +777,7 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                 faceid_names=list(faces or []), multiframe=False,
                 image_id=f"kf:{_verify_mod._file_fingerprint(kf_path)}",
                 model=(model_id or _vmodel_sv), venue_fallback=False,
-                must_see=_policy.deictic_target(seg))
+                must_see=_verify_mod.effective_deictic_target(seg))
         except Exception:
             return ""                                    # no key → baseline uncached call
 
@@ -787,7 +787,7 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
         _fp = _still_fp(kf_path, seg, sid, sidx, faces)
         _hit = _still_vcache.get(_fp) if _fp else None
         _required_sv = getattr(seg, "required_entity", "") or ""
-        _must_see_sv = _policy.deictic_target(seg)
+        _must_see_sv = _verify_mod.effective_deictic_target(seg)
         if _hit is not None and _verify_mod._verdict_schema_ok(
                 _hit, required_entity=_required_sv, must_see=_must_see_sv) \
                 and _verify_mod._hit_provider_ok(_hit, _vmodel_sv):
@@ -806,7 +806,8 @@ def _fill_image_fallbacks(proj, segs, analysis, faceid_obj, refs, log, *, eng_cf
                     scene_query=getattr(seg, "scene_query", "") or "",
                     era_hint=_verify_mod._beat_era(seg, _global_era_sv, _vtype_sv == "single_scene",
                                                    anchor_eras=_anchor_eras_sv),
-                    venue_fallback=False, must_see=_policy.deictic_target(seg))
+                    venue_fallback=False,
+                    must_see=_verify_mod.effective_deictic_target(seg))
                 if v is None:
                     continue                              # transport error → retry, then unverified
                 v = {**v, "status": "ok"}
@@ -3260,6 +3261,11 @@ def _unverifiable_relevance_indices(audit: dict) -> set[int]:
     """
     prefixes = (
         "verifier_absent", "verifier_error", "verifier_breaker", "verifier_unavailable",
+        # A native still may have been the reason the moving selection was never asked the
+        # publication question (or was asked an older question).  Once that still is rejected we
+        # deliberately mark the moving verdict stale; it must receive one fresh scoped judgment
+        # before acquisition or the specificity ladder can treat it as a content failure.
+        "verifier_stale_native_still_conflict",
         "verdict_absent", "matches_narration_absent", "specific_enough_absent",
         "quality_ok_absent", "wrong_subject_visible_absent",
         "correct_subject_visible_absent", "target_visible_absent",
@@ -3382,12 +3388,38 @@ def _strict_still_reply_schema_error(verdict, seg) -> str:
         return "keep is missing/malformed required boolean 'correct_subject_visible'"
     try:
         from . import policy as _policy_still_schema
-        target = _policy_still_schema.deictic_target(seg)
+        from .verify import effective_deictic_target
+        target = effective_deictic_target(seg)
     except Exception:                                    # noqa: BLE001 — schema must fail closed
         target = ""
     if target and not isinstance(verdict.get("target_visible"), bool):
         return "keep is missing/malformed required boolean 'target_visible'"
     return ""
+
+
+def _invalid_still_recovery_indices(audit: dict) -> set[int]:
+    """All invalid stills, independent of the moving verifier's technical/content lane.
+
+    A stale moving proof and an invalid still are two separate facts.  Excluding technical moving
+    beats here stranded the bad image forever because scoped moving re-verification cannot repair
+    or remove image bytes.
+    """
+    return {
+        int(entry.get("segment_index", -1))
+        for entry in (audit.get("blockers") or [])
+        if any(str(reason).startswith("invalid_still:")
+               for reason in (entry.get("reasons") or []))
+    }
+
+
+def _owned_native_still_recovery_candidate(meta: dict, invalid_reasons) -> bool:
+    """Whether an invalid still has enough indexed ownership to use the native refresh lane."""
+    return bool(
+        str((meta or {}).get("source", "") or "")
+        in ("source-frame", "source-frame-recovery")
+        and str((meta or {}).get("src", "") or "")
+        and (meta or {}).get("shot") is not None
+        and list(invalid_reasons or []))
 
 
 def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, refs,
@@ -3471,26 +3503,114 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
     # Judge those exact bytes once before buying new footage. Persist NEGATIVE verdicts too, so the
     # audit says what the image showed rather than merely "old metadata"; only a complete positive
     # verdict flips the semantic flag.
-    image_blockers = {
-        int(e["segment_index"]) for e in audit.get("blockers") or []
-        if any(str(r).startswith("invalid_still:") for r in (e.get("reasons") or []))
-    } - _initial_technical
+    image_blockers = _invalid_still_recovery_indices(audit)
     if _content_generation_exhausted:
         image_blockers.clear()
     if image_blockers:
         from . import verify as _verify_img_sr
         from . import policy as _policy_img_sr
+        from .verify import NonRetryableBuildError as _StillContentReject
         by_seg = {int(getattr(s, "index", -1)): s for s in segs}
         by_sel = {int(getattr(s, "segment_index", -1)): s for s in (proj.selections or [])}
-        if isinstance(analysis, dict):
-            _era_img = str(analysis.get("episode_hint", "") or "")
-        else:
-            _era_img = str(getattr(analysis, "episode_hint", "") or "")
+        blocker_by_idx = {
+            int(entry.get("segment_index", -1)): entry
+            for entry in (audit.get("blockers") or [])}
+        native_rows = []
+
+        def _invalidate_conflicting_still(_sel, _idx: int, _reason: str) -> None:
+            """Detach rejected image bytes and force one fresh judgment of the moving selection."""
+            from .selfheal import _discard_invalid_still
+            _discard_invalid_still(_sel, _reason, log)
+            moving = dict(getattr(_sel, "verifier", {}) or {})
+            moving["status"] = "stale_native_still_conflict"
+            moving["native_still_conflict"] = _reason
+            moving.pop("reused", None)
+            _sel.verifier = moving
+
         for idx in sorted(image_blockers):
             seg, sel = by_seg.get(idx), by_sel.get(idx)
             path = str(getattr(sel, "image_path", "") or "") if sel is not None else ""
             if seg is None or not path or not Path(path).is_file():
                 continue
+            meta = dict(getattr(sel, "image_meta", {}) or {})
+            invalid_reasons = list((blocker_by_idx.get(idx) or {}).get("reasons") or [])
+            owned_native_needed = _owned_native_still_recovery_candidate(
+                meta, invalid_reasons)
+            if owned_native_needed:
+                try:
+                    from .build import _rescue_still_fullres
+                    rescue = _rescue_still_fullres(
+                        proj, sel, path, log, seg=seg, eng=eng,
+                        allow_semantic_reject=True, refresh_semantic_verdict=True)
+                except _verify_img_sr.VisionBackendError as exc:
+                    raise PipelineError(
+                        f"semantic recovery native-still verifier was technically unavailable "
+                        f"for beat {idx}: {exc}") from exc
+                except _StillContentReject as exc:
+                    # Wrong-era/content and genuinely sub-HD owners are candidate failures: detach
+                    # them and judge the moving selection.  Broken ownership/hash provenance is an
+                    # integrity failure, not a candidate verdict, and must remain a loud stop.
+                    if str(getattr(exc, "kind", "") or "") not in (
+                            "selection_relevance", "native_resolution"):
+                        raise
+                    reason = str(exc)
+                    native_rows.append({
+                        "segment_index": idx, "status": "rejected_before_verify",
+                        "declared_path": path, "owner_source_id": str(meta.get("src") or ""),
+                        "owner_shot_index": meta.get("shot"), "reason": reason,
+                    })
+                    _invalidate_conflicting_still(sel, idx, reason)
+                    log(f"semantic-recovery: beat {idx} owned still rejected before native "
+                        f"publication ({reason}); moving selection will be freshly reverified")
+                    continue
+
+                verdict = dict(rescue.get("semantic_verifier") or {})
+                why = str(rescue.get("semantic_strict_reason") or "")
+                native_rows.append({
+                    "segment_index": idx,
+                    "status": "rejected" if why else "passed",
+                    "declared_path": path, "native_path": str(rescue.get("path") or ""),
+                    "owner_source_id": str(rescue.get("actual_source_id") or ""),
+                    "owner_shot_index": rescue.get("actual_shot_index"),
+                    "owner_time": rescue.get("actual_time"),
+                    "native_dimensions": [int(rescue.get("image_width") or 0),
+                                          int(rescue.get("image_height") or 0)],
+                    "native_image_sha256": str(rescue.get("file_sha256") or ""),
+                    "vision_served_by": str(rescue.get("semantic_model") or ""),
+                    "reason": why,
+                })
+                if why:
+                    _invalidate_conflicting_still(sel, idx, why)
+                    log(f"semantic-recovery: beat {idx} native still failed — {why}; moving "
+                        "selection will be freshly reverified")
+                    continue
+
+                exact = _policy_img_sr.is_exact(seg)
+                sel.image_path = str(rescue["path"])
+                meta.update({
+                    "still_verification_attempted": True,
+                    "still_verified": True,
+                    "still_semantic_verified": True,
+                    "still_verifier": verdict,
+                    "still_image_sha256": str(rescue["file_sha256"]),
+                    "exact_still_verified": bool(exact),
+                    "exact_still_verifier": (verdict if exact else {}),
+                    "relevance_class": ("exact_scene" if exact else "contextual_fallback"),
+                    "native_semantic_materialized": True,
+                    "native_indexed_keyframe_sha256": str(
+                        rescue.get("indexed_keyframe_sha256") or ""),
+                    "native_owner_source_content_fingerprint": str(
+                        rescue.get("owner_source_content_fingerprint") or ""),
+                    "native_owner_time": rescue.get("owner_time"),
+                    "native_semantic_question_fingerprint": str(
+                        rescue.get("semantic_question_fingerprint") or ""),
+                    "native_semantic_model": str(rescue.get("semantic_model") or ""),
+                })
+                sel.image_meta = meta
+                log(f"semantic-recovery: beat {idx} native still passed on exact "
+                    f"{rescue.get('image_width')}x{rescue.get('image_height')} bytes")
+                continue
+
             try:
                 verdict = _verify_img_sr.verify_frame(
                     path, getattr(seg, "text", "") or "",
@@ -3498,8 +3618,10 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
                     getattr(seg, "required_kind", "") or "", [], eng,
                     getattr(eng, "anthropic_model", ""), is_specific=True,
                     expected_visual=getattr(seg, "expected_visual", "") or "",
-                    scene_query=getattr(seg, "scene_query", "") or "", era_hint=_era_img,
-                    venue_fallback=False, must_see=_policy_img_sr.deictic_target(seg))
+                    scene_query=getattr(seg, "scene_query", "") or "",
+                    era_hint=_verify_img_sr._project_beat_era(proj, seg),
+                    venue_fallback=False,
+                    must_see=_verify_img_sr.effective_deictic_target(seg))
             except Exception as exc:                     # noqa: BLE001 — retryable technical stop
                 raise PipelineError(
                     f"semantic recovery legacy-still verifier failed for beat {idx}: "
@@ -3529,6 +3651,22 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
             sel.image_meta = meta
             log(f"semantic-recovery: beat {idx} legacy still actual-image reverify "
                 f"{'passed' if not why else 'failed — ' + why}")
+        if native_rows:
+            import json as _json_native_still
+            payload = {
+                "schema": "native_still_reverification/1",
+                "count": len(native_rows),
+                "passed": sum(row.get("status") == "passed" for row in native_rows),
+                "rejected": sum(row.get("status") != "passed" for row in native_rows),
+                "rows": native_rows,
+            }
+            proj.meta["native_still_reverification"] = payload
+            native_dest = proj.output_dir / "native_still_reverification_audit.json"
+            native_tmp = native_dest.with_suffix(native_dest.suffix + ".tmp")
+            native_tmp.write_text(
+                _json_native_still.dumps(payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8")
+            native_tmp.replace(native_dest)
         proj.save()
         audit = _R_sr.evaluate_selection_relevance(
             proj, segs, cfg=cfg, quote_pool_cache=_quote_pool_cache_sr)

@@ -15,7 +15,11 @@ from pathlib import Path
 
 from . import policy as _policy
 from .models import SOURCE_OK
-from .verify import _contradiction_reason, selection_verifier_evidence_reason
+from .verify import (
+    _contradiction_reason,
+    effective_deictic_target,
+    selection_verifier_evidence_reason,
+)
 
 # v8 invalidates exhausted semantic-recovery markers after strict candidate arbitration learned to
 # bind a concrete anchor scene to its canonical episode.  Code-only ranking changes are otherwise
@@ -139,7 +143,7 @@ def strict_still_evidence_reason(evidence: dict, seg) -> str:
             and evidence.get("correct_subject_visible") is not True:
         return "still required subject is not affirmatively visible"
     try:
-        must_see = _policy.deictic_target(seg)
+        must_see = effective_deictic_target(seg)
     except Exception:
         must_see = ""
     if must_see and evidence.get("target_visible") is not True:
@@ -147,7 +151,7 @@ def strict_still_evidence_reason(evidence: dict, seg) -> str:
     return ""
 
 
-def verified_still_coverage(sel, seg) -> tuple[bool, str]:
+def verified_still_coverage(sel, seg, *, proj=None) -> tuple[bool, str]:
     """Whether the exact image that will air has complete positive semantic evidence.
 
     Source labels, CLIP similarity, Face-ID and the legacy ``still_verified`` boolean are candidate
@@ -172,6 +176,63 @@ def verified_still_coverage(sel, seg) -> tuple[bool, str]:
         return False, f"exact still relevance_class is {relevance_class or 'absent'}, not exact_scene"
     if policy != _policy.EXACT and relevance_class in ("generic_filler", "unverified_fallback", ""):
         return False, f"concrete still relevance_class is {relevance_class or 'absent'}"
+
+    # Indexed source-frame stills are CLIP thumbnails (normally 512x288), not publication pixels.
+    # A semantic verdict bound to those bytes cannot silently transfer to a separately encoded HD
+    # JPEG. Force the scoped recovery lane to materialize and freshly judge the exact native owner
+    # before this image can suppress its moving selection. Metadata-free/web stills retain their
+    # existing semantic-only treatment here; the independent build native-resolution gate remains
+    # authoritative for them.
+    if source in ("source-frame", "source-frame-recovery") \
+            and str(meta.get("src", "") or "") and meta.get("shot") is not None:
+        try:
+            from PIL import Image
+            with Image.open(p) as image:
+                iw, ih = image.size
+        except Exception:
+            return False, "owned source-frame still dimensions are unreadable"
+        short, long = sorted((int(iw), int(ih)))
+        if short < 720 or long < 1280:
+            return False, (f"owned source-frame still is {iw}x{ih}; native materialization "
+                           "and fresh semantic verification are required")
+        if proj is not None:
+            owner_id = str(meta.get("src", "") or "")
+            owner = proj.source(owner_id)
+            if owner is None:
+                return False, f"owned source-frame still source {owner_id!r} is absent"
+            try:
+                from .era import title_era_conflicts
+                from .verify import _project_beat_era
+                beat_era = _project_beat_era(proj, seg)
+                owner_title = ((getattr(owner, "title", "") or "") + " " + owner_id)
+                if title_era_conflicts(beat_era, owner_title):
+                    return False, (f"owned source-frame still declares the wrong era for "
+                                   f"{beat_era or 'this beat'}")
+            except Exception:
+                return False, "owned source-frame still era provenance is unprovable"
+            # Resolve exact indexed ownership now, not hours later in build.  A native image is
+            # valid either because it is the original indexed keyframe itself, or because the
+            # rematerialization lane persisted and we can recompute every owner/question binding.
+            # Legacy booleans plus an image SHA do not prove where separately extracted HD pixels
+            # came from or which semantic question judged them.
+            try:
+                from .build import (
+                    _persisted_native_still_semantic_reason,
+                    _resolve_indexed_still_owner,
+                    _still_owner_source_fingerprint,
+                )
+                indexed_owner = _resolve_indexed_still_owner(proj, sel)
+                if indexed_owner is None:
+                    return False, "owned source-frame still indexed provenance is absent"
+                if meta.get("native_semantic_materialized") is True:
+                    native_reason = _persisted_native_still_semantic_reason(
+                        proj, seg, indexed_owner, meta,
+                        image_sha256=image_sha256(p),
+                        source_fingerprint=_still_owner_source_fingerprint(indexed_owner))
+                    if native_reason:
+                        return False, f"owned native semantic binding is stale: {native_reason}"
+            except Exception as exc:
+                return False, f"owned source-frame still indexed provenance is invalid: {exc}"
 
     evidence = meta.get("still_verifier") or meta.get("exact_still_verifier") or {}
     proven = meta.get("still_semantic_verified") is True
@@ -748,7 +809,7 @@ def evaluate_selection_relevance(proj, segments, *, cfg=None,
         else:
             verifier = dict(getattr(sel, "verifier", {}) or {})
             source_id = str(getattr(sel, "source_id", "") or "")
-            still_ok, still_why = verified_still_coverage(sel, seg)
+            still_ok, still_why = verified_still_coverage(sel, seg, proj=proj)
             if still_ok:
                 coverage = f"verified_still:{still_why}"
             else:
@@ -823,7 +884,7 @@ def evaluate_selection_relevance(proj, segments, *, cfg=None,
                     if verifier.get("era_ok") is False:
                         reasons.append("era_ok_false")
                     try:
-                        must_see = _policy.deictic_target(seg)
+                        must_see = effective_deictic_target(seg)
                     except Exception:
                         must_see = ""
                     if must_see and verifier.get("target_visible") is not True:

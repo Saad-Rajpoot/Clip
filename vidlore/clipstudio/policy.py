@@ -219,7 +219,8 @@ _LOOK_PRONOUN_RX = re.compile(
 _TARGET_STOP = frozenset("""way ways point points fact facts idea ideas reason reasons question
 questions answer answers thing things order timing logic argument division labour labor
 difference differences pattern patterns detail details sense
-strategy tactics approach method plan intent motive meaning implication""".split())
+strategy tactics approach method plan intent motive meaning implication
+shape shapes form forms structure structures""".split())
 
 # a target phrase ENDS here — the trailing clause is about the target, not part of it:
 # "the dagger IN that room", "the trial THE WAY Bran watched it", "his strategy IN the next…"

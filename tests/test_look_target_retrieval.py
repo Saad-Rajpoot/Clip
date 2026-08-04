@@ -40,6 +40,8 @@ def test_extraction_breadth():
          "Sansa Stark"),
         ("We can watch Olenna's hand take it off.", "", "", "Olenna's hand"),
         ("watch the trial the way Bran watched it", "", "", "the trial"),
+        ("Now look at the shape of the lie he tells her.", "Petyr Baelish", "character",
+         "Petyr Baelish"),
     ]
     for text, ent, kind, want in cases:
         got = P.deictic_target(seg(text, ent, kind))

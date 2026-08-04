@@ -333,6 +333,39 @@ def test_exact_non_strict_provenance_gets_scoped_reverify(reason):
     assert O._unverifiable_relevance_indices(audit) == {59}
 
 
+def test_native_still_rejection_forces_fresh_moving_reverify():
+    audit = {"blockers": [{
+        "segment_index": 36,
+        "reasons": ["verifier_stale_native_still_conflict"],
+    }]}
+    assert O._unverifiable_relevance_indices(audit) == {36}
+
+
+def test_invalid_still_recovery_is_not_suppressed_by_moving_technical_fault():
+    audit = {"blockers": [{
+        "segment_index": 56,
+        "reasons": [
+            "invalid_still:owned source-frame still is 512x288",
+            "verifier_evidence_mismatch",
+        ],
+    }]}
+    assert O._invalid_still_recovery_indices(audit) == {56}
+
+
+@pytest.mark.parametrize("semantic", [True, False])
+@pytest.mark.parametrize("reason", [
+    "invalid_still:owned source-frame still is 512x288; native materialization required",
+    "invalid_still:owned native semantic binding is stale: beat-question changed",
+    "invalid_still:owned source-frame still indexed provenance is invalid",
+])
+def test_every_owned_invalid_still_uses_native_refresh_lane(semantic, reason):
+    meta = {
+        "source": "source-frame-recovery", "src": "owner", "shot": 7,
+        "still_semantic_verified": semantic,
+    }
+    assert O._owned_native_still_recovery_candidate(meta, [reason]) is True
+
+
 def test_exact_non_strict_provenance_with_semantic_negative_still_skips_reverify():
     audit = {"blockers": [{
         "segment_index": 59,

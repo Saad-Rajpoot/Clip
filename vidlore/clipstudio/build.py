@@ -5493,28 +5493,53 @@ def _resolve_indexed_still_owner(proj, sel) -> Optional[dict]:
     if raw_keyframe and not keyframe.is_absolute():
         keyframe = index_path.parent / keyframe
     declared = _require_declared_image_path(sel)
-    # The vision/relevance verifier approved the indexed thumbnail.  Re-extracting the claimed
-    # source midpoint is only safe when that approved file is demonstrably THIS shot's keyframe;
-    # otherwise valid-looking but wrong src/shot metadata could redirect the aired image.
-    if (not raw_keyframe or not keyframe.is_file() or keyframe.stat().st_size <= 0
-            or (keyframe.resolve() != declared.resolve()
-                and _image_file_sha256(keyframe) != _image_file_sha256(declared))):
-        raise NonRetryableBuildError(
-            f"image-lineage gate: declared verified still does not match indexed keyframe for "
-            f"{sid!r} shot {shot_index}", kind="scene_lineage")
     src = proj.source(sid)
     src_path = Path(str(getattr(src, "local_path", "") or "")) if src else Path("")
     if not src or not src_path.is_file() or src_path.stat().st_size <= 0:
         raise NonRetryableBuildError(
             f"image-lineage gate: indexed owner source {sid!r} is missing/empty; refusing to use "
             f"selection source {getattr(sel, 'source_id', '')!r} instead", kind="scene_lineage")
+    # The vision/relevance verifier approved the indexed thumbnail.  Re-extracting the claimed
+    # source midpoint is only safe when that approved file is demonstrably THIS shot's keyframe;
+    # otherwise valid-looking but wrong src/shot metadata could redirect the aired image. A native
+    # image already materialized and strictly judged by the pre-assembly recovery lane is the one
+    # explicit exception: it carries the original keyframe hash, owner-source fingerprint, exact
+    # midpoint and its own semantic SHA, all of which are rechecked here.
+    keyframe_hash = _image_file_sha256(keyframe)
+    declared_hash = _image_file_sha256(declared)
+    same_as_indexed = bool(
+        raw_keyframe and keyframe.is_file() and keyframe.stat().st_size > 0
+        and (keyframe.resolve() == declared.resolve() or keyframe_hash == declared_hash))
+    native_materialized = meta.get("native_semantic_materialized") is True
+    native_ok = False
+    if not same_as_indexed and native_materialized:
+        from .verify import _file_fingerprint
+        midpoint = round((start + end) / 2.0, 3)
+        try:
+            time_ok = abs(float(meta.get("native_owner_time")) - midpoint) <= 0.001
+        except (TypeError, ValueError, OverflowError):
+            time_ok = False
+        source_fp = _file_fingerprint(src_path)
+        native_ok = bool(
+            keyframe_hash
+            and str(meta.get("native_indexed_keyframe_sha256") or "") == keyframe_hash
+            and source_fp not in ("", "missing", "unreadable")
+            and str(meta.get("native_owner_source_content_fingerprint") or "") == source_fp
+            and time_ok and declared_hash
+            and str(meta.get("still_image_sha256") or "") == declared_hash
+            and str(meta.get("native_semantic_question_fingerprint") or "")
+            and str(meta.get("native_semantic_model") or "") not in ("", "none"))
+    if not same_as_indexed and not native_ok:
+        raise NonRetryableBuildError(
+            f"image-lineage gate: declared verified still does not match indexed keyframe for "
+            f"{sid!r} shot {shot_index}", kind="scene_lineage")
     # Index keyframes are extracted at the exact shot midpoint (index.py).  Repeating that rule
     # makes the full-resolution frame deterministic and keeps it tied to the verified still.
     return {"source_id": sid, "shot_index": shot_index,
             "time": round((start + end) / 2.0, 3), "start": start, "end": end,
             "source_path": str(src_path.resolve()),
             "keyframe_path": str(keyframe.resolve()),
-            "keyframe_sha256": _image_file_sha256(keyframe)}
+            "keyframe_sha256": keyframe_hash}
 
 
 def _probe_image_owner_source(path) -> tuple[int, int]:
@@ -5586,15 +5611,14 @@ def _semantic_still_question_fingerprint(proj, seg, owner: dict, *, image_sha256
         -> tuple[str, str]:
     """Fingerprint the exact full-resolution still question and its source bytes."""
     from . import policy as _policy_still
-    from .verify import verdict_fingerprint
+    from .verify import _project_beat_era, effective_deictic_target, verdict_fingerprint
 
     source_fp = source_fingerprint or _still_owner_source_fingerprint(owner)
     if source_fp in ("", "missing", "unreadable"):
         source_fp = _still_owner_source_fingerprint(owner)
-    analysis = (getattr(proj, "meta", {}) or {}).get("analysis", {}) or {}
-    era = str(analysis.get("episode_hint", "") or "")
+    era = _project_beat_era(proj, seg)
     is_specific = _policy_still.policy_of(seg) == _policy_still.EXACT
-    must_see = _policy_still.deictic_target(seg)
+    must_see = effective_deictic_target(seg)
     question_fp = verdict_fingerprint(
         src_hash=source_fp,
         source_id=str(owner.get("source_id") or ""),
@@ -5618,8 +5642,43 @@ def _semantic_still_question_fingerprint(proj, seg, owner: dict, *, image_sha256
     return question_fp, source_fp
 
 
+def _persisted_native_still_semantic_reason(
+        proj, seg, owner: dict, meta: dict, *, image_sha256: str,
+        source_fingerprint: str = "") -> str:
+    """Why persisted rematerialized pixels no longer prove the current beat, or ``""``.
+
+    Shared by the early relevance contract and the final build invariant so an audit cannot say
+    CLEAR for bytes that assembly will later reject.  Original native indexed keyframes do not
+    carry ``native_semantic_materialized`` and are governed by their ordinary exact-byte verdict.
+    """
+    if meta.get("native_semantic_materialized") is not True:
+        return ""
+    from .relevance_contract import strict_still_evidence_reason
+
+    source_fp = source_fingerprint or _still_owner_source_fingerprint(owner)
+    persisted_verdict = dict(meta.get("still_verifier") or {})
+    persisted_model = str(meta.get("native_semantic_model") or "")
+    expected_qfp, expected_source_fp = _semantic_still_question_fingerprint(
+        proj, seg, owner, image_sha256=image_sha256,
+        model=persisted_model, source_fingerprint=source_fp)
+    stale_reasons = []
+    verdict_reason = strict_still_evidence_reason(persisted_verdict, seg)
+    if verdict_reason:
+        stale_reasons.append(verdict_reason)
+    if not persisted_model or persisted_model == "none":
+        stale_reasons.append("served model identity is absent")
+    if str(persisted_verdict.get("vision_served_by") or "") != persisted_model:
+        stale_reasons.append("verdict model does not match persisted model")
+    if str(meta.get("native_semantic_question_fingerprint") or "") != expected_qfp:
+        stale_reasons.append("beat-question fingerprint changed")
+    if str(meta.get("native_owner_source_content_fingerprint") or "") != expected_source_fp:
+        stale_reasons.append("owner-source fingerprint changed")
+    return "; ".join(stale_reasons)
+
+
 def _strictly_verify_native_still(proj, sel, seg, owner: dict, image_path: Path, eng,
-                                  *, source_fingerprint: str) -> dict:
+                                  *, source_fingerprint: str,
+                                  allow_content_reject: bool = False) -> dict:
     """Freshly judge the exact native pixels; thumbnail verdicts are never transferred."""
     from . import policy as _policy_still
     from . import relevance_contract as _relevance_still
@@ -5627,10 +5686,9 @@ def _strictly_verify_native_still(proj, sel, seg, owner: dict, image_path: Path,
     from .selfheal import _still_verdict_schema_error
     from .verify import NonRetryableBuildError, VisionBackendError
 
-    analysis = (getattr(proj, "meta", {}) or {}).get("analysis", {}) or {}
-    era = str(analysis.get("episode_hint", "") or "")
+    era = _verify_still._project_beat_era(proj, seg)
     is_specific = _policy_still.policy_of(seg) == _policy_still.EXACT
-    must_see = _policy_still.deictic_target(seg)
+    must_see = _verify_still.effective_deictic_target(seg)
     _require_unchanged_still_source(owner, source_fingerprint)
     image_hash_before = _image_file_sha256(image_path)
     if not image_hash_before:
@@ -5680,9 +5738,10 @@ def _strictly_verify_native_still(proj, sel, seg, owner: dict, image_path: Path,
             raise VisionBackendError(
                 f"native still verifier returned incomplete keep evidence for beat "
                 f"{getattr(seg, 'index', '?')} ({why})", kind="down")
-        raise NonRetryableBuildError(
-            f"image semantic gate: native still for beat {getattr(seg, 'index', '?')} failed "
-            f"strict verification ({why})", kind="selection_relevance")
+        if not allow_content_reject:
+            raise NonRetryableBuildError(
+                f"image semantic gate: native still for beat {getattr(seg, 'index', '?')} failed "
+                f"strict verification ({why})", kind="selection_relevance")
     image_hash = _image_file_sha256(image_path)
     _require_unchanged_still_source(owner, source_fingerprint)
     if not image_hash or image_hash != image_hash_before:
@@ -5697,13 +5756,15 @@ def _strictly_verify_native_still(proj, sel, seg, owner: dict, image_path: Path,
     question_fp, source_fp = _semantic_still_question_fingerprint(
         proj, seg, owner, image_sha256=image_hash, model=model,
         source_fingerprint=source_fingerprint)
-    return {
+    result = {
         "verdict": verdict,
         "model": model,
         "question_fingerprint": question_fp,
         "source_content_fingerprint": source_fp,
         "image_sha256": image_hash,
+        "strict_reason": why,
     }
+    return result
 
 
 def _extract_owned_still_fullres(original: Path, owner: dict) -> tuple[Path, int, int]:
@@ -5734,7 +5795,9 @@ def _extract_owned_still_fullres(original: Path, owner: dict) -> tuple[Path, int
     return dest, iw, ih
 
 
-def _rescue_still_fullres(proj, sel, img_path: str, log, *, seg=None, eng=None) -> dict:
+def _rescue_still_fullres(proj, sel, img_path: str, log, *, seg=None, eng=None,
+                          allow_semantic_reject: bool = False,
+                          refresh_semantic_verdict: bool = False) -> dict:
     """Return the aired still plus independently checkable, actual ownership.
 
     Source-frame stills with complete metadata are re-extracted from the exact indexed ``src`` and
@@ -5750,8 +5813,11 @@ def _rescue_still_fullres(proj, sel, img_path: str, log, *, seg=None, eng=None) 
             kind="scene_lineage")
     meta, _is_source_frame = _source_frame_meta(sel)
     _image_source = str(meta.get("source") or "")
+    owned_refresh_candidate = bool(
+        refresh_semantic_verdict and "source-frame" in _image_source
+        and str(meta.get("src", "") or "") and meta.get("shot") is not None)
     if not (meta.get("still_verified") is True or meta.get("still_semantic_verified") is True
-            or _image_source == "web-exact-scene"):
+            or _image_source == "web-exact-scene" or owned_refresh_candidate):
         raise NonRetryableBuildError(
             f"image-lineage gate: declared image source {_image_source or '?'} has no explicit "
             f"verifier proof; refusing to label it verified_image", kind="scene_lineage")
@@ -5765,6 +5831,18 @@ def _rescue_still_fullres(proj, sel, img_path: str, log, *, seg=None, eng=None) 
             "declared judged bytes", kind="scene_lineage")
     owner = _resolve_indexed_still_owner(proj, sel)
     if owner is not None:
+        if seg is not None:
+            from .era import title_era_conflicts
+            from .verify import _project_beat_era
+            owner_source = proj.source(owner["source_id"])
+            owner_title = ((getattr(owner_source, "title", "") or "") + " "
+                           + owner["source_id"])
+            beat_era = _project_beat_era(proj, seg)
+            if title_era_conflicts(beat_era, owner_title):
+                raise NonRetryableBuildError(
+                    f"image semantic gate: beat {getattr(seg, 'index', '?')} requires "
+                    f"{beat_era or 'its local era'}, but still owner declares another era "
+                    f"({owner_title.strip()[:100]})", kind="selection_relevance")
         source_fingerprint = _still_owner_source_fingerprint(owner)
         sw, sh = _probe_image_owner_source(owner["source_path"])
         if not _publishable_still_pixels(sw, sh):
@@ -5774,6 +5852,51 @@ def _rescue_still_fullres(proj, sel, img_path: str, log, *, seg=None, eng=None) 
                 f"{reason}; at least native 1280x720 is required and upscaling cannot create "
                 f"detail",
                 kind="native_resolution")
+        # Recovery may arrive here because old thumbnail evidence is absent, the current beat
+        # question changed, or persisted native proof became stale.  Re-establish the contract on
+        # exact owner pixels in every case.  This is deliberately separate from normal build,
+        # which never spends a fresh semantic call to rescue stale metadata on its own.
+        if refresh_semantic_verdict:
+            iw, ih = _image_pixel_dimensions(original)
+            preserved = _publishable_still_pixels(iw, ih)
+            if preserved:
+                candidate = original
+            else:
+                candidate, iw, ih = _extract_owned_still_fullres(original, owner)
+            if seg is None or eng is None:
+                raise NonRetryableBuildError(
+                    "image semantic gate: native still refresh lacks the current beat/verifier",
+                    kind="selection_relevance")
+            semantic = _strictly_verify_native_still(
+                proj, sel, seg, owner, candidate, eng,
+                source_fingerprint=source_fingerprint,
+                allow_content_reject=allow_semantic_reject)
+            _require_unchanged_still_source(owner, source_fingerprint)
+            binding = _owned_still_binding(
+                owner, original, source_fingerprint=source_fingerprint)
+            semantic_reason = str(semantic.get("strict_reason") or "")
+            log(f"build: native still semantic proof freshly "
+                f"{'rejected' if semantic_reason else 'verified'} for beat "
+                f"{getattr(seg, 'index', '?')} from indexed owner {owner['source_id']} shot "
+                f"{owner['shot_index']} @{owner['time']:.3f}s ({iw}x{ih})")
+            return {
+                "path": str(candidate), "ownership_kind": "source_frame",
+                "actual_source_id": owner["source_id"],
+                "actual_shot_index": owner["shot_index"], "actual_time": owner["time"],
+                "source_path": owner["source_path"], "source_width": sw,
+                "source_height": sh, "image_width": iw, "image_height": ih,
+                "preserved_original": preserved,
+                "file_sha256": semantic["image_sha256"],
+                "semantic_binding_preserved": not bool(semantic_reason),
+                "semantic_image_sha256": semantic["image_sha256"],
+                "semantic_rematerialized": not preserved,
+                "semantic_verifier": semantic["verdict"],
+                "semantic_model": semantic["model"],
+                "semantic_question_fingerprint": semantic["question_fingerprint"],
+                "source_content_fingerprint": semantic["source_content_fingerprint"],
+                "semantic_strict_reason": semantic_reason,
+                **binding,
+            }
         # Strict semantic evidence is bound to the exact declared bytes. Re-extracting another
         # JPEG from the same owned instant would air pixels the semantic verifier never judged.
         # Preserve native judged bytes when the persisted SHA matches. A low-resolution index
@@ -5782,6 +5905,24 @@ def _rescue_still_fullres(proj, sel, img_path: str, log, *, seg=None, eng=None) 
         strict_semantic_bound = semantic_claimed
         if strict_semantic_bound:
             iw, ih = _image_pixel_dimensions(original)
+            # A native image persisted by the pre-assembly recovery lane is no longer byte-equal
+            # to the indexed thumbnail, so its semantic authorization must be re-derived from the
+            # current beat question before it may take the cheap preserve-original path.  Merely
+            # carrying non-empty provenance strings is not proof: a later analyzer/policy edit
+            # could otherwise reuse a KEEP that answered a different question.
+            if meta.get("native_semantic_materialized") is True:
+                if seg is None:
+                    raise NonRetryableBuildError(
+                        "image semantic gate: persisted native still has no current beat question",
+                        kind="selection_relevance")
+                stale_reason = _persisted_native_still_semantic_reason(
+                    proj, seg, owner, meta, image_sha256=declared_hash,
+                    source_fingerprint=source_fingerprint)
+                if stale_reason:
+                    raise NonRetryableBuildError(
+                        "image semantic gate: persisted native still proof is stale/incomplete ("
+                        + stale_reason + ")",
+                        kind="selection_relevance")
             if not _publishable_still_pixels(iw, ih):
                 if seg is None or eng is None:
                     raise NonRetryableBuildError(
@@ -5791,11 +5932,14 @@ def _rescue_still_fullres(proj, sel, img_path: str, log, *, seg=None, eng=None) 
                 dest, iw, ih = _extract_owned_still_fullres(original, owner)
                 semantic = _strictly_verify_native_still(
                     proj, sel, seg, owner, dest, eng,
-                    source_fingerprint=source_fingerprint)
+                    source_fingerprint=source_fingerprint,
+                    allow_content_reject=allow_semantic_reject)
                 _require_unchanged_still_source(owner, source_fingerprint)
                 binding = _owned_still_binding(
                     owner, original, source_fingerprint=source_fingerprint)
-                log(f"build: native still freshly verified for beat "
+                semantic_reason = str(semantic.get("strict_reason") or "")
+                log(f"build: native still freshly "
+                    f"{'rejected' if semantic_reason else 'verified'} for beat "
                     f"{getattr(seg, 'index', '?')} from indexed owner {owner['source_id']} shot "
                     f"{owner['shot_index']} @{owner['time']:.3f}s ({sw}x{sh})")
                 return {
@@ -5805,13 +5949,14 @@ def _rescue_still_fullres(proj, sel, img_path: str, log, *, seg=None, eng=None) 
                     "source_path": owner["source_path"], "source_width": sw,
                     "source_height": sh, "image_width": iw, "image_height": ih,
                     "preserved_original": False, "file_sha256": semantic["image_sha256"],
-                    "semantic_binding_preserved": True,
+                    "semantic_binding_preserved": not bool(semantic_reason),
                     "semantic_image_sha256": semantic["image_sha256"],
                     "semantic_rematerialized": True,
                     "semantic_verifier": semantic["verdict"],
                     "semantic_model": semantic["model"],
                     "semantic_question_fingerprint": semantic["question_fingerprint"],
                     "source_content_fingerprint": semantic["source_content_fingerprint"],
+                    "semantic_strict_reason": semantic_reason,
                     **binding,
                 }
             _require_unchanged_still_source(owner, source_fingerprint)

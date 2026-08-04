@@ -41,6 +41,7 @@ def test_extracts_the_named_target(line, want):
 @pytest.mark.parametrize("line", [
     "But notice the division of labour.",          # abstract noun, nothing to point a camera at
     "Now watch his strategy in the next thirty seconds, because this is the tell.",
+    "Now look at the shape of the lie he tells her.",  # figurative shape, not a visible prop
     "Watch it again — not as a fan, as a lawyer.",  # no named thing
     "That is the tragedy of it.",                   # bare anaphora
     "I'm not going to dwell on Baelish's face in that moment.",   # not an instruction to look

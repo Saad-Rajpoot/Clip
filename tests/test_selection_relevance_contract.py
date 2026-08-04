@@ -568,6 +568,38 @@ def test_moving_verifier_binding_rejects_post_verify_selection_or_content_mutati
     assert "verifier_evidence_mismatch" in reasons
 
 
+def test_moving_verifier_binding_recomputes_current_deictic_target(tmp_path):
+    proj, seg, sel = _fixture(
+        tmp_path, text="Now look at the shape of the lie he tells her.",
+        entity="Petyr Baelish", kind="character")
+    shot = V._shot_lookup(proj)("s1", 0)
+    # Reconstruct the stale pre-fix proof: figurative "shape" was treated as a literal prop.
+    V.bind_selection_verifier_evidence(
+        proj, sel, seg, sel.verifier, shot=shot, model="vision-test",
+        is_specific=True, multiframe=True, faceid_names=[],
+        era=V._project_beat_era(proj, seg), must_see="the shape")
+
+    assert P.deictic_target(seg) == "Petyr Baelish"
+    assert "verifier_evidence_mismatch" in _block_reasons(proj, seg)
+
+
+def test_look_gate_kill_switch_uses_same_empty_target_for_verify_and_audit(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_LOOK_GATE", "0")
+    proj, seg, sel = _fixture(
+        tmp_path, text="Keep your eye on the dagger in that room.",
+        entity="dagger", kind="object")
+    shot = V._shot_lookup(proj)("s1", 0)
+    V.bind_selection_verifier_evidence(
+        proj, sel, seg, sel.verifier, shot=shot, model="vision-test",
+        is_specific=True, multiframe=True, faceid_names=[],
+        era=V._project_beat_era(proj, seg), must_see="")
+
+    assert P.deictic_target(seg) == "the dagger"
+    assert V.effective_deictic_target(seg) == ""
+    assert R.evaluate_selection_relevance(proj, [seg])["status"] == "pass"
+
+
 def test_character_specific_is_concrete_but_abstract_stays_lenient(tmp_path):
     bad = {**GOOD, "matches_narration": False}
     proj, seg, _ = _fixture(tmp_path / "character", policy=P.CHARACTER, verifier=bad)

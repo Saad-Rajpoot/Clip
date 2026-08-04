@@ -191,6 +191,17 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
             scene_query=scene_query)
         if is_specific or venue_fallback else ""
     )
+    _contradiction_instruction = (
+        "For contradicts_narration: this is the narrow ABSENCE-ELSEWHERE exception described "
+        "above. Set false when the named subject is visibly at the storyboard's distinct location, "
+        "because that supports their absence from the excluded place. Set true if the subject is "
+        "in the excluded place, at a different location than the storyboard, or the frame otherwise "
+        "directly negates the line. The exact storyboard scene/location is still required.\n"
+        if _absence_elsewhere else
+        "For contradicts_narration: set true when what is visibly shown directly negates the line "
+        "(for example, the line says a named person is absent but that person is visibly present, "
+        "or it names one person's death while the clip shows another person's death). This is "
+        "stronger than merely being an inexact or contextual shot.\n")
     if era_hint:
         _story += (f"Era/season context: {era_hint} — footage from a clearly different era/season "
                    f"than the moment described is WRONG even if the character matches.\n"
@@ -269,10 +280,7 @@ def verify_frame(keyframe_path, narration: str, required_entity: str, required_k
         "For wrong_subject_visible: set true ONLY if a DIFFERENT specific character (clearly NOT the "
         "one this line is about) is the main subject of the frame; set false for a wide / crowd / "
         "reaction / establishing shot where the required person may be present off-centre or unclear.\n"
-        "For contradicts_narration: set true when what is visibly shown directly negates the line "
-        "(for example, the line says a named person is absent but that person is visibly present, "
-        "or it names one person's death while the clip shows another person's death). This is "
-        "stronger than merely being an inexact or contextual shot.\n"
+        + _contradiction_instruction +
         "Answer ONLY this JSON:\n"
         '{"matches_narration": true/false, "correct_subject_visible": true/false, '
         '"wrong_subject_visible": true/false, "contradicts_narration": true/false, '
@@ -336,6 +344,18 @@ SELECTION_EVIDENCE_SCHEMA = 1
 # gate passed and published. Nothing noticed, because "0 rejections" and "nothing checked" were the
 # same number. The breaker exists so the pipeline can tell those two apart.
 VERIFIER_BREAKER_TRIP = 8
+
+
+def effective_deictic_target(seg) -> str:
+    """Current look target under the verifier's supported LOOK_GATE kill switch."""
+    import os as _os_look
+    if _os_look.environ.get("VIDLORE_CLIPSTUDIO_LOOK_GATE", "1").strip().lower() \
+            in ("0", "false", "no"):
+        return ""
+    try:
+        return _policy.deictic_target(seg)
+    except Exception:                                   # noqa: BLE001 — disabled/unknown is empty
+        return ""
 
 
 class NonRetryableBuildError(RuntimeError):
@@ -485,7 +505,7 @@ def verdict_fingerprint(*, src_hash: str, source_id: str, shot_start: float, sho
     # This is a conditional prompt clause, so only affected absence-at-A / subject-at-B questions
     # cold-miss. Every unrelated exact verdict keeps its warm v9 cache.
     if absence_elsewhere:
-        parts.append("absence-elsewhere-v1")
+        parts.append("absence-elsewhere-v2")
     # must_see changes the QUESTION ("is the dagger visible?"), so a verdict cached without it
     # answers something else entirely and must not be reused. Appended only when set, so every
     # pre-existing key stays valid.
@@ -645,9 +665,14 @@ def selection_verifier_evidence_reason(
                  ([getattr(sel, "identity", "")] if getattr(sel, "identity", "") else []))
         expected = selection_verifier_evidence_record(
             proj, sel, seg, shot=shot, model=model,
+            # Preserve whether this was the strict or the deliberate lenient question: the
+            # publication contract separately rejects a lenient proof for a current EXACT beat and
+            # recognizes completed exact→contextual downgrades as content (not infrastructure).
+            # The current deictic target below, however, changes the semantic question itself and
+            # must never be borrowed from the old record.
             is_specific=bool(record.get("is_specific", False)),
             multiframe=bool(record.get("multiframe", False)), faceid_names=faces,
-            era=_project_beat_era(proj, seg), must_see=str(record.get("must_see", "") or ""))
+            era=_project_beat_era(proj, seg), must_see=effective_deictic_target(seg))
     except Exception:
         expected = {}
     if not expected:
@@ -2455,15 +2480,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         Env: VIDLORE_CLIPSTUDIO_LOOK_GATE=0 disables. When set, the verifier is asked whether that
         specific thing is on screen and a frame without it cannot satisfy the beat — "the right
         people are present" is not an answer to "keep your eye on the dagger"."""
-        import os as _os_ls
         if not _look_scope["on"]:
             return ""
-        if _os_ls.environ.get("VIDLORE_CLIPSTUDIO_LOOK_GATE", "1").strip() in ("0", "false", "no"):
-            return ""
-        try:
-            return _policy.deictic_target(_seg)
-        except Exception:                                    # noqa: BLE001
-            return ""
+        return effective_deictic_target(_seg)
 
     def _served_model_of(v) -> str:
         """The provider that ACTUALLY served this fresh verdict (canonical id), falling back
