@@ -1211,30 +1211,6 @@ def test_page_growth_restores_hidden_29th_blocker_into_same_bounded_generation(t
             O._selection_relevance_retry_fingerprint(proj, segs, first)
         assert first_marker["pool_fingerprint"] == \
             O._semantic_recovery_pool_fingerprint(proj)
-        assert O._pending_semantic_recovery_tail(proj, segs) == first_marker["deferred"]
-
-        # Only a current, structurally complete, still-blocked tail can postpone the old
-        # rejected-footage fast predictor. Empty/corrupt/wrong-pool metadata and the kill switch
-        # all fail closed to the predictor; none can bypass a publication gate.
-        valid_marker = copy.deepcopy(first_marker)
-        invalid_markers = [
-            {},
-            {**valid_marker, "deferred": []},
-            {**valid_marker, "deferred": [softened_idx, softened_idx]},
-            {**valid_marker, "deferred": [999], "after": [999]},
-            {**valid_marker, "pool_fingerprint": "wrong-pool"},
-        ]
-        for invalid in invalid_markers:
-            proj.meta["selection_relevance_recovery"] = invalid
-            assert O._pending_semantic_recovery_tail(proj, segs) == []
-        proj.meta["selection_relevance_recovery"] = copy.deepcopy(valid_marker)
-        softened_seg.visual_policy = P.ABSTRACT
-        assert O._pending_semantic_recovery_tail(proj, segs) == [], \
-            "a stale tail cannot postpone the predictor after its deferred beat stops blocking"
-        softened_seg.visual_policy = P.EXACT
-        with mock.patch.dict(os.environ, {"VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY": "0"}):
-            assert O._preassembly_semantic_recovery_tail(proj, segs) == []
-        assert O._preassembly_semantic_recovery_tail(proj, segs) == valid_marker["deferred"]
 
         expected_resume_scope = first_marker["deferred"]
         second = _call(proj, segs)
@@ -1248,13 +1224,22 @@ def test_page_growth_restores_hidden_29th_blocker_into_same_bounded_generation(t
     ladder.assert_not_called()
 
 
-def test_pending_semantic_tail_reaches_build_retry_before_legacy_preassembly_block(tmp_path):
-    """The old rejected-footage predictor may not deadlock an already-paged strict retry.
+@pytest.mark.parametrize("recovery_marker", [
+    pytest.param(None, id="marker-absent"),
+    pytest.param({
+        "schema_version": -1, "post_fingerprint": "stale",
+        "deferred": [24], "after": [24], "pool_fingerprint": "old-pool",
+    }, id="marker-stale"),
+])
+def test_semantic_preflight_precedes_legacy_preassembly_without_valid_marker(
+        tmp_path, recovery_marker):
+    """Absent/stale pagination metadata cannot let legacy repair deadlock semantic retry.
 
-    The first build call represents build_video's mandatory first semantic assertion; after its
-    typed failure the existing catch must run semantic retry.  A second build call then represents
-    the independent authoritative rejected-footage gate and is still allowed to block.  Thus only
-    the early predictor/self-heal is postponed—neither publication gate is weakened.
+    This reproduces the scale-run ordering failure: a rematch invalidates the progress marker while
+    the strict beat is still blocked, and the older predictor also wants to heal it. The semantic
+    assertion/retry must run first unconditionally; only after it passes may legacy self-heal run.
+    build_video is still called and models its own semantic assertion before its independent
+    rejected-footage gate, proving neither publication contract was bypassed.
     """
     from vidlore.clipstudio import analyze as AN
     from vidlore.clipstudio import build as B
@@ -1288,28 +1273,57 @@ def test_pending_semantic_tail_reaches_build_retry_before_legacy_preassembly_blo
             confidence=0.8, flag_reasons=["verifier_failed"],
             verifier={"status": "ok", "verdict": "replace"},
             beat_windows=[["src", 0.0, 3.0]])]
+        if recovery_marker is not None:
+            proj.meta["selection_relevance_recovery"] = copy.deepcopy(recovery_marker)
 
-    build_calls = []
+    events = []
+    recovered = {"done": False}
     from vidlore.clipstudio.verify import NonRetryableBuildError
 
-    def authoritative_build(*_args, **_kwargs):
-        build_calls.append(len(build_calls) + 1)
-        if len(build_calls) == 1:
+    clear = {"status": "pass", "blocked_count": 0, "blockers": []}
+
+    def strict_assert(*_args, **_kwargs):
+        events.append("semantic-assert-pass" if recovered["done"] else "semantic-assert-block")
+        if not recovered["done"]:
             raise NonRetryableBuildError(
                 "strict selection relevance still blocked", kind="selection_relevance")
+        return clear
+
+    def retry(*_args, **_kwargs):
+        events.append("semantic-retry")
+        recovered["done"] = True
+        return clear
+
+    def predictor(*_args, **_kwargs):
+        events.append("legacy-predictor")
+        return "pre-assembly blocker scene(s) [24]"
+
+    def legacy_selfheal_fn(*_args, **_kwargs):
+        events.append("legacy-selfheal")
+        return None
+
+    def authoritative_build(*_args, **_kwargs):
+        events.append("build")
+        # The real build_video starts with this same assertion. Keep it explicit while mocking the
+        # expensive encoder so the regression proves the authoritative assertion remains ordered.
+        strict_assert()
         raise NonRetryableBuildError(
             "authoritative rejected footage still blocked", kind="rejected_footage")
 
-    clear = {"status": "pass", "blocked_count": 0, "blockers": []}
+    def finalize(*_args, **_kwargs):
+        events.append("qc")
+        return {"flagged_for_review": 1, "segments": 1, "mean_confidence": 0.8}
+
     env = {
         "VIDLORE_CLIPSTUDIO_BACKFILL_REJECTED": "0",
         "VIDLORE_CLIPSTUDIO_INDEX_OVERLAP": "0",
         "VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY": "1",
         "VIDLORE_CLIPSTUDIO_SELFHEAL_BUILD_RETRY": "0",
     }
-    legacy_selfheal = mock.Mock()
-    retry = mock.Mock(return_value=clear)
+    legacy_selfheal = mock.Mock(side_effect=legacy_selfheal_fn)
+    retry_mock = mock.Mock(side_effect=retry)
     from contextlib import ExitStack
+    from vidlore.clipstudio import relevance_contract as R
     patches = [
         mock.patch.dict(os.environ, env),
         mock.patch.object(AN, "analyze_script", side_effect=analyze),
@@ -1326,13 +1340,11 @@ def test_pending_semantic_tail_reaches_build_retry_before_legacy_preassembly_blo
         mock.patch.object(O, "_fill_image_fallbacks"),
         mock.patch.object(O, "_purge_unwanted_sources", return_value=0),
         mock.patch.object(RV, "write_review", return_value="review.html"),
-        mock.patch.object(LG, "finalize", return_value={
-            "flagged_for_review": 1, "segments": 1, "mean_confidence": 0.8}),
-        mock.patch.object(B, "preassemble_release_block_reason",
-                          return_value="pre-assembly blocker scene(s) [24]"),
-        mock.patch.object(O, "_preassembly_semantic_recovery_tail", return_value=[24]),
+        mock.patch.object(LG, "finalize", side_effect=finalize),
+        mock.patch.object(R, "assert_selection_relevance", side_effect=strict_assert),
+        mock.patch.object(B, "preassemble_release_block_reason", side_effect=predictor),
         mock.patch.object(O, "_run_preassemble_selfheal", legacy_selfheal),
-        mock.patch.object(O, "_retry_selection_relevance", retry),
+        mock.patch.object(O, "_retry_selection_relevance", retry_mock),
         mock.patch.object(O, "build_video", side_effect=authoritative_build),
     ]
     with ExitStack() as stack:
@@ -1345,10 +1357,13 @@ def test_pending_semantic_tail_reaches_build_retry_before_legacy_preassembly_blo
                 do_build=True, verify=False)
 
     assert exc.value.kind == "rejected_footage"
-    legacy_selfheal.assert_not_called()
-    retry.assert_called_once()
-    assert build_calls == [1, 2], \
-        "strict semantic assertion and authoritative rejected-footage gate both remain active"
+    retry_mock.assert_called_once()
+    legacy_selfheal.assert_called_once()
+    assert events == [
+        "semantic-assert-block", "semantic-retry", "semantic-assert-pass",
+        "qc", "legacy-predictor", "legacy-selfheal", "qc",
+        "build", "semantic-assert-pass",
+    ]
 
 
 def test_scoped_recovery_reuses_current_pool_before_demanding_a_new_url(tmp_path):
@@ -2195,10 +2210,16 @@ def test_current_pool_recovery_clears_a_real_timed_quote_window_contract(tmp_pat
 
 def test_orchestrate_runs_strict_recovery_then_confirmed_gap_ladder_then_asserts():
     src = inspect.getsource(O.produce_auto)
-    branch = src[src.index('== "selection_relevance"'):src.index(
-        '== "rejected_footage"')]
-    assert "_retry_selection_relevance(" in branch
-    assert "_assert_sr(" in branch
+    shared = src[src.index("def _recover_selection_relevance_or_raise"):
+                 src.index("# STRICT SEMANTIC PREFLIGHT")]
+    assert "_retry_selection_relevance(" in shared
+    assert "_assert_sr_recovered(" in shared
+    assert src.index("_assert_sr_preflight(") < src.index(
+        "preassemble_release_block_reason")
+    build_catch = src[src.index("except RuntimeError as _be"):
+                      src.index("_pm_stage.write_report")]
+    assert '== "selection_relevance"' not in build_catch
+    assert "_recover_selection_relevance_or_raise" not in build_catch
 
     retry = inspect.getsource(O._retry_selection_relevance)
     strict_recover = retry.index("_recover_unresolved_beats(")

@@ -255,6 +255,7 @@ def test_produce_auto_resume_skips_completed_stages_end_to_end():
     from vidlore.clipstudio import analyze as AN, discover as DS, download as DL
     from vidlore.clipstudio import faceid as FI, verify as VF, review as RV, index as IX, ledger as LG
     from vidlore.clipstudio import llm as LM
+    from vidlore.clipstudio import relevance_contract as R
     from vidlore.clipstudio.analyze import ScriptAnalysis
 
     calls = {}
@@ -316,6 +317,11 @@ def test_produce_auto_resume_skips_completed_stages_end_to_end():
         (RV, "write_review", lambda *a, **k: "review.html"),
         (LG, "finalize", lambda proj, segs, cfg: {"flagged_for_review": 0, "segments": len(segs),
                                                   "mean_confidence": 1.0}),
+        # This test isolates checkpoint/resume ordering and replaces build_video, which normally
+        # owns the real semantic assertion. The dedicated recovery E2E tests exercise both the new
+        # preflight and build assertion; keep this fixture semantically neutral.
+        (R, "assert_selection_relevance", lambda *a, **k: {
+            "status": "pass", "blocked_count": 0, "blockers": []}),
         (O, "asr_pool_current", lambda *_a, **_k: asr_state["current"]),
         (O, "index_all", fake_index),
         (O, "_ensure_anchor_coverage", fake_anchor),
@@ -449,6 +455,7 @@ def test_vision_outage_does_not_checkpoint_verify_and_skips_the_grind():
     from vidlore.clipstudio import analyze as AN, discover as DS, download as DL
     from vidlore.clipstudio import faceid as FI, verify as VF, review as RV, index as IX, ledger as LG
     from vidlore.clipstudio import llm as LM
+    from vidlore.clipstudio import relevance_contract as R
     from vidlore.clipstudio.analyze import ScriptAnalysis
     from vidlore.clipstudio.verify import VisionBackendError
 
@@ -530,6 +537,7 @@ def test_verify_materialization_failure_rolls_back_checkpoint_and_resume_retries
     from vidlore.clipstudio import analyze as AN, discover as DS, download as DL
     from vidlore.clipstudio import faceid as FI, verify as VF, review as RV, index as IX, ledger as LG
     from vidlore.clipstudio import llm as LM
+    from vidlore.clipstudio import relevance_contract as R
     from vidlore.clipstudio.analyze import ScriptAnalysis
 
     calls = {}
@@ -577,6 +585,10 @@ def test_verify_materialization_failure_rolls_back_checkpoint_and_resume_retries
         (RV, "write_review", lambda *a, **k: "review.html"),
         (LG, "finalize", lambda proj, segs, cfg: {
             "flagged_for_review": 0, "segments": len(segs), "mean_confidence": 1.0}),
+        # This transaction test mocks build_video and has intentionally skeletal verifier evidence;
+        # strict semantic ordering is covered independently in the recovery E2E regression.
+        (R, "assert_selection_relevance", lambda *a, **k: {
+            "status": "pass", "blocked_count": 0, "blockers": []}),
         (O, "asr_pool_current", lambda *_a, **_k: True),
         (O, "index_all", lambda *a, **k: _count("index")),
         (O, "match_segments", fake_match),

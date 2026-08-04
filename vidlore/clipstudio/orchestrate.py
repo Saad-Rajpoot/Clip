@@ -2535,72 +2535,6 @@ def _selection_relevance_retry_fingerprint(proj, segs, audit: dict) -> str:
     return _hashlib_sr.sha256(raw.encode("utf-8", "replace")).hexdigest()
 
 
-def _pending_semantic_recovery_tail(proj, segs, *, cfg=None) -> list[int]:
-    """Return a structurally valid persisted semantic-pagination tail, else ``[]``.
-
-    This marker is allowed to postpone only the *fail-fast predictor* before build; it never
-    authorizes footage or bypasses either publication gate.  Validate the full persisted shape so
-    corrupt/stale free-form metadata cannot suppress even that early diagnostic.  A changed content
-    fingerprint is intentionally not rejected here: `_retry_selection_relevance` owns generation
-    invalidation and must be reached to start the appropriate fresh bounded generation.
-    """
-    from . import relevance_contract as _R_pending
-
-    marker = (getattr(proj, "meta", {}) or {}).get("selection_relevance_recovery")
-    if not isinstance(marker, dict) \
-            or marker.get("schema_version") != _R_pending.SCHEMA_VERSION \
-            or not str(marker.get("post_fingerprint", "") or ""):
-        return []
-    deferred = marker.get("deferred")
-    after = marker.get("after")
-    if not isinstance(deferred, list) or not deferred \
-            or not isinstance(after, list):
-        return []
-    if any(isinstance(i, bool) or not isinstance(i, int) or i < 0 for i in deferred + after):
-        return []
-    if len(deferred) != len(set(deferred)) or len(after) != len(set(after)) \
-            or not set(deferred).issubset(set(after)):
-        return []
-    try:
-        current = {int(getattr(seg, "index", -1)) for seg in (segs or [])}
-    except (TypeError, ValueError):
-        return []
-    if not set(deferred).issubset(current):
-        return []
-    # New markers expose the indexed-pool identity directly.  Keep accepting the immediately prior
-    # schema-6 shape (which has no field) so the live 101-beat job can escape the deadlock once; any
-    # marker that does carry the binding must match exactly.
-    bound_pool = marker.get("pool_fingerprint")
-    if bound_pool is not None and (
-            not isinstance(bound_pool, str)
-            or not bound_pool
-            or bound_pool != _semantic_recovery_pool_fingerprint(proj)):
-        return []
-    # Deferred pagination is meaningful only for beats still blocked by the current strict
-    # contract.  This also rejects a structurally plausible but stale marker after those beats were
-    # fixed by some other operation.  Evaluation is read-only; generation mismatch remains the
-    # retry function's responsibility.
-    try:
-        current_audit = _R_pending.evaluate_selection_relevance(proj, segs, cfg=cfg)
-        current_blockers = {
-            int(e.get("segment_index", -1))
-            for e in (current_audit.get("blockers") or [])}
-    except Exception:                                  # noqa: BLE001 — predictor handoff fails closed
-        return []
-    if not set(deferred).issubset(current_blockers):
-        return []
-    return sorted(deferred)
-
-
-def _preassembly_semantic_recovery_tail(proj, segs, *, cfg=None) -> list[int]:
-    """Pending semantic tail eligible to postpone the rejected-footage fast predictor."""
-    import os as _os_pending
-    if _os_pending.environ.get("VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY", "1") \
-            .strip().lower() in ("0", "false", "no"):
-        return []
-    return _pending_semantic_recovery_tail(proj, segs, cfg=cfg)
-
-
 def _unverifiable_relevance_indices(audit: dict) -> set[int]:
     """Strict blockers where a scoped re-verification can add missing evidence.
 
@@ -3661,11 +3595,86 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
                 _log_stage_skip(log, proj, "image-fallback", _e)
         _stage_done(proj, "recover", _sig_recover)
 
-    # ledger + QC report
-    summ = ledger.finalize(proj, segs, cfg)
-    review_path = _review.write_review(proj, segs)
-    proj.save()
-    log(f"  QC · {summ['flagged_for_review']}/{summ['segments']} flagged · mean conf {summ['mean_confidence']}")
+    def _refresh_qc():
+        """Rewrite ledger/review from the current selections after any repair mutation."""
+        _summ = ledger.finalize(proj, segs, cfg)
+        _review_path = _review.write_review(proj, segs)
+        proj.save()
+        log(f"  QC · {_summ['flagged_for_review']}/{_summ['segments']} flagged · "
+            f"mean conf {_summ['mean_confidence']}")
+        return _summ, _review_path
+
+    def _refresh_qc_without_masking_active_error():
+        """Refresh final-state QC, but never replace an already-raised typed pipeline error."""
+        import sys as _sys_qc
+        _active_error = _sys_qc.exc_info()[0] is not None
+        try:
+            return _refresh_qc()
+        except Exception as _qc_error:
+            if not _active_error:
+                raise
+            log(f"QC refresh failed while preserving active pipeline error: "
+                f"{type(_qc_error).__name__}: {str(_qc_error)[:100]}")
+            return None
+
+    def _recover_selection_relevance_or_raise(_original_error):
+        """Run the one bounded strict-semantic retry, then prove the current state passes.
+
+        This belongs only to the pre-assembly semantic preflight. Technical failures remain
+        retryable/fail-closed, recovery may never demote policy, and a claimed clear result is
+        checked again against persisted state. build_video's later independent assertion never
+        recovers in the same attempt: if legacy repair regresses relevance, it hard-fails and Resume
+        can begin the next bounded generation.
+        """
+        import os as _os_sr
+        from .verify import NonRetryableBuildError as _NRBE_sr
+
+        if (not isinstance(_original_error, _NRBE_sr)
+                or getattr(_original_error, "kind", "") != "selection_relevance"
+                or _os_sr.environ.get("VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY", "1")
+                .strip().lower() in ("0", "false", "no")):
+            raise _original_error
+        try:
+            _retry_selection_relevance(
+                proj, segs, cfg, analysis, eng, faceid_obj=faceid_obj, refs=refs,
+                roster=roster, policy=policy, log=log)
+        except (_verify.VisionBackendError, PipelineError):
+            raise                                    # retryable technical failure, no bypass
+        except Exception as _se:                     # technical repair fault cannot bypass gate
+            log(f"semantic-recovery: technical failure ({type(_se).__name__}: "
+                f"{str(_se)[:100]}); original publication block preserved")
+            raise _original_error
+
+        # Never trust the retry helper's summary as an authorization. Re-run the exact publication
+        # assertion against the now-persisted project, whether the helper reported blockers or a
+        # clear page. This is also what build_video independently does before any encoding.
+        from .relevance_contract import assert_selection_relevance as _assert_sr_recovered
+        return _assert_sr_recovered(
+            proj, segs, proj.output_dir / "selection_relevance_audit.json", cfg=cfg)
+
+    # STRICT SEMANTIC PREFLIGHT — this must precede the older rejected-footage predictor on every
+    # build. A pagination marker is only a progress hint and can legitimately be absent or stale
+    # after match/cut reruns; using it to decide ordering let legacy self-heal deadlock a newly
+    # restored exact beat before semantic retry was reached. This assertion is the same contract
+    # build_video starts with, runs before encoding, and is followed by that independent in-build
+    # assertion after any legacy repair mutates selections.
+    if do_build:
+        from .relevance_contract import assert_selection_relevance as _assert_sr_preflight
+        try:
+            try:
+                _assert_sr_preflight(
+                    proj, segs, proj.output_dir / "selection_relevance_audit.json", cfg=cfg)
+            except RuntimeError as _semantic_block:
+                _recover_selection_relevance_or_raise(_semantic_block)
+        finally:
+            # Recovery may rematch/re-cut even when the strict re-assertion still blocks. Keep the
+            # terminal failure's ledger/review aligned with that final persisted state.
+            _qc = _refresh_qc_without_masking_active_error()
+            if _qc is not None:
+                summ, review_path = _qc
+    else:
+        # Preserve audit-only/no-build behavior: one QC snapshot after normal recovery stages.
+        summ, review_path = _refresh_qc()
 
     # PRE-ASSEMBLE FEASIBILITY GATE (fail-fast). The rejected-footage release gate lives at the END of
     # assembly, so on a footage-gap render it fired only AFTER ~20 min of per-beat re-encoding — all of
@@ -3679,27 +3688,21 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
         except Exception as _e:                          # never let the fast-path itself break a render
             _pre = None
             _log_stage_skip(log, proj, "pre-assemble gate", _e)
-        # A persisted semantic page tail must reach build_video's first operation: the strict
-        # selection-relevance assertion.  That assertion raises the typed error routed into
-        # `_retry_selection_relevance`, which advances the bounded tail.  Running the older
-        # rejected-footage predictor/self-heal first deadlocked Resume on the newly-restored exact
-        # beat (the new pool correctly made its old gap authorization stale), so the tail could
-        # never run.  Postpone ONLY this fail-fast predictor; the strict semantic gate still runs
-        # before any encoding and the authoritative rejected-footage gate still runs in assembly.
-        _pending_semantic_tail = _preassembly_semantic_recovery_tail(proj, segs, cfg=cfg)
-        if _pre and _pending_semantic_tail:
-            log("semantic-recovery: pending bounded page tail "
-                f"{_pending_semantic_tail}; postponing the pre-assembly footage predictor so "
-                "the build-first strict semantic assertion can advance it")
-            _pre = None
         # SELF-HEALING FOOTAGE RECOVERY — the automated gate-unblock playbook (verified stills
         # at the venue bar → targeted LLM-queried acquisition → retry), bounded rounds, never
         # weakens the gate. Manual on job olenna_v2_allfixes it took 17 blocked beats to 0;
         # this makes that loop the pipeline's own behavior. VIDLORE_CLIPSTUDIO_SELFHEAL=0 off.
         if _pre:
-            _pre = _run_preassemble_selfheal(
-                proj, segs, cfg, analysis, policy=policy, pre=_pre,
-                faceid_obj=faceid_obj, refs=refs, roster=roster, log=log)
+            try:
+                _pre = _run_preassemble_selfheal(
+                    proj, segs, cfg, analysis, policy=policy, pre=_pre,
+                    faceid_obj=faceid_obj, refs=refs, roster=roster, log=log)
+            finally:
+                # The fail-fast error must ship final-state QC too, even when self-heal raises or
+                # returns an unresolved blocker.
+                _qc = _refresh_qc_without_masking_active_error()
+                if _qc is not None:
+                    summ, review_path = _qc
         if _pre:
             _mode = _os.environ.get("VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE", "block").strip().lower()
             if _mode == "warn":
@@ -3726,37 +3729,7 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
             # once and rebuild — same bounded machinery, gate stays the final word.
             import os as _os_bh
             from .verify import NonRetryableBuildError as _NRBE
-            if (isinstance(_be, _NRBE)
-                    and getattr(_be, "kind", "") == "selection_relevance"
-                    and _os_bh.environ.get("VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY", "1")
-                    .strip().lower() not in ("0", "false", "no")):
-                # The semantic gate is the FIRST operation in build_video, so no render work has
-                # happened. Give only its blockers one final bounded chance: missing evidence is
-                # reverified, explicit negatives acquire different footage, and exact-image
-                # recovery reruns for that subset. No self-heal policy demotion is permitted here.
-                try:
-                    _saudit = _retry_selection_relevance(
-                        proj, segs, cfg, analysis, eng, faceid_obj=faceid_obj, refs=refs,
-                        roster=roster, policy=policy, log=log)
-                except (_verify.VisionBackendError, PipelineError):
-                    raise                                # retryable technical failure, no marker
-                except Exception as _se:                 # technical repair fault cannot bypass gate
-                    log(f"semantic-recovery: technical failure ({type(_se).__name__}: "
-                        f"{str(_se)[:100]}); original publication block preserved")
-                    raise _be
-                if _saudit.get("blockers"):
-                    from .relevance_contract import assert_selection_relevance as _assert_sr
-                    _assert_sr(
-                        proj, segs, proj.output_dir / "selection_relevance_audit.json",
-                        cfg=cfg)
-                out = build_video(proj, segs, cfg, voice=voice, captions=captions,
-                                  caption_style=caption_style,
-                                  title=title or analysis.movie_title or proj.name,
-                                  theme_name=theme, voiceover=voiceover,
-                                  voice_provider=voice_provider,
-                                  voice_preset=voice_preset, use_tts=use_tts,
-                                  progress=progress)
-            elif (isinstance(_be, _NRBE) and getattr(_be, "kind", "") == "rejected_footage"
+            if (isinstance(_be, _NRBE) and getattr(_be, "kind", "") == "rejected_footage"
                     and _os_bh.environ.get("VIDLORE_CLIPSTUDIO_SELFHEAL", "1").strip().lower()
                     not in ("0", "false", "no")
                     and _os_bh.environ.get("VIDLORE_CLIPSTUDIO_SELFHEAL_BUILD_RETRY", "1")
@@ -3765,10 +3738,14 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
                 _idxs = _selfheal_b.blocked_indexes(proj)
                 log(f"self-heal: in-build release gate blocked {len(_idxs)} beat(s) — healing "
                     f"and rebuilding once")
-                _n = _selfheal_b.heal_blocked_beats(
-                    proj, segs, cfg, blocked=_idxs, policy=policy,
-                    faceid_obj=faceid_obj, refs=refs, roster=roster, log=log)
-                proj.save()
+                try:
+                    _n = _selfheal_b.heal_blocked_beats(
+                        proj, segs, cfg, blocked=_idxs, policy=policy,
+                        faceid_obj=faceid_obj, refs=refs, roster=roster, log=log)
+                finally:
+                    _qc = _refresh_qc_without_masking_active_error()
+                    if _qc is not None:
+                        summ, review_path = _qc
                 if not _n:
                     raise
                 out = build_video(proj, segs, cfg, voice=voice, captions=captions,
