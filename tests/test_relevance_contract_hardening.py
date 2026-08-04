@@ -5,7 +5,10 @@ acceptance contracts that previously admitted raven→dragon and named-death con
 """
 from __future__ import annotations
 
+import base64
 from pathlib import Path
+import subprocess
+import threading
 from types import SimpleNamespace as NS
 
 import pytest
@@ -14,6 +17,69 @@ from vidlore.clipstudio import policy as P
 from vidlore.clipstudio import verify as V
 from vidlore.clipstudio import analyze as A
 from vidlore.clipstudio import relevance_contract as R
+
+
+def test_action_contact_sheet_preserves_three_moments_but_caps_provider_aspect(
+        tmp_path, monkeypatch):
+    """A 3x16:9 strip must remain multiframe without Gemini's measured 5.33:1 block."""
+    from PIL import Image
+
+    src = tmp_path / "source.mp4"
+    src.write_bytes(b"fixture")
+    dest = tmp_path / "sheet.jpg"
+    colours = ((220, 20, 20), (20, 220, 20), (20, 20, 220))
+
+    def fake_extract(argv, **_kwargs):
+        frame_path = Path(argv[-1])
+        frame_no = int(frame_path.stem.rsplit("_", 1)[-1])
+        Image.new("RGB", (426, 240), colours[frame_no]).save(frame_path)
+        return NS(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_extract)
+    assert V._action_contact_sheet(str(src), 817.0, 820.0, dest) == dest
+
+    with Image.open(dest).convert("RGB") as sheet:
+        assert sheet.size == (1278, 320)
+        assert sheet.width / sheet.height <= V._CONTACT_SHEET_MAX_ASPECT
+        assert sheet.crop((0, 40, 426, 280)).size == (426, 240)
+        assert sheet.crop((426, 40, 852, 280)).size == (426, 240)
+        assert sheet.crop((852, 40, 1278, 280)).size == (426, 240)
+        for neutral in (sheet.getpixel((639, 10)), sheet.getpixel((639, 310))):
+            assert max(neutral) - min(neutral) <= 2
+            assert all(10 <= channel <= 22 for channel in neutral)
+        y = sheet.height // 2
+        samples = [sheet.getpixel((213 + 426 * i, y)) for i in range(3)]
+    assert samples[0][0] > 180 and samples[0][1] < 60 and samples[0][2] < 60
+    assert samples[1][1] > 180 and samples[1][0] < 60 and samples[1][2] < 60
+    assert samples[2][2] > 180 and samples[2][0] < 60 and samples[2][1] < 60
+
+
+def test_contact_sheet_padding_does_not_change_single_frame_verifier_payload(
+        tmp_path, monkeypatch):
+    """The provider workaround is sheet-only; ordinary keyframe bytes stay byte-identical."""
+    from PIL import Image
+    from vidlore.clipstudio import llm
+
+    frame = tmp_path / "keyframe.jpg"
+    Image.new("RGB", (426, 240), (31, 73, 119)).save(frame, quality=91)
+    original = frame.read_bytes()
+    captured = {}
+
+    def answer(**kwargs):
+        captured.update(kwargs)
+        return ('{"matches_narration":false,"correct_subject_visible":false,'
+                '"wrong_subject_visible":false,"contradicts_narration":false,'
+                '"specific_enough":false,"quality_ok":true,"confidence":0.5,'
+                '"verdict":"replace","reason":"fixture"}', {"served": "fixture"})
+
+    monkeypatch.setattr(llm, "complete_ex", answer)
+    assert V.verify_frame(
+        frame, "A generic line.", "", "", [], NS(), multiframe=False) is not None
+    image_part = captured["messages"][0]["content"][0]
+    assert base64.b64decode(image_part["source"]["data"]) == original
+    assert frame.read_bytes() == original
+    prompt = captured["messages"][0]["content"][1]["text"]
+    assert "START -> MIDDLE -> END contact sheet" not in prompt
 
 
 def _seg(text: str, **kw):
@@ -256,6 +322,116 @@ def test_exact_repair_loop_does_not_rewrite_explicit_mismatch(tmp_path, monkeypa
     assert summary["failed"] == 1
     assert selection.verifier["verdict"] == "replace"
     assert V.FLAG_EXACT_MISSING in selection.flag_reasons
+
+
+def test_exact_keep_that_denies_required_subject_enters_repair_instead_of_stalling_gate(
+        tmp_path, monkeypatch):
+    """A self-contradictory vision reply is not a successful strict selection.
+
+    This exact shape aired in the 101-beat reproduction: Gemini said ``keep`` for a blade shot
+    while also saying Petyr Baelish was not visible.  Accepting the headline verdict stopped the
+    repair ladder, then the publication gate rejected the same explicit negative fact.
+    """
+    proj, segs, shot, cfg = _verify_fixture(tmp_path, P.EXACT)
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "0")
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_EXACT_CONTEXTUAL_DOWNGRADE", "0")
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_GENERIC_FILLER_DOWNGRADE", "0")
+    monkeypatch.setattr(V, "_shot_lookup", lambda _p: lambda sid, ix: shot)
+    contradictory_keep = {
+        "verdict": "keep", "matches_narration": True, "specific_enough": True,
+        "correct_subject_visible": False, "wrong_subject_visible": False,
+        "contradicts_narration": False, "quality_ok": True, "era_ok": True,
+        "confidence": 0.8,
+    }
+    monkeypatch.setattr(V, "verify_frame", lambda *a, **k: dict(contradictory_keep))
+
+    summary = V.verify_and_repair(
+        proj, segs, cfg, NS(anthropic_model="m", anthropic_key="k"), progress=None)
+
+    selection = proj.selections[0]
+    assert summary["failed"] == 1
+    assert selection.verifier["verdict"] == "replace"
+    assert "required subject" in selection.verifier["contract_rejected"]
+    assert V.FLAG_EXACT_MISSING in selection.flag_reasons
+
+
+def test_strict_promotion_refuses_keep_that_denies_required_subject(tmp_path, monkeypatch):
+    """The same contract applies to alternates; beat 7's bad window entered via promotion."""
+    from vidlore.clipstudio.models import ClipCandidate, Shot
+
+    proj, segs, primary, cfg = _verify_fixture(tmp_path, P.EXACT)
+    alt_frame = tmp_path / "alt.jpg"
+    alt_frame.write_bytes(b"\xff\xd8\xffalt")
+    alternate = Shot(source_id="s1", index=1, start=3.0, end=5.0,
+                     keyframe_path=str(alt_frame))
+    proj.selections[0].alternates = [ClipCandidate(
+        segment_index=0, source_id="s1", shot_index=1, score=0.9,
+        in_point=3.0, out_point=5.0)]
+    shots = {("s1", 0): primary, ("s1", 1): alternate}
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "0")
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_EXACT_CONTEXTUAL_DOWNGRADE", "0")
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_GENERIC_FILLER_DOWNGRADE", "0")
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_STRICT_NEIGHBORHOOD", "0")
+    monkeypatch.setattr(V, "_shot_lookup", lambda _p: lambda sid, ix: shots.get((sid, ix)))
+
+    def judge(frame, *_a, **_k):
+        if str(frame) == str(primary.keyframe_path):
+            return {**_EXPLICIT_MISMATCH, "contradicts_narration": False}
+        return {
+            "verdict": "keep", "matches_narration": True, "specific_enough": True,
+            "correct_subject_visible": False, "wrong_subject_visible": False,
+            "contradicts_narration": False, "quality_ok": True, "era_ok": True,
+            "confidence": 0.8,
+        }
+
+    monkeypatch.setattr(V, "verify_frame", judge)
+    summary = V.verify_and_repair(
+        proj, segs, cfg, NS(anthropic_model="m", anthropic_key="k"), progress=None)
+
+    assert summary["failed"] == 1
+    assert proj.selections[0].shot_index == 0, "internally contradictory alternate must not promote"
+    assert proj.selections[0].verifier["verdict"] == "replace"
+
+
+def test_contradictory_primary_keep_still_prefetches_strict_repair(
+        tmp_path, monkeypatch):
+    """The new keep contract must feed phase-2 scheduling as well as the serial decision."""
+    from vidlore.clipstudio.models import ClipCandidate, Shot
+
+    proj, segs, primary, cfg = _verify_fixture(tmp_path, P.EXACT)
+    alt_frame = tmp_path / "alt-prefetch.jpg"
+    alt_frame.write_bytes(b"\xff\xd8\xffalt")
+    alternate = Shot(source_id="s1", index=1, start=3.0, end=5.0,
+                     keyframe_path=str(alt_frame))
+    proj.selections[0].alternates = [ClipCandidate(
+        segment_index=0, source_id="s1", shot_index=1, score=0.9,
+        in_point=3.0, out_point=5.0)]
+    shots = {("s1", 0): primary, ("s1", 1): alternate}
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "0")
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", "2")
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_WINDOW_QC", "0")
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_STRICT_NEIGHBORHOOD", "0")
+    monkeypatch.setattr(V, "_shot_lookup", lambda _p: lambda sid, ix: shots.get((sid, ix)))
+    calls = []
+
+    def judge(frame, *_a, **_k):
+        calls.append((str(frame), threading.current_thread() is threading.main_thread()))
+        visible = str(frame) == str(alternate.keyframe_path)
+        return {
+            "verdict": "keep", "matches_narration": True, "specific_enough": True,
+            "correct_subject_visible": visible, "wrong_subject_visible": False,
+            "contradicts_narration": False, "quality_ok": True, "era_ok": True,
+            "confidence": 0.8,
+        }
+
+    monkeypatch.setattr(V, "verify_frame", judge)
+    summary = V.verify_and_repair(
+        proj, segs, cfg, NS(anthropic_model="m", anthropic_key="k"), progress=None,
+        materialize_promotions=False, persist_project=False)
+
+    alt_calls = [on_main for frame, on_main in calls if frame == str(alternate.keyframe_path)]
+    assert alt_calls == [False], "strict repair must be warmed in the worker pool, not paid serially"
+    assert summary["replaced"] == 1 and proj.selections[0].shot_index == 1
 
 
 def test_nonexact_contextual_leniency_is_preserved(tmp_path, monkeypatch):

@@ -165,8 +165,11 @@ class TestRungPrefetch(unittest.TestCase):
     def test_phase2_ask_set_replicates_serial_walk(self):
         src = (ROOT / "verify.py").read_text()
         seg = src.split("PHASE-2 RUNG PREFETCH")[1].split("for sel in proj.selections:")[0]
-        # only warmed-replace exact beats; slot consumed even when shotless (serial parity)
-        self.assertIn('str(_v0.get("verdict")) != "replace" or not _exP', seg)
+        # only exact beats that serial repair will enter: explicit replace OR a purported keep
+        # rejected by the strict publication facts; slot consumed even when shotless (parity)
+        self.assertIn('_primary_strict_reject = (', seg)
+        self.assertIn('not _exP or (str(_v0.get("verdict")) != "replace"', seg)
+        self.assertIn('and not _primary_strict_reject', seg)
         self.assertIn("slot consumed even when shotless", seg)
         # scene-affinity ordering mirrored, both rungs through _cached_verify_ctx
         self.assertIn("_scene_affinity_order(selP.alternates, segP, proj,", seg)
@@ -175,7 +178,8 @@ class TestRungPrefetch(unittest.TestCase):
         # strict alternates ask the same named-target question as the serial path, so cache keys
         # match and a generic keep cannot pre-empt a later target-visible candidate
         self.assertIn('_look_scope["on"] = True', seg)
-        self.assertIn('_v_w.get("target_visible") is True', seg)
+        self.assertIn('_strict_keep_rejection_reason(', seg)
+        self.assertIn('must_see=_look_w', seg)
         # its own kill-switch + abort on repeated transport failures
         self.assertIn("VIDLORE_CLIPSTUDIO_VERIFY_PREFETCH_RUNGS", seg)
         self.assertIn("VERIFIER_BREAKER_TRIP", seg)

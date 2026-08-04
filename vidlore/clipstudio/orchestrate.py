@@ -114,6 +114,12 @@ from datetime import datetime as _dt, timezone as _tz
 
 _PIPELINE_CKPT_VERSION = 2   # bump when a stage's semantics change so old checkpoints are ignored
 
+# Narrow semantic versions for stages whose code-level content gates are not otherwise represented
+# by their data/config inputs.  Keep these separate from _PIPELINE_CKPT_VERSION: changing a source
+# admission rule must replay backfill + match, but it must not throw away valid downloads/indexes.
+_MATCH_GATE_VERSION = "gatev3-wrong-installment-mixed-title"
+_BACKFILL_SIGNATURE_VERSION = "backfillv5-wrong-installment-mixed-title"
+
 
 def _sig(*parts) -> str:
     """Stable short signature of a stage's inputs (order-sensitive)."""
@@ -174,7 +180,7 @@ def _footage_stage_signatures(download_sig: str, sources, *, force_index: bool,
     # a fully checkpointed Resume can skip index + match and silently reuse words decoded under an
     # older vocabulary (or even another Whisper build).
     sig_index = _sig(download_sig, source_ids, bool(force_index), str(asr_signature or ""))
-    sig_match = _sig(sig_index, _seg_sig(segments), "gatev2-graphics")
+    sig_match = _sig(sig_index, _seg_sig(segments), _MATCH_GATE_VERSION)
     sig_cut = _sig(sig_match)
     sig_verify = _sig(sig_cut, bool(verify))
     return sig_index, sig_match, sig_cut, sig_verify, _sig(sig_verify)
@@ -331,7 +337,7 @@ def _backfill_input_signature(download_sig: str, segments, *, policy: str, max_s
         _semantic_fingerprint(_backfill_semantic_config(cfg)),
         _semantic_fingerprint(analysis),
         _semantic_fingerprint(_backfill_semantic_environment()),
-        "backfillv4-completion-aware-semantic-inputs",
+        _BACKFILL_SIGNATURE_VERSION,
     )
 
 
@@ -1276,6 +1282,23 @@ def _verifier_summary_error(summary) -> str:
             return "verifier_down"
         return "verifier_down_missing_or_malformed"
     return ""
+
+
+def _verifier_summary_is_global_outage(summary) -> bool:
+    """Whether a scoped verifier summary says the backend/batch itself is unusable.
+
+    A well-formed available batch with an explicit closed breaker may contain isolated per-beat
+    errors; those can be partitioned. Missing/malformed liveness, an unavailable provider, or an
+    open breaker means recovery would immediately spend more work against a dead dependency.
+    """
+    if not isinstance(summary, dict):
+        return True
+    if summary.get("available") is not True:
+        return True
+    if summary.get("verifier_down") is not False:
+        return True
+    errored = summary.get("errored")
+    return isinstance(errored, bool) or not isinstance(errored, int)
 
 
 def _load_conclusive_semantic_recovery_page(path: Path, *, request_id: str,
@@ -2922,6 +2945,58 @@ def _unverifiable_relevance_indices(audit: dict) -> set[int]:
     }
 
 
+_PERSISTENT_VERIFIER_TECHNICAL_PREFIXES = (
+    "verifier_absent", "verifier_error", "verifier_breaker", "verifier_unavailable",
+    "verdict_absent", "matches_narration_absent", "specific_enough_absent",
+    "quality_ok_absent", "wrong_subject_visible_absent",
+    "correct_subject_visible_absent", "target_visible_absent",
+    "verifier_evidence_absent", "verifier_evidence_schema_mismatch",
+    "verifier_evidence_model_mismatch", "verifier_evidence_mismatch",
+    "verifier_evidence_unrecomputable", "verifier_evidence_window_not_sampled",
+    "exact_verifier_evidence_not_strict", "exact_moving_verdict_was_downgraded",
+    "exact_moving_relevance_is_contextual",
+    # Quote location is a content requirement, but an uncertified/missing ASR generation is not
+    # evidence that the pool lacks the line.  It must be repaired, never acquired around/softened.
+    "exact_quote_pool_classification_indeterminate",
+    "exact_quote_selected_asr_provenance_invalid",
+)
+
+
+def _persistent_verifier_technical_indices(audit: dict) -> set[int]:
+    """Return blockers whose current facts are technically inconclusive, not content rejects.
+
+    A missing moving selection is intentionally a content/footage recovery problem even though
+    its verifier evidence is necessarily unrecomputable.  Everything else in this set has actual
+    selected bytes but lacks a current, schema-complete, provenance-bound judgment.  Such beats
+    stay blocked, while independent conclusive blockers may continue through bounded recovery.
+    """
+    out: set[int] = set()
+    for entry in (audit.get("blockers") or []):
+        reasons = [str(reason) for reason in (entry.get("reasons") or [])]
+        if any(reason.startswith(("selection_absent", "moving_source_absent"))
+               for reason in reasons):
+            continue
+        if any(reason.startswith(_PERSISTENT_VERIFIER_TECHNICAL_PREFIXES)
+               for reason in reasons):
+            out.add(int(entry.get("segment_index", -1)))
+    return out
+
+
+def _selection_relevance_audit_without(audit: dict, excluded: set[int]) -> dict:
+    """Copy an audit with selected blocker indices removed from its decision surface."""
+    excluded = {int(i) for i in excluded}
+    blockers = [
+        entry for entry in (audit.get("blockers") or [])
+        if int(entry.get("segment_index", -1)) not in excluded
+    ]
+    return {
+        **audit,
+        "blockers": blockers,
+        "blocked_count": len(blockers),
+        "status": "blocked" if blockers else "pass",
+    }
+
+
 def _strict_still_reply_schema_error(verdict, seg) -> str:
     """Validate a legacy-still reply before it can mutate persisted evidence.
 
@@ -2986,25 +3061,38 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
     if not audit.get("blockers"):
         return audit
 
-    initial_fp = _selection_relevance_retry_fingerprint(proj, segs, audit)
+    # Exhaustion is a CONTENT-generation concept. A current verifier/schema/provenance fault is a
+    # retryable technical blocker and must never be hidden by the marker that bounds downloads.
+    _initial_technical = _persistent_verifier_technical_indices(audit)
+    _initial_content_audit = _selection_relevance_audit_without(audit, _initial_technical)
+    initial_fp = _selection_relevance_retry_fingerprint(proj, segs, _initial_content_audit)
     previous = (getattr(proj, "meta", {}) or {}).get("selection_relevance_recovery") or {}
     _same_recovery_generation = previous.get("post_fingerprint") == initial_fp
     _current_initial_blockers = {
-        int(e.get("segment_index", -1)) for e in (audit.get("blockers") or [])}
+        int(e.get("segment_index", -1))
+        for e in (_initial_content_audit.get("blockers") or [])}
     _pending_deferred = [int(i) for i in (previous.get("deferred") or [])
                          if str(i).lstrip("-").isdigit()
                          and int(i) in _current_initial_blockers]
-    if _same_recovery_generation and not _pending_deferred:
+    _content_generation_exhausted = _same_recovery_generation and not _pending_deferred
+    if _content_generation_exhausted and not _initial_technical:
         log(f"semantic-recovery: unchanged content failure already exhausted for "
-            f"{audit['blocked_count']} beat(s) — skipping duplicate download/verification")
+            f"{_initial_content_audit['blocked_count']} beat(s) — skipping duplicate "
+            "download/verification")
         return audit
     if _same_recovery_generation and _pending_deferred:
         log(f"semantic-recovery: continuing {len(_pending_deferred)} audited deferred blocker(s) "
             f"from the prior bounded round {_pending_deferred}")
+    elif _content_generation_exhausted and _initial_technical:
+        log("semantic-recovery: content lane is unchanged/exhausted; retrying only the "
+            f"technically inconclusive beat(s) {sorted(_initial_technical)}")
 
-    before = sorted(int(e["segment_index"]) for e in audit["blockers"])
-    log(f"semantic-recovery: publication contract blocked {len(before)} beat(s) {before}; "
-        f"running one scoped strict recovery chance (no policy downgrade)")
+    before = sorted(_current_initial_blockers)
+    _all_initial_blockers = sorted(
+        int(e["segment_index"]) for e in (audit.get("blockers") or []))
+    log(f"semantic-recovery: publication contract blocked {len(_all_initial_blockers)} "
+        f"beat(s) {_all_initial_blockers}; content lane={before}, "
+        f"technical lane={sorted(_initial_technical)} (no policy downgrade)")
     backend_down = False
 
     # Legacy source/web stills may be genuinely correct but predate persisted actual-image evidence.
@@ -3014,7 +3102,9 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
     image_blockers = {
         int(e["segment_index"]) for e in audit.get("blockers") or []
         if any(str(r).startswith("invalid_still:") for r in (e.get("reasons") or []))
-    }
+    } - _initial_technical
+    if _content_generation_exhausted:
+        image_blockers.clear()
     if image_blockers:
         from . import verify as _verify_img_sr
         from . import policy as _policy_img_sr
@@ -3074,6 +3164,7 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
     # Missing/old evidence can be repaired without changing selection order. Explicit `false` facts
     # never enter this branch; they require genuinely different footage.
     unverified = _unverifiable_relevance_indices(audit)
+    _scoped_verify_error = ""
     if unverified:
         try:
             from . import verify as _verify_sr
@@ -3081,22 +3172,33 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
                 proj, segs, cfg, eng, only_indices=unverified, progress=None)
             _scoped_verify_error = _verifier_summary_error(result)
             if _scoped_verify_error:
-                raise PipelineError(
-                    f"semantic scoped re-verification was inconclusive: "
-                    f"{_scoped_verify_error}")
+                if _verifier_summary_is_global_outage(result):
+                    raise PipelineError(
+                        "semantic scoped re-verification was globally inconclusive: "
+                        f"{_scoped_verify_error}")
+                log("semantic-recovery: scoped reverify had isolated technical error(s) for "
+                    f"{sorted(unverified)} ({_scoped_verify_error}); continuing independent "
+                    "content blockers through bounded recovery")
+            else:
+                log(f"semantic-recovery: scoped reverify completed for {sorted(unverified)}")
             proj.save()
-            log(f"semantic-recovery: scoped reverify completed for {sorted(unverified)}")
-        except (_verify_sr.VisionBackendError, PipelineError):
+        except PipelineError:
             raise
+        except _verify_sr.VisionBackendError as exc:
+            raise PipelineError(
+                "semantic scoped re-verification backend failed globally: "
+                f"{type(exc).__name__}: {exc}") from exc
         except Exception as exc:                         # noqa: BLE001 — retryable technical stop
             raise PipelineError(
-                f"semantic scoped re-verification failed: {type(exc).__name__}: {exc}") from exc
+                "semantic scoped re-verification failed before a partitionable summary: "
+                f"{type(exc).__name__}: {exc}") from exc
 
     audit = _R_sr.evaluate_selection_relevance(
         proj, segs, cfg=cfg, quote_pool_cache=_quote_pool_cache_sr)
+    _persistent_technical = _persistent_verifier_technical_indices(audit)
     if unverified:
         _still_unverifiable = sorted(
-            set(unverified) & _unverifiable_relevance_indices(audit))
+            set(unverified) & _persistent_technical)
         if _still_unverifiable:
             _remaining_facts = {
                 int(_entry.get("segment_index", -1)): list(_entry.get("reasons") or [])
@@ -3106,10 +3208,27 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
             # A nominally successful verifier batch can still contain a fresh malformed KEEP. It
             # is correctly absent from the verdict cache, but it is not content evidence and must
             # not send the beat into acquisition/softening as though footage had been rejected.
-            raise PipelineError(
-                "semantic scoped re-verification remained technically inconclusive for "
-                f"beat(s) {_still_unverifiable}: missing/schema evidence {_remaining_facts}")
-    blockers = {int(e["segment_index"]) for e in audit.get("blockers") or []}
+            log("semantic-recovery: scoped re-verification remained technically inconclusive for "
+                f"beat(s) {_still_unverifiable}: missing/schema evidence {_remaining_facts}; "
+                "excluding them from content exhaustion and softening")
+
+    # Recompute the bounded content generation after scoped reverify. A technical beat can become a
+    # conclusive reject here; that newly typed content blocker earns the same one bounded recovery
+    # page as any other. Conversely, persistent technical beats are absent from the fingerprint.
+    _content_audit = _selection_relevance_audit_without(audit, _persistent_technical)
+    _current_content_blockers = {
+        int(e.get("segment_index", -1)) for e in (_content_audit.get("blockers") or [])}
+    before = sorted(set(before) | _current_content_blockers)
+    _content_fp = _selection_relevance_retry_fingerprint(proj, segs, _content_audit)
+    _same_recovery_generation = previous.get("post_fingerprint") == _content_fp
+    _pending_deferred = [int(i) for i in (previous.get("deferred") or [])
+                         if str(i).lstrip("-").isdigit()
+                         and int(i) in _current_content_blockers]
+    _content_generation_exhausted = _same_recovery_generation and not _pending_deferred
+    if _content_generation_exhausted and _current_content_blockers:
+        log("semantic-recovery: current content generation is already exhausted for beat(s) "
+            f"{sorted(_current_content_blockers)}; technical beats will still fail closed")
+    blockers = (set() if _content_generation_exhausted else set(_current_content_blockers))
     _recovery_deferred: list[int] = []
     _page_pool_changed = False
     _completed_page_scope: set[int] = set()
@@ -3177,7 +3296,11 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
         # subset keeps the second still pass from decorating/changing any already-approved beat.
         audit = _R_sr.evaluate_selection_relevance(
             proj, segs, cfg=cfg, quote_pool_cache=_quote_pool_cache_sr)
-        blockers = {int(e["segment_index"]) for e in audit.get("blockers") or []}
+        _technical_after_page = _persistent_verifier_technical_indices(audit)
+        _content_after_page = _selection_relevance_audit_without(
+            audit, _technical_after_page)
+        blockers = {
+            int(e["segment_index"]) for e in (_content_after_page.get("blockers") or [])}
         if _page_pool_changed:
             # The page's own scoped beats were rematched after its downloads/indexing. Every prior
             # blocker outside that page was transactionally restored, so it has never seen the new
@@ -3226,14 +3349,16 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
     # is immediately re-evaluated below; softening never bypasses it.
     pre_soften = _R_sr.evaluate_selection_relevance(
         proj, segs, cfg=cfg, quote_pool_cache=_quote_pool_cache_sr)
-    _pre_soften_for_ladder = pre_soften
-    if _recovery_deferred:
+    _pre_soften_technical = _persistent_verifier_technical_indices(pre_soften)
+    _pre_soften_for_ladder = _selection_relevance_audit_without(
+        pre_soften, _pre_soften_technical)
+    if _recovery_deferred or _content_generation_exhausted:
         # Keep this generation-wide too. A deferred tail may acquire footage for an already-tried
         # head, so softening even that head before the tail runs would erase the very blocker that
         # needs to be reconsidered against the expanded pool.
         _ladder_blockers = []
         _pre_soften_for_ladder = {
-            **pre_soften,
+            **_pre_soften_for_ladder,
             "blockers": _ladder_blockers,
             "blocked_count": len(_ladder_blockers),
             "status": "blocked" if _ladder_blockers else "pass",
@@ -3269,25 +3394,62 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
     final = _R_sr.evaluate_selection_relevance(
         proj, segs, cfg=cfg, quote_pool_cache=_quote_pool_cache_sr)
     _R_sr.write_selection_relevance_audit(audit_path, final)
-    after = sorted(int(e["segment_index"]) for e in final.get("blockers") or [])
+    _final_technical = _persistent_verifier_technical_indices(final)
+    _final_content = _selection_relevance_audit_without(final, _final_technical)
+    after = sorted(int(e["segment_index"]) for e in (_final_content.get("blockers") or []))
     _recovery_deferred = [i for i in _recovery_deferred if i in set(after)]
-    proj.meta["selection_relevance_recovery"] = {
-        "schema_version": _R_sr.SCHEMA_VERSION,
-        "before": before,
-        "after": after,
-        "post_fingerprint": _selection_relevance_retry_fingerprint(proj, segs, final),
-        "gap_softening": _gap_softening or {},
-        "deferred": _recovery_deferred,
-        "pool_fingerprint": _semantic_recovery_pool_fingerprint(proj),
-        "pool_changed_during_page": _page_pool_changed,
-        "completed_page_scope": sorted(_completed_page_scope),
-    }
+    _technical_details = [
+        {
+            "segment_index": int(entry.get("segment_index", -1)),
+            "reasons": list(entry.get("reasons") or []),
+        }
+        for entry in (final.get("blockers") or [])
+        if int(entry.get("segment_index", -1)) in _final_technical
+    ]
+    # Pure technical failure is not content exhaustion and creates no recovery marker. In a mixed
+    # run, the marker records only the content lane while retaining the technical lane separately
+    # for diagnosis; its before/after/fingerprint can therefore never suppress verifier retry.
+    if before or after or previous:
+        _marker = (dict(previous) if _content_generation_exhausted else {})
+        _marker.update({
+            "schema_version": _R_sr.SCHEMA_VERSION,
+            "before": ((list(_marker.get("before") or []))
+                       if _content_generation_exhausted and not before else before),
+            "after": after,
+            "post_fingerprint": _selection_relevance_retry_fingerprint(
+                proj, segs, _final_content),
+            "gap_softening": ((_marker.get("gap_softening") or {})
+                              if _content_generation_exhausted else (_gap_softening or {})),
+            "deferred": (_marker.get("deferred") or [])
+                        if _content_generation_exhausted else _recovery_deferred,
+            "pool_fingerprint": _semantic_recovery_pool_fingerprint(proj),
+            "pool_changed_during_page": (
+                bool(_marker.get("pool_changed_during_page"))
+                if _content_generation_exhausted else _page_pool_changed),
+            "completed_page_scope": (
+                list(_marker.get("completed_page_scope") or [])
+                if _content_generation_exhausted else sorted(_completed_page_scope)),
+            "technical_blockers": _technical_details,
+        })
+        proj.meta["selection_relevance_recovery"] = _marker
     proj.save()
     if after:
-        log(f"semantic-recovery: {len(after)} beat(s) still fail positive semantic evidence "
-            f"{after}; stopping before render")
-    else:
+        log(f"semantic-recovery: {len(after)} content beat(s) still fail positive semantic "
+            f"evidence {after}; stopping before render")
+    elif not _technical_details:
         log("semantic-recovery: publication contract CLEAR after scoped strict recovery")
+    if _technical_details:
+        _technical_indices = sorted(_final_technical)
+        _technical_reasons = {
+            int(entry["segment_index"]): list(entry.get("reasons") or [])
+            for entry in _technical_details
+        }
+        _summary = (f"; verifier summary/error: {_scoped_verify_error}"
+                    if _scoped_verify_error else "")
+        raise PipelineError(
+            "semantic scoped re-verification remained technically inconclusive for "
+            f"beat(s) {_technical_indices}: missing/schema evidence {_technical_reasons}"
+            f"{_summary}; independent content recovery was saved")
     return final
 
 

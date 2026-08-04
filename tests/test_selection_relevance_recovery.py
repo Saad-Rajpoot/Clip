@@ -83,6 +83,31 @@ def _fixture(tmp_path, verifier):
     return proj, [seg], sel
 
 
+def _append_bound_rejected_beat(proj, segs, *, index=1):
+    seg = ScriptSegment(
+        index=index, text="The crown lies on the table.",
+        expected_visual="the royal crown resting on the council table",
+        required_entity="royal crown", required_kind="object",
+        scene_query="Game of Thrones royal crown council table",
+        visual_policy=P.EXACT, is_specific_claim=True)
+    rejected = {
+        **GOOD, "verdict": "replace", "matches_narration": False,
+        "specific_enough": False, "correct_subject_visible": False,
+    }
+    sel = ClipSelection(
+        segment_index=index, source_id="s1", shot_index=0,
+        in_point=0.0, out_point=2.0, confidence=0.7, verifier=dict(rejected))
+    shot = Shot.from_dict(json.loads(proj.shots_path("s1").read_text())[0])
+    V.bind_selection_verifier_evidence(
+        proj, sel, seg, sel.verifier, shot=shot,
+        model="vision", is_specific=True, multiframe=True,
+        faceid_names=[], era="", must_see="")
+    segs.append(seg)
+    proj.segments = list(segs)
+    proj.selections.append(sel)
+    return seg, sel, shot
+
+
 def _call(proj, segs):
     return O._retry_selection_relevance(
         proj, segs, ClipConfig(), SimpleNamespace(movie_title="Game of Thrones"),
@@ -310,6 +335,20 @@ def test_absent_moving_source_does_not_enter_impossible_scoped_reverify():
     assert O._unverifiable_relevance_indices(audit) == set()
 
 
+def test_persistent_technical_partition_keeps_missing_footage_in_content_lane():
+    audit = {"blockers": [
+        {
+            "segment_index": 11,
+            "reasons": ["verifier_evidence_mismatch", "matches_narration_false"],
+        },
+        {
+            "segment_index": 12,
+            "reasons": ["moving_source_absent", "verifier_evidence_unrecomputable"],
+        },
+    ]}
+    assert O._persistent_verifier_technical_indices(audit) == {11}
+
+
 @pytest.mark.parametrize("summary,expected_reason", INCONCLUSIVE_VERIFY_SUMMARIES)
 def test_missing_evidence_inconclusive_summary_is_retryable_before_recovery(
         tmp_path, summary, expected_reason):
@@ -357,6 +396,106 @@ def test_success_summary_with_fresh_malformed_keep_is_retryable_before_recovery(
     stills.assert_not_called()
     ladder.assert_not_called()
     assert "selection_relevance_recovery" not in proj.meta
+
+
+def test_isolated_error_summary_does_not_override_a_clear_final_audit(tmp_path):
+    """The final current facts, not a historical batch count, decide technical failure."""
+    proj, segs, sel = _fixture(tmp_path, {"status": "ok", "verdict": "keep"})
+
+    def repair_then_report_isolated_error(
+            _proj, _segs, _cfg, _eng, *, only_indices, progress):
+        assert only_indices == {0}
+        sel.verifier = dict(GOOD)
+        V.bind_selection_verifier_evidence(
+            proj, sel, segs[0], sel.verifier, model="vision", is_specific=True,
+            multiframe=True, faceid_names=[], era="", must_see="")
+        return {"available": True, "errored": 1, "verifier_down": False}
+
+    with mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                    side_effect=repair_then_report_isolated_error), \
+            mock.patch.object(O, "_recover_unresolved_beats") as recover, \
+            mock.patch.object(O, "_fill_image_fallbacks") as images, \
+            mock.patch("vidlore.clipstudio.selfheal.heal_selection_relevance_gaps") as ladder:
+        audit = _call(proj, segs)
+
+    assert audit["status"] == "pass"
+    recover.assert_not_called()
+    images.assert_not_called()
+    ladder.assert_not_called()
+
+
+def test_global_verifier_outage_aborts_before_independent_content_recovery(tmp_path):
+    """Partitioning is for isolated beat errors, never permission to spend against a dead backend."""
+    proj, segs, _technical_sel = _fixture(
+        tmp_path, {"status": "ok", "verdict": "keep"})
+    _append_bound_rejected_beat(proj, segs)
+    outage = {"available": True, "errored": 0, "verifier_down": True}
+
+    with mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                    return_value=outage) as verifier, \
+            mock.patch.object(O, "_recover_unresolved_beats") as recover, \
+            mock.patch.object(O, "_fill_image_fallbacks") as images, \
+            mock.patch("vidlore.clipstudio.selfheal.heal_selection_relevance_gaps") as ladder:
+        with pytest.raises(O.PipelineError, match="globally inconclusive: verifier_down"):
+            _call(proj, segs)
+
+    assert verifier.call_args.kwargs["only_indices"] == {0}
+    recover.assert_not_called()
+    images.assert_not_called()
+    ladder.assert_not_called()
+    assert "selection_relevance_recovery" not in proj.meta
+
+
+def test_technical_beat_fails_closed_after_independent_content_recovery_is_saved(tmp_path):
+    """One verifier fault must not abort a conclusive recovery for another beat."""
+    proj, segs, _technical_sel = _fixture(
+        tmp_path, {"status": "ok", "verdict": "keep"})
+    content_seg, content_sel, shot = _append_bound_rejected_beat(proj, segs)
+
+    def recover_content(_proj, _segs, _analysis, _cfg, _eng, **kw):
+        assert kw["only_indices"] == {1}, (
+            "the technically inconclusive beat must never enter content recovery")
+        _write_mock_recovery_page(_proj, kw)
+        content_sel.verifier = dict(GOOD)
+        V.bind_selection_verifier_evidence(
+            proj, content_sel, content_seg, content_sel.verifier, shot=shot,
+            model="vision", is_specific=True, multiframe=True,
+            faceid_names=[], era="", must_see="")
+        return 1
+
+    inconclusive = {"available": True, "errored": 1, "verifier_down": False}
+    env = {
+        "VIDLORE_CLIPSTUDIO_IMAGE_FALLBACK": "0",
+        "VIDLORE_CLIPSTUDIO_SELFHEAL": "1",
+        "VIDLORE_CLIPSTUDIO_SELFHEAL_SOFTEN": "1",
+    }
+    with mock.patch.dict(os.environ, env), \
+            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                       return_value=inconclusive) as verifier, \
+            mock.patch.object(O, "_recover_unresolved_beats",
+                              side_effect=recover_content) as recover, \
+            mock.patch.object(O, "_fill_image_fallbacks") as images, \
+            mock.patch("vidlore.clipstudio.selfheal.heal_selection_relevance_gaps") as ladder:
+        for _attempt in range(2):
+            with pytest.raises(
+                    O.PipelineError, match=r"beat\(s\) \[0\].*verifier_errored:1"):
+                _call(proj, segs)
+
+    assert verifier.call_count == 2, (
+        "the content exhaustion marker must never suppress a fresh technical retry")
+    assert verifier.call_args.kwargs["only_indices"] == {0}
+    recover.assert_called_once(), "the already repaired content beat must remain bounded"
+    images.assert_not_called()
+    ladder.assert_not_called()
+    assert content_sel.verifier["matches_narration"] is True, (
+        "the independent conclusive content repair must survive the final technical failure")
+    final_audit = json.loads(
+        (proj.output_dir / "selection_relevance_audit.json").read_text())
+    assert [entry["segment_index"] for entry in final_audit["blockers"]] == [0]
+    marker = proj.meta["selection_relevance_recovery"]
+    assert marker["before"] == [1]
+    assert marker["after"] == []
+    assert [entry["segment_index"] for entry in marker["technical_blockers"]] == [0]
 
 
 def test_explicit_negative_skips_duplicate_reverify_and_recovers_only_blocker(tmp_path):

@@ -743,18 +743,27 @@ def _wrong_installment(target_title: str, candidate_title: str) -> bool:
     """True if candidate_title declares a DIFFERENT installment of target_title's franchise.
 
     Catches sibling-show contamination that survives every other gate because the clip is
-    'right world, wrong production'. Self-references are excluded: a HotD-target never rejects
-    HotD, and the GoT pattern is only consulted when GoT is the target."""
+    'right world, wrong production'.  The target itself must name one unambiguous installment;
+    a cross-franchise comparison target is left alone because this helper cannot infer which side
+    owns the requested pixels.  Candidate titles get no such exemption: naming both installments
+    is evidence of a comparison/timeline/mixed-source upload, not clean footage from the target.
+
+    This distinction closes the measured ``House Of The Dragon ... timeline in Game Of Thrones``
+    leak.  The former ``if show in candidate`` shortcut treated the trailing target-show credit as
+    proof that every frame belonged to that show, even though the title led with the sibling show.
+    """
     tl = (target_title or "").lower()
     cl = (candidate_title or "").lower()
     for show, rx in _WRONGSHOW_SIBLINGS.items():
-        if show not in tl or not rx.search(cl):
+        if show not in tl:
             continue
-        # Don't reject a clip that ALSO names the target show — it's a self/comparison reference
-        # ("GoT vs House of the Dragon"), and the target's own footage may well be in it.
-        if show in cl:
+        # An analysis explicitly covering both installments is not a single-show target.  Refuse to
+        # guess which sibling is "wrong" in that uncommon case; downstream semantic verification
+        # still owns individual frame relevance.
+        if rx.search(tl):
             continue
-        return True
+        if rx.search(cl):
+            return True
     return False
 
 

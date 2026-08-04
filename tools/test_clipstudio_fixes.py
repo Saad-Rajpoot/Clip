@@ -1697,9 +1697,13 @@ def test_image_fallback():
     check("wrong-show guard rejects franchise sibling (HotD in a GoT video)",
           _wrong_installment("Game of Thrones", "House of the Dragon - Aegon II coronation") is True
           and _wrong_installment("Game of Thrones", "A Knight of the Seven Kingdoms") is True)
-    check("wrong-show guard keeps real target footage + comparison videos",
+    check("wrong-show guard keeps target footage; mixed candidates need a mixed target",
           _wrong_installment("Game of Thrones", "Game of Thrones S1 Robert & Cersei") is False
-          and _wrong_installment("Game of Thrones", "Game of Thrones vs House of the Dragon") is False)
+          and _wrong_installment(
+              "Game of Thrones", "Game of Thrones vs House of the Dragon") is True
+          and _wrong_installment(
+              "Game of Thrones vs House of the Dragon",
+              "Game of Thrones vs House of the Dragon") is False)
     check("wrong-show guard is symmetric (GoT clips rejected for a HotD video)",
           _wrong_installment("House of the Dragon", "Game of Thrones S3 Red Wedding") is True
           and _wrong_installment("House of the Dragon", "House of the Dragon - Rhaenyra") is False)
@@ -2398,7 +2402,8 @@ def test_generic_beat_filler_leniency():
     vsrc = (Path(__file__).resolve().parent.parent / "vidlore" / "clipstudio" /
             "verify.py").read_text(encoding="utf-8")
     check("verify_frame prompt distinguishes specific vs generic",
-          "is_specific" in vsrc and "GENERIC narration line" in vsrc and "Be STRICT" in vsrc)
+          "is_specific" in vsrc and "GENERIC or CHARACTER-GENERAL narration line" in vsrc
+          and "Be STRICT" in vsrc)
 
 
 def test_dark_patch_prepass():

@@ -227,7 +227,7 @@ PROMPT_VERSION = "v9-2026-08"           # strict/exact prompt remains byte-ident
 LENIENT_PROMPT_VERSION = "v10-2026-08"  # policy-typed generic/character/venue question
 # Bump when the contact-sheet SAMPLING changes (frame count/positions/layout). The sheet is the
 # image the verifier judges, so a different sampling is a different question even for the same shot.
-SHEET_VERSION = "sheet-v2-selected-window-15-50-85"
+SHEET_VERSION = "sheet-v3-selected-window-15-50-85-max4x1"
 # A persisted positive verdict is not publication evidence until it is bound to the selection that
 # will air.  The verdict-cache fingerprint identifies the vision QUESTION; this schema adds the
 # selected source/shot/trim tuple so a later project.json mutation cannot carry a stale `keep` onto
@@ -632,6 +632,9 @@ def _beat_era(seg, global_era: str, single_scene: bool, *, global_verified: bool
                          anchor_eras=anchor_eras)
 
 
+_CONTACT_SHEET_MAX_ASPECT = 4
+
+
 def _action_contact_sheet(src_path: str, shot_start: float, shot_end: float, dest: Path):
     """Build a 15% -> 50% -> 85% sheet from the exact selected source window.
 
@@ -672,6 +675,17 @@ def _action_contact_sheet(src_path: str, shot_start: float, shot_end: float, des
         x = 0
         for im in ims:
             sheet.paste(im, (x, 0)); x += im.width
+        # Three 16:9 frames make a 5.33:1 strip. Gemini can reject particular strips at prompt
+        # admission with ``BlockedReason.OTHER`` and zero candidates even though every source
+        # frame is valid (measured beat 65). Preserve all START/MIDDLE/END pixels and their
+        # left-to-right order; add only a neutral letterbox so the provider accepts the same
+        # multiframe evidence. Falling back to one frame would weaken the exact-action gate.
+        min_h = (sheet.width + _CONTACT_SHEET_MAX_ASPECT - 1) // \
+            _CONTACT_SHEET_MAX_ASPECT
+        if sheet.height < min_h:
+            padded = Image.new("RGB", (sheet.width, min_h), (16, 16, 16))
+            padded.paste(sheet, (0, (min_h - sheet.height) // 2))
+            sheet = padded
         sheet.save(dest, quality=88)
     except Exception:
         dest = None
@@ -807,6 +821,40 @@ def _exact_positive_evidence_ok(vd, seg=None, source_title: str = "", char2actor
     if seg is not None and _contradiction_reason(seg, vd, source_title, char2actor):
         return False
     return True
+
+
+def _strict_keep_rejection_reason(vd, seg=None, source_title: str = "", char2actor=None,
+                                  *, must_see: str = "") -> str:
+    """Return why a purported strict ``keep`` cannot satisfy the publication contract.
+
+    The verifier asks for all of these facts in one response.  Consuming only its top-level
+    ``verdict`` let internally contradictory answers through repair (the measured case said
+    ``verdict=keep`` while also saying ``correct_subject_visible=false``), so the expensive repair
+    ladder stopped on footage the final relevance gate was guaranteed to reject.  Keep this
+    predicate aligned with ``relevance_contract.evaluate_selection_relevance``: every positive
+    promise must be explicit, while an absent ``era_ok`` remains unknown-but-not-disproven exactly
+    as the publication gate defines it.
+    """
+    if not isinstance(vd, dict) or vd.get("verdict") != "keep":
+        return "verifier did not return keep"
+    for field in ("matches_narration", "specific_enough", "quality_ok"):
+        if vd.get(field) is not True:
+            return f"{field} is not positively true"
+    if vd.get("wrong_subject_visible") is not False:
+        return "wrong_subject_visible is not explicitly false"
+    if str(getattr(seg, "required_entity", "") or "").strip() \
+            and vd.get("correct_subject_visible") is not True:
+        return "required subject is not positively visible"
+    contradiction = _contradiction_reason(seg, vd, source_title, char2actor) if seg is not None \
+        else ("vision verifier explicitly marked a contradiction"
+              if vd.get("contradicts_narration") is True else "")
+    if contradiction:
+        return contradiction
+    if vd.get("era_ok") is False:
+        return "era_ok is false"
+    if str(must_see or "").strip() and vd.get("target_visible") is not True:
+        return f"instructed look target {must_see!r} is not positively visible"
+    return ""
 
 
 def _exact_contextual_ok(vd, seg=None, source_title: str = "", char2actor=None) -> bool:
@@ -1886,8 +1934,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
 
         # PHASE-2 RUNG PREFETCH (the unimplemented half of prior-audit OPT-3) — the repair
         # chain's ~450-600 vision calls stayed SERIAL even with phase-1 on (measured ~17-20
-        # min: 146/202 beats entered repair). For every beat whose warmed PRIMARY verdict is
-        # 'replace' and that is EXACT, warm the questions the serial loop will provably ask:
+        # min: 146/202 beats entered repair). For every EXACT beat whose warmed PRIMARY verdict
+        # will enter repair (an explicit ``replace`` OR a self-contradictory ``keep`` rejected by
+        # the strict publication facts), warm the questions the serial loop will provably ask:
         #   (a) the strict-promotion rung over the first max_replacements alternates in the
         #       exact serial order (_scene_affinity_order when enabled), including the SAME
         #       named-look-target question the serial strict promotion asks; a slot-consuming
@@ -1920,7 +1969,13 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                             must_see=_must_see(segP))
                         and _hit_provider_ok(_v0, _vmodel)):
                     continue                             # primary not warm → serial pays as today
-                if str(_v0.get("verdict")) != "replace" or not _exP:
+                _primary_strict_reject = (
+                    _strict_keep_rejection_reason(
+                        _v0, segP, _src_title_of(selP), _char2actor,
+                        must_see=_must_see(segP))
+                    if _exP and str(_v0.get("verdict")) == "keep" else "")
+                if (not _exP or (str(_v0.get("verdict")) != "replace"
+                                 and not _primary_strict_reject)):
                     continue
                 _altsP = selP.alternates
                 if _aff_on2:
@@ -1995,8 +2050,11 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                                                  _a.face_ids or [], _win_a,
                                                  rung="strict_promote")
                     _look_w = _must_see(_s)
-                    if (_v_w is not None and str(_v_w.get("verdict")) == "keep"
-                            and (not _look_w or _v_w.get("target_visible") is True)):
+                    _src_w = proj.source(getattr(_a, "source_id", "") or "")
+                    _title_w = ((getattr(_src_w, "title", "") or "") + " "
+                                + (getattr(_a, "source_id", "") or ""))
+                    if (_v_w is not None and not _strict_keep_rejection_reason(
+                            _v_w, _s, _title_w, _char2actor, must_see=_look_w)):
                         # the serial loop may still refuse this alternate on the reuse cap or
                         # window-QC and walk on — then the next alternate is simply unwarmed and
                         # asked fresh, which is today's behaviour for anything not prefetched
@@ -2165,14 +2223,13 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         if _primary_conflict:
             v["contradicts_narration"] = True
             v["contradiction_reason"] = _primary_conflict
-        if _exact and v.get("verdict") == "keep" and (
-                v.get("matches_narration") is False
-                or v.get("specific_enough") is False
-                or bool(_primary_conflict)):
+        _primary_contract_rejection = (
+            _strict_keep_rejection_reason(
+                v, seg, _src_title_of(sel), _char2actor, must_see=_must_see(seg))
+            if _exact and v.get("verdict") == "keep" else "")
+        if _primary_contract_rejection:
             v["verdict"] = "replace"
-            v["contract_rejected"] = (
-                _primary_conflict or
-                "exact footage lacks positive narration-match/specificity evidence")
+            v["contract_rejected"] = _primary_contract_rejection
         # NON-EXACT LENIENCY (user rule: exact clip only for a SPECIFIC scene; a relevant FILLER is
         # fine for generic/character/abstract beats). Don't replace an on-topic, right-subject clip on
         # a non-exact beat just because it isn't the exact scene — only off-topic / wrong-character.
@@ -2301,11 +2358,12 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     if downgrade:
                         _accept = _exact_contextual_ok(av, seg, _atitle, _char2actor)
                     else:
+                        _strict_reject = (_strict_keep_rejection_reason(
+                            av, seg, _atitle, _char2actor, must_see=_alt_must_see)
+                            if _exact else "")
                         _accept = (av.get("verdict") == "keep" and not _aconflict
-                                   and not (_exact and (
-                                       av.get("matches_narration") is False
-                                       or av.get("specific_enough") is False))
-                                   and (not _alt_must_see
+                                   and not _strict_reject
+                                   and (not _exact or not _alt_must_see
                                         or av.get("target_visible") is True))
                     if not _accept:
                         # an explicit non-keep judgment (av None = transport error, handled above)
