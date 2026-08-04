@@ -3424,6 +3424,17 @@ def _owned_native_still_recovery_candidate(meta: dict, invalid_reasons) -> bool:
         and list(invalid_reasons or []))
 
 
+def _raise_semantic_recovery_failure(original_error, recovery_error, log) -> None:
+    """Preserve typed repair failures; only unknown plumbing faults restore the original gate."""
+    from .verify import NonRetryableBuildError, VisionBackendError
+
+    if isinstance(recovery_error, (NonRetryableBuildError, VisionBackendError, PipelineError)):
+        raise recovery_error
+    log(f"semantic-recovery: technical failure ({type(recovery_error).__name__}: "
+        f"{str(recovery_error)[:100]}); original publication block preserved")
+    raise original_error
+
+
 def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, refs,
                                roster, policy, log) -> dict:
     """One scoped, strictly-positive repair chance after the publication contract blocks.
@@ -3921,6 +3932,7 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
                 not in ("0", "false", "no")
                 and _os_gap.environ.get("VIDLORE_CLIPSTUDIO_SELFHEAL_SOFTEN", "1")
                 .strip().lower() not in ("0", "false", "no")):
+            from .verify import NonRetryableBuildError as _GapNonRetryable
             try:
                 from . import selfheal as _selfheal_gap
                 _gap_softening = _selfheal_gap.heal_selection_relevance_gaps(
@@ -3934,6 +3946,10 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
                     log(f"semantic-gap: specificity ladder softened "
                         f"{_gap_softening.get('softened_count', 0)}/"
                         f"{_gap_softening.get('candidate_count', 0)} exhausted gap beat(s)")
+            except _GapNonRetryable:
+                # A scene-lineage/native-owner invariant is deterministic content/build failure;
+                # relabelling it PipelineError would make unchanged Resume attempts loop forever.
+                raise
             except Exception as exc:                     # noqa: BLE001 — retryable technical stop
                 # The ladder owns a transaction that restores the exact beat/selection state before
                 # re-raising. Do not convert that technical failure into a content exhaustion marker:
@@ -4742,12 +4758,8 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
             _retry_selection_relevance(
                 proj, segs, cfg, analysis, eng, faceid_obj=faceid_obj, refs=refs,
                 roster=roster, policy=policy, log=log)
-        except (_verify.VisionBackendError, PipelineError):
-            raise                                    # retryable technical failure, no bypass
         except Exception as _se:                     # technical repair fault cannot bypass gate
-            log(f"semantic-recovery: technical failure ({type(_se).__name__}: "
-                f"{str(_se)[:100]}); original publication block preserved")
-            raise _original_error
+            _raise_semantic_recovery_failure(_original_error, _se, log)
 
         # A completed semantic page is the same scoped transaction as stage 8a, only later in the
         # pipeline. It may have added an unusable-but-indexed source while retaining an audited

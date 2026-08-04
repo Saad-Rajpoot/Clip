@@ -885,6 +885,8 @@ def _strictly_confirm_concrete_still(proj, seg, sel, eng, *,
     question before claiming recovery succeeded; otherwise a lenient contextual still can silently
     bypass the relevance contract before or after policy softening.
     """
+    from .verify import NonRetryableBuildError
+
     path = str(getattr(sel, "image_path", "") or "")
     if not path or not Path(path).is_file():
         if require_conclusive:
@@ -899,6 +901,71 @@ def _strictly_confirm_concrete_still(proj, seg, sel, eng, *,
         analysis = (getattr(proj, "meta", {}) or {}).get("analysis", {}) or {}
         era = str(analysis.get("episode_hint", "") or "")
         exact = P.policy_of(seg) == P.EXACT
+        meta = dict(getattr(sel, "image_meta", {}) or {})
+        owned_source_frame = bool(
+            str(meta.get("source", "") or "") in ("source-frame", "source-frame-recovery")
+            and str(meta.get("src", "") or "") and meta.get("shot") is not None)
+        if owned_source_frame:
+            # Index keyframes are search thumbnails (normally 512x288).  The real-scale ladder
+            # found sixteen correct Jaime candidates, then rejected every one for thumbnail size
+            # before build's existing native-owner lane could run.  Materialize the exact indexed
+            # midpoint from its source now and freshly judge those native pixels; thumbnail verdicts
+            # are never transferred, native-HD is still mandatory, and lineage stays hash-bound.
+            from .build import _rescue_still_fullres
+            from .verify import VisionBackendError
+            try:
+                rescue = _rescue_still_fullres(
+                    proj, sel, path, lambda _message: None, seg=seg, eng=eng,
+                    allow_semantic_reject=True, refresh_semantic_verdict=True)
+            except NonRetryableBuildError as exc:
+                if str(getattr(exc, "kind", "") or "") in (
+                        "selection_relevance", "native_resolution"):
+                    return False, str(exc)
+                raise
+            except VisionBackendError as exc:
+                if require_conclusive:
+                    raise InconclusiveStillVerificationError(
+                        int(getattr(seg, "index", -1)),
+                        "native concrete-still verification", candidate=path,
+                        detail=str(exc)) from exc
+                return False, f"native concrete-still verifier was inconclusive: {exc}"
+            why = str(rescue.get("semantic_strict_reason") or "")
+            if why:
+                return False, why
+            verdict = dict(rescue.get("semantic_verifier") or {})
+            native_path = str(rescue.get("path") or "")
+            native_hash = str(rescue.get("file_sha256") or "")
+            if not native_path or not native_hash:
+                if require_conclusive:
+                    raise InconclusiveStillVerificationError(
+                        int(getattr(seg, "index", -1)),
+                        "native concrete-still verification", candidate=path,
+                        detail="native materialization omitted path/hash provenance")
+                return False, "native materialization omitted path/hash provenance"
+            sel.image_path = native_path
+            meta.update({
+                "still_verification_attempted": True,
+                "still_verified": True,
+                "still_semantic_verified": True,
+                "still_verifier": verdict,
+                "still_image_sha256": native_hash,
+                "exact_still_verified": bool(exact),
+                "exact_still_verifier": (verdict if exact else {}),
+                "relevance_class": ("exact_scene" if exact else "contextual_fallback"),
+                "native_semantic_materialized": True,
+                "native_indexed_keyframe_sha256": str(
+                    rescue.get("indexed_keyframe_sha256") or ""),
+                "native_owner_source_content_fingerprint": str(
+                    rescue.get("owner_source_content_fingerprint") or ""),
+                "native_owner_time": rescue.get("owner_time"),
+                "native_semantic_question_fingerprint": str(
+                    rescue.get("semantic_question_fingerprint") or ""),
+                "native_semantic_model": str(rescue.get("semantic_model") or ""),
+            })
+            sel.image_meta = meta
+            covered, coverage_why = R.verified_still_coverage(sel, seg, proj=proj)
+            return (True, "") if covered else (
+                False, coverage_why or "native strict coverage absent")
         # The bound gap review has already authorized EXACT -> CHARACTER before this helper is
         # reached.  Requiring the original exact-scene question here made that first rung
         # unsatisfiable by construction: a clean related ship/Ned frame passed the venue filter,
@@ -928,7 +995,6 @@ def _strictly_confirm_concrete_still(proj, seg, sel, eng, *,
         if not str(verdict.get("status", "") or "").strip():
             verdict["status"] = "ok"
         why = R.strict_still_evidence_reason(verdict, seg)
-        meta = dict(getattr(sel, "image_meta", {}) or {})
         meta.update({
             "still_verification_attempted": True,
             "still_verified": not bool(why),
@@ -942,9 +1008,13 @@ def _strictly_confirm_concrete_still(proj, seg, sel, eng, *,
         sel.image_meta = meta
         if why:
             return False, why
-        covered, coverage_why = R.verified_still_coverage(sel, seg)
+        covered, coverage_why = R.verified_still_coverage(sel, seg, proj=proj)
         return (True, "") if covered else (False, coverage_why or "strict coverage absent")
     except InconclusiveStillVerificationError:
+        raise
+    except NonRetryableBuildError:
+        # Deterministic owner/keyframe/hash corruption is a publication invariant, not a verifier
+        # outage. Preserve its non-retryable identity so Resume cannot loop on unchanged bytes.
         raise
     except Exception as exc:                             # noqa: BLE001 — fail closed
         if require_conclusive:

@@ -304,6 +304,8 @@ def test_failed_abstract_search_restores_the_original_strict_request(monkeypatch
 def test_unjudged_ladder_candidate_raises_and_restores_full_phase1_state(
         monkeypatch, tmp_path):
     """``verify_frame=None`` is infrastructure uncertainty, never evidence of a footage gap."""
+    from vidlore.clipstudio import build as B
+
     proj, seg, sel = _phase1_evidence_fixture(tmp_path)
     pool = S._clean_pool(proj)
     used = {"already-used.jpg"}
@@ -316,7 +318,10 @@ def test_unjudged_ladder_candidate_raises_and_restores_full_phase1_state(
     # The venue pass installs a real candidate; the strict publication-strength recheck receives no
     # answer. This exercises selection + used-path rollback, not merely segment-field rollback.
     monkeypatch.setattr(S, "_venue_verify", lambda *_a, **_k: _valid_keep())
-    monkeypatch.setattr(V, "verify_frame", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        B, "_rescue_still_fullres",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            V.VisionBackendError("native still verifier returned no verdict", kind="down")))
 
     with pytest.raises(S.InconclusiveStillVerificationError, match="returned no verdict"):
         S._soften_and_retry(
@@ -366,6 +371,156 @@ def test_concrete_still_recheck_asks_the_current_authorized_policy(
     assert sel.image_meta["still_image_sha256"] == hashlib.sha256(frame.read_bytes()).hexdigest()
     assert sel.image_meta["relevance_class"] == (
         "exact_scene" if expected_specific else "contextual_fallback")
+
+
+def test_owned_thumbnail_is_materialized_and_verified_on_native_pixels(
+        monkeypatch, tmp_path):
+    """The ladder's 512px search image is only a locator, never the pixels authorized to air."""
+    from vidlore.clipstudio import build as B
+    from vidlore.clipstudio import relevance_contract as R
+
+    thumbnail = tmp_path / "jaime-thumb.jpg"
+    thumbnail.write_bytes(b"indexed search thumbnail")
+    native = tmp_path / "jaime-native.jpg"
+    native.write_bytes(b"freshly extracted native source pixels")
+    native_hash = hashlib.sha256(native.read_bytes()).hexdigest()
+    seg = Seg(
+        visual_policy=P.CHARACTER, is_specific_claim=False,
+        required_kind="character", required_entity="Jaime Lannister")
+    sel = NS(
+        segment_index=seg.index, image_path=str(thumbnail),
+        image_meta={
+            "source": "source-frame-recovery", "src": "owner", "shot": 7,
+            "relevance_class": "contextual_fallback",
+        })
+    proj = NS(meta={"analysis": {"episode_hint": ""}})
+    expected_proj = proj
+    rescue_calls = []
+
+    def rescue(project, selection, judged_path, _log, **kwargs):
+        rescue_calls.append((project, selection, judged_path, kwargs))
+        return {
+            "path": str(native),
+            "file_sha256": native_hash,
+            "semantic_strict_reason": "",
+            "semantic_verifier": _valid_keep(
+                status="ok", vision_served_by="vision-live"),
+            "semantic_model": "vision-live",
+            "semantic_question_fingerprint": "native-question-fp",
+            "indexed_keyframe_sha256": "indexed-thumb-fp",
+            "owner_source_content_fingerprint": "owner-content-fp",
+            "owner_time": 12.0,
+        }
+
+    def coverage(selection, current_seg, *, proj=None):
+        assert selection.image_path == str(native)
+        assert current_seg is seg
+        assert proj is expected_proj
+        assert selection.image_meta["still_image_sha256"] == native_hash
+        assert selection.image_meta["native_semantic_materialized"] is True
+        assert selection.image_meta["native_semantic_question_fingerprint"] == \
+            "native-question-fp"
+        return True, "source-frame-recovery"
+
+    monkeypatch.setattr(B, "_rescue_still_fullres", rescue)
+    monkeypatch.setattr(R, "verified_still_coverage", coverage)
+    monkeypatch.setattr(
+        V, "verify_frame",
+        lambda *_a, **_k: pytest.fail("the indexed thumbnail was judged as publication pixels"))
+
+    ok, why = S._strictly_confirm_concrete_still(
+        proj, seg, sel, NS(anthropic_model="vision-test"), require_conclusive=True)
+
+    assert (ok, why) == (True, "")
+    assert len(rescue_calls) == 1
+    assert rescue_calls[0][0:3] == (proj, sel, str(thumbnail))
+    assert rescue_calls[0][3]["seg"] is seg
+    assert rescue_calls[0][3]["allow_semantic_reject"] is True
+    assert rescue_calls[0][3]["refresh_semantic_verdict"] is True
+    assert sel.image_meta["still_verifier"]["vision_served_by"] == "vision-live"
+    assert sel.image_meta["exact_still_verified"] is False
+
+
+def test_owned_thumbnail_native_resolution_rejection_is_a_candidate_miss(
+        monkeypatch, tmp_path):
+    """An SD owner rejects this candidate without weakening the native-HD publication gate."""
+    from vidlore.clipstudio import build as B
+
+    thumbnail = tmp_path / "sd-owner-thumb.jpg"
+    thumbnail.write_bytes(b"indexed thumbnail")
+    seg = Seg(
+        visual_policy=P.CHARACTER, is_specific_claim=False,
+        required_kind="character", required_entity="Jaime Lannister")
+    sel = NS(
+        segment_index=seg.index, image_path=str(thumbnail),
+        image_meta={"source": "source-frame", "src": "sd-owner", "shot": 3})
+
+    def reject(*_args, **_kwargs):
+        raise V.NonRetryableBuildError(
+            "source-frame owner is 640x360", kind="native_resolution")
+
+    monkeypatch.setattr(B, "_rescue_still_fullres", reject)
+
+    ok, why = S._strictly_confirm_concrete_still(
+        NS(meta={"analysis": {}}), seg, sel, NS(anthropic_model="vision-test"),
+        require_conclusive=True)
+
+    assert ok is False
+    assert "640x360" in why
+    assert sel.image_path == str(thumbnail)
+
+
+def test_owned_thumbnail_native_verifier_outage_remains_inconclusive(
+        monkeypatch, tmp_path):
+    """Backend uncertainty is not converted into either a content rejection or a softening pass."""
+    from vidlore.clipstudio import build as B
+
+    thumbnail = tmp_path / "unjudged-thumb.jpg"
+    thumbnail.write_bytes(b"indexed thumbnail")
+    seg = Seg(
+        visual_policy=P.CHARACTER, is_specific_claim=False,
+        required_kind="character", required_entity="Jaime Lannister")
+    sel = NS(
+        segment_index=seg.index, image_path=str(thumbnail),
+        image_meta={"source": "source-frame-recovery", "src": "owner", "shot": 3})
+
+    def unavailable(*_args, **_kwargs):
+        raise V.VisionBackendError("vision service unavailable", kind="down")
+
+    monkeypatch.setattr(B, "_rescue_still_fullres", unavailable)
+
+    with pytest.raises(
+            S.InconclusiveStillVerificationError,
+            match="native concrete-still verification.*vision service unavailable"):
+        S._strictly_confirm_concrete_still(
+            NS(meta={"analysis": {}}), seg, sel, NS(anthropic_model="vision-test"),
+            require_conclusive=True)
+
+
+def test_owned_thumbnail_lineage_corruption_remains_nonretryable(
+        monkeypatch, tmp_path):
+    from vidlore.clipstudio import build as B
+
+    thumbnail = tmp_path / "corrupt-owner-thumb.jpg"
+    thumbnail.write_bytes(b"indexed thumbnail")
+    seg = Seg(
+        visual_policy=P.CHARACTER, is_specific_claim=False,
+        required_kind="character", required_entity="Jaime Lannister")
+    sel = NS(
+        segment_index=seg.index, image_path=str(thumbnail),
+        image_meta={"source": "source-frame-recovery", "src": "owner", "shot": 3})
+
+    def corrupt(*_args, **_kwargs):
+        raise V.NonRetryableBuildError(
+            "indexed keyframe hash changed", kind="scene_lineage")
+
+    monkeypatch.setattr(B, "_rescue_still_fullres", corrupt)
+
+    with pytest.raises(V.NonRetryableBuildError, match="keyframe hash") as caught:
+        S._strictly_confirm_concrete_still(
+            NS(meta={"analysis": {}}), seg, sel, NS(anthropic_model="vision-test"),
+            require_conclusive=True)
+    assert caught.value.kind == "scene_lineage"
 
 
 @pytest.mark.parametrize(("policy", "expected_venue"), [
@@ -547,6 +702,8 @@ def test_venue_malformed_keep_is_inconclusive_and_cannot_soften(monkeypatch, tmp
 def test_strict_confirm_error_keep_is_not_laundered_and_cannot_soften(
         monkeypatch, tmp_path):
     """The publication-strength recheck must inspect status before writing still evidence."""
+    from vidlore.clipstudio import build as B
+
     proj, seg, sel = _phase1_evidence_fixture(tmp_path)
     pool = S._clean_pool(proj)
     used = {"already-used.jpg"}
@@ -556,12 +713,10 @@ def test_strict_confirm_error_keep_is_not_laundered_and_cannot_soften(
     monkeypatch.setattr("vidlore.clipstudio.image_fallback._shot_relevance",
                         lambda *_a, **_k: 0.9)
     monkeypatch.setattr(S, "_venue_verify", lambda *_a, **_k: _valid_keep())
-    monkeypatch.setattr(V, "verify_frame", lambda *_a, **_k: {
-        "status": "error", "verdict": "keep", "confidence": 1.0,
-        "matches_narration": True, "specific_enough": True, "quality_ok": True,
-        "wrong_subject_visible": False, "contradicts_narration": False,
-        "correct_subject_visible": True,
-    })
+    monkeypatch.setattr(
+        B, "_rescue_still_fullres",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            V.VisionBackendError("native still verifier status is error", kind="down")))
 
     with pytest.raises(S.InconclusiveStillVerificationError, match="status.*error"):
         S._soften_and_retry(
@@ -576,18 +731,22 @@ def test_strict_confirm_error_keep_is_not_laundered_and_cannot_soften(
 
 def test_strict_confirm_malformed_keep_is_inconclusive_and_cannot_soften(
         monkeypatch, tmp_path):
+    from vidlore.clipstudio import build as B
+
     proj, seg, sel = _phase1_evidence_fixture(tmp_path)
     pool = S._clean_pool(proj)
     used = {"already-used.jpg"}
     before_seg = copy.deepcopy(vars(seg))
     before_sel = copy.deepcopy(vars(sel))
-    malformed = _valid_keep()
-    malformed.pop("contradicts_narration")
     monkeypatch.setenv("VIDLORE_CLIPSTUDIO_SELFHEAL_VERIFY_WORKERS", "1")
     monkeypatch.setattr("vidlore.clipstudio.image_fallback._shot_relevance",
                         lambda *_a, **_k: 0.9)
     monkeypatch.setattr(S, "_venue_verify", lambda *_a, **_k: _valid_keep())
-    monkeypatch.setattr(V, "verify_frame", lambda *_a, **_k: malformed)
+    monkeypatch.setattr(
+        B, "_rescue_still_fullres",
+        lambda *_a, **_k: (_ for _ in ()).throw(V.VisionBackendError(
+            "native still verifier missing/malformed field contradicts_narration",
+            kind="down")))
 
     with pytest.raises(S.InconclusiveStillVerificationError,
                        match="missing/malformed.*contradicts_narration"):

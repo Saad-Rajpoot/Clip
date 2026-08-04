@@ -1081,6 +1081,53 @@ def test_gap_ladder_exception_rolls_back_and_resume_retries_without_exhaustion_m
     assert persisted.selections[0].source_id == "s1"
 
 
+def test_gap_ladder_scene_lineage_corruption_remains_nonretryable(tmp_path):
+    """A broken owner/hash invariant must not be relabelled as a retryable verifier outage."""
+    from vidlore.clipstudio import selfheal as S
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, segs, [0], method="actual_frame_and_pool_audit")
+
+    def exhausted(_proj, _segs, _analysis, _cfg, _eng, **kw):
+        _write_mock_recovery_page(_proj, kw)
+        return 0
+
+    deterministic = V.NonRetryableBuildError(
+        "indexed keyframe hash no longer matches", kind="scene_lineage")
+    with mock.patch.object(O, "_recover_unresolved_beats", side_effect=exhausted), \
+            mock.patch.object(O, "_fill_image_fallbacks", return_value=0), \
+            mock.patch.object(
+                S, "heal_selection_relevance_gaps", side_effect=deterministic):
+        with pytest.raises(V.NonRetryableBuildError, match="keyframe hash") as caught:
+            _call(proj, segs)
+
+    assert caught.value.kind == "scene_lineage"
+    assert "selection_relevance_recovery" not in proj.meta
+    assert "selection_relevance_gap_softening" not in proj.meta
+
+
+def test_preflight_recovery_router_preserves_typed_lineage_and_unknown_fallback():
+    original = V.NonRetryableBuildError(
+        "selection relevance still blocked", kind="selection_relevance")
+    lineage = V.NonRetryableBuildError(
+        "indexed keyframe hash no longer matches", kind="scene_lineage")
+
+    with pytest.raises(V.NonRetryableBuildError, match="keyframe hash") as caught:
+        O._raise_semantic_recovery_failure(original, lineage, lambda _message: None)
+    assert caught.value is lineage
+    assert caught.value.kind == "scene_lineage"
+
+    messages = []
+    with pytest.raises(V.NonRetryableBuildError, match="selection relevance") as restored:
+        O._raise_semantic_recovery_failure(
+            original, RuntimeError("untyped repair plumbing fault"), messages.append)
+    assert restored.value is original
+    assert messages and "technical failure" in messages[0]
+
+
 def test_pool_bound_softening_stays_for_same_pool_then_restores_and_blocks_on_new_pool(
         tmp_path):
     """A footage-gap downgrade is valid for one indexed pool, never an authored-script rewrite."""
