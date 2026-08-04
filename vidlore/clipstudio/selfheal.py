@@ -98,7 +98,7 @@ def _soften_to_abstract(seg, log, *, cause: str = "gate-forbidden content") -> N
                            "atmospheric shot as visual rest under a meta line.")
 
 
-def _soften_to_character(seg, log) -> bool:
+def _soften_to_character(seg, log, *, surrender_verbatim_quote: bool = False) -> bool:
     """LAST RESORT for an exact beat whose moment is simply not in reach. Returns True if softened.
 
     The owner's standing rule for this pipeline: if the exact scene is not available, do not insist
@@ -135,15 +135,25 @@ def _soften_to_character(seg, log) -> bool:
     # leak gets in, and that is the one class of error the identity gate exists to stop.
     _kind = (getattr(seg, "required_kind", "") or "").strip().lower()
     _drop = _kind not in ("character", "actor")
+    _quote_note = ", surrendering the audited verbatim-dialogue promise" \
+        if surrender_verbatim_quote and str(getattr(seg, "quote", "") or "").strip() else ""
     log(f"self-heal: beat {seg.index} — the exact moment is not in reach after acquisition; "
         f"settling for the right subject instead of failing the video "
         f"(exact_scene -> character_specific"
         + (f", dropping the {_kind or 'unnamed'} requirement "
-           f"{(getattr(seg, 'required_entity', '') or '')[:40]!r}" if _drop else "") + ")")
+           f"{(getattr(seg, 'required_entity', '') or '')[:40]!r}" if _drop else "")
+        + _quote_note + ")")
     seg.visual_policy = _P.CHARACTER
     if _drop:
         seg.required_entity = ""
         seg.required_kind = ""
+    # A normal character fallback never erases real dialogue.  The sole exception is a separately
+    # validated schema-3 proof that the exact quote/scene exists only in native-SD bytes and no
+    # publishable-HD copy exists in the current, fully audited pool.  Clearing the field here makes
+    # the surrendered promise explicit before a character still is judged; otherwise still
+    # coverage could pass while project.json continued to claim timed on-screen dialogue.
+    if surrender_verbatim_quote:
+        seg.quote = ""
     try:
         seg.is_specific_claim = False
     except Exception:                                    # noqa: BLE001
@@ -892,7 +902,8 @@ def _strictly_confirm_concrete_still(proj, seg, sel, eng, *,
         return False, f"strict character-rung verification failed: {type(exc).__name__}: {exc}"
 
 
-def _soften_and_retry(proj, seg, sel, eng, pool, used, log) -> bool:
+def _soften_and_retry(proj, seg, sel, eng, pool, used, log, *,
+                      surrender_verbatim_quote: bool = False) -> bool:
     """Soften an unreachable exact beat and search the SAME pool once more under the looser bar.
 
     Deliberately no re-acquisition and no new pool: the point is not to try harder, it is to stop
@@ -916,7 +927,8 @@ def _soften_and_retry(proj, seg, sel, eng, pool, used, log) -> bool:
             used.update(copy.deepcopy(used_before))
 
     try:
-        if _soften_to_character(seg, log) and still_recover(
+        if _soften_to_character(
+                seg, log, surrender_verbatim_quote=surrender_verbatim_quote) and still_recover(
                 proj, seg, sel, eng, pool=pool, used_paths=used, cand_n=_n, log=log,
                 require_conclusive=True):
             ok, why = _strictly_confirm_concrete_still(
@@ -1074,14 +1086,18 @@ def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
         # against this exact beat and this exact searchable pool.  Consume that evidence before
         # ``acquire_for_beat`` can add media and make its own authorization stale.  Ordinary
         # unreviewed/stale/incomplete beats keep the acquire-first path below unchanged.
-        reviewed_exhausted, _review_reason = \
-            _phase1_reviewed_exhaustion_authorization(proj, seg, cfg)
-        if reviewed_exhausted:
+        reviewed_authorization, _review_reason = \
+            _phase1_reviewed_exhaustion_details(proj, seg, cfg)
+        if reviewed_authorization is not None:
             if _phase1_softening_attempt(
                     proj, seg, sel, used,
-                    lambda: _soften_and_retry(proj, seg, sel, eng, pool, used, log),
+                    lambda: _soften_and_retry(
+                        proj, seg, sel, eng, pool, used, log,
+                        surrender_verbatim_quote=bool(
+                            reviewed_authorization.get("surrender_verbatim_quote"))),
                     basis="phase1_bound_strict_acquisition_exhausted",
-                    marker_original=marker_original):
+                    marker_original=marker_original,
+                    authorization=reviewed_authorization):
                 resolved += 1
             else:
                 log(f"self-heal: beat {bidx} — audited specificity ladder exhausted; "
@@ -1184,7 +1200,8 @@ _SEMANTIC_NEGATIVE_REASONS = (
 )
 
 
-def _phase1_current_gap_evidence(proj, seg, cfg=None) -> tuple[bool, str]:
+def _phase1_current_gap_evidence(proj, seg, cfg=None, *,
+                                 allow_verified_native_gap: bool = False) -> tuple[bool, str]:
     """Type the *current* phase-1 blocker before allowing specificity loss.
 
     The review binding below answers "did a viewer audit this authored request against this pool?"
@@ -1208,9 +1225,10 @@ def _phase1_current_gap_evidence(proj, seg, cfg=None) -> tuple[bool, str]:
         quote = str(getattr(seg, "quote", "") or "").strip()
         if quote:
             branch = str((entry.get("quote_evidence") or {}).get("branch", "") or "")
-            if branch == "verbatim":
+            if branch == "verbatim" and not allow_verified_native_gap:
                 return False, "phase1_verbatim_quote_promise"
-            if branch != "paraphrase":
+            if branch not in (("paraphrase", "verbatim")
+                              if allow_verified_native_gap else ("paraphrase",)):
                 # Empty is also indeterminate: every strict quoted beat should have been typed by
                 # the complete-pool scan, and phase 1 has no authority to guess if that evidence is
                 # absent or malformed.
@@ -1237,6 +1255,7 @@ def _phase1_current_gap_evidence(proj, seg, cfg=None) -> tuple[bool, str]:
         semantic = [
             reason for reason in reasons
             if reason in _SEMANTIC_NEGATIVE_REASONS
+            or (allow_verified_native_gap and reason in _NATIVE_QUOTE_CONTENT_REASONS)
         ]
         nonsemantic = [reason for reason in reasons if reason not in semantic]
         if nonsemantic:
@@ -1392,7 +1411,8 @@ def _softening_new_state(seg, sel) -> dict:
 def _softening_row(proj, seg, sel, original: dict, *, phase: str, basis: str,
                    pool_fingerprint: str | None = None,
                    pool_source_count: int | None = None,
-                   trigger_reasons=None, quote_branch: str = "") -> dict:
+                   trigger_reasons=None, quote_branch: str = "",
+                   authorization=None) -> dict:
     if pool_fingerprint is None or pool_source_count is None:
         pool_fingerprint, pool_source_count = _gap_pool_fingerprint(proj)
     row = {
@@ -1407,9 +1427,12 @@ def _softening_row(proj, seg, sel, original: dict, *, phase: str, basis: str,
         "new": _softening_new_state(seg, sel),
         "trigger_reasons": list(trigger_reasons or []),
         "quote_branch": str(quote_branch or ""),
+        "authorization": copy.deepcopy(authorization or {}),
     }
     row["dropped_requirement"] = bool(
         row["original"].get("required_entity") and not row["new"].get("required_entity"))
+    row["surrendered_quote"] = bool(
+        row["original"].get("quote") and not row["new"].get("quote"))
     return row
 
 
@@ -1507,10 +1530,14 @@ def _persist_softening_payload(proj, payload: dict) -> None:
 
 
 def _record_phase1_softening(proj, seg, sel, original: dict, *, basis: str,
-                             pool_fingerprint: str, pool_source_count: int) -> dict:
+                             pool_fingerprint: str, pool_source_count: int,
+                             authorization=None) -> dict:
     row = _softening_row(
         proj, seg, sel, original, phase="phase1_preassembly", basis=basis,
-        pool_fingerprint=pool_fingerprint, pool_source_count=pool_source_count)
+        pool_fingerprint=pool_fingerprint, pool_source_count=pool_source_count,
+        quote_branch=str((authorization or {}).get("quote_branch", "") or "")
+        if isinstance(authorization, dict) else "",
+        authorization=authorization)
     payload = _merge_softening_payload(
         proj, [row], basis=basis,
         existing=(getattr(proj, "meta", {}) or {}).get(
@@ -1520,7 +1547,8 @@ def _record_phase1_softening(proj, seg, sel, original: dict, *, basis: str,
 
 
 def _phase1_softening_attempt(proj, seg, sel, used, attempt, *, basis: str,
-                              marker_original: dict | None = None) -> bool:
+                              marker_original: dict | None = None,
+                              authorization=None) -> bool:
     """Run one authorized phase-1 policy mutation as an all-or-nothing transaction."""
     seg_before = copy.deepcopy(vars(seg))
     sel_before = copy.deepcopy(vars(sel))
@@ -1549,7 +1577,8 @@ def _phase1_softening_attempt(proj, seg, sel, used, attempt, *, basis: str,
                 "source/index pool changed while semantic specificity was being softened")
         _record_phase1_softening(
             proj, seg, sel, original, basis=basis,
-            pool_fingerprint=pool_fp, pool_source_count=pool_n)
+            pool_fingerprint=pool_fp, pool_source_count=pool_n,
+            authorization=authorization)
         return True
     except Exception:
         _rollback()
@@ -1574,18 +1603,81 @@ def restore_stale_selection_relevance_softenings(proj, segments, *, log=None) ->
     if not isinstance(rows, list):
         raise RuntimeError("active semantic-softening marker has no beat rows")
     current_fp, current_n = _gap_pool_fingerprint(proj)
+    passed = {int(getattr(s, "index", -1)): s for s in (segments or [])}
+    persisted = {
+        int(getattr(s, "index", -1)): s
+        for s in (getattr(proj, "segments", None) or [])
+    }
     active_rows = [
         row for row in rows if isinstance(row, dict)
         and row.get("status") == "softened" and row.get("active", True)
     ]
     stale = []
     unchanged = []
+    stale_reasons = {}
     for row in active_rows:
+        idx = int(row.get("segment_index", -1))
         bound = str(row.get("pool_fingerprint", "") or "")
         if not bound:
             raise RuntimeError(
                 f"softened beat {row.get('segment_index')} lacks a pool fingerprint")
-        (unchanged if bound == current_fp else stale).append(row)
+        reason = ""
+        if bound != current_fp:
+            reason = "publishable_pool_changed"
+        else:
+            authorization = row.get("authorization")
+            auth_kind = str((authorization or {}).get("authorization_kind", "") or "") \
+                if isinstance(authorization, dict) else ""
+            original = row.get("original")
+            new_state = row.get("new") if isinstance(row.get("new"), dict) else {}
+            cleared_quote = bool(
+                isinstance(original, dict) and original.get("quote")
+                and not new_state.get("quote"))
+            native_surrender = bool(
+                auth_kind == _NATIVE_HD_GAP_CLASSIFICATION
+                or (isinstance(authorization, dict)
+                    and authorization.get("surrender_verbatim_quote") is True)
+                or (cleared_quote and str(row.get("quote_branch", "") or "") == "verbatim"))
+            evidence_bound = bool(
+                isinstance(authorization, dict)
+                and authorization.get("strict_acquisition_exhausted") is True)
+            if native_surrender and (
+                    auth_kind != _NATIVE_HD_GAP_CLASSIFICATION
+                    or authorization.get("surrender_verbatim_quote") is not True):
+                reason = "native_gap_authorization_missing_or_malformed"
+            elif evidence_bound or native_surrender:
+                original = row.get("original")
+                base = persisted.get(idx) or passed.get(idx)
+                if not isinstance(original, dict) or base is None:
+                    reason = "gap_evidence_original_state_missing"
+                else:
+                    strict_seg = copy.deepcopy(base)
+                    try:
+                        for field in _SOFTENING_SEGMENT_FIELDS:
+                            setattr(strict_seg, field, copy.deepcopy(original[field]))
+                    except Exception:
+                        reason = "gap_evidence_original_state_malformed"
+                    if not reason:
+                        current_evidence, evidence_reason = \
+                            _reviewed_exhaustion_evidence(proj, strict_seg)
+                        if current_evidence is None:
+                            reason = f"gap_evidence_stale:{evidence_reason}"
+                        else:
+                            for field in (
+                                    "authorization_kind", "evidence_source", "evidence_sha256",
+                                    "evidence_schema_version", "nonpublishable_exact_sources"):
+                                if current_evidence.get(field) != authorization.get(field):
+                                    reason = f"gap_authorization_{field}_changed"
+                                    break
+                            if (not reason and native_surrender
+                                    and current_evidence.get(
+                                        "surrender_verbatim_quote") is not True):
+                                reason = "native_gap_quote_surrender_no_longer_authorized"
+        if reason:
+            stale.append(row)
+            stale_reasons[idx] = reason
+        else:
+            unchanged.append(row)
     if not stale:
         return {
             "restored": [],
@@ -1593,11 +1685,6 @@ def restore_stale_selection_relevance_softenings(proj, segments, *, log=None) ->
             "pool_fingerprint": current_fp,
         }
 
-    passed = {int(getattr(s, "index", -1)): s for s in (segments or [])}
-    persisted = {
-        int(getattr(s, "index", -1)): s
-        for s in (getattr(proj, "segments", None) or [])
-    }
     selections = {
         int(getattr(s, "segment_index", -1)): s
         for s in (getattr(proj, "selections", None) or [])
@@ -1628,13 +1715,17 @@ def restore_stale_selection_relevance_softenings(proj, segments, *, log=None) ->
                 for field in _SOFTENING_SEGMENT_FIELDS:
                     setattr(target, field, copy.deepcopy(original[field]))
             row["active"] = False
-            row["status"] = "restored_pool_changed"
+            restore_reason = stale_reasons.get(idx, "publishable_pool_changed")
+            row["status"] = ("restored_pool_changed"
+                             if restore_reason == "publishable_pool_changed"
+                             else "restored_evidence_stale")
+            row["restore_reason"] = restore_reason
             row["restored_against_pool_fingerprint"] = current_fp
             row["restored_against_pool_source_count"] = current_n
             restored.append(idx)
             if callable(log):
                 log(f"semantic-gap: beat {idx} restored to its original authored promise "
-                    "because the indexed footage pool changed")
+                    f"because its softening authorization is stale ({restore_reason})")
         marker["active"] = any(
             isinstance(r, dict) and r.get("status") == "softened" and r.get("active", True)
             for r in rows)
@@ -1660,7 +1751,8 @@ def restore_stale_selection_relevance_softenings(proj, segments, *, log=None) ->
 
 
 def _phase1_softening_authorization(proj, seg, cfg=None, *,
-                                    require_eligible_pool: bool = True) -> tuple[bool, str]:
+                                    require_eligible_pool: bool = True,
+                                    allow_verified_native_gap: bool = False) -> tuple[bool, str]:
     """Fail-closed authorization for phase-1 exact→character→abstract policy mutation.
 
     The legacy pre-assembly self-heal sees a deliberately incomplete structural blocker set.  It
@@ -1668,9 +1760,10 @@ def _phase1_softening_authorization(proj, seg, cfg=None, *,
     only when an actual-frame/pool review names this exact authored promise and is still bound to the
     complete current source/index pool.  Acquisition can change that pool inside the same healing
     pass, so callers check this immediately before every mutation rather than caching the answer.
-    The sole ``require_eligible_pool=False`` caller immediately validates a schema-2, content-hashed
-    exhaustion artifact over *all* indexed OK sources; it may ignore a matcher-only pool shrink, but
-    never a new source or changed media/index artifact.
+    The sole ``require_eligible_pool=False`` caller immediately validates a schema-2 or schema-3,
+    content-hashed exhaustion artifact over *all* indexed OK sources; it may ignore a matcher-only
+    pool shrink, but never a new source or changed media/index artifact.  Schema 3 can additionally
+    authorize one proven native-HD absence without changing the ordinary quote contract.
     """
     try:
         review = (getattr(proj, "meta", {}) or {}).get(
@@ -1702,7 +1795,8 @@ def _phase1_softening_authorization(proj, seg, cfg=None, *,
             if expected_pool != current_pool:
                 return False, ("stale_gap_review_source_pool_changed:"
                                f"{expected_pool[:12]}!={current_pool[:12]}")
-        evidence_ok, evidence_reason = _phase1_current_gap_evidence(proj, seg, cfg)
+        evidence_ok, evidence_reason = _phase1_current_gap_evidence(
+            proj, seg, cfg, allow_verified_native_gap=allow_verified_native_gap)
         if not evidence_ok:
             return False, evidence_reason
         return True, "authorized_by_bound_gap_review_and_current_semantic_gap"
@@ -1711,6 +1805,9 @@ def _phase1_softening_authorization(proj, seg, cfg=None, *,
 
 
 _STRICT_ACQUISITION_EVIDENCE_SCHEMA = 2
+_NATIVE_HD_GAP_EVIDENCE_SCHEMA = 3
+_NATIVE_HD_GAP_CLASSIFICATION = "publishable_native_hd_absence"
+_TOTAL_ABSENCE_GAP_SCOPE = "all_indexed_absence"
 _STRICT_ACQUISITION_CLAIMS = (
     ("classification", "footage_gap", "strict_acquisition_classification_not_footage_gap"),
     ("actual_frame_pool_audit", True,
@@ -1723,6 +1820,217 @@ _STRICT_ACQUISITION_CLAIMS = (
      "strict_acquisition_status_not_exhausted"),
     ("technical_status", "complete", "strict_acquisition_technical_status_not_complete"),
 )
+
+_NATIVE_HD_GAP_CLAIMS = (
+    ("classification", _NATIVE_HD_GAP_CLASSIFICATION,
+     "strict_acquisition_classification_not_publishable_native_hd_absence"),
+    ("gap_scope", _NATIVE_HD_GAP_CLASSIFICATION,
+     "strict_acquisition_gap_scope_not_publishable_native_hd_absence"),
+    ("actual_frame_pool_audit", True,
+     "strict_acquisition_actual_frame_pool_audit_absent"),
+    ("whole_pool_reviewed", True, "strict_acquisition_whole_pool_review_absent"),
+    ("correct_footage_present_in_pool", True,
+     "strict_acquisition_native_only_footage_presence_not_proven"),
+    ("correct_publishable_footage_present_in_pool", False,
+     "strict_acquisition_publishable_pool_absence_not_proven"),
+    ("pipeline_bug_ruled_out", True, "strict_acquisition_pipeline_bug_not_ruled_out"),
+    ("strict_acquisition_status", "exhausted",
+     "strict_acquisition_status_not_exhausted"),
+    ("technical_status", "complete", "strict_acquisition_technical_status_not_complete"),
+)
+
+_SCHEMA3_TOTAL_ABSENCE_CLAIMS = (
+    *_STRICT_ACQUISITION_CLAIMS,
+    ("gap_scope", _TOTAL_ABSENCE_GAP_SCOPE,
+     "strict_acquisition_gap_scope_not_all_indexed_absence"),
+)
+
+
+def _strict_claim_failure(row: dict, claims) -> str:
+    for field, expected, failure in claims:
+        value = row.get(field)
+        valid = value is expected if isinstance(expected, bool) \
+            else str(value or "") == expected
+        if not valid:
+            return failure
+    return ""
+
+
+def _validated_native_hd_gap_row(proj, seg, row: dict) -> tuple[dict | None, str]:
+    """Re-prove a schema-3 SD-only exact-scene claim from current bytes and ASR.
+
+    The independent artifact owns the actual-frame/whole-pool classification.  Runtime still owns
+    every objective premise that can drift: publication floors, source bytes/dimensions, the
+    matcher rejection that keeps those pixels out of every visual pool, and the complete-pool
+    quote locations.  A schema-3 row is deliberately useful only for a located real quote; ordinary
+    quoted gaps retain the global verbatim denial and schema 2 keeps its total-absence meaning.
+    """
+    failure = _strict_claim_failure(row, _NATIVE_HD_GAP_CLAIMS)
+    if failure:
+        return None, failure
+    try:
+        from .quality_contract import (
+            MIN_NATIVE_LONG_EDGE, MIN_NATIVE_SHORT_EDGE,
+            native_video_ok, probe_native_video_info,
+        )
+    except Exception as exc:                             # noqa: BLE001 — quality proof fails closed
+        return None, f"strict_acquisition_native_probe_unavailable:{type(exc).__name__}"
+
+    if row.get("publication_min_short_edge") != MIN_NATIVE_SHORT_EDGE \
+            or row.get("publication_min_long_edge") != MIN_NATIVE_LONG_EDGE:
+        return None, "strict_acquisition_native_publication_floor_mismatch"
+    raw_sources = row.get("nonpublishable_exact_sources")
+    if not isinstance(raw_sources, list) or not raw_sources:
+        return None, "strict_acquisition_nonpublishable_exact_sources_missing"
+
+    auto_reasons = (getattr(proj, "meta", {}) or {}).get("auto_rejected_reasons") or {}
+    auto_rejected = {
+        str(source_id) for source_id in
+        ((getattr(proj, "meta", {}) or {}).get("auto_rejected_sources") or [])
+    }
+    normalized_sources = []
+    by_source = {}
+    for source_row in raw_sources:
+        if not isinstance(source_row, dict):
+            return None, "strict_acquisition_nonpublishable_exact_source_malformed"
+        sid = str(source_row.get("source_id", "") or "").strip()
+        if not sid or sid in by_source:
+            return None, "strict_acquisition_nonpublishable_exact_source_id_malformed"
+        src = proj.source(sid)
+        if src is None or str(getattr(src, "status", "") or "") != SOURCE_OK:
+            return None, "strict_acquisition_nonpublishable_exact_source_unavailable"
+        checksum = str(getattr(src, "checksum", "") or "").strip()
+        if not checksum or str(source_row.get("source_checksum", "") or "") != checksum:
+            return None, "strict_acquisition_nonpublishable_exact_source_checksum_mismatch"
+        # The reason map is audit prose; the rejected-ID set is what actually excludes a source
+        # from matcher/self-heal pools.  Require both or a stale reason could authorize quote
+        # surrender while the same 640×360 bytes are re-admitted and aired as an image still.
+        if sid not in auto_rejected:
+            return None, "strict_acquisition_nonpublishable_exact_source_not_currently_rejected"
+        if str(auto_reasons.get(sid, "") or "") != "sub_native_hd" \
+                or str(source_row.get("auto_reject_reason", "") or "") != "sub_native_hd":
+            return None, "strict_acquisition_nonpublishable_exact_source_not_rejected_as_sd"
+        dims = dict(probe_native_video_info(getattr(src, "local_path", "") or "") or {})
+        try:
+            width, height = int(dims.get("width") or 0), int(dims.get("height") or 0)
+        except (TypeError, ValueError, OverflowError):
+            width = height = 0
+        if not width or not height:
+            return None, "strict_acquisition_nonpublishable_exact_source_unprobeable"
+        if native_video_ok(dims):
+            return None, "strict_acquisition_nonpublishable_exact_source_is_native_hd"
+        if source_row.get("native_width") != width or source_row.get("native_height") != height:
+            return None, "strict_acquisition_nonpublishable_exact_source_dimensions_changed"
+        if source_row.get("actual_frame_target_verified") is not True:
+            return None, "strict_acquisition_nonpublishable_exact_frame_not_verified"
+        span = source_row.get("timed_asr_span")
+        ratio = source_row.get("timed_asr_ratio")
+        if not isinstance(span, list) or len(span) != 2 \
+                or isinstance(ratio, bool) or not isinstance(ratio, (int, float)):
+            return None, "strict_acquisition_nonpublishable_exact_quote_span_malformed"
+        try:
+            q0, q1, qratio = float(span[0]), float(span[1]), float(ratio)
+        except (TypeError, ValueError, OverflowError):
+            return None, "strict_acquisition_nonpublishable_exact_quote_span_malformed"
+        if not (q1 > q0 >= 0.0) or not (0.0 <= qratio <= 1.0):
+            return None, "strict_acquisition_nonpublishable_exact_quote_span_malformed"
+        normalized = {
+            "source_id": sid,
+            "source_checksum": checksum,
+            "auto_reject_reason": "sub_native_hd",
+            "native_width": width,
+            "native_height": height,
+            "actual_frame_target_verified": True,
+            "timed_asr_span": [q0, q1],
+            "timed_asr_ratio": qratio,
+        }
+        by_source[sid] = normalized
+        normalized_sources.append(normalized)
+
+    quote = str(getattr(seg, "quote", "") or "").strip()
+    if not quote:
+        return None, "strict_acquisition_native_gap_verbatim_quote_absent"
+    try:
+        from . import relevance_contract as _rel_native
+        contract = dict(_rel_native._quote_pool_branches(proj, [seg]).get(
+            int(getattr(seg, "index", -1))) or {})
+    except Exception as exc:                             # noqa: BLE001 — ASR proof fails closed
+        return None, f"strict_acquisition_native_gap_quote_scan_error:{type(exc).__name__}"
+    if str(contract.get("branch", "") or "") != "verbatim":
+        return None, "strict_acquisition_native_gap_quote_not_currently_verbatim"
+    expected_asr_fingerprint = str(
+        contract.get("asr_prompt_fingerprint_expected", "") or "").strip()
+    if not expected_asr_fingerprint:
+        return None, "strict_acquisition_native_gap_asr_fingerprint_missing"
+    try:
+        invalid_asr_count = int(contract.get("asr_provenance_invalid_source_count", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None, "strict_acquisition_native_gap_asr_provenance_count_malformed"
+    if invalid_asr_count or contract.get("asr_provenance_invalid_sources"):
+        # A located SD quote proves presence, but quote surrender additionally asserts absence of
+        # any publishable-HD match.  One ASR-unknown source makes that absence unknowable, so this
+        # exceptional path must stop even though the ordinary quote branch remains verbatim.
+        return None, "strict_acquisition_native_gap_asr_pool_incomplete"
+    matches = list(contract.get("pool_matches") or [])
+    if not matches and isinstance(contract.get("pool_match"), dict):
+        matches = [contract["pool_match"]]
+    if not matches:
+        return None, "strict_acquisition_native_gap_quote_match_absent"
+    current_ids = set()
+    for match in matches:
+        if not isinstance(match, dict):
+            return None, "strict_acquisition_native_gap_quote_match_malformed"
+        sid = str(match.get("source_id", "") or "")
+        current_ids.add(sid)
+        source_row = by_source.get(sid)
+        if source_row is None:
+            return None, "strict_acquisition_native_gap_quote_match_unlisted"
+        match_span = match.get("timed_asr_span")
+        try:
+            m0, m1 = float(match_span[0]), float(match_span[1])
+            mratio = float(match.get("timed_asr_ratio"))
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None, "strict_acquisition_native_gap_quote_match_malformed"
+        recorded = source_row["timed_asr_span"]
+        if abs(recorded[0] - m0) > 0.01 or abs(recorded[1] - m1) > 0.01 \
+                or abs(source_row["timed_asr_ratio"] - mratio) > 0.001:
+            return None, "strict_acquisition_native_gap_quote_match_changed"
+    if current_ids != set(by_source):
+        # Do not let an artifact pad its proof with a visually asserted source that the current
+        # complete-pool quote scan cannot reproduce.  Exact equality keeps this exception narrow.
+        return None, "strict_acquisition_native_gap_source_set_changed"
+
+    return {
+        **{field: row[field] for field, _expected, _failure in _NATIVE_HD_GAP_CLAIMS},
+        "publication_min_short_edge": MIN_NATIVE_SHORT_EDGE,
+        "publication_min_long_edge": MIN_NATIVE_LONG_EDGE,
+        "nonpublishable_exact_sources": sorted(
+            normalized_sources, key=lambda item: item["source_id"]),
+        "quote_branch": "verbatim",
+        "surrender_verbatim_quote": True,
+        "authorization_kind": _NATIVE_HD_GAP_CLASSIFICATION,
+        "strict_acquisition_exhausted": True,
+    }, "strict_acquisition_native_hd_gap_valid"
+
+
+def _validated_schema3_gap_row(proj, seg, row: dict) -> tuple[dict | None, str]:
+    """Validate either row profile allowed inside one mixed schema-3 evidence artifact."""
+    classification = str(row.get("classification", "") or "")
+    if classification == "footage_gap":
+        failure = _strict_claim_failure(row, _SCHEMA3_TOTAL_ABSENCE_CLAIMS)
+        if failure:
+            return None, failure
+        return {
+            **{field: row[field] for field, _expected, _failure
+               in _SCHEMA3_TOTAL_ABSENCE_CLAIMS},
+            "authorization_kind": "total_absence",
+            "surrender_verbatim_quote": False,
+            "strict_acquisition_exhausted": True,
+            "nonpublishable_exact_sources": [],
+        }, "strict_acquisition_total_absence_valid"
+    if classification == _NATIVE_HD_GAP_CLASSIFICATION:
+        return _validated_native_hd_gap_row(proj, seg, row)
+    return None, "strict_acquisition_schema3_gap_classification_unknown"
 
 
 def _strict_acquisition_evidence(proj, segments, beat_indices, *, source: str,
@@ -1770,8 +2078,9 @@ def _strict_acquisition_evidence(proj, segments, beat_indices, *, source: str,
         return None, "strict_acquisition_evidence_json_not_object"
     schema = artifact.get("schema_version")
     if isinstance(schema, bool) or not isinstance(schema, int) \
-            or schema != _STRICT_ACQUISITION_EVIDENCE_SCHEMA:
-        return None, "strict_acquisition_evidence_schema_not_2"
+            or schema not in (_STRICT_ACQUISITION_EVIDENCE_SCHEMA,
+                              _NATIVE_HD_GAP_EVIDENCE_SCHEMA):
+        return None, "strict_acquisition_evidence_schema_not_2_or_3"
     if str(artifact.get("status", "") or "") != "complete":
         return None, "strict_acquisition_evidence_status_not_complete"
     if str(artifact.get("pool_scope", "") or "") != _GAP_ABSENCE_POOL_SCOPE:
@@ -1810,14 +2119,24 @@ def _strict_acquisition_evidence(proj, segments, beat_indices, *, source: str,
         current_beat = _gap_beat_fingerprint(seg)
         if str(row.get("beat_fingerprint", "") or "") != current_beat:
             return None, "strict_acquisition_evidence_beat_fingerprint_mismatch"
-        for field, expected, failure in _STRICT_ACQUISITION_CLAIMS:
-            value = row.get(field)
-            if isinstance(expected, bool):
-                valid = value is expected
-            else:
-                valid = str(value or "") == expected
-            if not valid:
+        if schema == _STRICT_ACQUISITION_EVIDENCE_SCHEMA:
+            failure = _strict_claim_failure(row, _STRICT_ACQUISITION_CLAIMS)
+            if failure:
                 return None, failure
+            normalized_row = {
+                "beat_fingerprint": current_beat,
+                **{field: row[field] for field, _expected, _failure
+                   in _STRICT_ACQUISITION_CLAIMS},
+                "authorization_kind": "total_absence",
+                "surrender_verbatim_quote": False,
+                "strict_acquisition_exhausted": True,
+                "nonpublishable_exact_sources": [],
+            }
+        else:
+            schema3_row, schema3_reason = _validated_schema3_gap_row(proj, seg, row)
+            if schema3_row is None:
+                return None, schema3_reason
+            normalized_row = {"beat_fingerprint": current_beat, **schema3_row}
 
         # The artifact is authoritative, but retain its normalized claims in project.json so audit
         # output remains self-describing.  A hand edit must agree byte-for-byte with the artifact;
@@ -1828,19 +2147,19 @@ def _strict_acquisition_evidence(proj, segments, beat_indices, *, source: str,
         if stored is not None:
             if str(stored.get("beat_fingerprint", "") or "") != current_beat:
                 return None, "strict_acquisition_evidence_beat_fingerprint_mismatch"
-            for field, expected, failure in _STRICT_ACQUISITION_CLAIMS:
-                value = stored.get(field)
-                if isinstance(expected, bool):
-                    valid = value is expected
-                else:
-                    valid = str(value or "") == expected
-                if not valid or value != row.get(field):
-                    return None, failure
-        normalized[str(idx)] = {
-            "beat_fingerprint": current_beat,
-            **{field: row[field] for field, _expected, _failure
-               in _STRICT_ACQUISITION_CLAIMS},
-        }
+            if schema == _STRICT_ACQUISITION_EVIDENCE_SCHEMA:
+                claims = _STRICT_ACQUISITION_CLAIMS
+            elif str(row.get("classification", "") or "") == "footage_gap":
+                claims = _SCHEMA3_TOTAL_ABSENCE_CLAIMS
+            else:
+                claims = _NATIVE_HD_GAP_CLAIMS
+            failure = _strict_claim_failure(stored, claims)
+            if failure:
+                return None, failure
+            for field, value in normalized_row.items():
+                if stored.get(field) != value:
+                    return None, f"strict_acquisition_evidence_stored_{field}_mismatch"
+        normalized[str(idx)] = normalized_row
 
     return {
         "evidence_source": str(evidence_path),
@@ -1848,56 +2167,76 @@ def _strict_acquisition_evidence(proj, segments, beat_indices, *, source: str,
         "pool_scope": _GAP_ABSENCE_POOL_SCOPE,
         "pool_fingerprint": current_pool,
         "pool_source_count": current_count,
+        "evidence_schema_version": schema,
         "beats": normalized,
     }, "strict_acquisition_evidence_valid"
 
 
-def _phase1_reviewed_exhaustion_authorization(proj, seg, cfg=None) -> tuple[bool, str]:
-    """Authorize the sole pre-acquisition specificity-ladder path.
-
-    A plain footage-gap review still follows the normal acquire-first flow.  Moving the ladder
-    earlier is safe only when an independent actual-frame/pool audit also records that strict
-    acquisition completed conclusively for this same pool.  The ordinary phase-1 authorization
-    remains authoritative for beat/pool fingerprints, quote typing, current verifier evidence,
-    and the semantic-vs-technical distinction.
-    """
-    # Matcher source gates may shrink the publishable pool after the independent audit.  A strict
-    # exhaustion artifact covers the broader all-OK indexed universe, so validate the common beat
-    # and current-semantic checks here but let the content-hashed artifact below own pool identity.
-    ok, reason = _phase1_softening_authorization(
-        proj, seg, cfg, require_eligible_pool=False)
-    if not ok:
-        return False, reason
+def _reviewed_exhaustion_evidence(proj, seg) -> tuple[dict | None, str]:
+    """Return one current content-hashed exhaustion record, without semantic mutation authority."""
     try:
         review = (getattr(proj, "meta", {}) or {}).get(
             "selection_relevance_gap_review") or {}
         records = review.get("strict_acquisition_exhaustion")
         if not isinstance(records, dict):
-            return False, "strict_acquisition_exhaustion_missing_or_malformed"
+            return None, "strict_acquisition_exhaustion_missing_or_malformed"
         idx = int(getattr(seg, "index", -1))
         record = records.get(str(idx))
         if not isinstance(record, dict):
-            return False, "beat_strict_acquisition_exhaustion_missing"
+            return None, "beat_strict_acquisition_exhaustion_missing"
         validated, evidence_reason = _strict_acquisition_evidence(
             proj, [seg], [idx], source=record.get("evidence_source", ""),
             expected_sha256=record.get("evidence_sha256", ""), stored_records=records)
         if validated is None:
-            return False, evidence_reason
+            return None, evidence_reason
         if str(review.get("absence_pool_scope", "") or "") != \
                 str(validated.get("pool_scope", "") or ""):
-            return False, "strict_acquisition_review_pool_scope_mismatch"
+            return None, "strict_acquisition_review_pool_scope_mismatch"
         if str(review.get("absence_pool_fingerprint", "") or "") != \
                 str(validated.get("pool_fingerprint", "") or ""):
-            return False, "strict_acquisition_review_source_pool_changed"
+            return None, "strict_acquisition_review_source_pool_changed"
         try:
             review_absence_count = int(review.get("absence_pool_source_count"))
         except (TypeError, ValueError):
-            return False, "strict_acquisition_review_pool_source_count_malformed"
+            return None, "strict_acquisition_review_pool_source_count_malformed"
         if review_absence_count != int(validated.get("pool_source_count", -1)):
-            return False, "strict_acquisition_review_pool_source_count_changed"
-        return True, "authorized_by_bound_completed_strict_acquisition_exhaustion"
+            return None, "strict_acquisition_review_pool_source_count_changed"
+        beat = dict((validated.get("beats") or {}).get(str(idx)) or {})
+        if not beat:
+            return None, "strict_acquisition_evidence_beat_record_missing"
+        beat.update({
+            "evidence_source": validated["evidence_source"],
+            "evidence_sha256": validated["evidence_sha256"],
+            "evidence_schema_version": validated["evidence_schema_version"],
+        })
+        return beat, "strict_acquisition_evidence_valid"
     except Exception as exc:                              # noqa: BLE001 — mutation must fail closed
-        return False, f"strict_acquisition_review_validation_error:{type(exc).__name__}"
+        return None, f"strict_acquisition_review_validation_error:{type(exc).__name__}"
+
+
+def _phase1_reviewed_exhaustion_details(proj, seg, cfg=None) \
+        -> tuple[dict | None, str]:
+    """Authorize the sole pre-acquisition specificity-ladder path and return its proof."""
+    evidence, evidence_reason = _reviewed_exhaustion_evidence(proj, seg)
+    if evidence is None:
+        return None, evidence_reason
+    native_gap = evidence.get("authorization_kind") == _NATIVE_HD_GAP_CLASSIFICATION
+    # Matcher source gates may shrink the publishable pool after the independent audit.  The
+    # content-hashed artifact covers all indexed OK sources, so it owns pool identity here.  The
+    # common authorization still binds the reviewed beat and current semantic facts.  Only the
+    # schema-3 native-HD proof may admit a currently verbatim quote.
+    ok, reason = _phase1_softening_authorization(
+        proj, seg, cfg, require_eligible_pool=False,
+        allow_verified_native_gap=bool(native_gap))
+    if not ok:
+        return None, reason
+    return evidence, "authorized_by_bound_completed_strict_acquisition_exhaustion"
+
+
+def _phase1_reviewed_exhaustion_authorization(proj, seg, cfg=None) -> tuple[bool, str]:
+    """Compatibility boolean wrapper for the evidence-rich authorization."""
+    details, reason = _phase1_reviewed_exhaustion_details(proj, seg, cfg)
+    return details is not None, reason
 
 
 def make_selection_relevance_gap_review(proj, segments, confirmed_gap_beats, *,
@@ -1957,7 +2296,15 @@ def make_selection_relevance_gap_review(proj, segments, confirmed_gap_beats, *,
     return payload
 
 
-def semantic_gap_candidates(proj, audit: dict) -> tuple[list[int], str]:
+_NATIVE_QUOTE_CONTENT_REASONS = frozenset({
+    "exact_quote_dialogue_signal_below_floor",
+    "exact_quote_timed_asr_span_absent",
+    "exact_quote_timed_asr_outside_selected_window",
+})
+
+
+def _semantic_gap_authorizations(proj, audit: dict, *, cfg=None) \
+        -> tuple[dict[int, dict], str]:
     """Typed, fail-closed candidates for the post-recovery specificity ladder.
 
     A persisted viewer/pool audit may confirm genuine gaps and is authoritative when present. This
@@ -1973,33 +2320,40 @@ def semantic_gap_candidates(proj, audit: dict) -> tuple[list[int], str]:
     # correct pool shot"—the exact classification error this fix must not repeat. Without an
     # actual-frame/pool audit marker, fail closed and leave the publication blocker intact.
     if confirmed is None:
-        return [], "no_confirmed_actual_frame_gap_audit"
+        return {}, "no_confirmed_actual_frame_gap_audit"
     if int(review.get("schema_version", 0) or 0) < 2:
-        return [], "unbound_gap_review"
+        return {}, "unbound_gap_review"
 
     by_seg = {int(getattr(s, "index", -1)): s for s in (getattr(proj, "segments", None) or [])}
     bound_beats = review.get("beat_fingerprints") or {}
     if any(i not in by_seg or str(bound_beats.get(str(i), "")) != _gap_beat_fingerprint(by_seg[i])
            for i in confirmed):
-        return [], "stale_gap_review_beat_changed"
+        return {}, "stale_gap_review_beat_changed"
     pool_fp, _pool_n = _gap_pool_fingerprint(proj)
     if not review.get("pool_fingerprint") or str(review.get("pool_fingerprint")) != pool_fp:
-        return [], "stale_gap_review_source_pool_changed"
+        return {}, "stale_gap_review_source_pool_changed"
 
     from .relevance_contract import completed_deliberate_exact_downgrade
-    out = []
+    out: dict[int, dict] = {}
     for entry in (audit.get("blockers") or []):
         idx = int(entry.get("segment_index", -1))
         reasons = [str(r) for r in (entry.get("reasons") or [])]
         branch = str((entry.get("quote_evidence") or {}).get("branch", "") or "")
         seg = by_seg.get(idx)
         quote = str(getattr(seg, "quote", "") or "").strip() if seg is not None else ""
-        # A quote branch is a positive type assertion, not an optional hint.  A real quote, an
-        # indeterminate quote, or a missing/unknown branch must retain the authored promise.  Only
-        # the complete-pool scan's affirmative ``paraphrase`` result can enter this ladder.  This
-        # applies to CHARACTER as well as EXACT: policy's montage guard may legitimately demote a
-        # multi-subject quoted beat to CHARACTER, but that must not erase its dialogue promise.
-        if (quote and branch != "paraphrase") or branch in ("verbatim", "indeterminate"):
+        if idx not in confirmed or seg is None:
+            continue
+        # A real quote remains immutable by default.  The only exception is a current, hashed
+        # schema-3 actual-frame/pool proof that every exact quote source is native-SD and no
+        # publishable-HD copy exists.  Indeterminate/missing quote typing can never enter either
+        # path.  Nonquoted and confirmed-paraphrase beats retain the existing schema-2 behavior.
+        evidence, _evidence_reason = _reviewed_exhaustion_evidence(proj, seg)
+        native_quote_gap = bool(
+            quote and branch == "verbatim" and isinstance(evidence, dict)
+            and evidence.get("authorization_kind") == _NATIVE_HD_GAP_CLASSIFICATION)
+        if quote and branch != "paraphrase" and not native_quote_gap:
+            continue
+        if branch == "indeterminate" or (quote and not branch):
             continue
         if any(any(r.startswith(p) for p in _SEMANTIC_TECHNICAL_REASONS) for r in reasons):
             continue                                    # a code/evidence fault cannot buy a downgrade
@@ -2008,14 +2362,53 @@ def semantic_gap_candidates(proj, audit: dict) -> tuple[list[int], str]:
             reason for reason in reasons
             if reason in _SEMANTIC_NEGATIVE_REASONS
         ]
+        native_quote_content = [
+            reason for reason in reasons
+            if native_quote_gap and reason in _NATIVE_QUOTE_CONTENT_REASONS
+        ]
         # Fail closed on every reason outside the narrow semantic-negative vocabulary.  A mixed
         # blocker (for example verdict_replace + stale evidence) is still a technical blocker; the
         # viewer's pool-gap review cannot turn it into permission to mutate the beat contract.
-        if not deliberate_downgrade and len(semantic) != len(reasons):
+        if not deliberate_downgrade and len(semantic) + len(native_quote_content) != len(reasons):
             continue
-        if idx in confirmed and (semantic or deliberate_downgrade):
-            out.append(idx)
-    return sorted(set(out)), "confirmed_actual_frame_audit"
+        if not (semantic or native_quote_content or deliberate_downgrade):
+            continue
+        authorization = {
+            "authorization_kind": "confirmed_actual_frame_audit",
+            "strict_acquisition_exhausted": False,
+            "surrender_verbatim_quote": False,
+        }
+        if isinstance(evidence, dict):
+            authorization.update({
+                "authorization_kind": str(evidence.get("authorization_kind", "") or
+                                           "total_absence"),
+                "strict_acquisition_exhausted": True,
+                "surrender_verbatim_quote": bool(
+                    evidence.get("surrender_verbatim_quote") and native_quote_gap),
+                "evidence_source": str(evidence.get("evidence_source", "") or ""),
+                "evidence_sha256": str(evidence.get("evidence_sha256", "") or ""),
+                "evidence_schema_version": int(
+                    evidence.get("evidence_schema_version", 0) or 0),
+                "nonpublishable_exact_sources": copy.deepcopy(
+                    evidence.get("nonpublishable_exact_sources") or []),
+            })
+        out[idx] = authorization
+    return out, "confirmed_actual_frame_audit"
+
+
+def semantic_gap_candidates(proj, audit: dict) -> tuple[list[int], str]:
+    """Compatibility surface returning the indices from evidence-rich authorizations."""
+    authorizations, basis = _semantic_gap_authorizations(proj, audit)
+    return sorted(authorizations), basis
+
+
+def reviewed_exhausted_gap_authorizations(proj, audit: dict, *, cfg=None) -> dict[int, dict]:
+    """Current gap blockers that may bypass a duplicate strict acquisition/image-fallback page."""
+    authorizations, _basis = _semantic_gap_authorizations(proj, audit, cfg=cfg)
+    return {
+        idx: details for idx, details in authorizations.items()
+        if details.get("strict_acquisition_exhausted") is True
+    }
 
 
 def heal_selection_relevance_gaps(proj, segments, cfg, audit: dict, *, policy: str,
@@ -2023,12 +2416,14 @@ def heal_selection_relevance_gaps(proj, segments, cfg, audit: dict, *, policy: s
     """Run exact→character→abstract only after strict-positive semantic recovery is exhausted.
 
     The unchanged selection-relevance contract is evaluated again by the caller. This helper never
-    turns a technical failure or a located real quote into an abstract pass, and every surrendered
-    requirement is persisted for the next audit.
+    turns a technical failure into an abstract pass. A located real quote is surrenderable only by
+    its current schema-3 native-HD-absence proof, and every surrendered requirement is persisted for
+    the next audit.
     """
     from .config import engine_config
     from . import policy as P
-    candidates, basis = semantic_gap_candidates(proj, audit)
+    authorizations, basis = _semantic_gap_authorizations(proj, audit, cfg=cfg)
+    candidates = sorted(authorizations)
     by_seg = {int(getattr(s, "index", -1)): s for s in (segments or [])}
     by_sel = {int(getattr(s, "segment_index", -1)): s for s in (proj.selections or [])}
     by_entry = {int(e.get("segment_index", -1)): e for e in (audit.get("blockers") or [])}
@@ -2070,7 +2465,11 @@ def heal_selection_relevance_gaps(proj, segments, cfg, audit: dict, *, policy: s
                     _discard_invalid_still(sel, why, log)
             log(f"semantic-gap: beat {idx} exhausted strict-positive recovery; running the "
                 f"specificity ladder ({basis})")
-            ok = _soften_and_retry(proj, seg, sel, eng, pool, used, log)
+            authorization = authorizations.get(idx) or {}
+            ok = _soften_and_retry(
+                proj, seg, sel, eng, pool, used, log,
+                surrender_verbatim_quote=bool(
+                    authorization.get("surrender_verbatim_quote")))
             if ok:
                 row = _softening_row(
                     proj, seg, sel, old, phase="phase2_publication_recovery", basis=basis,
@@ -2078,7 +2477,7 @@ def heal_selection_relevance_gaps(proj, segments, cfg, audit: dict, *, policy: s
                     pool_source_count=softening_pool_n,
                     trigger_reasons=entry.get("reasons") or [],
                     quote_branch=str((entry.get("quote_evidence") or {}).get(
-                        "branch", "") or ""))
+                        "branch", "") or ""), authorization=authorization)
             else:
                 row = {
                     "segment_index": idx,
@@ -2093,6 +2492,9 @@ def heal_selection_relevance_gaps(proj, segments, cfg, audit: dict, *, policy: s
                     "trigger_reasons": list(entry.get("reasons") or []),
                     "quote_branch": str((entry.get("quote_evidence") or {}).get(
                         "branch", "") or ""),
+                    "authorization": copy.deepcopy(authorization),
+                    "surrendered_quote": bool(
+                        old.get("quote") and not getattr(seg, "quote", "")),
                     "dropped_requirement": False,
                 }
             rows.append(row)

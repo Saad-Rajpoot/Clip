@@ -210,6 +210,7 @@ def test_softening_is_the_LAST_thing_tried():
     reviewed_guards = [
         i for i in range(len(src))
         if src.startswith("_phase1_reviewed_exhaustion_authorization", i)
+        or src.startswith("_phase1_reviewed_exhaustion_details", i)
     ]
     assert i_ordinary_soft > i_still and i_ordinary_soft > i_acq \
         and i_ordinary_soft > i_region
@@ -715,6 +716,64 @@ def _bind_completed_exhaustion(proj, seg, *, source="actual-frame-pool-audit.jso
     return evidence
 
 
+def _bind_native_hd_gap_exhaustion(monkeypatch, proj, seg, *,
+                                   source="native-hd-gap-audit.json",
+                                   dimensions=(640, 360)):
+    """Bind the schema-3 shape used when exact quote footage exists only in native SD."""
+    from vidlore.clipstudio import quality_contract as Q
+    from vidlore.clipstudio import relevance_contract as R
+
+    src = proj.sources[0]
+    src.checksum = "current-native-sd-source-checksum"
+    proj.meta["auto_rejected_sources"] = [src.id]
+    proj.meta["auto_rejected_reasons"] = {src.id: "sub_native_hd"}
+    current_dimensions = {"width": dimensions[0], "height": dimensions[1]}
+    monkeypatch.setattr(Q, "probe_native_video_info", lambda _path: dict(current_dimensions))
+    contract = R._quote_pool_branches(proj, [seg])[seg.index]
+    assert contract["branch"] == "verbatim"
+    matches = list(contract.get("pool_matches") or [contract["pool_match"]])
+    assert [m["source_id"] for m in matches] == [src.id]
+    match = matches[0]
+    pool_fp, pool_n = S._gap_absence_pool_fingerprint(proj)
+    evidence = Path(proj.root) / source
+    beat = {
+        "beat_fingerprint": S._gap_beat_fingerprint(seg),
+        "classification": S._NATIVE_HD_GAP_CLASSIFICATION,
+        "gap_scope": S._NATIVE_HD_GAP_CLASSIFICATION,
+        "actual_frame_pool_audit": True,
+        "whole_pool_reviewed": True,
+        "correct_footage_present_in_pool": True,
+        "correct_publishable_footage_present_in_pool": False,
+        "pipeline_bug_ruled_out": True,
+        "strict_acquisition_status": "exhausted",
+        "technical_status": "complete",
+        "publication_min_short_edge": Q.MIN_NATIVE_SHORT_EDGE,
+        "publication_min_long_edge": Q.MIN_NATIVE_LONG_EDGE,
+        "nonpublishable_exact_sources": [{
+            "source_id": src.id,
+            "source_checksum": src.checksum,
+            "auto_reject_reason": "sub_native_hd",
+            "native_width": dimensions[0],
+            "native_height": dimensions[1],
+            "actual_frame_target_verified": True,
+            "timed_asr_span": match["timed_asr_span"],
+            "timed_asr_ratio": match["timed_asr_ratio"],
+        }],
+    }
+    evidence.write_text(json.dumps({
+        "schema_version": S._NATIVE_HD_GAP_EVIDENCE_SCHEMA,
+        "status": "complete",
+        "pool_scope": S._GAP_ABSENCE_POOL_SCOPE,
+        "pool_fingerprint": pool_fp,
+        "pool_source_count": pool_n,
+        "beats": {str(seg.index): beat},
+    }, sort_keys=True))
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, [seg], [seg.index], method="actual_frame_and_pool_audit",
+        source=str(evidence), strict_acquisition_exhausted_beats=[seg.index])
+    return evidence, current_dimensions
+
+
 @pytest.mark.parametrize(("top_patch", "reason"), [
     ({"schema_version": 1}, "schema_not_2"),
     ({"pool_scope": ""}, "pool_scope_not_all_source_ok_indexed"),
@@ -760,6 +819,11 @@ def test_bound_completed_exhaustion_runs_ladder_before_acquire(monkeypatch, tmp_
     assert row["basis"] == "phase1_bound_strict_acquisition_exhausted"
     assert row["original"]["visual_policy"] == P.EXACT
     assert row["new"]["visual_policy"] == P.ABSTRACT
+    assert row["authorization"]["authorization_kind"] == "total_absence"
+    assert row["authorization"]["strict_acquisition_exhausted"] is True
+    current = S.restore_stale_selection_relevance_softenings(proj, [seg])
+    assert current["restored"] == [] and current["unchanged"] == [24]
+    assert seg.visual_policy == P.ABSTRACT
 
 
 def test_match_auto_ban_does_not_stale_completed_whole_indexed_exhaustion(
@@ -984,6 +1048,229 @@ def test_completed_exhaustion_cannot_soften_a_verbatim_quote(tmp_path):
     assert ok is False and why == "phase1_verbatim_quote_promise"
 
 
+def test_schema3_native_hd_gap_can_surrender_only_its_bound_verbatim_quote(
+        monkeypatch, tmp_path):
+    from vidlore.clipstudio import relevance_contract as R
+
+    quote = "Kill his men."
+    words = [[0.1 + i * .2, 0.2 + i * .2, word]
+             for i, word in enumerate("Kill his men".split())]
+    proj, seg, sel = _phase1_evidence_fixture(
+        tmp_path, index=48, quote=quote, words=words,
+        verdict_patch={
+            "status": "ok", "verdict": "keep", "matches_narration": True,
+            "specific_enough": True, "correct_subject_visible": True,
+            "downgraded": "exact→contextual", "relevance_class": "contextual_fallback",
+        }, evidence_is_specific=False)
+    evidence, _dimensions = _bind_native_hd_gap_exhaustion(monkeypatch, proj, seg)
+
+    details, why = S._phase1_reviewed_exhaustion_details(proj, seg)
+    assert why == "authorized_by_bound_completed_strict_acquisition_exhaustion"
+    assert details["authorization_kind"] == S._NATIVE_HD_GAP_CLASSIFICATION
+    assert details["surrender_verbatim_quote"] is True
+    assert details["evidence_sha256"] == hashlib.sha256(evidence.read_bytes()).hexdigest()
+
+    audit = R.evaluate_selection_relevance(proj, [seg])
+    assert audit["blockers"][0]["quote_evidence"]["branch"] == "verbatim"
+    assert S.semantic_gap_candidates(proj, audit)[0] == [48]
+
+    observed = []
+
+    def authorized_ladder(_proj, target, selection, *_args, **kwargs):
+        observed.append(kwargs.get("surrender_verbatim_quote"))
+        assert S._soften_to_character(
+            target, lambda _m: None,
+            surrender_verbatim_quote=kwargs["surrender_verbatim_quote"])
+        selection.image_meta = {"selfheal_rung": "character_specific"}
+        return True
+
+    monkeypatch.setattr(S, "_clean_pool", lambda _proj: [])
+    monkeypatch.setattr(S, "_venue_cache_save", lambda _proj: None)
+    monkeypatch.setattr(S, "_soften_and_retry", authorized_ladder)
+    payload = S.heal_selection_relevance_gaps(
+        proj, [seg], ClipConfig(), audit, policy="approved_testing",
+        eng=NS(anthropic_model="vision-test"), log=lambda _m: None)
+
+    assert observed == [True]
+    assert seg.quote == "" and seg.visual_policy == P.CHARACTER
+    row = next(r for r in payload["beats"] if r["status"] == "softened")
+    assert row["original"]["quote"] == quote and row["new"]["quote"] == ""
+    assert row["quote_branch"] == "verbatim" and row["surrendered_quote"] is True
+    assert row["authorization"]["authorization_kind"] == \
+        S._NATIVE_HD_GAP_CLASSIFICATION
+    assert row["authorization"]["evidence_sha256"] == \
+        hashlib.sha256(evidence.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("stale_kind", ["evidence_hash", "source_became_hd"])
+def test_active_native_gap_softening_restores_quote_when_objective_proof_stales(
+        monkeypatch, tmp_path, stale_kind):
+    from vidlore.clipstudio import relevance_contract as R
+
+    quote = "Kill his men."
+    words = [[0.1 + i * .2, 0.2 + i * .2, word]
+             for i, word in enumerate("Kill his men".split())]
+    proj, seg, _sel = _phase1_evidence_fixture(
+        tmp_path, index=48, quote=quote, words=words,
+        verdict_patch={
+            "status": "ok", "verdict": "keep", "matches_narration": True,
+            "specific_enough": True, "correct_subject_visible": True,
+            "downgraded": "exact→contextual", "relevance_class": "contextual_fallback",
+        }, evidence_is_specific=False)
+    evidence, dimensions = _bind_native_hd_gap_exhaustion(monkeypatch, proj, seg)
+    audit = R.evaluate_selection_relevance(proj, [seg])
+
+    def authorized_ladder(_proj, target, selection, *_args, **kwargs):
+        assert S._soften_to_character(
+            target, lambda _m: None,
+            surrender_verbatim_quote=kwargs["surrender_verbatim_quote"])
+        selection.image_meta = {"selfheal_rung": "character_specific"}
+        return True
+
+    monkeypatch.setattr(S, "_clean_pool", lambda _proj: [])
+    monkeypatch.setattr(S, "_venue_cache_save", lambda _proj: None)
+    monkeypatch.setattr(S, "_soften_and_retry", authorized_ladder)
+    S.heal_selection_relevance_gaps(
+        proj, [seg], ClipConfig(), audit, policy="approved_testing",
+        eng=NS(anthropic_model="vision-test"), log=lambda _m: None)
+    assert seg.quote == "" and seg.visual_policy == P.CHARACTER
+    assert S.restore_stale_selection_relevance_softenings(proj, [seg])["restored"] == []
+
+    if stale_kind == "evidence_hash":
+        evidence.write_text(evidence.read_text() + "\n")
+    else:
+        dimensions.update(width=1280, height=720)
+
+    restored = S.restore_stale_selection_relevance_softenings(proj, [seg])
+    assert restored["restored"] == [48]
+    assert seg.visual_policy == P.EXACT and seg.quote == quote
+    row = next(r for r in proj.meta["selection_relevance_gap_softening"]["beats"]
+               if r["segment_index"] == 48)
+    assert row["status"] == "restored_evidence_stale" and row["active"] is False
+    post = R.evaluate_selection_relevance(proj, [seg])
+    assert post["status"] == "blocked" and post["blocked_count"] == 1
+
+
+def test_one_schema3_artifact_binds_total_absence_and_native_hd_absence_together(
+        monkeypatch, tmp_path):
+    quote = "Kill his men."
+    words = [[0.1 + i * .2, 0.2 + i * .2, word]
+             for i, word in enumerate("Kill his men".split())]
+    proj, native_seg, _sel = _phase1_evidence_fixture(
+        tmp_path, index=48, quote=quote, words=words)
+    evidence, _dimensions = _bind_native_hd_gap_exhaustion(
+        monkeypatch, proj, native_seg)
+    total_seg = ScriptSegment(
+        index=4, text="She puts it on the table and asks one question.", quote="",
+        expected_visual="Catelyn places the dagger on the table",
+        scene_query="Game of Thrones Catelyn dagger table",
+        required_entity="Catelyn Stark", required_kind="character",
+        visual_policy=P.EXACT, is_specific_claim=True)
+    proj.segments = [total_seg, native_seg]
+
+    artifact = json.loads(evidence.read_text())
+    artifact["beats"]["4"] = {
+        "beat_fingerprint": S._gap_beat_fingerprint(total_seg),
+        "classification": "footage_gap",
+        "gap_scope": S._TOTAL_ABSENCE_GAP_SCOPE,
+        "actual_frame_pool_audit": True,
+        "whole_pool_reviewed": True,
+        "correct_footage_present_in_pool": False,
+        "pipeline_bug_ruled_out": True,
+        "strict_acquisition_status": "exhausted",
+        "technical_status": "complete",
+    }
+    evidence.write_text(json.dumps(artifact, sort_keys=True))
+    review = S.make_selection_relevance_gap_review(
+        proj, proj.segments, [4, 48], method="actual_frame_and_pool_audit",
+        source=str(evidence), strict_acquisition_exhausted_beats=[4, 48])
+    proj.meta["selection_relevance_gap_review"] = review
+
+    total, total_reason = S._reviewed_exhaustion_evidence(proj, total_seg)
+    native, native_reason = S._reviewed_exhaustion_evidence(proj, native_seg)
+    assert total_reason == native_reason == "strict_acquisition_evidence_valid"
+    assert total["authorization_kind"] == "total_absence"
+    assert total["surrender_verbatim_quote"] is False
+    assert native["authorization_kind"] == S._NATIVE_HD_GAP_CLASSIFICATION
+    assert native["surrender_verbatim_quote"] is True
+    assert review["confirmed_gap_beats"] == [4, 48]
+    assert set(review["strict_acquisition_exhaustion"]) == {"4", "48"}
+
+
+@pytest.mark.parametrize(
+    "changed", ["hd", "unprobeable", "reject_reason", "reject_membership"],
+    ids=["became-hd", "probe-failed", "wrong-reject-reason", "not-currently-rejected"],
+)
+def test_schema3_native_gap_fails_closed_when_objective_sd_proof_changes(
+        monkeypatch, tmp_path, changed):
+    from vidlore.clipstudio import quality_contract as Q
+
+    quote = "Kill his men."
+    words = [[0.1 + i * .2, 0.2 + i * .2, word]
+             for i, word in enumerate("Kill his men".split())]
+    proj, seg, _sel = _phase1_evidence_fixture(
+        tmp_path, index=48, quote=quote, words=words)
+    _evidence, dimensions = _bind_native_hd_gap_exhaustion(monkeypatch, proj, seg)
+
+    if changed == "hd":
+        dimensions.update(width=1280, height=720)
+    elif changed == "unprobeable":
+        dimensions.clear()
+    elif changed == "reject_reason":
+        proj.meta["auto_rejected_reasons"][proj.sources[0].id] = "subtitled_copy"
+    else:
+        proj.meta["auto_rejected_sources"] = []
+
+    details, why = S._phase1_reviewed_exhaustion_details(proj, seg)
+    assert details is None
+    assert {
+        "hd": "source_is_native_hd",
+        "unprobeable": "source_unprobeable",
+        "reject_reason": "source_not_rejected_as_sd",
+        "reject_membership": "source_not_currently_rejected",
+    }[changed] in why
+
+
+def test_schema3_native_gap_denies_quote_surrender_when_an_hd_source_has_unknown_asr(
+        monkeypatch, tmp_path):
+    quote = "Kill his men."
+    words = [[0.1 + i * .2, 0.2 + i * .2, word]
+             for i, word in enumerate("Kill his men".split())]
+    proj, seg, _sel = _phase1_evidence_fixture(
+        tmp_path, index=48, quote=quote, words=words)
+
+    unknown_media = tmp_path / "hd-unknown.mp4"
+    unknown_media.write_bytes(b"publishable hd source with unknown asr")
+    unknown_frame = tmp_path / "hd-unknown.jpg"
+    unknown_frame.write_bytes(b"frame")
+    unknown = SourceVideo(
+        id="hd_unknown", url="unknown", title="Game of Thrones possible street scene",
+        local_path=str(unknown_media), permission="owner", status="ok",
+        checksum="unknown-hd-checksum", width=1280, height=720,
+    )
+    proj.sources.append(unknown)
+    proj.shots_path(unknown.id).write_text(json.dumps([Shot(
+        source_id=unknown.id, index=0, start=0.0, end=2.0,
+        keyframe_path=str(unknown_frame)).to_dict()]))
+    # Deliberately no current words/index metadata: absence cannot be proven for this HD source.
+    prior_review = copy.deepcopy(proj.meta.get("selection_relevance_gap_review"))
+    with pytest.raises(ValueError, match="native_gap_asr_pool_incomplete"):
+        _bind_native_hd_gap_exhaustion(monkeypatch, proj, seg)
+    assert proj.meta.get("selection_relevance_gap_review") == prior_review
+
+
+def test_character_softening_preserves_quote_without_schema3_authorization():
+    quote = "Kill his men."
+    ordinary = Seg(quote=quote, required_kind="character", required_entity="Jaime Lannister")
+    assert S._soften_to_character(ordinary, lambda _m: None) is True
+    assert ordinary.quote == quote
+
+    authorized = Seg(quote=quote, required_kind="character", required_entity="Jaime Lannister")
+    assert S._soften_to_character(
+        authorized, lambda _m: None, surrender_verbatim_quote=True) is True
+    assert authorized.quote == ""
+
+
 def test_exhaustion_declaration_requires_confirmed_beat_and_evidence_source(tmp_path):
     proj, seg, _sel = _phase1_evidence_fixture(tmp_path)
     with pytest.raises(ValueError, match="subset"):
@@ -1106,7 +1393,8 @@ def _run_phase1_authorization(monkeypatch, proj, seg):
 
     def ladder(_proj, target, *_args, **_kwargs):
         called.append(target.index)
-        target.visual_policy = P.ABSTRACT
+        S._soften_to_abstract(target, lambda _message: None,
+                              cause="test exhausted paraphrase")
         return True
 
     monkeypatch.setattr(S, "_soften_and_retry", ladder)
@@ -1179,6 +1467,10 @@ def test_phase1_bound_paraphrase_with_pure_content_negative_can_still_soften(
 
     assert resolved == 1 and called == [seg.index]
     assert P.policy_of(seg) == P.ABSTRACT
+    assert seg.quote == ""
+    restored = S.restore_stale_selection_relevance_softenings(proj, [seg])
+    assert restored["restored"] == [] and restored["unchanged"] == [seg.index]
+    assert P.policy_of(seg) == P.ABSTRACT and seg.quote == ""
     assert not any("specificity softening DENIED" in line for line in lines)
 
 

@@ -319,6 +319,13 @@ _DISTINCT_PHYSICAL_EVENT_RX = re.compile(
     r"collapses?|collapsing|collapsed)\b",
     re.I,
 )
+# The narration can describe a character's intent to put something "on the record" without
+# reciting the later dialogue.  When that intent is appended to a physical-action beat, treating
+# the analyzer's remembered line as co-temporal creates a permanently impossible <=8s contract.
+_ON_RECORD_INTENT_RX = re.compile(
+    r"\b(?:wants?|wanted)\s+(?:it|this|that)\s+on\s+the\s+record\b",
+    re.I,
+)
 _SCENE_ACTION_ROOTS = frozenset({
     "answer", "arrive", "attack", "betray", "bow", "burn", "carry", "chase", "check",
     "choke", "collapse", "confess", "confront", "discover", "die", "draw", "drink",
@@ -343,6 +350,11 @@ def _grounding_stem(word: str) -> str:
     w = word.lower().strip("'-")
     if len(w) <= 3:
         return w
+    # Prefer a known action root before generic suffix stripping: ``takes`` -> ``take``,
+    # ``dies`` -> ``die`` and ``collapses`` -> ``collapse``.  The old blanket ``-es`` rule made
+    # each of those look verb-less, which could misclassify a real action as a nominal fragment.
+    if w.endswith("s") and w[:-1] in _SCENE_ACTION_ROOTS:
+        return w[:-1]
     if w.endswith("ies") and len(w) > 4:
         return w[:-3] + "y"
     if w.endswith("ing") and len(w) > 5:
@@ -369,6 +381,33 @@ def _grounding_terms(value: str) -> set[str]:
         stem for raw in _GROUNDING_WORD_RX.findall(value or "")
         if raw.lower() not in _GROUNDING_STOP and len(stem := _grounding_stem(raw)) >= 3
     }
+
+
+def _determiner_named_subject_fragment(narration: str, required_entity: str) -> bool:
+    """Recognize only a tightly structured determiner-led noun phrase, never infer verbhood.
+
+    The measured failure is ``the master-at-arms of the Red Keep``: the required entity is the
+    immediate noun-phrase prefix and the only remainder is a short proper-name ``of`` complement.
+    This intentionally prefers false negatives.  In particular, finite actions such as ``The
+    Hound abandons Arya`` must survive even when their verb is outside our tiny action lexicon.
+    """
+    words = list(_GROUNDING_WORD_RX.finditer(narration or ""))
+    if len(words) < 2 or words[0].group(0).lower() not in {"the", "a", "an"}:
+        return False
+    entity_words = [w.lower() for w in _GROUNDING_WORD_RX.findall(required_entity or "")]
+    while entity_words and entity_words[0] in {"the", "a", "an"}:
+        entity_words.pop(0)
+    body = words[1:]
+    if not entity_words or len(body) < len(entity_words):
+        return False
+    if [w.group(0).lower() for w in body[:len(entity_words)]] != entity_words:
+        return False
+    tail = (narration[body[len(entity_words) - 1].end():]
+            .strip().rstrip(".!?").strip())
+    if not tail:
+        return True
+    return bool(re.fullmatch(
+        r"of\s+(?:the\s+)?[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,3}", tail))
 
 
 def _narrates_authored_quote(narration: str, quote: str) -> bool:
@@ -440,6 +479,19 @@ def _exact_direction_grounding(beat: ScriptSegment, directive: dict) -> dict:
             "sanitize_fields": sanitize_fields,
         }
 
+    # Keep the narrated physical event exact, but do not turn the essayist's "on the record"
+    # paraphrase into a promise that remembered show dialogue occurs inside that same short action
+    # window.  Literal dialogue remains protected by the authored-dialogue return above.
+    if (quote and _ON_RECORD_INTENT_RX.search(narration)
+            and _DISTINCT_PHYSICAL_EVENT_RX.search(narration)):
+        return {
+            "grounded": True,
+            "reason": "record_intent_is_not_verbatim_dialogue",
+            "shared_terms": sorted(shared)[:8],
+            "entity_grounded": bool(entity_shared),
+            "sanitize_fields": ["quote"],
+        }
+
     has_action = _has_scene_action(narration)
     required_kind = str(directive.get("required_kind", "") or "").strip().lower()
     subject_terms = shared - _NON_SUBJECT_GROUNDING_TERMS
@@ -452,13 +504,20 @@ def _exact_direction_grounding(beat: ScriptSegment, directive: dict) -> dict:
         return {"grounded": False, "reason": "general_relationship_not_exact_moment",
                 "shared_terms": sorted(shared)[:8], "entity_grounded": bool(entity_shared),
                 "subject_named": subject_named}
-    if _NOMINAL_FRAGMENT_RX.search(narration) and not has_action:
+    verb_less_named_subject = (
+        required_kind in _NAMED_SUBJECT_KINDS
+        and subject_named
+        and _determiner_named_subject_fragment(
+            narration, str(directive.get("required_entity", "") or ""))
+    )
+    if (_NOMINAL_FRAGMENT_RX.search(narration) or verb_less_named_subject) and not has_action:
         return {"grounded": False, "reason": "named_subject_without_exact_action",
                 "shared_terms": sorted(shared)[:8], "entity_grounded": bool(entity_shared),
                 "subject_named": subject_named}
-    if not shared and _VAGUE_SUBJECT_RX.search(narration):
-        return {"grounded": False, "reason": "vague_subject_has_no_storyboard_overlap",
-                "shared_terms": [], "entity_grounded": False, "subject_named": False}
+    if _VAGUE_SUBJECT_RX.search(narration) and not subject_named:
+        return {"grounded": False, "reason": "vague_subject_has_no_grounded_subject",
+                "shared_terms": sorted(shared)[:8], "entity_grounded": False,
+                "subject_named": False}
 
     # Once the narration itself names the subject and an action/event, uncertainty belongs to the
     # footage verifier, not this lexical guard.  Keeping this branch permissive protects indirect
@@ -608,13 +667,31 @@ def _sanitize_adjacent_quote_borrowing(beats) -> int:
     return changed
 
 
+_BEAT_GROUNDING_AUDIT_SCHEMA = 3
+
+
 def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
     """Persist process-local grounding markers in the project's serialized analysis metadata."""
+    previous = (analysis.beat_grounding_audit
+                if isinstance(analysis.beat_grounding_audit, dict) else {})
+    previous_breakout = (previous.get("breakout_provenance", {})
+                         if isinstance(previous.get("breakout_provenance", {}), dict) else {})
     records = {}
+    breakout_provenance = {}
     for beat in beats or []:
+        key = str(int(getattr(beat, "index", -1)))
         marker = getattr(beat, "_analyzer_grounding_guard", None)
         if isinstance(marker, dict):
-            records[str(int(getattr(beat, "index", -1)))] = dict(marker)
+            records[key] = dict(marker)
+        if key in previous_breakout:
+            breakout_provenance[key] = previous_breakout[key]
+        elif bool(getattr(beat, "breakout_candidate", False)):
+            # Before policy.finalize_beats, only an explicit caller can set the orthogonal flag.
+            breakout_provenance[key] = "explicit"
+        elif str(getattr(beat, "quote", "") or "").strip():
+            # finalize_beats will turn this quote into the automatic boolean later; recording that
+            # origin now is the only provenance-safe way to undo it if a future guard drops the line.
+            breakout_provenance[key] = "quote_derived"
     grounded = sum(str(m.get("branch", "")).startswith("grounded_exact")
                    for m in records.values())
     downgraded = sum(m.get("branch") == "ungrounded_exact_downgrade"
@@ -628,6 +705,9 @@ def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
         "information_staging_sanitized": sum(
             m.get("reason") == "unsupported_information_staging_removed"
             for m in records.values()),
+        "record_intent_quote_sanitized": sum(
+            m.get("reason") == "record_intent_is_not_verbatim_dialogue"
+            for m in records.values()),
         "adjacent_quote_copy_sanitized": sum(
             "adjacent_quote_borrowed_into_distinct_visual_event"
             in (m.get("sanitization_reasons") or []) for m in records.values()),
@@ -638,11 +718,201 @@ def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
             m.get("to_policy") == _policy.FILLER for m in records.values()),
     }
     analysis.beat_grounding_audit = {
-        "schema": 2,
+        "schema": _BEAT_GROUNDING_AUDIT_SCHEMA,
         "counts": counts,
         "beats": records,
     }
+    if breakout_provenance:
+        analysis.beat_grounding_audit["breakout_provenance"] = breakout_provenance
     return counts
+
+
+_CACHED_REVALIDATION_FIELDS = (
+    "visual_policy", "is_specific_claim", "expected_visual", "scene_query", "quote",
+    "breakout_candidate", "required_entity", "required_kind",
+)
+_CACHED_DIRECTION_GUARD_SCHEMA = _BEAT_GROUNDING_AUDIT_SCHEMA
+_MANUAL_BREAKOUT_PROVENANCE = frozenset({"manual", "authored", "editorial", "explicit"})
+
+
+def _sanitized_guard_is_effective(beat: ScriptSegment, marker: dict) -> bool:
+    """Whether a persisted sanitized marker still truthfully describes the loaded fields."""
+    if marker.get("branch") != "grounded_exact_sanitized":
+        return False
+    fields = list(marker.get("sanitized_fields") or [])
+    if not fields:
+        return False
+    for field in fields:
+        if field == "quote" and str(getattr(beat, "quote", "") or ""):
+            return False
+        if field == "expected_visual" and str(getattr(beat, "expected_visual", "") or "") != \
+                str(getattr(beat, "text", "") or "")[:200]:
+            return False
+    return all(field in {"quote", "expected_visual"} for field in fields)
+
+
+def _cached_direction(beat: ScriptSegment) -> dict:
+    """Reconstruct the analyzer directive already persisted on one loaded segment."""
+    return {
+        "expected_visual": str(getattr(beat, "expected_visual", "") or ""),
+        "scene_query": str(getattr(beat, "scene_query", "") or ""),
+        "quote": str(getattr(beat, "quote", "") or ""),
+        "shot_intent": str(getattr(beat, "shot_intent", "") or ""),
+        "required_entity": str(getattr(beat, "required_entity", "") or ""),
+        "required_kind": str(getattr(beat, "required_kind", "") or ""),
+        "emotion": str(getattr(beat, "emotion", "") or ""),
+        "visual_policy": str(getattr(beat, "visual_policy", "") or ""),
+        "specific": bool(getattr(beat, "is_specific_claim", False)),
+    }
+
+
+def revalidate_cached_directions(beats, analysis: ScriptAnalysis | None = None) -> dict:
+    """Re-apply today's deterministic analyzer guards to cached LLM directives, in place.
+
+    Resuming an old job normally loads ``ScriptSegment`` rows without their process-local guard
+    marker.  This helper restores any persisted markers, revalidates only rows that still claim
+    ``exact_scene``, then re-runs the cross-beat quote-copy sanitizer.  It never calls an LLM and it
+    is field-idempotent: a second pass reports zero new changes.  When ``analysis`` is supplied, the
+    complete guard audit and the first material revalidation diff are persisted for later review.
+    """
+    rows = list(beats or [])
+    prior_audit = (dict(analysis.beat_grounding_audit)
+                   if analysis is not None and isinstance(analysis.beat_grounding_audit, dict)
+                   else {})
+    prior_records = prior_audit.get("beats", {})
+    try:
+        prior_guard_schema = int(prior_audit.get("schema", 0) or 0)
+    except (TypeError, ValueError):
+        prior_guard_schema = 0
+    prior_revalidation = prior_audit.get("cached_revalidation")
+    prior_material_revalidation = prior_audit.get("last_material_revalidation")
+    prior_breakout_provenance = prior_audit.get("breakout_provenance", {})
+    breakout_provenance = (dict(prior_breakout_provenance)
+                           if isinstance(prior_breakout_provenance, dict) else {})
+
+    # Loaded dataclasses omit process-local attributes.  Restore old records so revalidating exact
+    # rows does not erase the audit history of rows that were already downgraded or sanitized.
+    for beat in rows:
+        key = str(int(getattr(beat, "index", -1)))
+        old_marker = prior_records.get(key) if isinstance(prior_records, dict) else None
+        if isinstance(old_marker, dict) and not isinstance(
+                getattr(beat, "_analyzer_grounding_guard", None), dict):
+            setattr(beat, "_analyzer_grounding_guard", dict(old_marker))
+
+    before = {
+        int(getattr(beat, "index", -1)): {
+            field: getattr(beat, field, None) for field in _CACHED_REVALIDATION_FIELDS
+        }
+        for beat in rows
+    }
+    exact_revalidated = 0
+    preserved_sanitized_provenance = 0
+    for beat in rows:
+        if _policy.normalize(getattr(beat, "visual_policy", "")) != _policy.EXACT:
+            continue
+        existing_marker = getattr(beat, "_analyzer_grounding_guard", None)
+        if (isinstance(existing_marker, dict)
+                and existing_marker.get("cached_revalidation_schema")
+                == _CACHED_DIRECTION_GUARD_SCHEMA):
+            if _sanitized_guard_is_effective(beat, existing_marker):
+                preserved_sanitized_provenance += 1
+            continue
+        if (isinstance(existing_marker, dict)
+                and prior_guard_schema == _BEAT_GROUNDING_AUDIT_SCHEMA):
+            # A fresh/current analyze already ran this exact deterministic guard version.  Replaying
+            # its post-guard fields can only erase provenance; stamp it as resume-current and keep
+            # the original reason.
+            existing_marker["cached_revalidation_schema"] = _CACHED_DIRECTION_GUARD_SCHEMA
+            if _sanitized_guard_is_effective(beat, existing_marker):
+                preserved_sanitized_provenance += 1
+            continue
+        if isinstance(existing_marker, dict) and _sanitized_guard_is_effective(
+                beat, existing_marker):
+            # The current fields prove this sanitizer already ran.  Reconstructing a directive
+            # from its post-sanitized state would overwrite the truthful reason with a generic
+            # "grounded" reason despite changing nothing.
+            existing_marker["cached_revalidation_schema"] = _CACHED_DIRECTION_GUARD_SCHEMA
+            preserved_sanitized_provenance += 1
+            continue
+        exact_revalidated += 1
+        _apply_beat_direction(beat, _cached_direction(beat))
+        current_marker = getattr(beat, "_analyzer_grounding_guard", None)
+        if isinstance(current_marker, dict):
+            current_marker["cached_revalidation_schema"] = _CACHED_DIRECTION_GUARD_SCHEMA
+    _sanitize_adjacent_quote_borrowing(rows)
+
+    # `policy.finalize_beats` derives the boolean breakout flag from a non-empty quote.  When this
+    # pass removes that quote, clear only that automatic residue.  A persisted explicit provenance
+    # value is the narrow escape hatch for a human/authored breakout that must survive independently
+    # of the bad quote; without such provenance, quote+True follows the only automatic setter's
+    # documented semantics and is recorded as quote-derived.
+    for beat in rows:
+        index = int(getattr(beat, "index", -1))
+        key = str(index)
+        old = before[index]
+        if (not str(old.get("quote") or "").strip()
+                or str(getattr(beat, "quote", "") or "").strip()
+                or not bool(old.get("breakout_candidate"))):
+            continue
+        provenance = str(breakout_provenance.get(key, "") or "").strip().lower()
+        marker = getattr(beat, "_analyzer_grounding_guard", None)
+        if provenance in _MANUAL_BREAKOUT_PROVENANCE:
+            if isinstance(marker, dict):
+                marker["breakout_candidate_action"] = "preserved_explicit_breakout"
+            breakout_provenance[key] = provenance
+            continue
+        beat.breakout_candidate = False
+        if isinstance(marker, dict):
+            marker["breakout_candidate_action"] = "cleared_quote_derived_breakout"
+        breakout_provenance[key] = "quote_derived_cleared"
+
+    changes = {}
+    for beat in rows:
+        index = int(getattr(beat, "index", -1))
+        old = before[index]
+        new = {field: getattr(beat, field, None) for field in _CACHED_REVALIDATION_FIELDS}
+        changed_fields = [field for field in _CACHED_REVALIDATION_FIELDS
+                          if old[field] != new[field]]
+        if not changed_fields:
+            continue
+        marker = getattr(beat, "_analyzer_grounding_guard", None)
+        changes[str(index)] = {
+            "changed_fields": changed_fields,
+            "before": {field: old[field] for field in changed_fields},
+            "after": {field: new[field] for field in changed_fields},
+            "guard": dict(marker) if isinstance(marker, dict) else {},
+        }
+
+    audit_target = analysis if analysis is not None else ScriptAnalysis()
+    grounding_counts = _record_beat_grounding_audit(audit_target, rows)
+    report = {
+        "schema": 1,
+        "scanned": len(rows),
+        "exact_revalidated": exact_revalidated,
+        "preserved_sanitized_provenance": preserved_sanitized_provenance,
+        "changed_count": len(changes),
+        "changed_indices": sorted(int(index) for index in changes),
+        "changes": changes,
+        "grounding_counts": grounding_counts,
+    }
+    if analysis is not None:
+        if breakout_provenance:
+            analysis.beat_grounding_audit["breakout_provenance"] = breakout_provenance
+        # `cached_revalidation` describes the current invocation, so a resume truthfully records a
+        # zero-work pass.  Preserve the most recent material diff separately instead of making the
+        # current-pass counters lie forever after the first run.
+        analysis.beat_grounding_audit["cached_revalidation"] = report
+        material = None
+        if changes:
+            material = report
+        elif isinstance(prior_material_revalidation, dict):
+            material = prior_material_revalidation
+        elif (isinstance(prior_revalidation, dict)
+              and int(prior_revalidation.get("changed_count", 0) or 0)):
+            material = prior_revalidation
+        if isinstance(material, dict):
+            analysis.beat_grounding_audit["last_material_revalidation"] = material
+    return report
 
 
 _ANCHOR_STOP = set(          # (was `_STOPQ if False else set(...)` — the dead branch never ran,

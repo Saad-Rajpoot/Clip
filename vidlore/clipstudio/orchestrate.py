@@ -133,8 +133,12 @@ def _sig(*parts) -> str:
 def _seg_sig(segs) -> str:
     """Signature of the beats that actually drive footage selection — text + the classified visual
     policy + the entity/scene/quote anchors. A change here must re-match."""
-    return _sig(tuple((s.index, s.text, s.visual_policy, s.required_entity, s.required_kind,
-                       s.scene_query, s.quote) for s in (segs or [])))
+    return _sig(tuple((
+        s.index, s.text, s.visual_policy, s.required_entity, s.required_kind,
+        s.scene_query, s.quote, getattr(s, "expected_visual", ""),
+        bool(getattr(s, "is_specific_claim", False)),
+        bool(getattr(s, "breakout_candidate", False)),
+    ) for s in (segs or [])))
 
 
 def _ckpt(proj) -> dict:
@@ -3426,11 +3430,28 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
                          if str(i).lstrip("-").isdigit()
                          and int(i) in _current_initial_blockers]
     _content_generation_exhausted = _same_recovery_generation and not _pending_deferred
-    if _content_generation_exhausted and not _initial_technical:
+    # A viewer may bind a completed, hash-checked gap audit *after* an earlier strict generation
+    # exhausted.  That review does not change the content fingerprint, so returning solely on the
+    # old marker would make the newly authorized specificity ladder unreachable forever.  Check
+    # current authorization before the fast return; it still grants no acquisition bypass or
+    # semantic pass on its own—the ladder and unchanged final publication assertion remain below.
+    _entry_exhausted_gap_authorizations = {}
+    if _content_generation_exhausted:
+        from . import selfheal as _selfheal_entry_gap_sr
+        _entry_exhausted_gap_authorizations = \
+            _selfheal_entry_gap_sr.reviewed_exhausted_gap_authorizations(
+                proj, _initial_content_audit, cfg=cfg)
+    if (_content_generation_exhausted and not _initial_technical
+            and not _entry_exhausted_gap_authorizations):
         log(f"semantic-recovery: unchanged content failure already exhausted for "
             f"{_initial_content_audit['blocked_count']} beat(s) — skipping duplicate "
             "download/verification")
         return audit
+    if _content_generation_exhausted and _entry_exhausted_gap_authorizations:
+        log("semantic-recovery: strict generation is already exhausted, but current bound gap "
+            "authorization is pending for beat(s) "
+            f"{sorted(_entry_exhausted_gap_authorizations)}; continuing directly to the "
+            "specificity ladder")
     if _same_recovery_generation and _pending_deferred:
         log(f"semantic-recovery: continuing {len(_pending_deferred)} audited deferred blocker(s) "
             f"from the prior bounded round {_pending_deferred}")
@@ -3569,6 +3590,16 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
     _content_audit = _selection_relevance_audit_without(audit, _persistent_technical)
     _current_content_blockers = {
         int(e.get("segment_index", -1)) for e in (_content_audit.get("blockers") or [])}
+    # A hash-bound, current-pool strict-exhaustion audit is stronger than another identical
+    # discovery/rematch page.  Keep those beats in the publication audit and in ``before``; remove
+    # them only from duplicate strict acquisition/image fallback so the audited specificity ladder
+    # below can settle them.  Ordinary viewer-confirmed gaps (and every stale/tampered/technical
+    # record) remain in the normal acquire-first path.
+    from . import selfheal as _selfheal_gap_auth_sr
+    _exhausted_gap_authorizations = \
+        _selfheal_gap_auth_sr.reviewed_exhausted_gap_authorizations(
+            proj, _content_audit, cfg=cfg)
+    _exhausted_gap_indices = set(_exhausted_gap_authorizations)
     before = sorted(set(before) | _current_content_blockers)
     _content_fp = _selection_relevance_retry_fingerprint(proj, segs, _content_audit)
     _same_recovery_generation = previous.get("post_fingerprint") == _content_fp
@@ -3579,7 +3610,12 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
     if _content_generation_exhausted and _current_content_blockers:
         log("semantic-recovery: current content generation is already exhausted for beat(s) "
             f"{sorted(_current_content_blockers)}; technical beats will still fail closed")
-    blockers = (set() if _content_generation_exhausted else set(_current_content_blockers))
+    blockers = (set() if _content_generation_exhausted else
+                set(_current_content_blockers) - _exhausted_gap_indices)
+    if _exhausted_gap_indices and not _content_generation_exhausted:
+        log("semantic-recovery: audited strict-exhaustion gap beat(s) "
+            f"{sorted(_exhausted_gap_indices)} bypass duplicate acquisition; "
+            "the specificity ladder and final publication gate still decide")
     _recovery_deferred: list[int] = []
     _page_pool_changed = False
     _completed_page_scope: set[int] = set()
@@ -3650,8 +3686,15 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
         _technical_after_page = _persistent_verifier_technical_indices(audit)
         _content_after_page = _selection_relevance_audit_without(
             audit, _technical_after_page)
-        blockers = {
+        _all_blockers_after_page = {
             int(e["segment_index"]) for e in (_content_after_page.get("blockers") or [])}
+        # Revalidate against the post-page pool.  A newly downloaded/indexed source invalidates the
+        # absence proof, so that beat immediately returns to strict recovery instead of spending a
+        # stale downgrade authorization.  An unchanged pool keeps it out of exact image fallback.
+        _exhausted_after_page = \
+            _selfheal_gap_auth_sr.reviewed_exhausted_gap_authorizations(
+                proj, _content_after_page, cfg=cfg)
+        blockers = _all_blockers_after_page - set(_exhausted_after_page)
         if _page_pool_changed:
             # The page's own scoped beats were rematched after its downloads/indexing. Every prior
             # blocker outside that page was transactionally restored, so it has never seen the new
@@ -3695,19 +3738,36 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
 
     # Genuine, audited footage gaps are different from wrong picks and technical evidence faults.
     # Strict-positive recovery above gets the first and final chance to preserve specificity. Only
-    # after it is exhausted may the existing exact→character→abstract ladder run, and it excludes
-    # located real quotes plus binding/schema/backend failures. The unchanged publication contract
-    # is immediately re-evaluated below; softening never bypasses it.
+    # after it is exhausted may the existing exact→character→abstract ladder run. Located real
+    # quotes remain excluded unless a current schema-3 audit proves their exact footage exists only
+    # below the native-HD floor; binding/schema/backend failures are always excluded. The unchanged
+    # publication contract is immediately re-evaluated below; softening never bypasses it.
     pre_soften = _R_sr.evaluate_selection_relevance(
         proj, segs, cfg=cfg, quote_pool_cache=_quote_pool_cache_sr)
     _pre_soften_technical = _persistent_verifier_technical_indices(pre_soften)
     _pre_soften_for_ladder = _selection_relevance_audit_without(
         pre_soften, _pre_soften_technical)
-    if _recovery_deferred or _content_generation_exhausted:
+    if _recovery_deferred:
         # Keep this generation-wide too. A deferred tail may acquire footage for an already-tried
         # head, so softening even that head before the tail runs would erase the very blocker that
         # needs to be reconsidered against the expanded pool.
         _ladder_blockers = []
+        _pre_soften_for_ladder = {
+            **_pre_soften_for_ladder,
+            "blockers": _ladder_blockers,
+            "blocked_count": len(_ladder_blockers),
+            "status": "blocked" if _ladder_blockers else "pass",
+        }
+    elif _content_generation_exhausted:
+        # The old strict marker suppresses duplicate recovery, not a newly bound completed gap
+        # audit.  Retain exactly the currently authorized rows; every other exhausted blocker stays
+        # frozen and the final publication assertion continues to block it.
+        _pending_authorized = _selfheal_gap_auth_sr.reviewed_exhausted_gap_authorizations(
+            proj, _pre_soften_for_ladder, cfg=cfg)
+        _ladder_blockers = [
+            entry for entry in (_pre_soften_for_ladder.get("blockers") or [])
+            if int(entry.get("segment_index", -1)) in _pending_authorized
+        ]
         _pre_soften_for_ladder = {
             **_pre_soften_for_ladder,
             "blockers": _ladder_blockers,
@@ -3769,7 +3829,7 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
             "after": after,
             "post_fingerprint": _selection_relevance_retry_fingerprint(
                 proj, segs, _final_content),
-            "gap_softening": ((_marker.get("gap_softening") or {})
+            "gap_softening": (((_gap_softening or _marker.get("gap_softening") or {}))
                               if _content_generation_exhausted else (_gap_softening or {})),
             "deferred": (_marker.get("deferred") or [])
                         if _content_generation_exhausted else _recovery_deferred,
@@ -3928,7 +3988,7 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
     same inputs (checkpoints in proj.meta['pipeline']), so a render that died — or content-blocked —
     at assembly continues from where it stopped instead of redoing hours of index/match/verify. The
     final assemble always re-runs (a killed render leaves no usable output)."""
-    from .analyze import analyze_script, ScriptAnalysis
+    from .analyze import analyze_script, ScriptAnalysis, revalidate_cached_directions
     from .discover import discover_sources
     from .download import download_candidates
     from . import faceid as _faceid
@@ -4056,7 +4116,19 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
                    artifact_ok=bool(proj.segments and proj.meta.get("analysis"))):
         analysis = ScriptAnalysis.from_dict(proj.meta["analysis"])
         segs = proj.segments
+        # Analyzer directives are cached model output, but the deterministic grounding guards are
+        # code.  Re-apply today's guards on Resume so an older exact-scene storyboard cannot evade
+        # a newly fixed contract merely because its analyze checkpoint is valid.  Persist even a
+        # no-op pass: it records the guard schema/provenance that makes the next Resume idempotent.
+        _cached_guard = revalidate_cached_directions(segs, analysis)
         _tally = _policy.finalize_beats(segs)          # idempotent re-classify (cheap; for the tally)
+        proj.segments = segs
+        proj.meta["analysis"] = analysis.to_dict()
+        proj.save()
+        log("  cached analyzer guards → "
+            f"checked:{_cached_guard.get('exact_revalidated', 0)} · "
+            f"changed:{_cached_guard.get('changed_count', 0)} "
+            f"{_cached_guard.get('changed_indices', [])}")
         log(f"  ↻ skipped (resume) — movie={analysis.movie_title!r} · {len(segs)} beats cached")
     else:
         analysis, segs = analyze_script(script_text, topic=topic, movie_hint=movie_hint,

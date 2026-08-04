@@ -99,6 +99,15 @@ def test_zero_overlap_global_storyboards_downgrade_to_generic_and_clear_exact_fi
             },
         ),
         (
+            "the master-at-arms of the Red Keep.",
+            {
+                "expected_visual": "Close up of the master-at-arms examining the dagger",
+                "scene_query": "Game of Thrones Rodrik master-at-arms dagger question",
+                "required_entity": "master-at-arms",
+                "required_kind": "character",
+            },
+        ),
+        (
             "He never had to persuade Olenna Tyrell of anything.",
             {
                 "expected_visual": "Olenna holds a poison cup and confesses to Jaime",
@@ -149,6 +158,51 @@ def test_narration_grounded_exact_event_is_not_demoted_to_hide_a_timing_failure(
     assert beat.scene_query == directive["scene_query"]
     assert beat.quote == directive["quote"]
     assert beat._analyzer_grounding_guard["branch"] == "grounded_exact"
+
+
+def test_shared_abstract_term_does_not_ground_an_invented_subject_for_vague_narration():
+    text = "Verification is in motion. Someone is checking."
+    beat = _apply(
+        text,
+        expected_visual="Ser Rodrik showing the dagger, emphasizing the act of verification",
+        scene_query="Game of Thrones Ser Rodrik master-at-arms dagger question",
+        required_entity="Ser Rodrik Cassel",
+        required_kind="character",
+    )
+
+    assert beat.visual_policy == P.FILLER
+    assert beat.expected_visual == text
+    assert beat.scene_query == beat.quote == ""
+    assert beat.required_entity == beat.required_kind == ""
+    assert beat._analyzer_grounding_guard["reason"] == \
+        "vague_subject_has_no_grounded_subject"
+    # ``verification`` overlaps, but it is an abstract relation—not a grounded subject.
+    assert beat._analyzer_grounding_guard["shared_terms"] == ["verification"]
+
+
+def test_physical_event_with_record_intent_keeps_action_but_clears_borrowed_quote():
+    text = ("And it tells us again years later when Olenna is holding a cup of poison of her "
+            "own wants it on the record.")
+    directive = {
+        "expected_visual": "Olenna holding the poison cup with Jaime present",
+        "scene_query": "Game of Thrones Olenna drinks poison Jaime Highgarden",
+        "quote": "Tell Cersei. I want her to know it was me.",
+        "required_entity": "Olenna Tyrell",
+        "required_kind": "character",
+    }
+
+    beat = _apply(text, **directive)
+
+    assert beat.visual_policy == P.EXACT
+    assert beat.is_specific_claim is True
+    assert beat.expected_visual == directive["expected_visual"]
+    assert beat.scene_query == directive["scene_query"]
+    assert beat.required_entity == directive["required_entity"]
+    assert beat.quote == ""
+    assert beat._analyzer_grounding_guard["branch"] == "grounded_exact_sanitized"
+    assert beat._analyzer_grounding_guard["reason"] == \
+        "record_intent_is_not_verbatim_dialogue"
+    assert beat._analyzer_grounding_guard["sanitized_fields"] == ["quote"]
 
 
 def test_information_event_stays_exact_but_invented_delivery_staging_is_removed():
@@ -285,11 +339,43 @@ def test_direct_exact_action_indirect_scene_pointer_and_narrated_dialogue_stay_e
         required_entity="the trap",
         required_kind="object",
     )
+    finite_action = _apply(
+        "A king dies at his own feast in front of hundreds of people.",
+        expected_visual="Joffrey choking and dying at the Purple Wedding feast",
+        scene_query="Game of Thrones Joffrey choking Purple Wedding",
+        required_entity="Joffrey Baratheon",
+        required_kind="character",
+    )
 
-    for beat in (direct, indirect, dialogue, conservative):
+    for beat in (direct, indirect, dialogue, conservative, finite_action):
         assert beat.visual_policy == P.EXACT
         assert beat.is_specific_claim is True
         assert beat._analyzer_grounding_guard["branch"] == "grounded_exact"
+
+
+@pytest.mark.parametrize(
+    "text, expected_visual, entity",
+    [
+        ("The Hound abandons Arya.", "The Hound abandons Arya on the road", "The Hound"),
+        ("A guard blocks the gate.", "A guard physically blocks the gate", "guard"),
+        ("The king executes the prisoner.", "The king executes the prisoner", "the king"),
+        ("The queen embraces her child.", "The queen embraces her child", "the queen"),
+    ],
+)
+def test_determiner_led_finite_actions_outside_small_verb_lexicon_stay_exact(
+        text, expected_visual, entity):
+    beat = _apply(
+        text,
+        expected_visual=expected_visual,
+        scene_query=f"Example Show {expected_visual}",
+        required_entity=entity,
+        required_kind="character",
+    )
+
+    assert beat.visual_policy == P.EXACT
+    assert beat.is_specific_claim is True
+    assert beat.expected_visual == expected_visual
+    assert beat._analyzer_grounding_guard["branch"] == "grounded_exact"
 
 
 def test_grounding_branches_persist_in_analysis_metadata_and_round_trip():
@@ -327,12 +413,13 @@ def test_grounding_branches_persist_in_analysis_metadata_and_round_trip():
         "grounded_exact": 2,
         "sanitized_exact": 1,
         "information_staging_sanitized": 1,
+        "record_intent_quote_sanitized": 0,
         "adjacent_quote_copy_sanitized": 0,
         "downgraded": 1,
         "to_character_specific": 0,
         "to_generic_filler": 1,
     }
-    assert analysis.beat_grounding_audit["schema"] == 2
+    assert analysis.beat_grounding_audit["schema"] == 3
     restored = A.ScriptAnalysis.from_dict(analysis.to_dict())
     assert restored.beat_grounding_audit == analysis.beat_grounding_audit
     assert restored.beat_grounding_audit["beats"]["0"]["branch"] == \
@@ -340,3 +427,195 @@ def test_grounding_branches_persist_in_analysis_metadata_and_round_trip():
     assert restored.beat_grounding_audit["beats"]["1"]["branch"] == "grounded_exact"
     assert restored.beat_grounding_audit["beats"]["2"]["branch"] == \
         "grounded_exact_sanitized"
+
+
+def test_cached_direction_revalidation_is_scoped_audited_and_idempotent_for_101_beats():
+    beats = [
+        ScriptSegment(
+            index=i,
+            text=f"Generic contextual narration {i}.",
+            expected_visual=f"Generic contextual narration {i}.",
+            visual_policy=P.FILLER,
+        )
+        for i in range(101)
+    ]
+    beats[31] = ScriptSegment(
+        index=31,
+        text="the master-at-arms of the Red Keep.",
+        expected_visual="Close up of the master-at-arms examining the dagger",
+        scene_query="Game of Thrones Rodrik master-at-arms dagger question",
+        required_entity="master-at-arms",
+        required_kind="character",
+        visual_policy=P.EXACT,
+        is_specific_claim=True,
+    )
+    beats[32] = ScriptSegment(
+        index=32,
+        text="Verification is in motion. Someone is checking.",
+        expected_visual="Ser Rodrik showing the dagger, emphasizing verification",
+        scene_query="Game of Thrones Rodrik master-at-arms dagger question",
+        required_entity="Ser Rodrik Cassel",
+        required_kind="character",
+        visual_policy=P.EXACT,
+        is_specific_claim=True,
+    )
+    beats[59] = ScriptSegment(
+        index=59,
+        text=("And it tells us again years later when Olenna is holding a cup of poison of her "
+              "own wants it on the record."),
+        expected_visual="Olenna holding the poison cup with Jaime present",
+        scene_query="Game of Thrones Olenna drinks poison Jaime Highgarden",
+        quote="Tell Cersei. I want her to know it was me.",
+        required_entity="Olenna Tyrell",
+        required_kind="character",
+        visual_policy=P.EXACT,
+        is_specific_claim=True,
+        breakout_candidate=True,
+    )
+    # A grounded exact control proves the helper is not a global exact->soft policy rewrite.
+    beats[70] = ScriptSegment(
+        index=70,
+        text="Joffrey collapses at the wedding feast, clawing at his throat.",
+        expected_visual="Joffrey choking at the Purple Wedding feast",
+        scene_query="Game of Thrones Joffrey choking Purple Wedding",
+        required_entity="Joffrey Baratheon",
+        required_kind="character",
+        visual_policy=P.EXACT,
+        is_specific_claim=True,
+    )
+    analysis = A.ScriptAnalysis(movie_title="Game of Thrones")
+
+    first = A.revalidate_cached_directions(beats, analysis)
+
+    assert first["scanned"] == 101
+    assert first["exact_revalidated"] == 4
+    assert first["changed_count"] == 3
+    assert first["changed_indices"] == [31, 32, 59]
+    assert beats[31].visual_policy == P.CHARACTER
+    assert beats[31].required_entity == "master-at-arms"
+    assert beats[32].visual_policy == P.FILLER
+    assert beats[32].required_entity == ""
+    assert first["changes"]["59"]["changed_fields"] == ["quote", "breakout_candidate"]
+    assert beats[59].visual_policy == P.EXACT
+    assert beats[59].quote == ""
+    assert beats[59].breakout_candidate is False
+    assert analysis.beat_grounding_audit["breakout_provenance"]["59"] == \
+        "quote_derived_cleared"
+    assert beats[70].visual_policy == P.EXACT
+    assert analysis.beat_grounding_audit["cached_revalidation"]["changed_indices"] == \
+        [31, 32, 59]
+    saved_analysis = analysis.to_dict()
+    saved_audit = saved_analysis["beat_grounding_audit"]
+    # Exercise the real resume seam: ScriptSegment serialization drops process-local attributes,
+    # so the second pass must restore guard markers from ScriptAnalysis.
+    reloaded_beats = [ScriptSegment.from_dict(beat.to_dict()) for beat in beats]
+    reloaded_analysis = A.ScriptAnalysis.from_dict(saved_analysis)
+
+    second = A.revalidate_cached_directions(reloaded_beats, reloaded_analysis)
+
+    assert second["changed_count"] == 0
+    assert second["changed_indices"] == []
+    assert second["exact_revalidated"] == 0
+    resumed_audit = reloaded_analysis.to_dict()["beat_grounding_audit"]
+    # Current-pass counters are truthful, while the first material diff and guard records survive.
+    assert resumed_audit["cached_revalidation"]["changed_count"] == 0
+    assert resumed_audit["cached_revalidation"]["exact_revalidated"] == 0
+    assert resumed_audit["last_material_revalidation"]["changed_indices"] == [31, 32, 59]
+    assert resumed_audit["beats"] == saved_audit["beats"]
+    assert resumed_audit["breakout_provenance"] == saved_audit["breakout_provenance"]
+
+    reloaded_again = [ScriptSegment.from_dict(beat.to_dict()) for beat in reloaded_beats]
+    analysis_again = A.ScriptAnalysis.from_dict(reloaded_analysis.to_dict())
+    third = A.revalidate_cached_directions(reloaded_again, analysis_again)
+    assert third["changed_count"] == 0
+    assert analysis_again.to_dict()["beat_grounding_audit"] == resumed_audit
+
+
+@pytest.mark.parametrize("explicit_provenance", ["manual", "authored"])
+def test_cached_revalidation_preserves_explicit_breakout_but_clears_quote_derived_flag(
+        explicit_provenance):
+    def _cached(index: int) -> ScriptSegment:
+        return ScriptSegment(
+            index=index,
+            text=("Olenna is holding a cup of poison of her own and wants it on the "
+                  "record."),
+            expected_visual="Olenna holding the poison cup with Jaime present",
+            scene_query="Game of Thrones Olenna drinks poison Jaime Highgarden",
+            quote="Tell Cersei. I want her to know it was me.",
+            required_entity="Olenna Tyrell",
+            required_kind="character",
+            visual_policy=P.EXACT,
+            is_specific_claim=True,
+            breakout_candidate=True,
+        )
+
+    automatic, manual = _cached(0), _cached(1)
+    analysis = A.ScriptAnalysis(
+        beat_grounding_audit={"breakout_provenance": {"1": explicit_provenance}})
+
+    report = A.revalidate_cached_directions([automatic, manual], analysis)
+
+    assert automatic.quote == manual.quote == ""
+    assert automatic.breakout_candidate is False
+    assert manual.breakout_candidate is True
+    assert report["changes"]["0"]["changed_fields"] == ["quote", "breakout_candidate"]
+    assert report["changes"]["1"]["changed_fields"] == ["quote"]
+    assert analysis.beat_grounding_audit["breakout_provenance"] == {
+        "0": "quote_derived_cleared",
+        "1": explicit_provenance,
+    }
+    assert report["changes"]["0"]["guard"]["breakout_candidate_action"] == \
+        "cleared_quote_derived_breakout"
+    assert report["changes"]["1"]["guard"]["breakout_candidate_action"] == \
+        "preserved_explicit_breakout"
+
+
+def test_grounding_audit_records_breakout_origin_before_policy_finalization():
+    automatic = ScriptSegment(index=0, text="A quoted beat", quote="A real line")
+    explicit = ScriptSegment(
+        index=1, text="An editor-authored breakout", quote="Another real line",
+        breakout_candidate=True)
+    analysis = A.ScriptAnalysis()
+
+    A._record_beat_grounding_audit(analysis, [automatic, explicit])
+
+    assert analysis.beat_grounding_audit["breakout_provenance"] == {
+        "0": "quote_derived",
+        "1": "explicit",
+    }
+
+
+def test_resume_preserves_fresh_sanitizer_reason_when_post_state_changes_nothing():
+    beat = _apply(
+        "Olenna is holding a cup of poison of her own and wants it on the record.",
+        expected_visual="Olenna holding the poison cup with Jaime present",
+        scene_query="Game of Thrones Olenna drinks poison Jaime Highgarden",
+        quote="Tell Cersei. I want her to know it was me.",
+        required_entity="Olenna Tyrell",
+        required_kind="character",
+    )
+    analysis = A.ScriptAnalysis(movie_title="Game of Thrones")
+    A._record_beat_grounding_audit(analysis, [beat])
+    assert analysis.beat_grounding_audit["beats"]["0"]["reason"] == \
+        "record_intent_is_not_verbatim_dialogue"
+
+    loaded = ScriptSegment.from_dict(beat.to_dict())
+    loaded_analysis = A.ScriptAnalysis.from_dict(analysis.to_dict())
+    first = A.revalidate_cached_directions([loaded], loaded_analysis)
+
+    assert first["changed_count"] == 0
+    assert first["exact_revalidated"] == 0
+    assert first["preserved_sanitized_provenance"] == 1
+    marker = loaded_analysis.beat_grounding_audit["beats"]["0"]
+    assert marker["branch"] == "grounded_exact_sanitized"
+    assert marker["reason"] == "record_intent_is_not_verbatim_dialogue"
+    assert marker["sanitized_fields"] == ["quote"]
+    assert marker["cached_revalidation_schema"] == 3
+    saved_audit = loaded_analysis.to_dict()["beat_grounding_audit"]
+
+    loaded_again = ScriptSegment.from_dict(loaded.to_dict())
+    analysis_again = A.ScriptAnalysis.from_dict(loaded_analysis.to_dict())
+    second = A.revalidate_cached_directions([loaded_again], analysis_again)
+
+    assert second["changed_count"] == 0
+    assert analysis_again.to_dict()["beat_grounding_audit"] == saved_audit

@@ -2599,6 +2599,154 @@ def test_orchestrate_runs_strict_recovery_then_confirmed_gap_ladder_then_asserts
     assert "is_specific=True" in fallback
 
 
+def _bind_schema2_exhausted_gap(proj, segs, idx, tmp_path):
+    """Bind the existing total-absence proof for orchestration-scope tests."""
+    from vidlore.clipstudio import selfheal as S
+
+    seg = next(s for s in segs if s.index == idx)
+    pool_fp, pool_n = S._gap_absence_pool_fingerprint(proj)
+    evidence = tmp_path / f"beat-{idx}-strict-exhaustion.json"
+    evidence.write_text(json.dumps({
+        "schema_version": 2,
+        "status": "complete",
+        "pool_scope": S._GAP_ABSENCE_POOL_SCOPE,
+        "pool_fingerprint": pool_fp,
+        "pool_source_count": pool_n,
+        "beats": {str(idx): {
+            "beat_fingerprint": S._gap_beat_fingerprint(seg),
+            "classification": "footage_gap",
+            "actual_frame_pool_audit": True,
+            "whole_pool_reviewed": True,
+            "correct_footage_present_in_pool": False,
+            "pipeline_bug_ruled_out": True,
+            "strict_acquisition_status": "exhausted",
+            "technical_status": "complete",
+        }},
+    }, sort_keys=True))
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, segs, [idx], method="actual_frame_and_pool_audit",
+        source=str(evidence), strict_acquisition_exhausted_beats=[idx])
+    return evidence
+
+
+def test_validated_exhausted_gap_skips_duplicate_acquisition_and_exact_image_fallback(
+        tmp_path):
+    from vidlore.clipstudio import selfheal as S
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    _bind_schema2_exhausted_gap(proj, segs, 0, tmp_path)
+
+    def settle_gap(_proj, targets, *_args, **_kwargs):
+        seg = targets[0]
+        seg.visual_policy = P.ABSTRACT
+        seg.required_entity = ""
+        seg.required_kind = ""
+        seg.quote = ""
+        seg.scene_query = ""
+        seg.is_specific_claim = False
+        return {"candidate_count": 1, "softened_count": 1}
+
+    with mock.patch.object(O, "_recover_unresolved_beats") as recover, \
+            mock.patch.object(O, "_fill_image_fallbacks") as images, \
+            mock.patch.object(S, "heal_selection_relevance_gaps",
+                              side_effect=settle_gap) as ladder:
+        final = _call(proj, segs)
+
+    assert final["status"] == "pass"
+    recover.assert_not_called()
+    images.assert_not_called()
+    ladder.assert_called_once()
+
+
+def test_new_bound_gap_review_runs_ladder_after_same_generation_was_already_exhausted(
+        tmp_path):
+    """A completed strict marker predates operator review and must not deadlock that review."""
+    from vidlore.clipstudio import relevance_contract as R
+    from vidlore.clipstudio import selfheal as S
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    _bind_schema2_exhausted_gap(proj, segs, 0, tmp_path)
+    current = R.evaluate_selection_relevance(proj, segs)
+    assert current["blocked_count"] == 1
+    proj.meta["selection_relevance_recovery"] = {
+        "schema_version": R.SCHEMA_VERSION,
+        "before": [0],
+        "after": [0],
+        "post_fingerprint": O._selection_relevance_retry_fingerprint(proj, segs, current),
+        "deferred": [],
+        "gap_softening": {},
+    }
+
+    result_payload = {"candidate_count": 1, "softened_count": 1,
+                      "beats": [{"segment_index": 0, "status": "softened"}]}
+
+    def settle_gap(_proj, targets, *_args, **_kwargs):
+        seg = targets[0]
+        seg.visual_policy = P.ABSTRACT
+        seg.required_entity = ""
+        seg.required_kind = ""
+        seg.quote = ""
+        seg.scene_query = ""
+        seg.is_specific_claim = False
+        return result_payload
+
+    with mock.patch.object(O, "_recover_unresolved_beats") as recover, \
+            mock.patch.object(O, "_fill_image_fallbacks") as images, \
+            mock.patch.object(S, "heal_selection_relevance_gaps",
+                              side_effect=settle_gap) as ladder:
+        final = _call(proj, segs)
+
+    assert final["status"] == "pass"
+    recover.assert_not_called()
+    images.assert_not_called()
+    ladder.assert_called_once()
+    assert proj.meta["selection_relevance_recovery"]["gap_softening"] == result_payload
+
+
+def test_pool_growth_revalidates_exhausted_gap_and_returns_it_to_strict_recovery(
+        tmp_path):
+    from vidlore.clipstudio import selfheal as S
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    _append_bound_rejected_beat(proj, segs, index=1)
+    _bind_schema2_exhausted_gap(proj, segs, 0, tmp_path)
+    scopes = []
+
+    def grow_pool(_proj, _segs, _analysis, _cfg, _eng, **kw):
+        scopes.append(sorted(kw["only_indices"]))
+        assert scopes[-1] == [1], "the bound exhausted gap must skip this duplicate page"
+        media = tmp_path / "new-pool-source.mp4"
+        media.write_bytes(b"new searchable pool bytes")
+        frame = tmp_path / "new-pool-frame.jpg"
+        frame.write_bytes(b"new indexed frame")
+        _proj.sources.append(SourceVideo(
+            id="new_pool", url="new", title="Game of Thrones new exact scene",
+            permission="owner", status="ok", local_path=str(media)))
+        _proj.shots_path("new_pool").write_text(json.dumps([Shot(
+            source_id="new_pool", index=0, start=0.0, end=2.0,
+            keyframe_path=str(frame)).to_dict()]))
+        (_proj.index_dir / "new_pool.words.json").write_text("[]")
+        _write_mock_recovery_page(_proj, kw)
+        return 0
+
+    with mock.patch.object(O, "_recover_unresolved_beats", side_effect=grow_pool), \
+            mock.patch.object(O, "_fill_image_fallbacks") as images, \
+            mock.patch.object(S, "heal_selection_relevance_gaps") as ladder:
+        final = _call(proj, segs)
+
+    assert final["status"] == "blocked" and final["blocked_count"] == 2
+    assert scopes == [[1]]
+    assert proj.meta["selection_relevance_recovery"]["deferred"] == [0]
+    images.assert_not_called()
+    ladder.assert_not_called(), "a changed pool invalidates the gap proof before softening"
+
+
 def test_semantic_gap_ladder_requires_actual_frame_confirmation(tmp_path):
     from vidlore.clipstudio import selfheal as S
     proj, segs, _sel = _fixture(

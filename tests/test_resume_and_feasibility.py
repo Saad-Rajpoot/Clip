@@ -68,6 +68,18 @@ def test_signature_is_stable_and_sensitive():
     s2 = O._seg_sig([_seg(0, "throne room", "tyrion")])
     s3 = O._seg_sig([_seg(0, "dragon pit", "tyrion")])
     assert s1 == s2 and s1 != s3, "seg signature tracks the beats that drive matching"
+    baseline = _seg(0, "throne room", "tyrion")
+    mutations = []
+    for field, value in (
+            ("expected_visual", "Tyrion entering the throne room"),
+            ("is_specific_claim", True),
+            ("breakout_candidate", True)):
+        changed = ScriptSegment.from_dict(baseline.to_dict())
+        setattr(changed, field, value)
+        mutations.append((field, O._seg_sig([changed])))
+    baseline_sig = O._seg_sig([baseline])
+    assert all(sig != baseline_sig for _field, sig in mutations), \
+        f"every match/verify input must invalidate the segment signature: {mutations}"
 
 
 def test_stage_skip_only_when_resuming_matching_and_artifact_present():
@@ -335,7 +347,22 @@ def test_produce_auto_resume_skips_completed_stages_end_to_end():
         _count("analyze")
         a = ScriptAnalysis(topic="t", movie_title="Movie", video_type="multi_scene",
                            actors=["Actor"], characters=[])
-        segs = [_seg(0, "throne room", "tyrion"), _seg(1, "throne room", "tyrion")]
+        segs = []
+        for idx in range(2):
+            seg = _seg(idx, "Tyrion enters the throne room", "Tyrion")
+            seg.text = "Tyrion enters the throne room."
+            seg.expected_visual = "Tyrion enters the throne room"
+            # Exercise the same deterministic guard marker a real analyze call persists.
+            AN._apply_beat_direction(seg, {
+                "expected_visual": seg.expected_visual,
+                "scene_query": seg.scene_query,
+                "required_entity": seg.required_entity,
+                "required_kind": seg.required_kind,
+                "visual_policy": "exact_scene",
+                "specific": True,
+            })
+            segs.append(seg)
+        AN._record_beat_grounding_audit(a, segs)
         return a, segs
 
     def fake_discover(analysis, cfg, **k):
@@ -421,6 +448,10 @@ def test_produce_auto_resume_skips_completed_stages_end_to_end():
         assert calls.get("recover") == 1, f"recovery must NOT re-run: {calls}"
         assert calls.get("index", 0) == 1, f"index must be skipped when all footage stages cached: {calls}"
         assert calls.get("build") == 2, f"assembly MUST re-run on resume: {calls}"
+        cached_after_resume = ClipProject.load(tmp)
+        cached_audit = cached_after_resume.meta["analysis"]["beat_grounding_audit"]
+        assert cached_audit["cached_revalidation"]["changed_count"] == 0
+        assert cached_audit["cached_revalidation"]["exact_revalidated"] == 0
 
         # 3) Simulate an interrupted/invalid cut checkpoint while the match checkpoint remains
         # valid. This is the one safe reuse path: selections are unchanged, so cut_all may retain
