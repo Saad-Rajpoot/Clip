@@ -7494,8 +7494,9 @@ def _scene_video(
         return _enc(["-loop", "1", "-i", str(item.path)], vf)
 
 
-def _srt(words: list[WordTiming], path: Path) -> None:
-    from .captions import assert_caption_schedule
+def _srt(words: list[WordTiming], path: Path, *, protected_windows=None,
+         schedule: list[dict] | None = None) -> list[dict]:
+    from .captions import assert_caption_schedule, caption_schedule_problems
 
     def ts(t: float) -> str:
         total_ms = max(0, int(round(float(t) * 1000.0)))
@@ -7507,12 +7508,24 @@ def _srt(words: list[WordTiming], path: Path) -> None:
     # SRT and burned ASS must consume the same schedule.  Persist the viewer-facing metrics before
     # serialising anything and fail the render on zero/backwards/overlapping or >20-CPS cues
     # (the official adult timed-text publish ceiling, with spaces/punctuation counted).
-    schedule = assert_caption_schedule(
-        words, path.with_name("caption_readability_audit.json"))
+    if schedule is None:
+        schedule = assert_caption_schedule(
+            words, path.with_name("caption_readability_audit.json"),
+            protected_windows=protected_windows)
+    else:
+        flattened = [word for cue in schedule for word in (cue.get("words") or [])]
+        if (len(flattened) != len(words)
+                or any(a is not b for a, b in zip(flattened, words))):
+            raise RuntimeError("approved SRT schedule does not own this word stream")
+        problems = caption_schedule_problems(schedule)
+        if problems:
+            raise RuntimeError("approved SRT schedule is unsafe: " + problems[0]["reason"])
     lines = []
     for i, cue in enumerate(schedule, 1):
         lines += [str(i), f"{ts(cue['start'])} --> {ts(cue['end'])}", cue["text"], ""]
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")
+    return schedule
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -8512,6 +8525,13 @@ def assemble(
     lineage_expectations: object | None = None,
 ) -> Path:
     workdir.mkdir(parents=True, exist_ok=True)
+    # Caption feasibility depends only on the final timed narration and trusted
+    # breakout windows.  Fail here, before hundreds of scene encodes, and retain
+    # this exact approved schedule for both SRT and burned ASS.
+    words = narration.all_words()
+    _approved_caption_schedule = _srt(
+        words, out_path.with_suffix(".srt"),
+        protected_windows=breakout_windows)
     # ASSEMBLY LINEAGE CONTRACT.  Generic engine callers remain unchanged
     # (None = disabled), but a caller that supplies provenance gets a strict,
     # fail-closed contract.  ``lineage_expectations`` is a compatibility alias
@@ -9704,8 +9724,9 @@ def assemble(
                     "reason": f"timeline lineage could not be checked: {_lineage_exc}",
                 }])
 
-    words = narration.all_words()
-    _srt(words, out_path.with_suffix(".srt"))
+    _srt(words, out_path.with_suffix(".srt"),
+         protected_windows=breakout_windows,
+         schedule=_approved_caption_schedule)
 
     # ═══════════════════════════════════════════════════════════════════
     # PRE-BAKE per-scene overlays (v11). The 80+ `movie=` overlay stages
@@ -10064,26 +10085,48 @@ def assemble(
             _drop_wins += [(float(gc[0]), float(gc[0]) + float(gc[1])) for gc in graphic_cues]
         if caption_suppress_windows:
             for w_ in caption_suppress_windows:
-                try:
-                    _drop_wins.append((float(w_[0]), float(w_[1])))
-                except Exception:
-                    pass
+                _drop_wins.append(w_)
+        if _drop_wins:
+            from .captions import _normalize_caption_windows, assert_caption_schedule
+            try:
+                _drop_wins = _normalize_caption_windows(
+                    _drop_wins, label="blocked", merge_overlaps=True)
+            except ValueError:
+                # Persist the malformed contract before failing; otherwise an
+                # all-covering bad window could remove every word and bypass
+                # the burn-caption gate entirely.
+                assert_caption_schedule(
+                    words, workdir / "caption_burn_readability_audit.json",
+                    protected_windows=breakout_windows,
+                    blocked_windows=_drop_wins)
+                raise
         if _drop_wins:
             def _under_card(w) -> bool:
-                mid = (float(getattr(w, "start", 0.0))
-                       + float(getattr(w, "end", 0.0))) / 2.0
-                return any(s <= mid < e for s, e in _drop_wins)
+                word_start = float(getattr(w, "start", 0.0))
+                word_end = float(getattr(w, "end", word_start))
+                return any(word_start < end and word_end > start
+                           for start, end in _drop_wins)
 
             cap_words = [w for w in words if not _under_card(w)]
-        ass = write_ass(
-            cap_words or words, workdir / "captions.ass",
-            style=theme["caption"],
-            # captions use `caption_accent` when set (a per-caption active-word colour that must
-            # NOT recolour title/graphic overlays or key-phrase stabs), else the theme accent.
-            accent=theme.get("caption_accent", theme.get("accent", (255, 210, 90))),
-            emphasis_words=emph,
-        )
-        vfilters.append("subtitles=filename=%s" % ass.name)
+        if _drop_wins:
+            from .captions import assert_caption_schedule
+            _burn_schedule = assert_caption_schedule(
+                cap_words, workdir / "caption_burn_readability_audit.json",
+                protected_windows=breakout_windows,
+                blocked_windows=_drop_wins)
+        else:
+            _burn_schedule = _approved_caption_schedule
+        if cap_words:
+            ass = write_ass(
+                cap_words, workdir / "captions.ass",
+                style=theme["caption"],
+                # captions use `caption_accent` when set (a per-caption active-word colour that
+                # must NOT recolour title/graphic overlays or key-phrase stabs), else the accent.
+                accent=theme.get("caption_accent", theme.get("accent", (255, 210, 90))),
+                emphasis_words=emph,
+                schedule=_burn_schedule,
+            )
+            vfilters.append("subtitles=filename=%s" % ass.name)
     if overlays:
         vfilters += _overlay_filters(
             title, theme["accent"], narration.total, workdir,

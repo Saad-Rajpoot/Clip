@@ -31,6 +31,49 @@ def _norm(w: str) -> str:
     return re.sub(r"[^a-z']", "", w.lower())
 
 
+_LATIN_DANGLING = {
+    "a", "an", "the", "and", "or", "but", "because", "although", "while",
+    "to", "of", "for", "with", "from", "into", "by", "as", "at", "on", "in",
+    "he", "she", "they", "we", "it", "his", "her", "their", "our", "your",
+    "that", "which", "who", "whose", "is", "are", "was", "were", "has", "have",
+}
+_CAPTION_REPAIR_MAX_WORDS = 16
+_CAPTION_REPAIR_CPS_MARGIN = 0.05
+_CAPTION_PROTECTED_LEAD_MAX = 0.45
+
+
+def _normalize_caption_windows(raw_windows, *, label: str,
+                               merge_overlaps: bool = False) -> list[tuple[float, float]]:
+    """Validate timing contracts before any window is allowed to donate/clamp dwell."""
+    if raw_windows is None:
+        return []
+    if not isinstance(raw_windows, (list, tuple)):
+        raise ValueError(f"{label} windows must be a list of (start, end) pairs")
+    normalized = []
+    for i, raw in enumerate(raw_windows):
+        if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+            raise ValueError(f"{label} window {i} is not a complete (start, end) pair")
+        try:
+            start, end = float(raw[0]), float(raw[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label} window {i} is not numeric") from exc
+        if not (math.isfinite(start) and math.isfinite(end)):
+            raise ValueError(f"{label} window {i} is not finite")
+        if start < 0.0 or end <= start:
+            raise ValueError(f"{label} window {i} must satisfy 0 <= start < end")
+        normalized.append((start, end))
+    normalized.sort()
+    result = []
+    for start, end in normalized:
+        if result and start < result[-1][1] - 1e-9:
+            if not merge_overlaps:
+                raise ValueError(f"{label} windows overlap")
+            result[-1] = (result[-1][0], max(result[-1][1], end))
+        else:
+            result.append((start, end))
+    return result
+
+
 def _channel_caption_pace() -> tuple[int | None, float | None]:
     """Read Look-DNA `captions.max_words` and `captions.max_dur_s`
     overrides.  Returns (None, None) when no channel — `_group()`
@@ -116,12 +159,6 @@ def _group(words: list[WordTiming], max_words: int = 6, max_dur: float = 3.4):
     # captions such as "is exactly how Varys learns she"; all source words were
     # present, but the displayed phrase read like broken grammar.
     _punct_end = re.compile(r"[.!?][\"'’)]*$")
-    _dangling = {
-        "a", "an", "the", "and", "or", "but", "because", "although", "while",
-        "to", "of", "for", "with", "from", "into", "by", "as", "at", "on", "in",
-        "he", "she", "they", "we", "it", "his", "her", "their", "our", "your",
-        "that", "which", "who", "whose", "is", "are", "was", "were", "has", "have",
-    }
     cues, buf = [], []
     for w in words:
         if buf and (float(w.start) - float(buf[-1].end)) >= _CUE_GAP_BREAK:
@@ -135,7 +172,7 @@ def _group(words: list[WordTiming], max_words: int = 6, max_dur: float = 3.4):
             buf = []
         elif len(buf) >= max_words or span >= max_dur:
             tail = _norm(str(getattr(buf[-1], "word", "") or ""))
-            if tail in _dangling and len(buf) >= 3:
+            if tail in _LATIN_DANGLING and len(buf) >= 3:
                 cues.append(buf[:-1])
                 buf = [buf[-1]]
             else:
@@ -150,8 +187,375 @@ def _cue_text(cue: list[WordTiming]) -> str:
     return " ".join(str(getattr(w, "word", "") or "") for w in cue).strip()
 
 
+def _ends_sentence(word: str) -> bool:
+    return bool(re.search(r"[.!?][\"'’)]*$", str(word or "")))
+
+
+def _looks_title_word(word: str) -> bool:
+    token = re.sub(r"^[^A-Za-z]+|[^A-Za-z]+$", "", str(word or ""))
+    return len(token) > 1 and token[0].isupper() and token[1:].islower()
+
+
+def _splits_proper_name(left: WordTiming, right: WordTiming) -> bool:
+    return (not _ends_sentence(getattr(left, "word", ""))
+            and _looks_title_word(getattr(left, "word", ""))
+            and _looks_title_word(getattr(right, "word", "")))
+
+
+def _blocked_between(left: WordTiming, right: WordTiming, blocked_windows) -> bool:
+    try:
+        left_end, right_start = float(left.end), float(right.start)
+    except (TypeError, ValueError):
+        return False
+    return any(left_end <= start + 1e-6 and right_start >= end - 1e-6
+               for start, end in (blocked_windows or []))
+
+
+def _split_cues_at_blocked_windows(cues: list[list[WordTiming]],
+                                   blocked_windows) -> list[list[WordTiming]]:
+    if not blocked_windows:
+        return cues
+    result = []
+    for cue in cues:
+        current = []
+        for word in cue:
+            if current and _blocked_between(current[-1], word, blocked_windows):
+                result.append(current)
+                current = []
+            current.append(word)
+        if current:
+            result.append(current)
+    return result
+
+
+def _protected_lead_start(cue: list[WordTiming], protected_windows) -> float | None:
+    """Return a trusted real-audio window end immediately before ``cue``."""
+    if not cue or not protected_windows:
+        return None
+    try:
+        first = float(cue[0].start)
+    except (TypeError, ValueError):
+        return None
+    candidates = []
+    for raw in protected_windows:
+        try:
+            end = float(raw[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if (math.isfinite(end) and end <= first + 1e-3
+                and first - end <= _CAPTION_PROTECTED_LEAD_MAX + 1e-3):
+            candidates.append(end)
+    return max(candidates) if candidates else None
+
+
+def _schedule_from_cues(cues: list[list[WordTiming]], *, target_cps: float,
+                        protected_windows=None, blocked_windows=None) -> list[dict]:
+    """Schedule fixed cue words, then quantise once to ASS centiseconds.
+
+    Ordinary inter-cue silence can be shared by its two neighbours.  A long
+    silence remains empty unless the caller explicitly identifies the end of a
+    real-audio breakout, in which case the following narration cue may use at
+    most 450 ms of verified post-dialogue silence. Burn-only graphic/OCR
+    windows are hard holes: narration caption dwell is clamped around them.
+    """
+    if not cues:
+        return []
+    starts = [float(c[0].start) for c in cues]
+    ends = [float(c[-1].end) for c in cues]
+    texts = [_cue_text(c) for c in cues]
+    protected_floors: list[float | None] = [None] * len(cues)
+    blocked_start_caps: list[float | None] = [None] * len(cues)
+    blocked_end_floors: list[float | None] = [None] * len(cues)
+
+    lead_need = max(0.12, len(texts[0]) / max(target_cps, 1.0)
+                    - (ends[0] - starts[0]))
+    starts[0] = max(0.0, starts[0] - min(0.18, lead_need))
+    tail_need = max(0.12, len(texts[-1]) / max(target_cps, 1.0)
+                    - (ends[-1] - starts[-1]))
+    ends[-1] += min(0.45, tail_need)
+
+    for i, cue in enumerate(cues):
+        safe_start = _protected_lead_start(cue, protected_windows)
+        if safe_start is None:
+            continue
+        protected_floors[i] = safe_start
+        need = max(0.0, len(texts[i]) / max(target_cps, 1.0)
+                   - (ends[i] - starts[i]))
+        starts[i] = min(starts[i], max(safe_start, starts[i] - min(0.45, need)))
+
+    for i in range(len(cues) - 1):
+        left_end = float(cues[i][-1].end)
+        right_start = float(cues[i + 1][0].start)
+        gap = right_start - left_end
+        if gap <= 0.02 or gap >= _CUE_GAP_BREAK:
+            continue
+        need_l = max(0.0, len(texts[i]) / max(target_cps, 1.0)
+                     - (left_end - starts[i]))
+        need_r = max(0.0, len(texts[i + 1]) / max(target_cps, 1.0)
+                     - (ends[i + 1] - right_start))
+        share_l = need_l / (need_l + need_r) if need_l + need_r > 1e-9 else 0.5
+        boundary = left_end + gap * share_l
+        ends[i] = max(ends[i], boundary - 0.01)
+        starts[i + 1] = min(starts[i + 1], boundary + 0.01)
+
+    for i, cue in enumerate(cues):
+        first_word = float(cue[0].start)
+        last_word = float(cue[-1].end)
+        for blocked_start, blocked_end in blocked_windows or []:
+            if last_word <= blocked_start + 1e-6:
+                ends[i] = min(ends[i], blocked_start)
+                blocked_start_caps[i] = (
+                    blocked_start if blocked_start_caps[i] is None
+                    else min(blocked_start_caps[i], blocked_start))
+            elif first_word >= blocked_end - 1e-6:
+                starts[i] = max(starts[i], blocked_end)
+                blocked_end_floors[i] = (
+                    blocked_end if blocked_end_floors[i] is None
+                    else max(blocked_end_floors[i], blocked_end))
+
+    # Canonical cue switches are one shared centisecond tick.  Independently
+    # flooring the right start and ceiling the left end creates a synthetic
+    # 10 ms overlap whenever ASR words touch or overlap by a frame.
+    for i in range(len(cues) - 1):
+        word_gap = float(cues[i + 1][0].start) - float(cues[i][-1].end)
+        if (word_gap < _CUE_GAP_BREAK
+                and not _blocked_between(cues[i][-1], cues[i + 1][0], blocked_windows)):
+            boundary = (ends[i] + starts[i + 1]) / 2.0
+            boundary = math.floor(boundary * 100.0 + 0.5) / 100.0
+            ends[i] = boundary
+            starts[i + 1] = boundary
+
+    schedule = []
+    for i, cue in enumerate(cues):
+        # Burned ASS is centisecond-based.  Gate these exact values rather than
+        # permissive floats that can become too fast only after serialisation.
+        start = math.floor((starts[i] + 1e-9) * 100.0) / 100.0
+        end = math.ceil((ends[i] - 1e-9) * 100.0) / 100.0
+        if protected_floors[i] is not None:
+            floor_cs = math.ceil((protected_floors[i] - 1e-9) * 100.0) / 100.0
+            start = max(start, floor_cs)
+        if blocked_end_floors[i] is not None:
+            floor_cs = math.ceil((blocked_end_floors[i] - 1e-9) * 100.0) / 100.0
+            start = max(start, floor_cs)
+        if blocked_start_caps[i] is not None:
+            cap_cs = math.floor((blocked_start_caps[i] + 1e-9) * 100.0) / 100.0
+            end = min(end, cap_cs)
+        schedule.append({"words": cue, "start": start, "end": end, "text": texts[i]})
+    return schedule
+
+
+def _timings_reflow_safe(cues: list[list[WordTiming]]) -> bool:
+    last_start = -1.0
+    for cue in cues:
+        for word in cue:
+            try:
+                start, end = float(word.start), float(word.end)
+            except (TypeError, ValueError):
+                return False
+            if not (math.isfinite(start) and math.isfinite(end)) or end <= start:
+                return False
+            if start < last_start - 0.25:
+                return False
+            last_start = max(last_start, start)
+    return True
+
+
+def _cue_speed_score(cues: list[list[WordTiming]], *, target_cps: float,
+                     protected_windows=None, blocked_windows=None) -> tuple[tuple, list[dict]]:
+    schedule = _schedule_from_cues(
+        cues, target_cps=max(1.0, target_cps - _CAPTION_REPAIR_CPS_MARGIN),
+        protected_windows=protected_windows, blocked_windows=blocked_windows)
+    speeds = [len(rec["text"]) /
+              max(0.001, float(rec["end"]) - float(rec["start"]))
+              for rec in schedule]
+    excess = [max(0.0, speed - target_cps) for speed in speeds]
+    score = (sum(value > 1e-6 for value in excess),
+             round(sum(excess), 9), round(max(speeds, default=0.0), 9))
+    return score, schedule
+
+
+def _grammar_issues(cues: list[list[WordTiming]]) -> tuple[int, int, int]:
+    names = dangling = tiny = 0
+    for i, cue in enumerate(cues):
+        if i + 1 < len(cues) and _splits_proper_name(cue[-1], cues[i + 1][0]):
+            names += 1
+        if i + 1 < len(cues) and not _ends_sentence(getattr(cue[-1], "word", "")) \
+                and _norm(str(getattr(cue[-1], "word", ""))) in _LATIN_DANGLING:
+            dangling += 1
+        if len(cue) < 3 and not _ends_sentence(getattr(cue[-1], "word", "")):
+            tiny += 1
+    return names, dangling, tiny
+
+
+def _partition_candidates(words: list[WordTiming], old_cuts: list[int], old_count: int,
+                          *, target_cps: float, max_chars: int,
+                          protected_windows=None, blocked_windows=None) -> list[tuple]:
+    """Bounded beam-DP partitions for one small failing-caption window."""
+    total = len(words)
+    if not total:
+        return []
+    old_cut_set = set(old_cuts)
+    min_count = max(1, old_count - 2)
+    max_count = old_count                 # repair may simplify cadence, never make it choppier
+    beam = 8
+    states: dict[tuple[int, int], list[tuple[float, list[int]]]] = {(0, 0): [(0.0, [])]}
+    planning_cps = max(1.0, target_cps - _CAPTION_REPAIR_CPS_MARGIN)
+
+    for pos in range(total):
+        for count in range(max_count):
+            for path_cost, path_cuts in list(states.get((pos, count), [])):
+                for size in range(1, min(_CAPTION_REPAIR_MAX_WORDS, total - pos) + 1):
+                    cut = pos + size
+                    cue = words[pos:cut]
+                    text = _cue_text(cue)
+                    if len(text) > max_chars:
+                        break
+                    if any(float(cue[j + 1].start) - float(cue[j].end) >= _CUE_GAP_BREAK
+                           for j in range(len(cue) - 1)):
+                        break
+                    if any(_blocked_between(cue[j], cue[j + 1], blocked_windows)
+                           for j in range(len(cue) - 1)):
+                        break
+
+                    crossed_sentences = sum(
+                        _ends_sentence(getattr(words[j - 1], "word", ""))
+                        and j in old_cut_set for j in range(pos + 1, cut))
+                    final = cut == total
+                    original_cut = cut in old_cut_set
+                    if not final:
+                        if _splits_proper_name(cue[-1], words[cut]) and not original_cut:
+                            continue
+                        tail = _norm(str(getattr(cue[-1], "word", "")))
+                        if tail in _LATIN_DANGLING and not _ends_sentence(cue[-1].word) \
+                                and not original_cut:
+                            continue
+                    if size < 3 and not _ends_sentence(getattr(cue[-1], "word", "")) \
+                            and not original_cut:
+                        continue
+
+                    effective_start = float(cue[0].start)
+                    protected = _protected_lead_start(cue, protected_windows)
+                    if protected is not None:
+                        effective_start = min(effective_start, protected)
+                    duration = max(0.001, float(cue[-1].end) - effective_start)
+                    excess = max(0.0, len(text) / duration - planning_cps)
+                    edge_cost = 25.0 * excess * excess
+                    # Keep authored sentence cuts unless crossing one is the only
+                    # honest way to make a measured fast burst readable.
+                    edge_cost += 4.0 * crossed_sentences
+                    if not _ends_sentence(getattr(cue[-1], "word", "")):
+                        edge_cost += 0.15
+                    edge_cost += 0.08 * max(0, size - 12) ** 2
+                    if not final and old_cuts:
+                        edge_cost += 0.04 * min(abs(cut - old) for old in old_cuts)
+
+                    key = (cut, count + 1)
+                    bucket = states.setdefault(key, [])
+                    bucket.append((path_cost + edge_cost, path_cuts + [cut]))
+                    bucket.sort(key=lambda row: row[0])
+                    del bucket[beam:]
+
+    result = []
+    for count in range(min_count, max_count + 1):
+        for cost, cuts in states.get((total, count), []):
+            prev = 0
+            cues = []
+            for cut in cuts:
+                cues.append(words[prev:cut])
+                prev = cut
+            result.append((cost + 0.7 * abs(count - old_count), cues, cuts))
+    result.sort(key=lambda row: row[0])
+    return result[:64]
+
+
+def _repair_fast_cues(cues: list[list[WordTiming]], *, target_cps: float,
+                      max_chars: int, protected_windows=None,
+                      blocked_windows=None) -> list[list[WordTiming]]:
+    """Repair only local failing windows; impossible speech stays a hard failure."""
+    cues = [list(cue) for cue in cues]
+    if len(cues) < 2 or not _timings_reflow_safe(cues):
+        return cues
+    original_ids = [id(word) for cue in cues for word in cue]
+
+    for _attempt in range(min(30, len(cues))):
+        current_score, schedule = _cue_speed_score(
+            cues, target_cps=target_cps, protected_windows=protected_windows,
+            blocked_windows=blocked_windows)
+        failing = [i for i, rec in enumerate(schedule)
+                   if len(rec["text"]) /
+                   max(0.001, float(rec["end"]) - float(rec["start"]))
+                   > target_cps + 1e-6]
+        name_boundaries = [i for i in range(len(cues) - 1)
+                           if _splits_proper_name(cues[i][-1], cues[i + 1][0])]
+        targets = failing + [i for i in name_boundaries if i not in failing]
+        if not targets:
+            break
+        current_grammar = _grammar_issues(cues)
+        chosen = None
+
+        for failing_i in targets:
+            for radius in (2, 3, 4):
+                lo = max(0, failing_i - radius)
+                hi = min(len(cues), failing_i + radius + 1)
+                for j in range(failing_i - 1, lo - 1, -1):
+                    if float(cues[j + 1][0].start) - float(cues[j][-1].end) \
+                            >= _CUE_GAP_BREAK \
+                            or _blocked_between(cues[j][-1], cues[j + 1][0],
+                                                blocked_windows):
+                        lo = j + 1
+                        break
+                for j in range(failing_i, hi - 1):
+                    if float(cues[j + 1][0].start) - float(cues[j][-1].end) \
+                            >= _CUE_GAP_BREAK \
+                            or _blocked_between(cues[j][-1], cues[j + 1][0],
+                                                blocked_windows):
+                        hi = j + 1
+                        break
+
+                window = cues[lo:hi]
+                window_words = [word for cue in window for word in cue]
+                old_cuts = []
+                cursor = 0
+                for cue in window[:-1]:
+                    cursor += len(cue)
+                    old_cuts.append(cursor)
+                best = None
+                for cost, replacement, cuts in _partition_candidates(
+                        window_words, old_cuts, len(window), target_cps=target_cps,
+                        max_chars=max_chars, protected_windows=protected_windows,
+                        blocked_windows=blocked_windows):
+                    trial = cues[:lo] + replacement + cues[hi:]
+                    grammar = _grammar_issues(trial)
+                    if any(new > old for new, old in zip(grammar, current_grammar)):
+                        continue
+                    speed_score, _ = _cue_speed_score(
+                        trial, target_cps=target_cps,
+                        protected_windows=protected_windows,
+                        blocked_windows=blocked_windows)
+                    rank = speed_score + grammar + (
+                        abs(len(replacement) - len(window)), round(cost, 6))
+                    if best is None or rank < best[0]:
+                        best = (rank, speed_score, trial, (lo, hi, cuts))
+                improves_speed = best is not None and best[1] < current_score
+                improves_name = (best is not None and best[1] <= current_score
+                                 and best[0][3] < current_grammar[0])
+                if improves_speed or improves_name:
+                    chosen = best
+                    break
+            if chosen is not None:
+                break
+        if chosen is None:
+            break
+        cues = chosen[2]
+
+    if [id(word) for cue in cues for word in cue] != original_ids:
+        raise RuntimeError("caption boundary repair changed word identity/order")
+    return cues
+
+
 def _caption_schedule(words: list[WordTiming], *, target_cps: float = 20.0,
-                      max_words: int = 12, max_chars: int = 84) -> list[dict]:
+                      max_words: int = 12, max_chars: int = 84,
+                      protected_windows=None, blocked_windows=None) -> list[dict]:
     """Return one readable, non-overlapping schedule shared by ASS and SRT.
 
     `_group` is intentionally cadence-first, so an ASR boundary can leave a very
@@ -164,7 +568,12 @@ def _caption_schedule(words: list[WordTiming], *, target_cps: float = 20.0,
     schedule and reported by `caption_schedule_problems`, allowing the export
     gate to fail closed instead of serialising zero-duration subtitles.
     """
-    cues = [list(c) for c in _group(words)]
+    protected_windows = _normalize_caption_windows(
+        protected_windows, label="protected", merge_overlaps=False)
+    blocked_windows = _normalize_caption_windows(
+        blocked_windows, label="blocked", merge_overlaps=True)
+    cues = _split_cues_at_blocked_windows(
+        [list(c) for c in _group(words)], blocked_windows)
     if not cues:
         return []
 
@@ -191,6 +600,7 @@ def _caption_schedule(words: list[WordTiming], *, target_cps: float = 20.0,
                 old_worst = max(_cps(cur), _cps(nxt))
                 if (gap < 0.45 and len(joined) <= max_words
                         and len(_cue_text(joined)) <= max_chars
+                        and not _blocked_between(cur[-1], nxt[0], blocked_windows)
                         and (old_worst > target_cps)
                         and _cps(joined) + 0.01 < old_worst):
                     merged.append(joined)
@@ -201,41 +611,12 @@ def _caption_schedule(words: list[WordTiming], *, target_cps: float = 20.0,
             i += 1
         cues = merged
 
-    starts = [float(c[0].start) for c in cues]
-    ends = [float(c[-1].end) for c in cues]
-    texts = [_cue_text(c) for c in cues]
-    # Bounded outer dwell.  Use the official 20-CPS target to size only the exposed outer edges;
-    # never show a phrase more than 180ms before speech, and never linger more than 450ms after it.
-    # Anything still unreadable after these honest bounds is rejected by the publication gate.
-    _lead_need = max(0.12, len(texts[0]) / max(target_cps, 1.0)
-                     - (ends[0] - starts[0]))
-    _old_start = starts[0]
-    starts[0] = max(0.0, starts[0] - min(0.18, _lead_need))
-    _lead_got = _old_start - starts[0]
-    _tail_need = max(0.12, len(texts[-1]) / max(target_cps, 1.0)
-                     - (ends[-1] - starts[-1]) - (_lead_got if len(cues) == 1 else 0.0))
-    ends[-1] = max(ends[-1], float(cues[-1][-1].end) + min(0.45, _tail_need))
-
-    for i in range(len(cues) - 1):
-        left_end = float(cues[i][-1].end)
-        right_start = float(cues[i + 1][0].start)
-        gap = right_start - left_end
-        if gap <= 0.02 or gap >= _CUE_GAP_BREAK:
-            continue
-        # Give more of the silence to whichever neighbour is furthest below
-        # its target dwell duration.  The 20 ms separator prevents rounding
-        # from creating overlapping SRT/ASS events.
-        need_l = max(0.0, len(texts[i]) / max(target_cps, 1.0)
-                     - (left_end - float(cues[i][0].start)))
-        need_r = max(0.0, len(texts[i + 1]) / max(target_cps, 1.0)
-                     - (float(cues[i + 1][-1].end) - right_start))
-        share_l = need_l / (need_l + need_r) if need_l + need_r > 1e-9 else 0.5
-        boundary = left_end + gap * share_l
-        ends[i] = max(ends[i], boundary - 0.01)
-        starts[i + 1] = min(starts[i + 1], boundary + 0.01)
-
-    return [{"words": c, "start": starts[i], "end": ends[i], "text": texts[i]}
-            for i, c in enumerate(cues)]
+    cues = _repair_fast_cues(
+        cues, target_cps=target_cps, max_chars=max_chars,
+        protected_windows=protected_windows, blocked_windows=blocked_windows)
+    return _cue_speed_score(
+        cues, target_cps=target_cps,
+        protected_windows=protected_windows, blocked_windows=blocked_windows)[1]
 
 
 def caption_schedule_problems(schedule: list[dict], *, hard_cps: float = 20.0,
@@ -286,15 +667,50 @@ def caption_schedule_problems(schedule: list[dict], *, hard_cps: float = 20.0,
 
 
 def assert_caption_schedule(words: list[WordTiming], audit_path: Path, *,
-                            hard_cps: float = 20.0) -> list[dict]:
+                            hard_cps: float = 20.0,
+                            protected_windows=None,
+                            blocked_windows=None) -> list[dict]:
     """Persist and enforce the exact caption schedule used by both SRT and ASS.
 
     A subtitle file is a publication artifact, so an unwritable audit is itself a hard failure.
     The gate rejects zero/backwards word timing, overlapping/zero cues and text above the bounded
     reading-speed ceiling.  It never deletes or rewrites spoken words to manufacture a pass.
     """
-    schedule = _caption_schedule(words)
-    problems = caption_schedule_problems(schedule, hard_cps=hard_cps)
+    problems = []
+    try:
+        normalized_windows = _normalize_caption_windows(
+            protected_windows, label="protected", merge_overlaps=False)
+    except ValueError as exc:
+        normalized_windows = []
+        problems.append({"reason": f"invalid protected caption window: {exc}"})
+    try:
+        normalized_blocked = _normalize_caption_windows(
+            blocked_windows, label="blocked", merge_overlaps=True)
+    except ValueError as exc:
+        normalized_blocked = []
+        problems.append({"reason": f"invalid blocked caption window: {exc}"})
+
+    schedule = _caption_schedule(
+        words, target_cps=hard_cps, protected_windows=normalized_windows,
+        blocked_windows=normalized_blocked)
+    problems.extend(caption_schedule_problems(schedule, hard_cps=hard_cps))
+    flattened = [word for rec in schedule for word in (rec.get("words") or [])]
+    if len(flattened) != len(words) or any(a is not b for a, b in zip(flattened, words)):
+        problems.append({"reason": "caption schedule changed word identity/order"})
+    for i, rec in enumerate(schedule):
+        start, end = float(rec["start"]), float(rec["end"])
+        for label, windows in (("protected real-audio", normalized_windows),
+                               ("blocked burn", normalized_blocked)):
+            overlap = next(((window_start, window_end)
+                            for window_start, window_end in windows
+                            if start < window_end - 1e-6
+                            and end > window_start + 1e-6), None)
+            if overlap is not None:
+                problems.append({
+                    "cue": i, "reason": f"narration caption overlaps {label} window",
+                    "window_start": overlap[0], "window_end": overlap[1],
+                })
+                break
     rows = []
     for i, rec in enumerate(schedule):
         a, b = float(rec.get("start", 0.0)), float(rec.get("end", 0.0))
@@ -309,6 +725,11 @@ def assert_caption_schedule(words: list[WordTiming], audit_path: Path, *,
         "schema": "caption_readability/1", "hard_cps": float(hard_cps),
         "passed": not problems, "word_count": len(words or []),
         "cue_count": len(schedule), "problem_count": len(problems),
+        "max_cps": max((row["cps"] for row in rows), default=0.0),
+        "protected_windows": [[round(a, 3), round(b, 3)]
+                              for a, b in normalized_windows],
+        "blocked_windows": [[round(a, 3), round(b, 3)]
+                            for a, b in normalized_blocked],
         "problems": problems, "cues": rows,
     }
     audit_path = Path(audit_path)
@@ -516,6 +937,7 @@ def write_ass(
     emphasis_words: set[str] | None = None,
     play_w: int = 1920,
     play_h: int = 1080,
+    schedule: list[dict] | None = None,
 ) -> Path:
     """Kinetic captions. The word currently being spoken pops in the
     theme accent colour (bigger + bold). Words the LLM flagged as the
@@ -653,7 +1075,22 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     # The publication gate is run by assemble's SRT preflight before this writer is reached.  Keep
     # this lower-level renderer tolerant for preview/unit callers that intentionally exercise
     # microscopic overlaps; the build cannot bypass ``assert_caption_schedule``.
-    _schedule = _caption_schedule(words)
+    if schedule is None:
+        _schedule = _caption_schedule(words)
+    else:
+        _schedule = list(schedule)
+        _flat_schedule = [word for rec in _schedule for word in (rec.get("words") or [])]
+        if (len(_flat_schedule) != len(words)
+                or any(a is not b for a, b in zip(_flat_schedule, words))):
+            raise RuntimeError("approved caption schedule does not own this ASS word stream")
+        if any(str(rec.get("text") or "") != _cue_text(list(rec.get("words") or []))
+               for rec in _schedule):
+            raise RuntimeError("approved caption schedule text does not match its words")
+        _schedule_problems = caption_schedule_problems(_schedule)
+        if _schedule_problems:
+            raise RuntimeError(
+                "approved caption schedule is not publication-safe: "
+                + _schedule_problems[0]["reason"])
     cues = [r["words"] for r in _schedule]
     # NEXT-EVENT START, across cue boundaries. The aligner can hand back words whose spans OVERLAP
     # (measured on a delivered render: word 797 starts at 251.260 while word 796 still ends at
@@ -709,7 +1146,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             # PAST the next event's start and produced 4 overlapping pairs, one of which displaced
             # the caption a full line height for 0.87s and printed the same sentence twice.
             we = (max(w.end, cue[k + 1].start) if k < n - 1
-                  else max(w.end, float(_sched["end"])))
+                  else float(_sched["end"]))
             _nxt = _next_start.get(id(w))
             if _nxt is not None:
                 we = min(we, _nxt)           # never outlive the next event — see the note above
