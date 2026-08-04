@@ -29,6 +29,31 @@ DISCLAIMER = (
     "safety. Each source's permission is the user's own assertion. Verify rights before publishing."
 )
 
+# Builds made briefly with the first timed-text reserve persisted token-name arrays in the
+# numeric ``signals`` map.  Resume must be able to finish their QC refresh, but accepting arbitrary
+# structured signals would weaken the ledger contract.  Migrate only those two known fields to the
+# exact numeric representation now emitted by verify.py; every other malformed value still raises.
+_LEGACY_SIGNAL_COUNT_FIELDS = {
+    "timed_text_matches": "timed_text_match_count",
+    "timed_text_rare_matches": "timed_text_rare_match_count",
+}
+
+
+def _numeric_ledger_signals(signals: dict) -> dict:
+    normalized = dict(signals or {})
+    for legacy_key, count_key in _LEGACY_SIGNAL_COUNT_FIELDS.items():
+        value = normalized.get(legacy_key)
+        if not isinstance(value, list):
+            continue
+        count = len(value)
+        normalized.pop(legacy_key)
+        if count_key in normalized and float(normalized[count_key]) != float(count):
+            raise ValueError(f"conflicting selection signals: {legacy_key}/{count_key}")
+        normalized[count_key] = count
+    # Deliberately retain the old hard failure for unknown non-numeric evidence.  Treating an
+    # arbitrary list/dict as a positive score would let malformed relevance evidence look valid.
+    return {k: round(float(v), 4) for k, v in normalized.items()}
+
 
 def evaluate_flags(
     sel: ClipSelection,
@@ -175,7 +200,7 @@ def write_ledger(proj: ClipProject, segments: list[ScriptSegment]) -> Path:
             "relevance_class": _rclass,
             "reuse_count": sel.reuse_count,
             "confidence": round(sel.confidence, 4),
-            "signals": {k: round(float(v), 4) for k, v in sel.signals.items()},
+            "signals": _numeric_ledger_signals(sel.signals),
             "flagged": sel.flagged,
             "flag_reasons": sel.flag_reasons,
             "approved": sel.approved,

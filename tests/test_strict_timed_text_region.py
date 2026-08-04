@@ -1,9 +1,13 @@
 """Regressions for the bounded timed-text passage inside strict neighborhood repair."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
+
 from vidlore.clipstudio import image_fallback as IF
+from vidlore.clipstudio import ledger as L
 from vidlore.clipstudio import verify as V
 from vidlore.clipstudio.config import ClipConfig
 from vidlore.clipstudio.models import (ClipCandidate, ClipProject, ClipSelection, ScriptSegment,
@@ -90,7 +94,33 @@ def test_distant_compound_asr_passage_enters_unchanged_twelve_call_cap(
     assert {candidate.source_id for candidate in out} == {"exact"}, \
         "strong text replaces the last source slot; it never increases source_cap"
     assert {candidate.shot_index for candidate in timed} == {19, 20, 21, 22, 23}
-    assert {"dontos", "necklace"} <= set(timed[0].signals["timed_text_matches"])
+    assert timed[0].signals["timed_text_match_count"] >= 2
+    assert timed[0].signals["timed_text_rare_match_count"] >= 2
+    assert all(isinstance(value, (int, float)) for candidate in timed
+               for value in candidate.signals.values()), \
+        "timed-text diagnostics must preserve the numeric selection-signal contract"
+
+
+def test_qc_ledger_migrates_known_timed_text_arrays_but_rejects_unknown_lists(tmp_path):
+    proj, seg, sel, _shots_by_source, _get_shot = _dontos_fixture(tmp_path)
+    proj.segments = [seg]
+    sel.signals = {
+        "clip": 0.8,
+        "timed_text_matches": ["dontos", "necklace"],
+        "timed_text_rare_matches": ["dontos"],
+    }
+
+    L.write_ledger(proj, [seg])
+    record = json.loads(proj.ledger_path.read_text().strip())
+    assert record["signals"] == {
+        "clip": 0.8,
+        "timed_text_match_count": 2.0,
+        "timed_text_rare_match_count": 1.0,
+    }
+
+    sel.signals = {"unknown_structured_evidence": ["must", "not", "pass"]}
+    with pytest.raises(TypeError):
+        L.write_ledger(proj, [seg])
 
 
 def test_generic_talk_does_not_open_a_distant_region(tmp_path, monkeypatch):

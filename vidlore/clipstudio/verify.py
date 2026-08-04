@@ -2049,8 +2049,12 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
                 timed_signals.update({
                     "neighbor_distance": int(timed_distance),
                     "strict_scene_timed_text_region": True,
-                    "timed_text_matches": list(_timed_info["matches"]),
-                    "timed_text_rare_matches": list(_timed_info["rare_matches"]),
+                    # ClipCandidate.signals is a numeric ledger contract.  The matched token
+                    # names are only temporary ranking diagnostics; persisting their lists makes
+                    # the final QC ledger crash when it rounds every signal.  Counts retain the
+                    # strength evidence without allowing structured data into that contract.
+                    "timed_text_match_count": len(_timed_info["matches"]),
+                    "timed_text_rare_match_count": len(_timed_info["rare_matches"]),
                     "timed_text_score": float(_timed_info["score"]),
                 })
                 timed_in, timed_out = float(in_point), float(out_point)
