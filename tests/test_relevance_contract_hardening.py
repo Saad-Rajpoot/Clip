@@ -716,13 +716,28 @@ def test_contradictory_primary_keep_still_prefetches_strict_repair(
     assert summary["replaced"] == 1 and proj.selections[0].shot_index == 1
 
 
-def test_nonexact_contextual_leniency_is_preserved(tmp_path, monkeypatch):
+def test_character_leniency_cannot_flip_publication_negative_fields(tmp_path, monkeypatch):
     proj, segs, shot, cfg = _verify_fixture(tmp_path, P.CHARACTER)
     monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "0")
     monkeypatch.setattr(V, "_shot_lookup", lambda _p: lambda sid, ix: shot)
     monkeypatch.setattr(V, "verify_frame", lambda *a, **k: dict(_EXPLICIT_MISMATCH))
     summary = V.verify_and_repair(
         proj, segs, cfg, NS(anthropic_model="m", anthropic_key="k"), progress=None)
+    assert summary["failed"] == 1
+    assert proj.selections[0].verifier["verdict"] == "replace"
+    assert "matches_narration" in proj.selections[0].verifier["contract_rejected"]
+
+
+def test_character_leniency_still_flips_top_level_replace_when_all_facts_are_positive(
+        tmp_path, monkeypatch):
+    proj, segs, shot, cfg = _verify_fixture(tmp_path, P.CHARACTER)
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "0")
+    monkeypatch.setattr(V, "_shot_lookup", lambda _p: lambda sid, ix: shot)
+    monkeypatch.setattr(V, "verify_frame", lambda *a, **k: dict(_POSITIVE_EXACT))
+
+    summary = V.verify_and_repair(
+        proj, segs, cfg, NS(anthropic_model="m", anthropic_key="k"), progress=None)
+
     assert summary["failed"] == 0
     assert proj.selections[0].verifier["verdict"] == "keep"
     assert "non-exact" in proj.selections[0].verifier["relaxed"]

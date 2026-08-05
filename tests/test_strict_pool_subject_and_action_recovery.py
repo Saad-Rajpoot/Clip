@@ -106,6 +106,49 @@ def test_scoped_character_subject_miss_can_use_indexed_pool_neighborhood(
     assert not calls[0].get("whole_source_probe", False)
 
 
+def test_scoped_character_internal_keep_mismatch_is_repaired_not_release_blocked(
+        tmp_path, monkeypatch):
+    proj, seg, sel, get_shot = _repair_fixture(tmp_path, policy="character_specific")
+    calls = []
+
+    def neighborhood(*_args, **kwargs):
+        calls.append(dict(kwargs))
+        # The first alternate repeats the provider's self-contradictory top-level keep; recovery
+        # must walk past it to the candidate whose required subject is positively visible.
+        return [_candidate(0, "wrong", 1), _candidate(0, "target", 1)]
+
+    def internally_inconsistent_keep(path, *_args, **_kwargs):
+        subject = Path(path).name.startswith("target_")
+        return {
+            "verdict": "keep",
+            "matches_narration": True,
+            "correct_subject_visible": subject,
+            "wrong_subject_visible": False,
+            "contradicts_narration": False,
+            "specific_enough": subject,
+            "quality_ok": True,
+            "confidence": 0.9,
+            "reason": "subject visible" if subject else "subject only in background",
+        }
+
+    monkeypatch.setattr(V, "_strict_scene_neighborhood_candidates", neighborhood)
+    monkeypatch.setattr(V, "_shot_lookup", lambda _proj: get_shot)
+    monkeypatch.setattr(V, "verify_frame", internally_inconsistent_keep)
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", "1")
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "0")
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_WINDOW_QC", "0")
+
+    summary = V.verify_and_repair(
+        proj, [seg], ClipConfig(), NS(anthropic_model="m", anthropic_key="k"),
+        max_replacements=0, materialize_promotions=False, persist_project=False,
+        strict_pool_recovery=True)
+
+    assert summary["replaced"] == 1
+    assert (sel.source_id, sel.shot_index) == ("target", 1)
+    assert sel.verifier["correct_subject_visible"] is True
+    assert calls and calls[0]["allow_indexed_pool_sources"] is True
+
+
 def test_normal_character_verification_does_not_open_indexed_pool_neighborhood(
         tmp_path, monkeypatch):
     proj, seg, sel, get_shot = _repair_fixture(tmp_path, policy="character_specific")

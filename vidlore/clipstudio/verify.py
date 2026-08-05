@@ -1256,6 +1256,39 @@ def _strict_keep_rejection_reason(vd, seg=None, source_title: str = "", char2act
     return ""
 
 
+def _character_keep_rejection_reason(vd, seg=None, source_title: str = "", char2actor=None,
+                                     *, must_see: str = "") -> str:
+    """Reject a CHARACTER keep that disproves its own required-subject promise.
+
+    Character prompts intentionally permit thematic right-subject filler, so this does not add the
+    exact-scene cast/moment bar.  Their own schema still promises narration relevance, sufficient
+    character coverage, quality, and a positively visible named subject.  The publication gate
+    already requires those same fields; rejecting an internally contradictory keep here lets
+    scoped recovery try positive Face-ID/vision alternates instead of stopping the whole render
+    after verification has declared success.
+    """
+    if not isinstance(vd, dict) or vd.get("verdict") != "keep":
+        return "verifier did not return keep"
+    for field in ("matches_narration", "specific_enough", "quality_ok"):
+        if vd.get(field) is not True:
+            return f"{field} is not positively true"
+    if vd.get("wrong_subject_visible") is not False:
+        return "wrong_subject_visible is not explicitly false"
+    if str(getattr(seg, "required_entity", "") or "").strip() \
+            and vd.get("correct_subject_visible") is not True:
+        return "required subject is not positively visible"
+    contradiction = _contradiction_reason(seg, vd, source_title, char2actor) if seg is not None \
+        else ("vision verifier explicitly marked a contradiction"
+              if vd.get("contradicts_narration") is True else "")
+    if contradiction:
+        return contradiction
+    if vd.get("era_ok") is False:
+        return "era_ok is false"
+    if str(must_see or "").strip() and vd.get("target_visible") is not True:
+        return f"instructed look target {must_see!r} is not positively visible"
+    return ""
+
+
 def _exact_contextual_ok(vd, seg=None, source_title: str = "", char2actor=None) -> bool:
     """Exact→contextual acceptance: positive exact evidence plus the existing subject/era bar."""
     return (_exact_positive_evidence_ok(vd, seg, source_title, char2actor)
@@ -3409,7 +3442,9 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         shot = get_shot(sel.source_id, sel.shot_index)
         kf = shot.keyframe_path if shot else ""
         faceid_names = (shot.face_ids if shot else []) or ([sel.identity] if sel.identity else [])
+        _resolved_policy = _policy.policy_of(seg)
         _exact = _policy.verify_strict(seg)               # exact_scene → strict; else lenient (filler ok)
+        _character = _resolved_policy == _policy.CHARACTER
         # REUSE a verdict only when the QUESTION is byte-identical (see verdict_fingerprint). This
         # is what lets a restart keep explicitly-proven judgments instead of re-rolling them against
         # a dying API — the failure mode that published this render.
@@ -3548,10 +3583,14 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         if _primary_conflict:
             v["contradicts_narration"] = True
             v["contradiction_reason"] = _primary_conflict
-        _primary_contract_rejection = (
-            _strict_keep_rejection_reason(
-                v, seg, _src_title_of(sel), _char2actor, must_see=_must_see(seg))
-            if _exact and v.get("verdict") == "keep" else "")
+        _primary_contract_rejection = ""
+        if v.get("verdict") == "keep":
+            if _exact:
+                _primary_contract_rejection = _strict_keep_rejection_reason(
+                    v, seg, _src_title_of(sel), _char2actor, must_see=_must_see(seg))
+            elif _character:
+                _primary_contract_rejection = _character_keep_rejection_reason(
+                    v, seg, _src_title_of(sel), _char2actor, must_see=_must_see(seg))
         if _primary_contract_rejection:
             v["verdict"] = "replace"
             v["contract_rejected"] = _primary_contract_rejection
@@ -3559,8 +3598,20 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
         # fine for generic/character/abstract beats). Don't replace an on-topic, right-subject clip on
         # a non-exact beat just because it isn't the exact scene — only off-topic / wrong-character.
         if not _exact and v.get("verdict") == "replace" and _contextual_subject_ok(v):
-            v["verdict"] = "keep"
-            v["relaxed"] = "non-exact beat: relevant right-subject filler accepted"
+            # A provider may put ``replace`` at the top while all character-filler facts are
+            # positive.  Preserve that established leniency, but never flip an answer whose own
+            # fields would be blocked by the publication contract.
+            _relaxed = dict(v)
+            _relaxed["verdict"] = "keep"
+            _character_rejection = (
+                _character_keep_rejection_reason(
+                    _relaxed, seg, _src_title_of(sel), _char2actor,
+                    must_see=_must_see(seg)) if _character else "")
+            if not _character_rejection:
+                v["verdict"] = "keep"
+                v["relaxed"] = "non-exact beat: relevant right-subject filler accepted"
+            else:
+                v["contract_rejected"] = _character_rejection
         _bind_evidence(v, sel, seg, shot, _exact, faceid_names, _used_sheet, _must_see(seg))
         sel.verifier = v
 
@@ -3820,9 +3871,13 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     if downgrade:
                         _accept = _exact_contextual_ok(av, seg, _atitle, _char2actor)
                     else:
-                        _strict_reject = (_strict_keep_rejection_reason(
-                            av, seg, _atitle, _char2actor, must_see=_alt_must_see)
-                            if _exact else "")
+                        _strict_reject = ""
+                        if _exact:
+                            _strict_reject = _strict_keep_rejection_reason(
+                                av, seg, _atitle, _char2actor, must_see=_alt_must_see)
+                        elif _character:
+                            _strict_reject = _character_keep_rejection_reason(
+                                av, seg, _atitle, _char2actor, must_see=_alt_must_see)
                         _accept = (av.get("verdict") == "keep" and not _aconflict
                                    and not _strict_reject
                                    and (not _exact or not _alt_must_see
