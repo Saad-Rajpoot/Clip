@@ -33,6 +33,9 @@ from .segment import _STOP as _CONTENT_STOP
 #   1 → shots + per-shot transcript only
 #   2 → + <sid>.words.json (word-level ASR start/end/text) for quote-span location
 INDEX_SCHEMA = 2
+# Metadata-only evolution stays separate: INDEX_SCHEMA also versions embedding manifests, and an
+# ASR provenance upgrade must not invalidate otherwise-current visual embeddings.
+INDEX_ARTIFACT_BINDING_SCHEMA = 1
 _ASR_PIPELINE_REVISION = 8
 QUOTE_RETRIEVAL_SCHEMA = 2
 _QUOTE_RETRIEVAL_REVISION = 2
@@ -848,6 +851,69 @@ def _source_content_fingerprint(path) -> str:
         return ""
 
 
+def _artifact_content_sha256(path) -> str:
+    """Full content identity for a small persisted index artifact."""
+    try:
+        candidate = Path(path)
+        if not candidate.is_file():
+            return ""
+        digest = hashlib.sha256()
+        with candidate.open("rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except Exception:
+        return ""
+
+
+def _index_artifact_bindings(proj: ClipProject, source: SourceVideo) -> dict:
+    """Current byte identities for the ASR/index tuple certified by index.meta."""
+    sid = str(getattr(source, "id", "") or "")
+    return {
+        "artifact_binding_schema": INDEX_ARTIFACT_BINDING_SCHEMA,
+        "source_content_fingerprint": _source_content_fingerprint(
+            str(getattr(source, "local_path", "") or "")),
+        "words_content_sha256": _artifact_content_sha256(
+            Path(proj.index_dir) / f"{sid}.words.json"),
+        "shots_content_sha256": _artifact_content_sha256(proj.shots_path(sid)),
+    }
+
+
+def _index_artifact_provenance_result(
+        proj: ClipProject, source: SourceVideo, meta: dict | None = None) \
+        -> tuple[bool, str, dict]:
+    """Validate that current source/words/shots bytes are the tuple certified by meta."""
+    if not isinstance(meta, dict):
+        try:
+            meta = json.loads((Path(proj.index_dir)
+                               / f"{source.id}.index.meta.json").read_text(
+                                   encoding="utf-8"))
+        except Exception:
+            meta = {}
+    if not isinstance(meta, dict):
+        return False, "index_artifact_binding_metadata_invalid", {}
+    try:
+        binding_schema = int(meta.get("artifact_binding_schema", 0) or 0)
+    except (TypeError, ValueError):
+        binding_schema = 0
+    if binding_schema != INDEX_ARTIFACT_BINDING_SCHEMA:
+        return False, "index_artifact_binding_schema_missing_or_stale", {}
+    current = _index_artifact_bindings(proj, source)
+    fields = (
+        "source_content_fingerprint", "words_content_sha256", "shots_content_sha256",
+    )
+    for field in fields:
+        actual = str(current.get(field, "") or "")
+        expected = str(meta.get(field, "") or "")
+        if not expected:
+            return False, f"{field}_missing", current
+        if not actual:
+            return False, f"{field}_unavailable", current
+        if actual != expected:
+            return False, f"{field}_mismatch", current
+    return True, "", current
+
+
 def _quote_retrieval_prompt_chunks(
         proj, cfg: ClipConfig, *, entries=None, fallback=None, model=None) -> tuple[list[str], str]:
     """Partition authored lines into prompts the installed decoder will actually receive.
@@ -1132,6 +1198,11 @@ def asr_pool_cache_audit(proj, cfg: ClipConfig, sources=None) -> dict:
             continue
         if str(meta.get("asr_prompt_fingerprint", "") or "") != expected:
             invalid.append({"source_id": sid, "reason": "asr_prompt_fingerprint_mismatch"})
+            continue
+        provenance_ok, provenance_reason, _provenance = \
+            _index_artifact_provenance_result(proj, source, meta)
+        if not provenance_ok:
+            invalid.append({"source_id": sid, "reason": provenance_reason})
             continue
         if (_project_authored_retrieval_prompt(proj)
                 and quote_retrieval_source_eligible(source, shots)):
@@ -1867,7 +1938,18 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
             have_caps = {}
         if not isinstance(have_caps, dict):      # 'null'/list/string parses fine but isn't caps
             have_caps = {}
-        if int(have_caps.get("schema", 1) or 1) < INDEX_SCHEMA:
+        try:
+            cached_schema = int(have_caps.get("schema", 1) or 1)
+        except (TypeError, ValueError):
+            cached_schema = 1
+        legacy_index_schema = cached_schema < INDEX_SCHEMA
+        try:
+            legacy_artifact_binding = int(
+                have_caps.get("artifact_binding_schema", 0) or 0
+            ) != INDEX_ARTIFACT_BINDING_SCHEMA
+        except (TypeError, ValueError):
+            legacy_artifact_binding = True
+        if legacy_index_schema:
             have_caps["words"] = False           # schema bump invalidates the word cache
         words_cache_valid, old_words = _load_words_result(proj, source.id)
         if want_caps["words"] and not words_cache_valid:
@@ -1876,6 +1958,20 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
             cached_shots = load_shots(proj, source.id)
         except Exception:
             cached_shots = []
+        provenance_ok, provenance_reason, _provenance = \
+            _index_artifact_provenance_result(proj, source, have_caps)
+        if not provenance_ok:
+            # A schema-2 cache receives one clean ASR refresh, which republishes both dependent
+            # JSON artifacts and binds them to the current source. Once artifact-binding schema 1
+            # claims that tuple, source/shots drift is a visual-index fault and forces re-indexing.
+            words_only_repair = bool(
+                legacy_index_schema or legacy_artifact_binding
+                or provenance_reason.startswith("words_content_sha256_"))
+            if words_only_repair:
+                have_caps["words"] = False
+            else:
+                want_caps["index_artifact_binding"] = True
+                have_caps["index_artifact_binding"] = False
         retrieval_required = bool(
             authored_retrieval_prompt
             and quote_retrieval_source_eligible(source, cached_shots))
@@ -1981,6 +2077,9 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
         return []
 
     path = Path(source.local_path)
+    source_fingerprint_at_start = _source_content_fingerprint(path)
+    if source_fingerprint_at_start in ("", "missing", "unreadable"):
+        raise RuntimeError(f"source fingerprint unavailable before indexing {source.id}")
     proj.index_dir.mkdir(parents=True, exist_ok=True)
     kf_dir = proj.keyframes_dir(source.id)
     kf_dir.mkdir(parents=True, exist_ok=True)
@@ -2171,8 +2270,18 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
                   "schema": INDEX_SCHEMA}
     if asr_succeeded:
         index_meta["asr_prompt_fingerprint"] = asr_fingerprint
+    index_meta.update(_index_artifact_bindings(proj, source))
+    if (not index_meta.get("source_content_fingerprint")
+            or index_meta.get("source_content_fingerprint") != source_fingerprint_at_start
+            or not index_meta.get("words_content_sha256")
+            or not index_meta.get("shots_content_sha256")):
+        index_meta["words"] = False
+        index_meta["index_artifact_binding_error"] = "fingerprint_unavailable_or_source_changed"
     _mtmp.write_text(json.dumps(index_meta), encoding="utf-8")
     _mtmp.replace(meta_file)
+    if index_meta.get("words") is not True:
+        raise RuntimeError(
+            f"index artifact provenance could not be certified for {source.id}")
     if (authored_retrieval_prompt
             and quote_retrieval_source_eligible(source, shots)):
         retrieval_valid, _retrieval_streams, _retrieval_reason, retrieval_complete = \
@@ -2201,6 +2310,9 @@ def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig
     untouched.  Both dependent JSON files are atomically replaced only after ASR succeeds.
     """
     if source.status != SOURCE_OK or not source.local_path:
+        return []
+    source_fingerprint_at_start = _source_content_fingerprint(source.local_path)
+    if source_fingerprint_at_start in ("", "missing", "unreadable"):
         return []
     shots_file = proj.shots_path(source.id)
     if not shots_file.exists():
@@ -2295,6 +2407,10 @@ def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig
             "asr_refresh_in_progress": True,
         })
         in_progress_meta.pop("asr_prompt_fingerprint", None)
+        for field in (
+                "artifact_binding_schema", "source_content_fingerprint",
+                "words_content_sha256", "shots_content_sha256"):
+            in_progress_meta.pop(field, None)
         meta_tmp.write_text(json.dumps(in_progress_meta), encoding="utf-8")
         meta_tmp.replace(meta_file)
         try:
@@ -2337,7 +2453,16 @@ def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig
             cfg, asr_hotwords, asr_initial_prompt, asr_legacy_initial_prompt),
         "schema": INDEX_SCHEMA,
     })
+    meta.update(_index_artifact_bindings(proj, source))
     meta.pop("asr_refresh_in_progress", None)
+    meta.pop("index_artifact_binding_error", None)
+    if (not meta.get("source_content_fingerprint")
+            or meta.get("source_content_fingerprint") != source_fingerprint_at_start
+            or not meta.get("words_content_sha256")
+            or not meta.get("shots_content_sha256")):
+        if progress:
+            progress(f"index: ⚠ {source.id} refreshed artifacts could not be provenance-bound")
+        return []
     try:
         meta_tmp.write_text(json.dumps(meta), encoding="utf-8")
         meta_tmp.replace(meta_file)

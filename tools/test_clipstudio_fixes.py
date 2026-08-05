@@ -968,11 +968,15 @@ def test_index_cache_and_atomic_saves():
           out_w == [] and any("re-indexing" in m and "words" in m for m in msgs_w))
 
     # same cache, same (no-cap) call, now schema-2 complete → still served from cache
-    (proj.index_dir / "s1.index.meta.json").write_text(
-        json.dumps({"faceid": False, "ocr": False, "words": True,
-                    "asr_prompt_fingerprint": IX._asr_prompt_fingerprint(cfg_noocr, ""),
-                    "schema": IX.INDEX_SCHEMA}), encoding="utf-8")
+    src.local_path = str(tmp / "s1.mp4")
+    Path(src.local_path).write_bytes(b"stable cached source bytes")
     (proj.index_dir / "s1.words.json").write_text("[]", encoding="utf-8")
+    bound_meta = {"faceid": False, "ocr": False, "words": True,
+                  "asr_prompt_fingerprint": IX._asr_prompt_fingerprint(cfg_noocr, ""),
+                  "schema": IX.INDEX_SCHEMA}
+    bound_meta.update(IX._index_artifact_bindings(proj, src))
+    (proj.index_dir / "s1.index.meta.json").write_text(
+        json.dumps(bound_meta), encoding="utf-8")
     msgs2 = []
     out2 = IX.index_source(proj, src, cfg_noocr, progress=msgs2.append)
     check("matching-capability cache still served",

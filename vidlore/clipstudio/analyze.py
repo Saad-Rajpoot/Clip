@@ -766,21 +766,40 @@ def _unsupported_short_quote_contract(beat: ScriptSegment, directive: dict) -> d
 
 _LEADING_NAMED_SUBJECT_RX = re.compile(
     r"^\s*(?P<subject>[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,2})\b")
+_CROSS_SCENE_LOCATION_GROUPS = (
+    ("confinement", frozenset({"cell", "dungeon", "prison"})),
+    ("urban", frozenset({"city", "street", "alley", "market"})),
+    ("sleeping_quarters", frozenset({"bed", "bedroom", "bedchamber"})),
+    ("royal_court", frozenset({"throne", "court", "council"})),
+    ("fortress", frozenset({"castle", "keep", "palace"})),
+    ("sea_travel", frozenset({"ship", "harbor", "harbour", "port"})),
+    ("wilderness", frozenset({"forest", "mountain", "desert"})),
+)
+_CROSS_SCENE_TRAVEL_RX = re.compile(
+    r"\b(?:move(?:s|d)?|moving|walk(?:s|ed|ing)?|ride(?:s|r|rs)?|riding|rode|"
+    r"travel(?:s|led|ing)?|lead(?:s|ing)?|led|escort(?:s|ed|ing)?|"
+    r"run(?:s|ning)?|ran|flee(?:s|ing)?|fled)\b.{0,48}"
+    r"\b(?:through|across|along|into|toward|towards|from|to|out\s+of)\b",
+    re.I,
+)
 
 
-def _multi_event_required_entity_contract(beat: ScriptSegment, directive: dict) -> dict | None:
-    """Narrow an enumerated exact contract to the one event its retrieval fields target.
+def _multi_event_montage_retype(beat: ScriptSegment, directive: dict) -> dict | None:
+    """Retype an enumerated cross-scene direction as a montage without narrowing its promise.
 
     A narration can rapidly enumerate several different scenes while one analyzer directive can
-    retrieve only one short window.  Requiring that window to show all enumerated scenes creates an
-    impossible conjunction even when the chosen scene is exact.  This guard is deliberately tight:
+    retrieve only one short window.  Calling the whole enumeration one exact continuous scene
+    creates an impossible conjunction even when each named event has valid footage.  This guard is
+    deliberately tight:
     the expected visual must reproduce the narration, contain at least three comma/semicolon clauses
-    led by pairwise-distinct named subjects, and exactly one clause must match both the declared
-    entity and the scene query.  If the query mentions another clause's subject, the montage remains
-    untouched because retrieval may genuinely be targeting the combined scene.
+    led by pairwise-distinct named subjects, put every clause in a different incompatible location
+    group, include an explicit travel transition, and have exactly one clause match both the declared
+    entity and scene query.  If any structural proof is missing, the exact direction stays untouched.
 
-    Exactness, specificity, entity, kind, and query all survive.  Only the verifier-facing prose is
-    narrowed to the same observable event already selected by ``required_entity``/``scene_query``.
+    The full expected visual, required entity, query, exact analyzer label, and specificity survive.
+    Only ``required_kind`` and ``shot_intent`` become ``montage``.  The existing policy montage guard
+    can then resolve the effective treatment to CHARACTER transparently; this analyzer guard never
+    falsely certifies one clause as satisfying the complete narrated enumeration.
     """
     if str(directive.get("required_kind", "") or "").strip().lower() not in {
             "actor", "character"}:
@@ -817,6 +836,21 @@ def _multi_event_required_entity_contract(beat: ScriptSegment, directive: dict) 
            for right in subject_terms[i + 1:]):
         return None
 
+    # Different named people can still share one exact moment (Arya draws her sword, Joffrey
+    # threatens Mycah, Sansa watches).  Require objective cross-scene structure: every clause has
+    # exactly one strong venue category, the categories are pairwise incompatible, and at least one
+    # clause explicitly travels between/through places.  This intentionally prefers false negatives.
+    location_groups = []
+    for terms in clause_terms:
+        groups = [name for name, anchors in _CROSS_SCENE_LOCATION_GROUPS if terms & anchors]
+        if len(groups) != 1:
+            return None
+        location_groups.append(groups[0])
+    if len(set(location_groups)) != len(location_groups):
+        return None
+    if not any(_CROSS_SCENE_TRAVEL_RX.search(clause) for clause in clauses):
+        return None
+
     entity_terms = _grounding_terms(str(directive.get("required_entity", "") or ""))
     query_terms = _grounding_terms(str(directive.get("scene_query", "") or ""))
     if not entity_terms or not entity_terms <= query_terms:
@@ -834,14 +868,17 @@ def _multi_event_required_entity_contract(beat: ScriptSegment, directive: dict) 
            if i != target_index):
         return None
 
-    target = clauses[target_index]
     return {
-        "reason": "multi_event_contract_narrowed_to_required_entity",
-        "sanitize_fields": ["expected_visual"],
-        "sanitized_values": {"expected_visual": target[:200]},
+        "reason": "multi_event_montage_retyped",
+        "sanitize_fields": ["required_kind", "shot_intent"],
+        "sanitized_values": {"required_kind": "montage", "shot_intent": "montage"},
         "multi_event_clause_count": len(clauses),
-        "multi_event_target_clause": target[:200],
-        "multi_event_original_expected_visual": expected[:200],
+        "multi_event_location_groups": location_groups,
+        "multi_event_target_clause": clauses[target_index][:200],
+        "multi_event_original_required_kind": str(
+            directive.get("required_kind", "") or "")[:20],
+        "multi_event_original_shot_intent": str(
+            directive.get("shot_intent", "") or "")[:24],
     }
 
 
@@ -1009,7 +1046,7 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
     grounding = (_exact_direction_grounding(beat, directive)
                  if resolved == _policy.EXACT else None)
     if grounding is not None and grounding.get("grounded"):
-        multi_event_guard = _multi_event_required_entity_contract(beat, directive)
+        multi_event_guard = _multi_event_montage_retype(beat, directive)
         if multi_event_guard:
             grounding = dict(grounding)
             existing_fields = list(grounding.get("sanitize_fields") or [])
@@ -1032,8 +1069,10 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
                 grounding["sanitize_fields"] = existing_fields
                 grounding["sanitized_values"] = existing_values
                 for field in (
-                        "multi_event_clause_count", "multi_event_target_clause",
-                        "multi_event_original_expected_visual"):
+                        "multi_event_clause_count", "multi_event_location_groups",
+                        "multi_event_target_clause",
+                        "multi_event_original_required_kind",
+                        "multi_event_original_shot_intent"):
                     grounding[field] = multi_event_guard[field]
         short_quote_guard = _unsupported_short_quote_contract(beat, directive)
         if short_quote_guard:
@@ -1105,6 +1144,13 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
             "entity_grounded": bool(grounding.get("entity_grounded")),
             "guard_schema": _BEAT_GROUNDING_AUDIT_SCHEMA,
         }
+        multi_event_retyped = (
+            grounding.get("reason") == "multi_event_montage_retyped"
+            or "multi_event_montage_retyped"
+            in (grounding.get("sanitization_reasons") or []))
+        if multi_event_retyped:
+            marker["branch"] = "multi_event_montage_retyped"
+            marker["to_policy"] = _policy.CHARACTER
         if grounding.get("grounded_event"):
             marker["grounded_event"] = str(grounding["grounded_event"])
         if grounding.get("grounded_subject_role"):
@@ -1119,8 +1165,10 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
         if grounding.get("camera_original_values"):
             marker["camera_original_values"] = dict(grounding["camera_original_values"])
         for field in (
-                "multi_event_clause_count", "multi_event_target_clause",
-                "multi_event_original_expected_visual"):
+                "multi_event_clause_count", "multi_event_location_groups",
+                "multi_event_target_clause",
+                "multi_event_original_required_kind",
+                "multi_event_original_shot_intent"):
             if grounding.get(field) not in (None, ""):
                 marker[field] = grounding[field]
         if sanitize_fields:
@@ -1138,6 +1186,10 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
             if "required_entity" in sanitize_fields:
                 beat.required_entity = str(sanitized_values.get(
                     "required_entity", grounding.get("grounded_event") or ""))[:80]
+            if "required_kind" in sanitize_fields:
+                beat.required_kind = str(sanitized_values.get("required_kind", ""))[:20]
+            if "shot_intent" in sanitize_fields:
+                beat.shot_intent = str(sanitized_values.get("shot_intent", ""))[:24]
             if "quote" in sanitize_fields:
                 beat.quote = str(sanitized_values.get("quote", ""))[:160]
         if not grounding["grounded"]:
@@ -1421,10 +1473,12 @@ def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
             # origin now is the only provenance-safe way to undo it if a future guard drops the line.
             breakout_provenance[key] = "quote_derived"
     grounded = sum(str(m.get("branch", "")).startswith("grounded_exact")
+                   or m.get("branch") == "multi_event_montage_retyped"
                    for m in records.values())
     downgraded = sum(m.get("branch") == "ungrounded_exact_downgrade"
                      for m in records.values())
-    sanitized = sum(m.get("branch") == "grounded_exact_sanitized"
+    sanitized = sum(m.get("branch") in {
+                        "grounded_exact_sanitized", "multi_event_montage_retyped"}
                     for m in records.values())
     counts = {
         "exact_directives": len(records),
@@ -1440,9 +1494,9 @@ def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
             m.get("reason") == "short_common_quote_not_literally_narrated"
             or "short_common_quote_not_literally_narrated"
             in (m.get("sanitization_reasons") or []) for m in records.values()),
-        "multi_event_contract_narrowed": sum(
-            m.get("reason") == "multi_event_contract_narrowed_to_required_entity"
-            or "multi_event_contract_narrowed_to_required_entity"
+        "multi_event_montage_retyped": sum(
+            m.get("reason") == "multi_event_montage_retyped"
+            or "multi_event_montage_retyped"
             in (m.get("sanitization_reasons") or []) for m in records.values()),
         "bare_named_event_sanitized": sum(
             m.get("reason") == "bare_named_event_staging_removed"
@@ -1488,7 +1542,7 @@ def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
 
 _CACHED_REVALIDATION_FIELDS = (
     "visual_policy", "is_specific_claim", "expected_visual", "scene_query", "quote",
-    "breakout_candidate", "required_entity", "required_kind",
+    "breakout_candidate", "required_entity", "required_kind", "shot_intent",
 )
 _CACHED_DIRECTION_GUARD_SCHEMA = _BEAT_GROUNDING_AUDIT_SCHEMA
 _MANUAL_BREAKOUT_PROVENANCE = frozenset({"manual", "authored", "editorial", "explicit"})
@@ -1496,7 +1550,8 @@ _MANUAL_BREAKOUT_PROVENANCE = frozenset({"manual", "authored", "editorial", "exp
 
 def _sanitized_guard_is_effective(beat: ScriptSegment, marker: dict) -> bool:
     """Whether a persisted sanitized marker still truthfully describes the loaded fields."""
-    if marker.get("branch") != "grounded_exact_sanitized":
+    if marker.get("branch") not in {
+            "grounded_exact_sanitized", "multi_event_montage_retyped"}:
         return False
     fields = list(marker.get("sanitized_fields") or [])
     if not fields:
@@ -1507,7 +1562,8 @@ def _sanitized_guard_is_effective(beat: ScriptSegment, marker: dict) -> bool:
     for field in fields:
         if field in sanitized_values:
             limit = {"expected_visual": 200, "scene_query": 120,
-                     "required_entity": 80, "quote": 160}.get(field)
+                     "required_entity": 80, "required_kind": 20,
+                     "shot_intent": 24, "quote": 160}.get(field)
             expected_value = str(sanitized_values[field])
             if limit:
                 expected_value = expected_value[:limit]
@@ -1528,7 +1584,10 @@ def _sanitized_guard_is_effective(beat: ScriptSegment, marker: dict) -> bool:
                 not grounded_event
                 or str(getattr(beat, "required_entity", "") or "") != grounded_event[:80]):
             return False
-    return all(field in {"quote", "expected_visual", "scene_query", "required_entity"}
+    return all(field in {
+        "quote", "expected_visual", "scene_query", "required_entity",
+        "required_kind", "shot_intent",
+    }
                for field in fields)
 
 
@@ -1595,6 +1654,50 @@ def revalidate_cached_directions(beats, analysis: ScriptAnalysis | None = None) 
     for beat in rows:
         current_policy = _policy.normalize(getattr(beat, "visual_policy", ""))
         existing_marker = getattr(beat, "_analyzer_grounding_guard", None)
+        cached_multi_event_guard = _multi_event_montage_retype(
+            beat, _cached_direction(beat))
+        if (prior_guard_schema < _CACHED_DIRECTION_GUARD_SCHEMA
+                and cached_multi_event_guard
+                and isinstance(existing_marker, dict)
+                and (current_policy == _policy.EXACT
+                     or existing_marker.get("from_policy") == _policy.EXACT)
+                and _sanitized_guard_is_effective(beat, existing_marker)):
+            # Schema 9 may already own expected_visual/quote provenance, and policy.finalize_beats
+            # may already have persisted CHARACTER.  Merge the montage retype in place so neither
+            # fact is lost: the full expected visual stays byte-for-byte identical, the effective
+            # softened policy stays softened, and the prior quote reason remains countable.
+            previous_reason = str(existing_marker.get("reason", "") or "")
+            existing_marker["branch"] = "multi_event_montage_retyped"
+            existing_marker["reason"] = cached_multi_event_guard["reason"]
+            existing_marker["to_policy"] = _policy.CHARACTER
+            reasons = list(existing_marker.get("sanitization_reasons") or [])
+            if previous_reason and previous_reason != cached_multi_event_guard["reason"]:
+                if previous_reason not in reasons:
+                    reasons.append(previous_reason)
+            if reasons:
+                existing_marker["sanitization_reasons"] = reasons
+            fields = list(existing_marker.get("sanitized_fields") or [])
+            values = (dict(existing_marker.get("sanitized_values") or {})
+                      if isinstance(existing_marker.get("sanitized_values"), dict) else {})
+            for field in cached_multi_event_guard["sanitize_fields"]:
+                if field not in fields:
+                    fields.append(field)
+                value = cached_multi_event_guard["sanitized_values"][field]
+                values[field] = value
+                setattr(beat, field, value)
+            existing_marker["sanitized_fields"] = fields
+            existing_marker["sanitized_values"] = values
+            for field in (
+                    "multi_event_clause_count", "multi_event_location_groups",
+                    "multi_event_target_clause",
+                    "multi_event_original_required_kind",
+                    "multi_event_original_shot_intent"):
+                existing_marker[field] = cached_multi_event_guard[field]
+            existing_marker["guard_schema"] = _CACHED_DIRECTION_GUARD_SCHEMA
+            existing_marker["cached_revalidation_schema"] = \
+                _CACHED_DIRECTION_GUARD_SCHEMA
+            exact_revalidated += 1
+            continue
         if current_policy != _policy.EXACT:
             # Older schemas could already have softened a nominal fragment to character footage.
             # Schema 4 replaced an analyzer-guessed identity with the narrated role, but a real
@@ -1658,42 +1761,6 @@ def revalidate_cached_directions(beats, analysis: ScriptAnalysis | None = None) 
                             cached_nominal_roles_migrated += 1
                     existing_marker["cached_revalidation_schema"] = \
                         _CACHED_DIRECTION_GUARD_SCHEMA
-            continue
-        cached_multi_event_guard = _multi_event_required_entity_contract(
-            beat, _cached_direction(beat))
-        if (prior_guard_schema < _CACHED_DIRECTION_GUARD_SCHEMA
-                and cached_multi_event_guard
-                and isinstance(existing_marker, dict)
-                and _sanitized_guard_is_effective(beat, existing_marker)):
-            # A prior sanitizer may already own ``expected_visual`` (beat 134 first had an
-            # unsupported tiny quote removed by schema 9).  Replaying the post-sanitized directive
-            # would erase that truthful provenance.  Merge this one-field schema migration in place
-            # and retain both reasons instead.
-            beat.expected_visual = str(
-                cached_multi_event_guard["sanitized_values"]["expected_visual"])[:200]
-            existing_marker["branch"] = "grounded_exact_sanitized"
-            fields = list(existing_marker.get("sanitized_fields") or [])
-            if "expected_visual" not in fields:
-                fields.append("expected_visual")
-            existing_marker["sanitized_fields"] = fields
-            values = (dict(existing_marker.get("sanitized_values") or {})
-                      if isinstance(existing_marker.get("sanitized_values"), dict) else {})
-            values["expected_visual"] = beat.expected_visual
-            existing_marker["sanitized_values"] = values
-            reason = cached_multi_event_guard["reason"]
-            if existing_marker.get("reason") != reason:
-                reasons = list(existing_marker.get("sanitization_reasons") or [])
-                if reason not in reasons:
-                    reasons.append(reason)
-                existing_marker["sanitization_reasons"] = reasons
-            for field in (
-                    "multi_event_clause_count", "multi_event_target_clause",
-                    "multi_event_original_expected_visual"):
-                existing_marker[field] = cached_multi_event_guard[field]
-            existing_marker["guard_schema"] = _CACHED_DIRECTION_GUARD_SCHEMA
-            existing_marker["cached_revalidation_schema"] = \
-                _CACHED_DIRECTION_GUARD_SCHEMA
-            exact_revalidated += 1
             continue
         if (isinstance(existing_marker, dict)
                 and existing_marker.get("cached_revalidation_schema")

@@ -77,8 +77,8 @@ def test_literal_or_three_token_quote_remains_for_downstream_proof(text, quote):
     assert beat._analyzer_grounding_guard["branch"] == "grounded_exact"
 
 
-def test_enumerated_exact_contract_follows_its_single_required_entity_target():
-    """Beat 134 must verify the Shae scene it retrieves, not three separate scenes at once."""
+def test_cross_scene_enumeration_is_retyped_as_montage_without_narrowing_contract():
+    """Beat 134 keeps all three scenes while existing policy resolves montage to CHARACTER."""
     narration = (
         "Jaime opening the cell, Varys moving him through the city, "
         "Shae in his father's bed,")
@@ -90,23 +90,30 @@ def test_enumerated_exact_contract_follows_its_single_required_entity_target():
         scene_query=query,
         required_entity="Shae",
         required_kind="character",
+        shot_intent="emotional_closeup",
     )
 
     assert beat.visual_policy == P.EXACT
+    assert P.policy_of(beat) == P.CHARACTER
     assert beat.is_specific_claim is True
-    assert beat.expected_visual == "Shae in his father's bed"
+    assert beat.expected_visual == narration
     assert beat.scene_query == query
     assert beat.required_entity == "Shae"
-    assert beat.required_kind == "character"
+    assert beat.required_kind == "montage"
+    assert beat.shot_intent == "montage"
     marker = beat._analyzer_grounding_guard
-    assert marker["branch"] == "grounded_exact_sanitized"
-    assert marker["reason"] == "multi_event_contract_narrowed_to_required_entity"
-    assert marker["sanitized_fields"] == ["expected_visual"]
+    assert marker["branch"] == "multi_event_montage_retyped"
+    assert marker["reason"] == "multi_event_montage_retyped"
+    assert marker["to_policy"] == P.CHARACTER
+    assert marker["sanitized_fields"] == ["required_kind", "shot_intent"]
     assert marker["sanitized_values"] == {
-        "expected_visual": "Shae in his father's bed"}
+        "required_kind": "montage", "shot_intent": "montage"}
     assert marker["multi_event_clause_count"] == 3
+    assert marker["multi_event_location_groups"] == [
+        "confinement", "urban", "sleeping_quarters"]
     assert marker["multi_event_target_clause"] == "Shae in his father's bed"
-    assert marker["multi_event_original_expected_visual"] == narration
+    assert marker["multi_event_original_required_kind"] == "character"
+    assert marker["multi_event_original_shot_intent"] == "emotional_closeup"
 
 
 @pytest.mark.parametrize(
@@ -118,9 +125,12 @@ def test_enumerated_exact_contract_follows_its_single_required_entity_target():
         # A query naming another enumerated subject may genuinely target their combined scene.
         ("Tyrion faces Tywin, Bronn watches him, Jaime enters the room",
          "Game of Thrones Tyrion Tywin Bronn confrontation"),
+        # Distinct named subjects are not cross-scene proof: all three share one exact encounter.
+        ("Arya draws her sword, Joffrey threatens Mycah, Sansa watches the fight",
+         "Game of Thrones Arya draws sword against Joffrey Mycah"),
     ],
 )
-def test_ordinary_or_combined_multi_subject_exact_contract_is_not_narrowed(
+def test_ordinary_or_same_scene_multi_subject_exact_contract_is_not_retyped(
         narration, query):
     beat = _apply(
         narration,
@@ -131,11 +141,14 @@ def test_ordinary_or_combined_multi_subject_exact_contract_is_not_narrowed(
     )
 
     assert beat.visual_policy == P.EXACT
+    assert P.policy_of(beat) == P.EXACT
     assert beat.expected_visual == narration
     assert beat._analyzer_grounding_guard["branch"] == "grounded_exact"
 
 
-def test_schema10_migrates_cached_beat134_contract_without_losing_quote_provenance():
+@pytest.mark.parametrize("persisted_policy", [P.EXACT, P.CHARACTER])
+def test_schema10_migrates_cached_beat134_montage_even_after_policy_softening(
+        persisted_policy):
     narration = (
         "Jaime opening the cell, Varys moving him through the city, "
         "Shae in his father's bed,")
@@ -147,7 +160,8 @@ def test_schema10_migrates_cached_beat134_contract_without_losing_quote_provenan
         quote="",
         required_entity="Shae",
         required_kind="character",
-        visual_policy=P.EXACT,
+        shot_intent="emotional_closeup",
+        visual_policy=persisted_policy,
         is_specific_claim=True,
     )
     prior_marker = {
@@ -171,17 +185,25 @@ def test_schema10_migrates_cached_beat134_contract_without_losing_quote_provenan
 
     assert first["changed_indices"] == [134]
     assert first["exact_revalidated"] == 1
-    assert first["changes"]["134"]["changed_fields"] == ["expected_visual"]
-    assert beat.expected_visual == "Shae in his father's bed"
-    assert beat.visual_policy == P.EXACT
+    assert first["changes"]["134"]["changed_fields"] == [
+        "required_kind", "shot_intent"]
+    assert beat.expected_visual == narration
+    assert beat.visual_policy == persisted_policy
+    assert P.policy_of(beat) == P.CHARACTER
+    assert beat.required_kind == beat.shot_intent == "montage"
     marker = analysis.beat_grounding_audit["beats"]["134"]
-    assert marker["reason"] == "short_common_quote_not_literally_narrated"
+    assert marker["branch"] == "multi_event_montage_retyped"
+    assert marker["reason"] == "multi_event_montage_retyped"
     assert marker["sanitization_reasons"] == [
-        "multi_event_contract_narrowed_to_required_entity"]
+        "short_common_quote_not_literally_narrated"]
     assert marker["sanitized_values"] == {
-        "expected_visual": "Shae in his father's bed", "quote": ""}
+        "expected_visual": narration,
+        "quote": "",
+        "required_kind": "montage",
+        "shot_intent": "montage",
+    }
     assert analysis.beat_grounding_audit["counts"]["short_common_quote_sanitized"] == 1
-    assert analysis.beat_grounding_audit["counts"]["multi_event_contract_narrowed"] == 1
+    assert analysis.beat_grounding_audit["counts"]["multi_event_montage_retyped"] == 1
     assert analysis.beat_grounding_audit["schema"] == 10
 
     loaded = ScriptSegment.from_dict(beat.to_dict())
@@ -190,7 +212,8 @@ def test_schema10_migrates_cached_beat134_contract_without_losing_quote_provenan
 
     assert second["changed_count"] == 0
     assert second["exact_revalidated"] == 0
-    assert loaded.expected_visual == "Shae in his father's bed"
+    assert loaded.expected_visual == narration
+    assert loaded.required_kind == loaded.shot_intent == "montage"
 
 
 def test_schema9_cached_revalidation_clears_short_quote_and_auto_breakout_idempotently():
@@ -1071,7 +1094,7 @@ def test_grounding_branches_persist_in_analysis_metadata_and_round_trip():
         "information_staging_sanitized": 1,
         "record_intent_quote_sanitized": 0,
         "short_common_quote_sanitized": 0,
-        "multi_event_contract_narrowed": 0,
+        "multi_event_montage_retyped": 0,
         "bare_named_event_sanitized": 0,
         "unsupported_camera_composition_sanitized": 0,
         "adjacent_quote_copy_sanitized": 0,

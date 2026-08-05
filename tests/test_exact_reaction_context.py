@@ -9,8 +9,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from vidlore.clipstudio import image_fallback as IF
 from vidlore.clipstudio import index as I
+from vidlore.clipstudio import orchestrate as O
 from vidlore.clipstudio import relevance_contract as R
 from vidlore.clipstudio import verify as V
 from vidlore.clipstudio.config import ClipConfig
@@ -69,6 +72,8 @@ def _shots(tmp_path: Path, sid: str, *, dialogue: str = "") -> list[Shot]:
 
 def _write_current_index(
         proj: ClipProject, sid: str, shots: list[Shot], cfg: ClipConfig) -> None:
+    (Path(proj.index_dir) / f"{sid}.words.json").write_text(
+        json.dumps([[0.0, 0.1, "indexed"]]), encoding="utf-8")
     proj.shots_path(sid).write_text(
         json.dumps([shot.to_dict() for shot in shots]), encoding="utf-8")
     meta = {
@@ -76,6 +81,7 @@ def _write_current_index(
         "words": True,
         "asr_prompt_fingerprint": I.asr_semantic_fingerprint(proj, cfg),
     }
+    meta.update(I._index_artifact_bindings(proj, proj.source(sid)))
     (Path(proj.index_dir) / f"{sid}.index.meta.json").write_text(
         json.dumps(meta), encoding="utf-8")
 
@@ -194,6 +200,59 @@ def test_stale_asr_sidecar_cannot_prove_reaction_context(tmp_path):
 
     assert evidence["passed"] is False
     assert evidence["reason"] == "exact_reaction_context_asr_provenance_invalid"
+
+
+def test_same_source_dialogue_before_hard_cut_cannot_prove_later_reaction(tmp_path):
+    proj, seg, rows, cfg = _fixture(tmp_path)
+    # The target phrase occurs in this source, but six edits / 20.5 seconds before the selected
+    # marriage shot. A broad same-source pre-roll used to certify these unrelated pixels.
+    rows["marriage"][18].transcript = "I demand a trial by combat."
+    _write_current_index(proj, "marriage", rows["marriage"], cfg)
+
+    evidence = V._exact_reaction_context_evidence(
+        proj, _selection("marriage"), seg, cfg=cfg)
+
+    assert evidence["passed"] is False
+    assert evidence["reason"] == "exact_reaction_context_unproven"
+
+
+@pytest.mark.parametrize(("artifact", "expected_reason"), [
+    ("source", "source_content_fingerprint_mismatch"),
+    ("words", "words_content_sha256_mismatch"),
+    ("shots", "shots_content_sha256_mismatch"),
+])
+def test_reaction_context_rejects_any_post_index_byte_drift(
+        artifact, expected_reason, tmp_path):
+    proj, seg, _rows, cfg = _fixture(tmp_path)
+    if artifact == "source":
+        path = Path(proj.source("trial").local_path)
+        path.write_bytes(b"entirely different source bytes")
+    elif artifact == "words":
+        path = Path(proj.index_dir) / "trial.words.json"
+        path.write_text(json.dumps([[0.0, 0.2, "changed"]]), encoding="utf-8")
+    else:
+        path = proj.shots_path("trial")
+        path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    evidence = V._exact_reaction_context_evidence(
+        proj, _selection("trial"), seg, cfg=cfg)
+
+    assert evidence["passed"] is False
+    assert evidence["reason"] == "exact_reaction_context_asr_provenance_invalid"
+    assert evidence["index_artifact_provenance_reason"] == expected_reason
+
+
+def test_reaction_asr_provenance_fault_is_not_conclusive_content():
+    assert "exact_reaction_context_asr_provenance_invalid" \
+        not in R._CONCLUSIVE_CONTENT_REASONS
+    audit = {
+        "blockers": [{
+            "segment_index": 7,
+            "reasons": ["exact_reaction_context_asr_provenance_invalid"],
+        }],
+    }
+    assert R.completed_deliberate_exact_downgrade(audit["blockers"][0]) is False
+    assert O._persistent_verifier_technical_indices(audit) == {7}
 
 
 def test_scene_affinity_needs_event_terms_not_two_character_names(tmp_path):

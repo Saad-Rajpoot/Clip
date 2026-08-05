@@ -3421,6 +3421,7 @@ _PERSISTENT_VERIFIER_TECHNICAL_PREFIXES = (
     "exact_quote_pool_classification_indeterminate",
     "exact_quote_selected_asr_provenance_invalid",
     "exact_quote_unprompted_confirmation_inconclusive",
+    "exact_reaction_context_asr_provenance_invalid",
 )
 
 

@@ -91,7 +91,6 @@ _CONCLUSIVE_CONTENT_REASONS = frozenset({
     "exact_quote_timed_asr_outside_selected_window",
     "exact_quote_unprompted_confirmation_rejected",
     "exact_reaction_context_unproven",
-    "exact_reaction_context_asr_provenance_invalid",
 })
 
 

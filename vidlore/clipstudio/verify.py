@@ -1401,6 +1401,8 @@ _EXACT_REACTION_INACTION_RX = re.compile(
 _EXACT_REACTION_CONTEXT_PRE_SEC = 30.0
 _EXACT_REACTION_CONTEXT_POST_SEC = 5.0
 _EXACT_REACTION_CONTEXT_MAX_SPAN_SEC = 30.0
+_EXACT_REACTION_CONTEXT_MAX_EDIT_GAP = 4
+_EXACT_REACTION_CONTEXT_MAX_TIME_GAP_SEC = 18.0
 _EXACT_REACTION_CONTEXT_SCHEMA = 1
 
 
@@ -1469,20 +1471,32 @@ def _exact_reaction_context_evidence(proj, selection, seg, *, cfg=None) -> dict:
     # The complete pipeline validates every ASR sidecar before match.  Re-check the selected
     # source here as well so a standalone publication audit cannot certify edited/stale words.
     try:
-        use_cfg = cfg if cfg is not None else ClipConfig()
+        if cfg is None:
+            from .config import load_clip_config
+            use_cfg = load_clip_config()
+        else:
+            use_cfg = cfg
         meta_path = Path(proj.index_dir) / f"{sid}.index.meta.json"
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         expected_asr = _index.asr_semantic_fingerprint(proj, use_cfg)
+        provenance_ok, provenance_reason, provenance = \
+            _index._index_artifact_provenance_result(proj, source, meta)
         meta_current = bool(
             isinstance(meta, dict)
             and not meta.get("asr_refresh_in_progress")
             and meta.get("words") is True
             and int(meta.get("schema", 0) or 0) >= int(_index.INDEX_SCHEMA)
-            and str(meta.get("asr_prompt_fingerprint", "") or "") == expected_asr)
+            and str(meta.get("asr_prompt_fingerprint", "") or "") == expected_asr
+            and provenance_ok)
     except Exception:
         meta_current = False
         expected_asr = ""
+        provenance_reason = "index_artifact_binding_validation_error"
+        provenance = {}
     detail["asr_prompt_fingerprint_expected"] = expected_asr
+    detail["index_artifact_provenance_reason"] = str(provenance_reason or "")
+    if provenance:
+        detail["index_artifact_fingerprints_current"] = provenance
     if not meta_current:
         detail["reason"] = "exact_reaction_context_asr_provenance_invalid"
         return detail
@@ -1551,6 +1565,24 @@ def _exact_reaction_context_evidence(proj, selection, seg, *, cfg=None) -> dict:
             float(getattr(shot, "start", 0.0) or 0.0), int(getattr(shot, "index", -1))))
     except Exception:
         shots = []
+    try:
+        selected_shot_index = int(getattr(selection, "shot_index", -1))
+    except (TypeError, ValueError):
+        selected_shot_index = -1
+    selected_shot = next((shot for shot in shots
+                          if int(getattr(shot, "index", -1)) == selected_shot_index), None)
+    detail["selected_shot_index"] = selected_shot_index
+    if selected_shot is None:
+        return detail
+    try:
+        selected_shot_start = float(selected_shot.start)
+        selected_shot_end = float(selected_shot.end)
+    except (TypeError, ValueError, AttributeError):
+        return detail
+    selection_overlaps_shot = max(w0, selected_shot_start) < min(w1, selected_shot_end)
+    detail["selection_overlaps_indexed_shot"] = selection_overlaps_shot
+    if not selection_overlaps_shot:
+        return detail
     for shot in shots:
         try:
             s0, s1 = float(shot.start), float(shot.end)
@@ -1576,19 +1608,28 @@ def _exact_reaction_context_evidence(proj, selection, seg, *, cfg=None) -> dict:
                 break
             matched |= rows[end][3]
             if len(matched) >= 2:
+                last_match_index = rows[end][2]
+                edit_gap = selected_shot_index - last_match_index
+                time_gap = max(0.0, w0 - span1)
+                if (edit_gap < 0 or edit_gap > _EXACT_REACTION_CONTEXT_MAX_EDIT_GAP
+                        or time_gap > _EXACT_REACTION_CONTEXT_MAX_TIME_GAP_SEC):
+                    continue
                 rank = (len(matched), -(span1 - span0), -span0)
                 if best is None or rank > best[0]:
-                    best = (rank, span0, span1, rows[start][2], rows[end][2], set(matched))
+                    best = (rank, span0, span1, rows[start][2], last_match_index,
+                            set(matched), edit_gap, time_gap)
     if best is None:
         detail["matched_terms"] = []
         return detail
-    _rank, span0, span1, first_shot, last_shot, matched = best
+    _rank, span0, span1, first_shot, last_shot, matched, edit_gap, time_gap = best
     detail.update({
         "passed": True,
         "reason": "timed_asr_scene_locator",
         "matched_terms": sorted(matched),
         "context_span": [round(span0, 3), round(span1, 3)],
         "context_shots": [first_shot, last_shot],
+        "context_to_selection_edit_gap": int(edit_gap),
+        "context_to_selection_time_gap_sec": round(float(time_gap), 3),
     })
     return detail
 

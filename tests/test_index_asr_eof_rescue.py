@@ -475,13 +475,16 @@ def test_index_cache_prompt_mismatch_refreshes_only_asr(monkeypatch, tmp_path):
     }
     src = SourceVideo(id="s", url="u", title="scene", permission="owner", status=IX.SOURCE_OK,
                       local_path=str(tmp_path / "source.mp4"), duration=100.0)
+    Path(src.local_path).write_bytes(b"source")
     shot = Shot(source_id="s", index=0, start=0.0, end=2.0)
     proj.shots_path("s").write_text(json.dumps([shot.to_dict()]))
     (proj.index_dir / "s.words.json").write_text('[[0,1,"old"]]')
-    (proj.index_dir / "s.index.meta.json").write_text(json.dumps({
+    meta = {
         "schema": IX.INDEX_SCHEMA, "words": True, "ocr": False, "faceid": False,
         "asr_prompt_fingerprint": "stale",
-    }))
+    }
+    meta.update(IX._index_artifact_bindings(proj, src))
+    (proj.index_dir / "s.index.meta.json").write_text(json.dumps(meta))
     cfg = ClipConfig()
     cfg.detect_ocr = False
     seen = {}
@@ -697,6 +700,7 @@ def test_refresh_pair_rolls_back_words_if_shots_replace_fails(monkeypatch, tmp_p
 
     source = NS(id="s", status=IX.SOURCE_OK, local_path=str(tmp_path / "source.mp4"),
                 duration=10.0)
+    Path(source.local_path).write_bytes(b"source")
     shot = NS(start=0.0, end=10.0, transcript="old",
               to_dict=lambda: {"start": 0.0, "end": 10.0, "transcript": shot.transcript})
     monkeypatch.setattr(IX, "load_shots", lambda _proj, _sid: [shot])
@@ -738,6 +742,7 @@ def test_refresh_invalidates_only_committed_sources_quote_cache(monkeypatch, tmp
 
     source = NS(id="s", status=IX.SOURCE_OK, local_path=str(tmp_path / "source.mp4"),
                 duration=10.0)
+    Path(source.local_path).write_bytes(b"source")
     shot = NS(start=0.0, end=10.0, transcript="old",
               to_dict=lambda: {"start": 0.0, "end": 10.0, "transcript": shot.transcript})
     monkeypatch.setattr(IX, "load_shots", lambda _proj, _sid: [shot])
@@ -801,6 +806,7 @@ def test_interrupted_pair_commit_leaves_invalid_marker_for_resume(monkeypatch, t
 
     source = NS(id="s", status=IX.SOURCE_OK, local_path=str(tmp_path / "source.mp4"),
                 duration=10.0)
+    Path(source.local_path).write_bytes(b"source")
     Proj.sources = [source]
     shot = NS(start=0.0, end=10.0, transcript="old",
               to_dict=lambda: {"start": 0.0, "end": 10.0, "transcript": shot.transcript})
@@ -843,6 +849,7 @@ def test_refresh_distinguishes_corrupt_cache_from_proven_silence(monkeypatch, tm
 
     source = NS(id="s", status=IX.SOURCE_OK, local_path=str(tmp_path / "source.mp4"),
                 duration=10.0)
+    Path(source.local_path).write_bytes(b"source")
     shot = NS(start=0.0, end=10.0, transcript="", to_dict=lambda: {"transcript": ""})
     monkeypatch.setattr(IX, "load_shots", lambda *_args: [shot])
     monkeypatch.setattr(IX, "_transcribe_words_result", lambda *_args, **_kwargs: (True, []))
@@ -869,6 +876,7 @@ def test_index_all_refuses_checkpointable_success_until_whole_asr_pool_is_curren
     source = SourceVideo(
         id="s", url="u", title="scene", permission="owner", status=IX.SOURCE_OK,
         local_path=str(tmp_path / "s.mp4"))
+    Path(source.local_path).write_bytes(b"source")
     proj.sources = [source]
     proj.shots_path("s").write_text(json.dumps([
         Shot(source_id="s", index=0, start=0.0, end=1.0).to_dict()
@@ -883,10 +891,12 @@ def test_index_all_refuses_checkpointable_success_until_whole_asr_pool_is_curren
     with pytest.raises(RuntimeError, match="ASR evidence incomplete for 1/1"):
         IX.index_all(proj, cfg)
 
-    (proj.index_dir / "s.index.meta.json").write_text(json.dumps({
+    current_meta = {
         "schema": IX.INDEX_SCHEMA, "words": True,
         "asr_prompt_fingerprint": IX.asr_semantic_fingerprint(proj, cfg),
-    }))
+    }
+    current_meta.update(IX._index_artifact_bindings(proj, source))
+    (proj.index_dir / "s.index.meta.json").write_text(json.dumps(current_meta))
     assert IX.index_all(proj, cfg) == {"s": []}
 
 
@@ -931,3 +941,92 @@ def test_asr_resume_artifact_check_includes_shots_and_selected_index(
     audit = IX.asr_pool_cache_audit(proj, cfg)
     assert IX.asr_pool_current(proj, cfg) is False
     assert audit["invalid"] == [{"source_id": "s", "reason": reason}]
+
+
+@pytest.mark.parametrize(("artifact", "reason"), [
+    ("source", "source_content_fingerprint_mismatch"),
+    ("words", "words_content_sha256_mismatch"),
+    ("shots", "shots_content_sha256_mismatch"),
+])
+def test_asr_pool_cache_audit_binds_source_words_and_shots_bytes(
+        tmp_path, artifact, reason):
+    from vidlore.clipstudio.config import ClipConfig
+    from vidlore.clipstudio.models import ClipProject, Shot, SourceVideo
+
+    proj = ClipProject(name="bound-index", root=str(tmp_path))
+    proj.ensure_dirs()
+    proj.meta["analysis"] = {"actors": [], "characters": []}
+    source = SourceVideo(
+        id="s", url="u", title="scene", permission="owner", status=IX.SOURCE_OK,
+        local_path=str(tmp_path / "s.mp4"))
+    proj.sources = [source]
+    source_path = Path(source.local_path)
+    words_path = proj.index_dir / "s.words.json"
+    shots_path = proj.shots_path("s")
+    source_path.write_bytes(b"source-v1")
+    words_path.write_text('[[0.0,0.1,"word"]]', encoding="utf-8")
+    shots_path.write_text(json.dumps([
+        Shot(source_id="s", index=0, start=0.0, end=1.0).to_dict()
+    ]), encoding="utf-8")
+    cfg = ClipConfig()
+    meta = {
+        "schema": IX.INDEX_SCHEMA,
+        "words": True,
+        "asr_prompt_fingerprint": IX.asr_semantic_fingerprint(proj, cfg),
+    }
+    meta.update(IX._index_artifact_bindings(proj, source))
+    (proj.index_dir / "s.index.meta.json").write_text(
+        json.dumps(meta), encoding="utf-8")
+    assert IX.asr_pool_current(proj, cfg) is True
+
+    if artifact == "source":
+        source_path.write_bytes(b"source-v2-with-different-bytes")
+    elif artifact == "words":
+        words_path.write_text(words_path.read_text(encoding="utf-8") + "\n",
+                              encoding="utf-8")
+    else:
+        shots_path.write_text(shots_path.read_text(encoding="utf-8") + "\n",
+                              encoding="utf-8")
+
+    audit = IX.asr_pool_cache_audit(proj, cfg)
+    assert audit["invalid"] == [{"source_id": "s", "reason": reason}]
+
+
+def test_legacy_unbound_index_routes_through_asr_refresh_before_cache_use(
+        monkeypatch, tmp_path):
+    from vidlore.clipstudio.config import ClipConfig
+    from vidlore.clipstudio.models import ClipProject, Shot, SourceVideo
+
+    proj = ClipProject(name="legacy-index", root=str(tmp_path))
+    proj.ensure_dirs()
+    proj.meta["analysis"] = {"actors": [], "characters": []}
+    source = SourceVideo(
+        id="s", url="u", title="scene", permission="owner", status=IX.SOURCE_OK,
+        local_path=str(tmp_path / "s.mp4"), duration=2.0)
+    Path(source.local_path).write_bytes(b"source")
+    shot = Shot(source_id="s", index=0, start=0.0, end=2.0)
+    proj.shots_path("s").write_text(json.dumps([shot.to_dict()]), encoding="utf-8")
+    (proj.index_dir / "s.words.json").write_text("[]", encoding="utf-8")
+    cfg = ClipConfig()
+    cfg.detect_ocr = False
+    (proj.index_dir / "s.index.meta.json").write_text(json.dumps({
+        "schema": 2,
+        "words": True,
+        "ocr": False,
+        "faceid": False,
+        "asr_prompt_fingerprint": IX.asr_semantic_fingerprint(proj, cfg),
+    }), encoding="utf-8")
+    calls = []
+
+    def refresh(*_args, **_kwargs):
+        calls.append("refresh")
+        return [shot]
+
+    monkeypatch.setattr(IX, "refresh_source_words", refresh)
+    monkeypatch.setattr(
+        IX, "detect_shots",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy binding migration must not silently cache or visually reindex")))
+
+    assert IX.index_source(proj, source, cfg) == [shot]
+    assert calls == ["refresh"]
