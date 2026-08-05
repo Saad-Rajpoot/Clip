@@ -4860,8 +4860,14 @@ def test_breakout_caption_layout():
     _orig_tx = BA.transcribe_breakout_words
 
     def _fake_tx(_audio, **_kwargs):
-        return [(w.word, float(w.start), float(w.end), float(w.probability))
-                for s in _canned["segs"] for w in (s.words or [])]
+        _w = [(w.word, float(w.start), float(w.end), float(w.probability))
+              for s in _canned["segs"] for w in (s.words or [])]
+        # honour with_status: the caption gate fails closed on an incomplete read, so a stub that
+        # ignores the flag makes every canned transcript look like a failed one
+        if _kwargs.get("with_status"):
+            return _w, {"complete": True, "chunks_planned": 1, "chunks_decoded": 1,
+                        "words": len(_w)}
+        return _w
 
     BA.transcribe_breakout_words = _fake_tx
     _tmp = _P(tempfile.mkdtemp(prefix="bkcap_"))

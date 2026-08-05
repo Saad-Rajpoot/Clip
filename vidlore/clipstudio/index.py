@@ -1238,6 +1238,68 @@ def _tok_close(a: str, b: str, thresh: float = 0.8) -> bool:
     return SequenceMatcher(None, a, b).ratio() >= thresh
 
 
+def _matched_quote_positions(win, qt, matcher) -> set:
+    """Which quote tokens a window actually accounted for — blocks plus positional fuzzy credit."""
+    got = set()
+    for bl in matcher.get_matching_blocks():
+        for k in range(bl.size):
+            got.add(bl.b + k)
+    for idx, (a, b) in enumerate(zip(win, qt)):
+        if a != b and _tok_close(a, b):
+            got.add(idx)
+    return got
+
+
+# Only genuinely adjacent audio may be re-attached below. Measured over real streams, ~85% of word
+# adjacencies carry no gap at all, and sweeping this bound across 0.0-2.0s moved the outcome by
+# well under a point either way — so the value is not load-bearing, and the smallest one changes
+# the least.
+_QUOTE_CONTIGUITY_S = 0.0
+
+
+def _quote_window_pays_for_what_it_skips(st, i, L, qt, n, win, matcher, min_ratio: float) -> bool:
+    """Would this window still qualify if it had to include the words it stopped short of?
+
+    THE ARBITRAGE THIS CLOSES. The phrase score is ``2*(hits+fuzzy)/(L+n)``, so for a fixed number
+    of matched tokens a SHORTER window scores HIGHER. Ending one word early is worth free ratio,
+    and the search sweeps L across a slack range and keeps the best — which systematically rewards
+    truncation. Measured case: authored quote "I want you to be my cupbearer." against audio that
+    actually says "Good. I want you to be happy." (three independent decodes agree). Stopping after
+    "be" gives 2*5/(5+7) = 0.833 and clears the 0.78 floor; including the next word "happy" gives
+    2*5/(6+7) = 0.769 and does not. The quote's last two tokens are simply not in that audio.
+
+    So when a window leaves quote tokens unaccounted for at either end it is extended by at most
+    that many stream words — and only across genuinely adjacent audio, never across a pause — then
+    re-scored with the identical formula. If the honest score no longer clears the caller's own
+    floor, the candidate is refused.
+
+    No new threshold is introduced: the bar is the caller's `min_ratio`, unchanged. This can only
+    reject; it can never admit a window the current scorer refuses.
+    """
+    got = _matched_quote_positions(win, qt, matcher)
+    if not got:
+        return False
+    lead_miss, trail_miss = min(got), n - 1 - max(got)
+    if lead_miss <= 0 and trail_miss <= 0:
+        return True                                   # the whole quote is accounted for
+    lo, hi = i, i + L                                 # hi exclusive
+    for _ in range(max(0, lead_miss)):
+        if lo <= 0 or float(st[lo][1]) - float(st[lo - 1][2]) > _QUOTE_CONTIGUITY_S:
+            break
+        lo -= 1
+    for _ in range(max(0, trail_miss)):
+        if hi >= len(st) or float(st[hi][1]) - float(st[hi - 1][2]) > _QUOTE_CONTIGUITY_S:
+            break
+        hi += 1
+    if lo == i and hi == i + L:
+        return True                                   # nothing adjacent to re-attach
+    win2 = [x[0] for x in st[lo:hi]]
+    m2 = SequenceMatcher(None, win2, qt)
+    hits2 = sum(bl.size for bl in m2.get_matching_blocks())
+    fuzzy2 = sum(1 for a, b in zip(win2, qt) if a != b and _tok_close(a, b))
+    return (2.0 * (hits2 + fuzzy2)) / float(len(win2) + n) >= min_ratio
+
+
 def find_quote_span(words, quote: str, *, min_ratio: float = 0.72,
                     window_slack: int = 3, max_interword_gap: float = 4.0,
                     all_matches: bool = False):
@@ -1304,6 +1366,19 @@ def find_quote_span(words, quote: str, *, min_ratio: float = 0.72,
             # credit near-miss tokens the block matcher rejected (ASR garble), positionally
             fuzzy = sum(1 for a, b in zip(win, qt) if a != b and _tok_close(a, b))
             ratio = (2.0 * (hits + fuzzy)) / float(L + n)
+            # Two admissibility clauses, both reusing the caller's own `min_ratio` and neither
+            # able to admit anything the scorer above refuses.
+            #   * a window may not buy ratio by stopping short of the quote (see the helper)
+            #   * a bridged alignment may not ALSO swallow speech the quote does not contain. A
+            #     dramatic pause is a real utterance; a pause with someone else's words inside it
+            #     is not the line. Without this, denying truncation merely displaces the match onto
+            #     the gapped fallback.
+            if ratio >= min_ratio:
+                if not _quote_window_pays_for_what_it_skips(
+                        st, i, L, qt, n, win, m, min_ratio):
+                    continue
+                if gapped and (L - (hits + fuzzy)) != 0:
+                    continue
             target = gapped_best if gapped else best
             target_raw_ratio = gapped_best_raw_ratio if gapped else best_raw_ratio
             candidate_start = st[i][1]
