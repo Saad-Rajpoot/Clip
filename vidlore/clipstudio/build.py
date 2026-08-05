@@ -3199,6 +3199,11 @@ def _split_clip_sequential(clip: Path, lens: list, out_dir: Path, idx: int,
     return parts
 
 
+# schema for the owned-derivative memo — bump when this function's output could change
+_FIT_MEMO_SCHEMA = 1
+_FIT_MEMO_STATS = {"hit": 0, "miss": 0}
+
+
 def _fit_verified_selection_clip(clip: Path, dest: Path, duration: float,
                                  *, crop_filter: str = "", zoom_to: float = 1.055,
                                  frame_exact: bool = False) -> Optional[Path]:
@@ -3218,6 +3223,35 @@ def _fit_verified_selection_clip(clip: Path, dest: Path, duration: float,
     need = max(0.6, float(duration))
     if not clip.exists() or clip.stat().st_size <= 0:
         return None
+    # CONTENT-ADDRESSED DERIVATIVE MEMO. This encode runs for every beat on every build pass, and a
+    # render that self-heals and rebuilds pays for all of them again even where nothing about the
+    # beat changed. The result is a pure function of its inputs, so it is keyed on ALL of them and
+    # on nothing else: the selected clip's own BYTES (not its path or mtime — a re-cut writes the
+    # same filename), the duration asked for, the crop, the zoom, the boundary contract in force,
+    # and a schema version so a change to this function invalidates every entry.
+    # A hit is re-validated exactly like a fresh encode: the file must exist, be non-empty, and
+    # still satisfy `need` on probe — and the caller then puts it through the same
+    # `_lineage_derive` proof either way. The memo can therefore skip work; it cannot approve any.
+    _memo = dest.with_suffix(dest.suffix + ".key.json")
+    _key = None
+    try:
+        import hashlib as _hl_fit
+        import json as _js_fit
+        _h = _hl_fit.sha256()
+        with open(clip, "rb") as _fh:
+            for _blk in iter(lambda: _fh.read(1 << 20), b""):
+                _h.update(_blk)
+        _key = {"schema": _FIT_MEMO_SCHEMA, "clip_sha256": _h.hexdigest(),
+                "need": round(need, 4), "crop": str(crop_filter or ""),
+                "zoom": round(float(zoom_to), 6), "frame_exact": bool(frame_exact)}
+        if dest.exists() and dest.stat().st_size > 0 \
+                and _js_fit.loads(_memo.read_text(encoding="utf-8")).get("key") == _key \
+                and _ffprobe_duration(dest) + (2.0 / 30.0) >= need:
+            _FIT_MEMO_STATS["hit"] += 1
+            return dest
+    except Exception:                                    # noqa: BLE001 — a memo fault must never
+        _key = None                                      # cost the encode it is memoising
+    _FIT_MEMO_STATS["miss"] += 1
     # tpad is applied *after* the selection-only motion/normalisation chain.  When a short cut has
     # to fill a longer narration beat, do not clone its final decoded frame: container/frame
     # rounding can expose the first frame *after* the declared selection (and a shot ending on a
@@ -3261,6 +3295,24 @@ def _fit_verified_selection_clip(clip: Path, dest: Path, duration: float,
         except OSError:
             pass
         return None
+    if _key is not None:                                 # record the memo only for a VALIDATED file
+        # `os` is imported LOCALLY on purpose. Module-level `os` is not reliably bound in this file
+        # — every neighbouring function does its own `import os as _os_xx` — and an unbound name
+        # inside a fail-open `except Exception` is invisible: the memo silently never records, every
+        # build stays a miss, and a stray .tmp accumulates. That is exactly the class this repo
+        # keeps an AST guard for, and it is how the first draft of this memo failed. Measured:
+        # hit 0 / miss 2 on a warm run, with owned.mp4.key.json.tmp left on disk.
+        import json as _js_w
+        import os as _os_w
+        _tmp = _memo.with_suffix(_memo.suffix + ".tmp")
+        try:
+            _tmp.write_text(_js_w.dumps({"key": _key}), encoding="utf-8")
+            _os_w.replace(_tmp, _memo)                   # atomic: old entry or new, never partial
+        except Exception:                                # noqa: BLE001 — the memo is an
+            try:                                         # optimisation and must never fail the
+                _tmp.unlink(missing_ok=True)              # encode it is memoising
+            except OSError:
+                pass
     return dest
 
 
