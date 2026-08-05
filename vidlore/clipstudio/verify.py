@@ -4661,6 +4661,68 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             # reached only down the branch where the original has ALREADY been judged unusable.
             # ~14 extra vision calls per affected beat (~$0.007 each at the measured rate).
             # Kill switch: VIDLORE_CLIPSTUDIO_DEEP_BENCH=0.
+            def _wrong_subject_rescue() -> bool:
+                """Reach past the bench when the required subject is not on screen.
+
+                THE BENCH CANNOT HOLD WHAT RETRIEVAL COULD NOT SEE. Measured on job ee93371e41
+                beat 134, on real extracted frames: the shipped pick is a daylight Tyrion close-up
+                with no Shae, and every one of the 60 bench candidates was viewed — none shows Shae
+                or Tywin's bedchamber, so no ordering of that bench can satisfy the beat. The shot
+                that literally shows "Shae in his father's bed" sits at CLIP rank 563 of 4942 for
+                this beat's query because it is a near-black night interior. The bench is match's
+                one-candidate-per-source ranking over the top CLIP-ranked sources, so a shot
+                retrieval cannot see is structurally absent from it.
+
+                Deliberately NOT placed inside `_deep_bench`: that runs only under `_exact`, and
+                this beat is `character_specific` (required_kind 'montage'), so a rescue living
+                there could never run for it — my first attempt did exactly that and was dead code
+                for the case it was written for. A wrong-subject verdict is policy-blind, and a
+                character beat is if anything MORE likely to name a person the pick lacks.
+
+                Venue first: the neighbourhood pool searches around the wrong pick's own scene
+                seeds. Measured on this beat, all 8 venue candidates come from the source that
+                actually holds the narrated image; none of the 12 neighbourhood ones do.
+
+                `_try_promote` runs at downgrade=False, the identical strict bar — this changes
+                what is EXAMINED, never what is admitted, and a beat with genuinely no right
+                footage still blocks.
+                """
+                _want = _subject_terms(seg, _char2actor)
+                _bench_ids = {id(c) for c in (getattr(sel, "deep_alternates", None) or [])}
+                _rungs = [("venue", lambda: _venue_candidates(
+                    sel, seg, proj, get_shot, _era_of(seg)))]
+                # The neighbourhood pool opens the indexed pool and belongs to the scoped recovery
+                # stage — ordinary verification deliberately does not reach it, and
+                # test_normal_character_verification_does_not_open_indexed_pool_neighborhood pins
+                # that. Costs this rescue nothing: on the motivating beat all 8 venue candidates
+                # come from the source holding the narrated image and none of the neighbourhood
+                # ones do.
+                if strict_pool_recovery:
+                    _rungs.append(
+                        ("scene-neighbourhood", lambda: _strict_scene_neighborhood_candidates(
+                            sel, seg, proj, get_shot, cfg, beat_era=_era_of(seg),
+                            allow_indexed_pool_sources=True)))
+                for _label, _mk in _rungs:
+                    try:
+                        _pool = [c for c in (_mk() or []) if id(c) not in _bench_ids]
+                    except Exception as _exc:            # noqa: BLE001 — fail closed
+                        log(f"verify: seg{sel.segment_index} wrong-subject {_label} pool "
+                            f"unavailable ({type(_exc).__name__})")
+                        continue
+                    if not _pool:
+                        continue
+                    if _want:
+                        _pool.sort(key=lambda c: _subject_affinity(c, _want, proj), reverse=True)
+                    log(f"verify: seg{sel.segment_index} required subject not on screen and the "
+                        f"bench had no answer — examining {len(_pool)} {_label} candidate(s) at "
+                        f"the same strict bar")
+                    if _try_promote(downgrade=False, pool=_pool,
+                                    label=f"wrong_subject_{_label}"):
+                        log(f"verify: seg{sel.segment_index} rescued from the {_label} pool — "
+                            f"required subject found, no downgrade")
+                        return True
+                return False
+
             def _deep_bench() -> bool:
                 if _os_ms.environ.get("VIDLORE_CLIPSTUDIO_DEEP_BENCH", "1").strip() \
                         in ("0", "false", "no"):
@@ -4694,58 +4756,6 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         f"({len(_bench)} extra candidate(s)) — exact scene found, no downgrade")
                     return True
 
-                # THE BENCH CANNOT HOLD WHAT RETRIEVAL COULD NOT SEE.
-                #
-                # The ordering above was measured on job ee93371e41 beat 134 and, on real frames,
-                # it does not fix that beat — because no ordering of that bench could. The bench is
-                # match's one-candidate-per-source ranking over the top CLIP-ranked sources, so a
-                # shot CLIP cannot retrieve is structurally absent from it. Beat 134 wants "Shae in
-                # his father's bed"; the shot that literally shows it sits at CLIP rank 563 of 4942
-                # for this beat's query, because it is a near-black night interior — the same
-                # retrieval blind spot measured twice before on low-contrast footage.
-                #
-                # So a wrong-subject failure now falls through to the bounded pools the pipeline
-                # already owns and which are built by scene affinity rather than by CLIP rank,
-                # BEFORE the beat is recorded as having no passing alternate. `_try_promote` runs
-                # with downgrade=False, i.e. the identical strict bar: this changes only what is
-                # EXAMINED, never what is admitted, and a beat with genuinely no right footage
-                # still blocks exactly as it did.
-                if _wrong_subject:
-                    # Venue first, deliberately. A wrong-subject failure means the SOURCE is wrong
-                    # about who is in it, and the neighbourhood pool searches around the current
-                    # pick's own scene seeds — the same neighbourhood that produced the wrong
-                    # person. The venue pool draws from anchor-affine sources instead. Measured on
-                    # beat 134: all 8 venue candidates come from the source that actually holds
-                    # "Shae in his father's bed"; none of the 12 neighbourhood candidates do.
-                    for _label, _mk in (
-                        ("venue", lambda: _venue_candidates(
-                            sel, seg, proj, get_shot, _era_of(seg))),
-                        ("scene-neighbourhood", lambda: _strict_scene_neighborhood_candidates(
-                            sel, seg, proj, get_shot, cfg, beat_era=_era_of(seg))),
-                    ):
-                        try:
-                            _pool = _mk() or []
-                        except Exception as _exc:        # noqa: BLE001 — fail closed, keep the ladder
-                            log(f"verify: seg{sel.segment_index} wrong-subject {_label} pool "
-                                f"unavailable ({type(_exc).__name__})")
-                            continue
-                        if not _pool:
-                            continue
-                        _seen_ids = {id(c) for c in _bench}
-                        _pool = [c for c in _pool if id(c) not in _seen_ids]
-                        if _wrong_subject:
-                            _want2 = _subject_terms(seg, _char2actor)
-                            if _want2:
-                                _pool.sort(key=lambda c: _subject_affinity(c, _want2, proj),
-                                           reverse=True)
-                        log(f"verify: seg{sel.segment_index} wrong subject on screen and the bench "
-                            f"had no answer — examining {len(_pool)} {_label} candidate(s) at the "
-                            f"same strict bar")
-                        if _try_promote(downgrade=False, pool=_pool,
-                                        label=f"wrong_subject_{_label}"):
-                            log(f"verify: seg{sel.segment_index} rescued from the {_label} pool — "
-                                f"required subject found, no downgrade")
-                            return True
                 return False
 
             # A beat that POINTS at something cannot be satisfied by "the right people are here".
@@ -4900,6 +4910,17 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 else:
                     log(f"verify: seg{sel.segment_index} generic-filler fallback REFUSED — "
                         f"{_why_f}; the beat stays unresolved rather than airing unproven footage")
+
+            # Last chance before the beat is written off. Policy-independent by design: see
+            # _wrong_subject_rescue.
+            if not swapped and v.get("correct_subject_visible") is False:
+                try:
+                    if _wrong_subject_rescue():
+                        replaced += 1
+                        swapped = True
+                except Exception as _wsr_exc:            # noqa: BLE001 — never break the ladder
+                    log(f"verify: seg{sel.segment_index} wrong-subject rescue unavailable "
+                        f"({type(_wsr_exc).__name__})")
 
             if not swapped:
                 failed += 1

@@ -156,16 +156,28 @@ def test_a_wrong_subject_failure_does_not_stop_at_the_bench():
     """It falls through to pools built by scene affinity rather than by CLIP rank."""
     src = inspect.getsource(V)
     i = src.index("THE BENCH CANNOT HOLD WHAT RETRIEVAL COULD NOT SEE")
-    tail = src[i:i + 3600]
-    assert "_strict_scene_neighborhood_candidates(" in tail
+    tail = src[i:i + 4600]
     assert "_venue_candidates(" in tail
+
+
+def test_ordinary_verification_still_does_not_open_the_indexed_pool():
+    """The neighbourhood pool belongs to the scoped recovery stage. Adding a rescue must not
+    quietly promote it into every character beat's verification —
+    test_normal_character_verification_does_not_open_indexed_pool_neighborhood caught exactly that.
+    Costs nothing here: on the motivating beat venue supplies the answer and neighbourhood does
+    not."""
+    src = inspect.getsource(V)
+    i = src.index("THE BENCH CANNOT HOLD WHAT RETRIEVAL COULD NOT SEE")
+    tail = src[i:i + 4600]
+    j = tail.index("_strict_scene_neighborhood_candidates(")
+    assert "if strict_pool_recovery:" in tail[:j]
 
 
 def test_the_fallthrough_uses_the_identical_strict_bar():
     """downgrade=False — this changes what is EXAMINED, never what is admitted."""
     src = inspect.getsource(V)
     i = src.index("THE BENCH CANNOT HOLD WHAT RETRIEVAL COULD NOT SEE")
-    tail = src[i:i + 3600]
+    tail = src[i:i + 4600]
     assert "_try_promote(downgrade=False, pool=_pool," in tail
     assert "downgrade=True" not in tail, "a rescue must not buy itself a downgrade"
 
@@ -173,14 +185,36 @@ def test_the_fallthrough_uses_the_identical_strict_bar():
 def test_a_pool_that_cannot_be_built_fails_closed():
     src = inspect.getsource(V)
     i = src.index("THE BENCH CANNOT HOLD WHAT RETRIEVAL COULD NOT SEE")
-    tail = src[i:i + 3600]
+    tail = src[i:i + 4600]
     assert "except Exception" in tail and "continue" in tail
 
 
 def test_the_fallthrough_only_runs_on_a_wrong_subject_verdict():
     src = inspect.getsource(V)
-    i = src.index("THE BENCH CANNOT HOLD WHAT RETRIEVAL COULD NOT SEE")
-    assert "if _wrong_subject:" in src[i:i + 3600]
+    assert 'if not swapped and v.get("correct_subject_visible") is False:' in src
+    i = src.index('if not swapped and v.get("correct_subject_visible") is False:')
+    assert "_wrong_subject_rescue()" in src[i:i + 400]
+
+
+def test_the_rescue_is_not_trapped_behind_the_exact_only_path():
+    """MEASURED FAILURE of my first attempt. The rescue was placed inside _deep_bench(), which is
+    reached only from the `if not swapped and _exact and _downgrade_on:` branch — and beat 134,
+    the case it was written for, resolves to character_specific (required_kind 'montage'), so
+    _exact is False and the code was dead for exactly the beat it targeted."""
+    src = inspect.getsource(V)
+    i_def = src.index("def _wrong_subject_rescue()")
+    i_bench = src.index("def _deep_bench()")
+    assert i_def < i_bench, "it is its own closure, not part of the exact-only bench path"
+    bench = src[i_bench:src.index("def ", i_bench + 10)]
+    assert "_venue_candidates(" not in bench, "the rescue must not live inside _deep_bench"
+
+    # and the call site must sit at the SAME nesting depth as the final `if not swapped:`,
+    # i.e. in the per-selection body rather than inside the exact-only branch
+    call = 'if not swapped and v.get("correct_subject_visible") is False:'
+    assert f"\n            {call}" in src, "the call is nested deeper than the per-beat body"
+    assert "\n            if not swapped:\n                failed += 1" in src, \
+        "the failure point moved; re-check that the rescue still precedes it"
+    assert src.index(call) < src.index("if not swapped:\n                failed += 1")
 
 
 # ------------------------------------------------------------------ a title is not a frame
