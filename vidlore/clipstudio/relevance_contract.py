@@ -66,23 +66,27 @@ _CONCLUSIVE_CONTENT_REASONS = frozenset({
 
 
 def completed_deliberate_exact_downgrade(entry: dict) -> bool:
-    """Whether an audit blocker is a fresh, bound lenient KEEP of an exact beat.
+    """Whether an audit blocker is a fresh, bound completed judgment of an exact beat.
 
     The strict gate must continue to block this selection: lenient evidence cannot prove an exact
     promise.  Recovery typing is the only thing that changes.  A completed exact→contextual/generic
     judgment belongs in the content lane, where strict recovery and an independently bound gap
     review can act on it; it must not be re-asked as though its verifier evidence were absent.
 
-    This predicate is intentionally fail-closed.  Both downgrade markers, a complete immutable
-    evidence identity, and the lenient ``is_specific=false`` question are required.  Any unknown or
-    technical reason (including stale binding or indeterminate ASR provenance) makes the shape
-    false, so a real pipeline fault can never buy content recovery or specificity loss.
+    The ordinary shape is a bound lenient ``is_specific=false`` KEEP.  A strict verifier answer can
+    also be relabelled contextual by the same repair pass after a deterministic content guard (for
+    example, an unresolved source-title cast conflict) rejects it.  That mixed-looking record is
+    still a conclusive CONTENT result when it has current strict evidence and an explicit content
+    reason; treating its downgrade marker as a backend/schema fault starves exact-footage recovery.
+
+    This predicate remains fail-closed.  A complete immutable evidence identity is required, every
+    reason must be either a known downgrade or known content rejection, and the strict-evidence
+    shape additionally requires an affirmative content rejection.  Unknown/binding/ASR provenance
+    reasons remain technical, so this can never authorize publication or specificity loss.
     """
     if not isinstance(entry, dict):
         return False
     reasons = {str(reason) for reason in (entry.get("reasons") or []) if str(reason)}
-    if not _REQUIRED_DELIBERATE_EXACT_DOWNGRADE_REASONS.issubset(reasons):
-        return False
     allowed = DELIBERATE_EXACT_DOWNGRADE_REASONS | _CONCLUSIVE_CONTENT_REASONS
     if not reasons or not reasons.issubset(allowed):
         return False
@@ -93,7 +97,19 @@ def completed_deliberate_exact_downgrade(entry: dict) -> bool:
     if verifier.get("status") != "ok" or verifier.get("verdict") != "keep":
         return False
     evidence = verifier.get("selection_evidence") or {}
-    if not isinstance(evidence, dict) or evidence.get("is_specific") is not False:
+    if not isinstance(evidence, dict):
+        return False
+    is_specific = evidence.get("is_specific")
+    lenient_shape = (
+        is_specific is False
+        and _REQUIRED_DELIBERATE_EXACT_DOWNGRADE_REASONS.issubset(reasons)
+    )
+    strict_content_shape = (
+        is_specific is True
+        and "exact_moving_verdict_was_downgraded" in reasons
+        and bool(reasons & _CONCLUSIVE_CONTENT_REASONS)
+    )
+    if not (lenient_shape or strict_content_shape):
         return False
     if evidence.get("multiframe") is not True:
         return False

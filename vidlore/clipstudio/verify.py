@@ -664,6 +664,26 @@ def bind_selection_verifier_evidence(
     return verdict
 
 
+_VERDICT_TRANSITION_FIELDS = (
+    "downgraded", "relaxed", "relevance_class", "contract_rejected",
+)
+
+
+def _clear_verifier_transition_state(verdict: dict) -> dict:
+    """Drop selection-lifecycle labels from a newly answered verifier question.
+
+    Vision-cache rows are question answers.  Downgrade/relaxation labels and a prior contract
+    rejection describe what a caller subsequently did with an answer, so carrying them into a
+    fresh strict scoped pass creates an impossible mixed record (strict bound evidence labelled as
+    an earlier contextual verdict).  Callers may add current-run transition labels again after the
+    strict answer has been evaluated; they must never arrive through the answer/cache boundary.
+    """
+    if isinstance(verdict, dict):
+        for field in _VERDICT_TRANSITION_FIELDS:
+            verdict.pop(field, None)
+    return verdict
+
+
 def selection_verifier_evidence_reason(
         proj: ClipProject, sel: ClipSelection, seg: ScriptSegment, verdict: dict) -> str:
     """Return a stable blocker code when persisted moving-footage proof is stale or absent."""
@@ -2911,9 +2931,13 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 exact_cast_warning=_cast_warning_r) \
                 and _hit_provider_ok(_hit, _vmodel):
             _pm_r.incr(f"verify.rung.{rung}.cache_hit")
-            return dict(_hit), _ws_r                     # copy: callers mutate their verdict
+            # Selection-lifecycle labels must not cross the immutable question-answer cache
+            # boundary.  Copy first because callers intentionally mutate the returned verdict.
+            return _clear_verifier_transition_state(dict(_hit)), _ws_r
         _pm_r.incr(f"verify.rung.{rung}.call")
         v_r, used_r = _verify_ctx(kf_path, ashot, _seg, strict_flag, faceids, window)
+        if v_r is not None:
+            _clear_verifier_transition_state(v_r)
         if _fp_r and v_r is not None and used_r == _ws_r \
                 and _verdict_schema_ok(
                     {**v_r, "status": "ok"}, required_entity=_required_r,
@@ -3322,6 +3346,10 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     f"the vision backend is down. NO further verifier requests will be made; every "
                     f"remaining beat is marked unverified and exact beats will release-block.")
             continue
+        # A scoped retry may hit a cache written by an older lifecycle which accidentally stored
+        # selection-transition metadata beside the vision answer.  Establish a clean strict answer
+        # before applying this run's contract/downgrade decisions and binding it to current pixels.
+        _clear_verifier_transition_state(v)
         _consec_err = 0
         verified += 1                    # counts SUCCESSES — never attempts (see the breaker note)
         # STORE only a schema-valid verdict, and only when the sheet prediction that went INTO the

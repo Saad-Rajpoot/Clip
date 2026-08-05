@@ -113,6 +113,56 @@ def test_exact_positive_selection_passes_and_generic_negative_is_untouched(tmp_p
     assert ga["generic_or_abstract_skipped"] == 1
 
 
+def test_strict_bound_cast_conflict_downgrade_is_content_but_gate_still_blocks(tmp_path):
+    """Beat-8 shape must recover footage, not retry a verifier that already answered."""
+    from vidlore.clipstudio import orchestrate as O
+
+    proj, seg, sel = _fixture(
+        tmp_path,
+        title="Game Of Thrones - Tywin Lannister commands Tyrion to marry Sansa",
+        text=("in an open courtyard, with Tywin Lannister sitting in the front row "
+              "watching it happen."),
+        entity="Tywin Lannister",
+    )
+    seg.expected_visual = (
+        "Tywin Lannister sitting in the front row of the stands, watching "
+        "Oberyn Martell fight the Mountain"
+    )
+    seg.scene_query = "Game of Thrones Tywin watching Oberyn vs Mountain front row"
+    proj.meta["analysis"]["characters"] = [
+        {"name": "Tywin Lannister", "actor": "Charles Dance"},
+        {"name": "Oberyn Martell", "actor": "Pedro Pascal"},
+        {"name": "Tyrion Lannister", "actor": "Peter Dinklage"},
+    ]
+    sel.verifier = {
+        **GOOD,
+        "source_title_conflict_resolved": True,
+        "reason": "The selected pixels show Tywin sitting and watching.",
+        "downgraded": "exact→contextual",
+        "relevance_class": "contextual_fallback",
+        "contract_rejected": "unresolved source-title cast warning",
+    }
+    shot = Shot.from_dict(json.loads(proj.shots_path("s1").read_text())[0])
+    V.bind_selection_verifier_evidence(
+        proj, sel, seg, sel.verifier, shot=shot, model="vision-test",
+        is_specific=True, multiframe=True, faceid_names=[],
+        era=V._project_beat_era(proj, seg), must_see=P.deictic_target(seg))
+
+    audit = R.evaluate_selection_relevance(proj, [seg])
+    entry = audit["blockers"][0]
+    assert audit["blocked_count"] == 1
+    assert set(entry["reasons"]) == {
+        "exact_moving_verdict_was_downgraded",
+        "exact_moving_relevance_is_contextual",
+        "exact_source_title_cast_conflict_unresolved",
+    }
+    assert R.completed_deliberate_exact_downgrade(entry) is True
+    assert O._persistent_verifier_technical_indices(audit) == set()
+    with pytest.raises(NonRetryableBuildError, match="selection relevance gate"):
+        R.assert_selection_relevance(
+            proj, [seg], audit_path=tmp_path / "strict-still-blocks.json")
+
+
 @pytest.mark.parametrize(("patch", "reason"), [
     ({"status": "error"}, "verifier_error"),
     ({"verdict": "replace"}, "verdict_replace"),

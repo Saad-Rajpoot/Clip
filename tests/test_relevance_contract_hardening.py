@@ -578,6 +578,31 @@ def test_exact_keep_that_denies_required_subject_enters_repair_instead_of_stalli
     assert V.FLAG_EXACT_MISSING in selection.flag_reasons
 
 
+def test_fresh_strict_answer_drops_stale_selection_transition_state(tmp_path, monkeypatch):
+    """A scoped strict retry starts from its current vision answer, not old downgrade labels."""
+    proj, segs, shot, cfg = _verify_fixture(tmp_path, P.EXACT)
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "0")
+    monkeypatch.setattr(V, "_shot_lookup", lambda _p: lambda sid, ix: shot)
+    polluted_keep = {
+        **_POSITIVE_EXACT,
+        "verdict": "keep",
+        "contradicts_narration": False,
+        "downgraded": "exact→contextual",
+        "relaxed": "stale non-exact decision",
+        "relevance_class": "contextual_fallback",
+        "contract_rejected": "stale contract rejection",
+    }
+    monkeypatch.setattr(V, "verify_frame", lambda *a, **k: dict(polluted_keep))
+
+    summary = V.verify_and_repair(
+        proj, segs, cfg, NS(anthropic_model="m", anthropic_key="k"), progress=None)
+
+    verifier = proj.selections[0].verifier
+    assert summary["failed"] == 0
+    assert not (set(V._VERDICT_TRANSITION_FIELDS) & set(verifier))
+    assert verifier["selection_evidence"]["is_specific"] is True
+
+
 def test_warned_keep_missing_resolution_is_technical_not_content_softening(
         tmp_path, monkeypatch):
     proj, segs, shot, cfg = _verify_fixture(tmp_path, P.EXACT)
