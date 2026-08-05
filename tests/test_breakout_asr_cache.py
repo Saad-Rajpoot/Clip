@@ -49,34 +49,34 @@ def _wav(tmp_path, name="a.wav", payload=b"RIFFfake-audio-bytes"):
 # ------------------------------------------------------------------ the key
 def test_the_key_is_the_audio_content_not_the_path(tmp_path):
     a, b = _wav(tmp_path, "a.wav"), _wav(tmp_path, "b.wav")
-    ka = A._asr_cache_key(A._wav_digest(a), FakeModel(), 3.8, 0.6)
-    kb = A._asr_cache_key(A._wav_digest(b), FakeModel(), 3.8, 0.6)
+    ka = A._asr_cache_key(A._wav_digest(a), FakeModel(), 3.8, 0.6, 5.0)
+    kb = A._asr_cache_key(A._wav_digest(b), FakeModel(), 3.8, 0.6, 5.0)
     assert ka == kb, "identical bytes at different paths are the same transcription"
 
 
 def test_different_audio_is_a_different_key(tmp_path):
     a = _wav(tmp_path, "a.wav", b"RIFFone")
     b = _wav(tmp_path, "b.wav", b"RIFFtwo")
-    assert A._asr_cache_key(A._wav_digest(a), FakeModel(), 3.8, 0.6) \
-        != A._asr_cache_key(A._wav_digest(b), FakeModel(), 3.8, 0.6)
+    assert A._asr_cache_key(A._wav_digest(a), FakeModel(), 3.8, 0.6, 5.0) \
+        != A._asr_cache_key(A._wav_digest(b), FakeModel(), 3.8, 0.6, 5.0)
 
 
 @pytest.mark.parametrize("window,overlap", [(2.0, 0.6), (3.8, 0.3)])
 def test_changing_the_windowing_changes_the_key(tmp_path, window, overlap):
     d = A._wav_digest(_wav(tmp_path))
-    base = A._asr_cache_key(d, FakeModel(), 3.8, 0.6)
-    assert A._asr_cache_key(d, FakeModel(), window, overlap) != base
+    base = A._asr_cache_key(d, FakeModel(), 3.8, 0.6, 5.0)
+    assert A._asr_cache_key(d, FakeModel(), window, overlap, 5.0) != base
 
 
 def test_changing_the_model_changes_the_key(tmp_path):
     d = A._wav_digest(_wav(tmp_path))
     other = FakeModel()
     other.model_size_or_path = "large-v3"
-    assert A._asr_cache_key(d, other, 3.8, 0.6) != A._asr_cache_key(d, FakeModel(), 3.8, 0.6)
+    assert A._asr_cache_key(d, other, 3.8, 0.6, 5.0) != A._asr_cache_key(d, FakeModel(), 3.8, 0.6, 5.0)
 
 
 def test_the_schema_version_is_part_of_the_key(tmp_path):
-    assert A._asr_cache_key(A._wav_digest(_wav(tmp_path)), FakeModel(), 3.8, 0.6)["schema"] \
+    assert A._asr_cache_key(A._wav_digest(_wav(tmp_path)), FakeModel(), 3.8, 0.6, 5.0)["schema"] \
         == A._ASR_CACHE_SCHEMA
 
 
@@ -159,12 +159,81 @@ def test_rewriting_the_audio_in_place_invalidates_the_entry(tmp_path, monkeypatc
     monkeypatch.setattr(A, "probe", lambda p: {"duration": 2.0})
     monkeypatch.setattr(A.subprocess, "run", lambda *a, **k: type("P", (), {"returncode": 1})())
     A.transcribe_breakout_words(wav, model=model, duration=2.0)
-    key_before = A._asr_cache_key(A._wav_digest(wav), model, 3.8, 0.6)
+    key_before = A._asr_cache_key(A._wav_digest(wav), model, 3.8, 0.6, 5.0)
     wav.write_bytes(b"RIFFsecond" + b"\x00" * 64)
-    key_after = A._asr_cache_key(A._wav_digest(wav), model, 3.8, 0.6)
+    key_after = A._asr_cache_key(A._wav_digest(wav), model, 3.8, 0.6, 5.0)
     assert key_before != key_after
     assert A._asr_cache_read(wav.with_suffix(wav.suffix + ".asr.json"), key_after) is None
 
 
 def test_hits_and_misses_are_counted_for_the_audit_trail():
-    assert set(A._ASR_CACHE_STATS) == {"hit", "miss"}
+    assert set(A._ASR_CACHE_STATS) == {"hit", "miss", "unidentified_model"}
+
+
+# ------------------------------------------------------------------ what the first key could not see
+#
+# The key shipped in b05fa21 resolved the model with
+#     getattr(model, "model_size_or_path", None) or getattr(model, "model_path", None)
+#         or type(model).__name__
+# and on the installed faster-whisper (1.2.1) BOTH attributes are absent — verified by probing a
+# real WhisperModel. So a real render's key carried the string "WhisperModel": a constant, identical
+# for `base` and for `large-v3`. Swapping the model would have served the old model's transcript.
+# Duration was missing for a different reason: it is not descriptive, it decides the chunk walk.
+class UnidentifiableModel:
+    """What faster-whisper 1.2.1 actually hands back: no size, no path."""
+
+    def transcribe(self, path, **kw):
+        return [], None
+
+
+class TaggedModel(UnidentifiableModel):
+    def __init__(self, spec):
+        setattr(self, A._SPEC_ATTR, spec)
+
+
+def test_a_model_that_cannot_be_identified_disables_the_cache(tmp_path):
+    """No key, so no hit and no write — the caller transcribes. Slower, never another model's words."""
+    assert A._model_identity(UnidentifiableModel()) is None
+    assert A._asr_cache_key(A._wav_digest(_wav(tmp_path)), UnidentifiableModel(),
+                            3.8, 0.6, 5.0) is None
+
+
+def test_two_different_models_never_share_a_key(tmp_path):
+    d = A._wav_digest(_wav(tmp_path))
+    a = A._asr_cache_key(d, TaggedModel("base"), 3.8, 0.6, 5.0)
+    b = A._asr_cache_key(d, TaggedModel("large-v3"), 3.8, 0.6, 5.0)
+    assert a and b and a != b
+
+
+def test_the_declared_duration_is_part_of_the_key(tmp_path):
+    """duration picks the window starts, decides whether a tail window is anchored, and clamps the
+    word end times — same bytes, different duration, legitimately different words."""
+    d = A._wav_digest(_wav(tmp_path))
+    assert A._asr_cache_key(d, FakeModel(), 3.8, 0.6, 5.0) \
+        != A._asr_cache_key(d, FakeModel(), 3.8, 0.6, 9.0)
+
+
+def test_the_decode_code_itself_is_part_of_the_key(tmp_path):
+    """A schema integer only invalidates when a human remembers to raise it. The three functions
+    that decide every returned word are hashed into the key instead."""
+    k = A._asr_cache_key(A._wav_digest(_wav(tmp_path)), FakeModel(), 3.8, 0.6, 5.0)
+    assert k["decode"] == A._DECODE_FP
+    assert k["decode"] and k["decode"] != "unavailable"
+
+
+def test_the_decode_fingerprint_covers_flags_merge_and_normalisation():
+    import inspect
+    src = inspect.getsource(A._decode_fingerprint)
+    for fn in ("_materialize_words", "_dedupe_overlaps", "_norm_token"):
+        assert fn in src, fn
+
+
+def test_quantisation_and_device_reach_the_identity():
+    """int8 and float16 produce different numbers from the same weights."""
+    src = __import__("inspect").getsource(A._model_identity)
+    for attr in ("compute_type", "device", "n_mels", "num_languages"):
+        assert attr in src, attr
+
+
+def test_an_unidentified_model_is_counted_not_hidden():
+    assert "unidentified_model" in A._ASR_CACHE_STATS

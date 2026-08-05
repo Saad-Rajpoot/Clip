@@ -97,9 +97,13 @@ def _dedupe_overlaps(words: list[tuple[str, float, float, float]]) -> list[tuple
 #
 # This is a pure memo of a deterministic computation. It cannot approve anything: every gate that
 # consumed a fresh transcript consumes the cached one identically.
-_ASR_CACHE_SCHEMA = 3
+_ASR_CACHE_SCHEMA = 4
 # hit/miss counters for the audit trail — reset by callers that want a per-stage figure
-_ASR_CACHE_STATS = {"hit": 0, "miss": 0}
+_ASR_CACHE_STATS = {"hit": 0, "miss": 0, "unidentified_model": 0}
+
+# The tag we stamp on a model WE construct, so its size is recoverable afterwards. faster-whisper
+# does not keep it: see _model_identity.
+_SPEC_ATTR = "_vidlore_asr_spec"
 
 
 def _wav_digest(wav: Path) -> str:
@@ -110,12 +114,72 @@ def _wav_digest(wav: Path) -> str:
     return h.hexdigest()
 
 
-def _asr_cache_key(digest: str, model, window: float, overlap: float) -> dict:
-    """Every input that can change the returned words — and nothing that cannot."""
-    name = getattr(model, "model_size_or_path", None) or getattr(model, "model_path", None) \
-        or type(model).__name__
-    return {"schema": _ASR_CACHE_SCHEMA, "sha256": digest, "model": str(name),
-            "window": round(float(window), 4), "overlap": round(float(overlap), 4)}
+def _decode_fingerprint() -> str:
+    """The code that turns audio into words is itself an input to the transcript.
+
+    A schema integer only invalidates the cache if a human remembers to raise it. These three
+    functions decide every word returned — the decode flags, the chunk walk's overlap merge, and
+    the token normalisation that merge compares on — so their source is hashed straight into the
+    key. Editing any of them invalidates every entry automatically."""
+    try:
+        import inspect
+        src = "".join(inspect.getsource(f)
+                      for f in (_materialize_words, _dedupe_overlaps, _norm_token))
+    except Exception:                                    # noqa: BLE001 — source unavailable
+        return "unavailable"                             # a constant: falls back to the schema int
+    return hashlib.sha256(src.encode("utf-8")).hexdigest()[:16]
+
+
+_DECODE_FP = _decode_fingerprint()
+
+
+def _model_identity(model) -> str | None:
+    """A handle that changes whenever the model producing the words changes — or None.
+
+    None means DO NOT CACHE. That is the whole point of this function. faster-whisper 1.2.1
+    exposes neither `model_size_or_path` nor `model_path`, so the previous key fell all the way
+    through to `type(model).__name__` — the string "WhisperModel", identical for `base` and
+    `large-v3`. A key that cannot tell two models apart is not a cache; it is a way to serve one
+    model's transcript as another's. Verified against the installed version: both attributes are
+    absent, and the only real discriminators live on the CTranslate2 object underneath.
+
+    So the size must be RESOLVABLE — from our own tag or from an attribute a future version
+    restores — before anything is memoised. Everything else that can move the words (quantisation,
+    device, mel bins, language head, library version) joins it. When the size cannot be resolved
+    the caller simply transcribes: slower, never wrong."""
+    spec = getattr(model, _SPEC_ATTR, "") \
+        or getattr(model, "model_size_or_path", None) or getattr(model, "model_path", None)
+    if not spec:
+        return None
+    ct2 = getattr(model, "model", None)
+    bits = [f"spec={spec}"]
+    for attr in ("compute_type", "device", "n_mels", "num_languages", "is_multilingual"):
+        v = getattr(ct2, attr, None) if ct2 is not None else None
+        if v is not None:
+            bits.append(f"{attr}={v}")
+    try:
+        import faster_whisper as _fw
+        bits.append(f"fw={getattr(_fw, '__version__', '?')}")
+    except Exception:                                    # noqa: BLE001
+        pass
+    return "|".join(bits)
+
+
+def _asr_cache_key(digest: str, model, window: float, overlap: float,
+                   duration: float) -> dict | None:
+    """Every input that can change the returned words — and nothing that cannot.
+
+    `duration` is in the key because it is not merely descriptive: it decides where the chunk
+    windows start, whether a tail window is anchored at all, and what the word end times are
+    clamped to. Two calls over the same bytes with different declared durations legitimately
+    produce different words."""
+    ident = _model_identity(model)
+    if ident is None:
+        return None
+    return {"schema": _ASR_CACHE_SCHEMA, "sha256": digest, "model": ident,
+            "decode": _DECODE_FP,
+            "window": round(float(window), 4), "overlap": round(float(overlap), 4),
+            "duration": round(float(duration), 3)}
 
 
 def _asr_cache_read(path: Path, key: dict):
@@ -159,6 +223,12 @@ def transcribe_breakout_words(wav_path, *, model=None, duration: float | None = 
     if model is None:
         from faster_whisper import WhisperModel
         model = WhisperModel("base", device="cpu", compute_type="int8")
+        # faster-whisper keeps no record of what it was asked to load, so remember it here —
+        # without this the memo cannot tell this model from any other (see _model_identity).
+        try:
+            setattr(model, _SPEC_ATTR, "base")
+        except Exception:                                # noqa: BLE001 — exotic model object
+            pass
     if duration is None:
         duration = float(probe(wav).get("duration", 0.0) or 0.0)
     duration = float(duration or 0.0)
@@ -169,13 +239,16 @@ def transcribe_breakout_words(wav_path, *, model=None, duration: float | None = 
     _key = _cache_path = None
     if cache:
         try:
-            _key = _asr_cache_key(_wav_digest(wav), model, window, overlap)
-            _cache_path = wav.with_suffix(wav.suffix + ".asr.json")
-            _hit = _asr_cache_read(_cache_path, _key)
-            if _hit is not None:
-                _ASR_CACHE_STATS["hit"] += 1
-                return _hit
-            _ASR_CACHE_STATS["miss"] += 1
+            _key = _asr_cache_key(_wav_digest(wav), model, window, overlap, duration)
+            if _key is None:                             # unidentifiable model — transcribe, and
+                _ASR_CACHE_STATS["unidentified_model"] += 1   # never risk another model's words
+            else:
+                _cache_path = wav.with_suffix(wav.suffix + ".asr.json")
+                _hit = _asr_cache_read(_cache_path, _key)
+                if _hit is not None:
+                    _ASR_CACHE_STATS["hit"] += 1
+                    return _hit
+                _ASR_CACHE_STATS["miss"] += 1
         except Exception:                                # noqa: BLE001 — a cache fault must never
             _key = _cache_path = None                    # cost a transcript; fall through and work
     step = window - overlap
