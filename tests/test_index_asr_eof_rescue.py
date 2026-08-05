@@ -129,6 +129,52 @@ def test_old_faster_whisper_large_roster_keeps_priority_prefix_inside_half_conte
     assert len(prompt_tokens) <= model.max_length // 2 - 1
 
 
+def test_old_faster_whisper_keeps_dialogue_ahead_of_large_actor_roster(tmp_path):
+    class Encoding:
+        def __init__(self, ids):
+            self.ids = ids
+
+    class Tokenizer:
+        def encode(self, text, add_special_tokens=False):
+            del add_special_tokens
+            return Encoding(list(range(len(text.split()))))
+
+    class OldModel:
+        max_length = 64
+        hf_tokenizer = Tokenizer()
+
+        def __init__(self):
+            self.prompt = ""
+
+        def transcribe(self, _path, word_timestamps=False, vad_filter=False,
+                       condition_on_previous_text=True, clip_timestamps="0",
+                       initial_prompt=None):
+            self.prompt = initial_prompt
+            return iter([]), NS()
+
+    actors = [f"Actor Name{i}" for i in range(20)]
+    proj = NS(
+        meta={"analysis": {
+            "characters": [{"name": "Priority Character"}],
+            "actors": actors,
+        }},
+        segments=[NS(index=0, quote="You shot me.")],
+    )
+    model = OldModel()
+    IX._transcribe_with_vocabulary(
+        model, tmp_path / "s.mp4",
+        hotwords=IX._project_asr_hotwords(proj),
+        initial_prompt=IX._project_asr_initial_prompt(proj),
+        legacy_initial_prompt=IX._project_asr_legacy_initial_prompt(proj),
+    )
+
+    assert model.prompt.startswith(
+        "Cast, character names, and quoted dialogue: "
+        "Priority Character, You shot me.")
+    assert "You shot me." in model.prompt
+    assert "Actor Name19" not in model.prompt
+
+
 def test_asr_cache_identity_changes_with_model_options_and_vocabulary():
     base = NS(whisper_model="base", whisper_compute="int8")
     other_model = NS(whisper_model="small", whisper_compute="int8")
@@ -197,6 +243,25 @@ def test_audited_softening_keeps_original_quote_prompt_identity_stable():
     }]}
 
     assert IX.asr_semantic_fingerprint(proj, cfg) == baseline
+
+
+def test_equal_length_quotes_keep_order_when_first_moves_to_softening_provenance():
+    first = "Kill his men."
+    second = "Kill the man."
+    proj = NS(
+        meta={"analysis": {"characters": [], "actors": []}},
+        segments=[NS(index=0, quote=first), NS(index=1, quote=second)],
+    )
+    baseline = IX._project_asr_initial_prompt(proj)
+
+    proj.segments[0].quote = ""
+    proj.meta["selection_relevance_gap_softening"] = {"beats": [{
+        "segment_index": 0,
+        "original": {"quote": first},
+    }]}
+
+    assert IX._project_asr_initial_prompt(proj) == baseline
+    assert baseline.split(", ") == [first, second]
 
 
 def test_bounded_project_prompt_keeps_compact_quotes_deterministically():

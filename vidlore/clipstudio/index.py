@@ -32,7 +32,7 @@ from .segment import _STOP as _CONTENT_STOP
 #   1 → shots + per-shot transcript only
 #   2 → + <sid>.words.json (word-level ASR start/end/text) for quote-span location
 INDEX_SCHEMA = 2
-_ASR_PIPELINE_REVISION = 6
+_ASR_PIPELINE_REVISION = 7
 _ASR_PROMPT_RESERVE_TOKENS = 16
 _ASR_INITIAL_PROMPT_PREFIX = "Cast, character names, and quoted dialogue: "
 
@@ -155,12 +155,24 @@ def _project_authored_quotes(proj, analysis: dict) -> list[str]:
     """Collect current beat quotes plus analysis-authored anchor dialogue.
 
     Within the quote tier, compact lines come first so a fixed Whisper context carries the largest
-    number of exact dialogue hints instead of being consumed by one long speech.  Original order
-    breaks ties, so the result is deterministic across resume.
+    number of exact dialogue hints instead of being consumed by one long speech. Original beat
+    order breaks ties, so the result stays stable when a reviewed guard moves a quote from the live
+    beat into provenance metadata.
     """
-    rows: list[tuple[int, str]] = []
-    for seg in (getattr(proj, "segments", None) or []):
-        rows.append((len(rows), str(getattr(seg, "quote", "") or "")))
+    segments = list(getattr(proj, "segments", None) or [])
+    rows: list[tuple[int, int, str]] = []
+
+    def add(order, raw) -> None:
+        try:
+            stable_order = int(order)
+        except (TypeError, ValueError):
+            stable_order = len(segments) + len(rows)
+        rows.append((stable_order, len(rows), str(raw or "")))
+
+    for pos, seg in enumerate(segments):
+        add(getattr(seg, "index", pos), getattr(seg, "quote", ""))
+    anchor_order = max(
+        [int(getattr(seg, "index", pos)) for pos, seg in enumerate(segments)] or [-1]) + 1
     for scene in (analysis.get("anchor_scenes") or []):
         if not isinstance(scene, dict):
             continue
@@ -168,7 +180,8 @@ def _project_authored_quotes(proj, analysis: dict) -> list[str]:
         if isinstance(dialogue, str):
             dialogue = [dialogue]
         for quote in dialogue:
-            rows.append((len(rows), str(quote or "")))
+            add(anchor_order, quote)
+            anchor_order += 1
 
     # Deterministic contract normalization and reviewed footage-gap softening may clear a quote
     # from the active segment while retaining it as audited source-locator provenance.  Keep that
@@ -178,19 +191,24 @@ def _project_authored_quotes(proj, analysis: dict) -> list[str]:
     grounding = analysis.get("beat_grounding_audit") or {}
     grounding_beats = grounding.get("beats") if isinstance(grounding, dict) else {}
     if isinstance(grounding_beats, dict):
-        for marker in grounding_beats.values():
+        for beat_index, marker in grounding_beats.items():
             if isinstance(marker, dict):
-                rows.append((len(rows), str(marker.get("original_quote", "") or "")))
+                add(beat_index, marker.get("original_quote", ""))
     softening = (getattr(proj, "meta", {}) or {}).get(
         "selection_relevance_gap_softening") or {}
     for marker in (softening.get("beats") or []) if isinstance(softening, dict) else []:
         original = marker.get("original") if isinstance(marker, dict) else {}
         if isinstance(original, dict):
-            rows.append((len(rows), str(original.get("quote", "") or "")))
+            add((marker.get("segment_index", marker.get("beat_index", marker.get("index")))
+                 if isinstance(marker, dict) else None), original.get("quote", ""))
 
+    # De-duplicate after restoring provenance rows to their original beat positions. Otherwise
+    # clearing beat 0 and retaining its quote after beat 1 reverses equal-sized entries and forces
+    # a second whole-pool ASR refresh despite an identical authored quote set.
+    rows.sort(key=lambda row: (row[0], row[1]))
     unique: list[tuple[int, str]] = []
     seen: set[str] = set()
-    for order, raw in rows:
+    for order, _encounter, raw in rows:
         quote = _asr_vocabulary_entry(raw)
         key = _asr_vocabulary_key(quote)
         if not quote or not key or key in seen:
@@ -201,18 +219,23 @@ def _project_authored_quotes(proj, analysis: dict) -> list[str]:
     return [quote for _order, quote in unique]
 
 
-def _project_asr_hotwords(proj, fallback=None) -> str:
-    """Proper-name hotwords only; sentence-level dialogue must never enter decoder bias."""
+def _project_asr_name_tiers(proj, fallback=None) -> tuple[list[str], list[str]]:
+    """Return character and actor names separately so legacy prompting preserves priority."""
     analysis = (getattr(proj, "meta", {}) or {}).get("analysis") or {}
-    # Character names are the words the show actually speaks, so keep them first when an unusually
-    # large cast must be bounded to Whisper's context. Actor names remain useful for interviews and
-    # credits, but must not evict a scripted character name such as Cersei.
     characters = [str(row.get("name", "") or "")
                   for row in (analysis.get("characters") or []) if isinstance(row, dict)]
     actors = list(analysis.get("actors") or [])
     if not characters and not actors:
-        fallback_rows = [fallback] if isinstance(fallback, str) else list(fallback or [])
-        characters = fallback_rows
+        characters = [fallback] if isinstance(fallback, str) else list(fallback or [])
+    return characters, actors
+
+
+def _project_asr_hotwords(proj, fallback=None) -> str:
+    """Proper-name hotwords only; sentence-level dialogue must never enter decoder bias."""
+    # Character names are the words the show actually speaks, so keep them first when an unusually
+    # large cast must be bounded to Whisper's context. Actor names remain useful for interviews and
+    # credits, but must not evict a scripted character name such as Cersei.
+    characters, actors = _project_asr_name_tiers(proj, fallback=fallback)
     return _asr_hotwords([*characters, *actors])
 
 
@@ -232,6 +255,19 @@ def _project_asr_initial_prompt(proj, fallback=None) -> str:
     return quotes or _project_asr_hotwords(proj, fallback=fallback)
 
 
+def _project_asr_legacy_initial_prompt(proj, fallback=None) -> str:
+    """Priority-safe single channel for Faster-Whisper versions without ``hotwords``."""
+    analysis = (getattr(proj, "meta", {}) or {}).get("analysis") or {}
+    characters, actors = _project_asr_name_tiers(proj, fallback=fallback)
+    # Dialogue must precede lower-value actor names. A large actor roster was reproduced to consume
+    # the bounded 1.0.x context and silently evict every authored line when these tiers were flat.
+    return _asr_hotwords([
+        *characters,
+        *_project_authored_quotes(proj, analysis),
+        *actors,
+    ])
+
+
 def _faster_whisper_version() -> str:
     try:
         from importlib.metadata import version
@@ -241,7 +277,8 @@ def _faster_whisper_version() -> str:
 
 
 def _asr_prompt_fingerprint(cfg: ClipConfig, hotwords: str,
-                            initial_prompt: Optional[str] = None) -> str:
+                            initial_prompt: Optional[str] = None,
+                            legacy_initial_prompt: Optional[str] = None) -> str:
     """Identity of every persisted-ASR input/options dependency relevant to word evidence."""
     payload = {
         "revision": _ASR_PIPELINE_REVISION,
@@ -250,6 +287,8 @@ def _asr_prompt_fingerprint(cfg: ClipConfig, hotwords: str,
         "faster_whisper": _faster_whisper_version(),
         "hotwords": str(hotwords or ""),
         "initial_prompt": str(hotwords if initial_prompt is None else initial_prompt),
+        "legacy_initial_prompt": str(
+            hotwords if legacy_initial_prompt is None else legacy_initial_prompt),
         "dialogue_delivery": "initial_prompt_only",
         "primary": {"word_timestamps": True, "vad_filter": True},
         "eof_rescue": {
@@ -268,7 +307,8 @@ def _asr_prompt_fingerprint(cfg: ClipConfig, hotwords: str,
 def asr_semantic_fingerprint(proj, cfg: ClipConfig) -> str:
     """Public checkpoint/cache identity for the ASR evidence a project requires."""
     return _asr_prompt_fingerprint(
-        cfg, _project_asr_hotwords(proj), _project_asr_initial_prompt(proj))
+        cfg, _project_asr_hotwords(proj), _project_asr_initial_prompt(proj),
+        _project_asr_legacy_initial_prompt(proj))
 
 
 def _token_ids(tokenizer, text: str) -> Optional[list[int]]:
@@ -335,7 +375,8 @@ def _bound_asr_vocabulary(model, hotwords: str, *, duplicated: bool) -> str:
 
 
 def _transcribe_with_vocabulary(model, path: Path, *, hotwords: str = "",
-                                initial_prompt: str = "", **kwargs):
+                                initial_prompt: str = "", legacy_initial_prompt: str = "",
+                                **kwargs):
     """Call Faster-Whisper without breaking supported 1.0.x installs.
 
     ``hotwords`` arrived after 1.0.0 while requirements intentionally support 1.0+.  Every version
@@ -353,9 +394,9 @@ def _transcribe_with_vocabulary(model, path: Path, *, hotwords: str = "",
         if supports_hotwords:
             prompt_vocabulary = requested_prompt or str(hotwords or "")
         else:
-            # Older Faster-Whisper has no hotword channel. Preserve proper names as leading context
-            # and keep authored dialogue last/near the decoder's active prompt tail.
-            prompt_vocabulary = _asr_hotwords([
+            # Indexing supplies character -> compact-dialogue -> actor priority explicitly. Keep a
+            # compatible fallback for direct callers that only know the two modern channels.
+            prompt_vocabulary = str(legacy_initial_prompt or "") or _asr_hotwords([
                 *[entry.strip() for entry in str(hotwords or "").split(",") if entry.strip()],
                 *[entry.strip() for entry in requested_prompt.split(",") if entry.strip()],
             ])
@@ -428,7 +469,7 @@ def _merge_eof_words(primary: list[tuple[float, float, str]],
 
 def _rescue_eof_words_result(path: Path, model, primary: list[tuple[float, float, str]],
                              duration: float, *, hotwords: str = "",
-                             initial_prompt: str = "") \
+                             initial_prompt: str = "", legacy_initial_prompt: str = "") \
         -> tuple[bool, list[tuple[float, float, str]]]:
     """Recover trailing dialogue that whole-source Silero VAD can omit.
 
@@ -451,6 +492,7 @@ def _rescue_eof_words_result(path: Path, model, primary: list[tuple[float, float
             clip_timestamps=[tail_start, duration],
             hotwords=hotwords,
             initial_prompt=initial_prompt,
+            legacy_initial_prompt=legacy_initial_prompt,
         )
         # no-VAD is required precisely because Silero missed this tail, but that also makes silent
         # outro hallucinations possible.  Faster-Whisper supplies independent decoder confidence
@@ -493,22 +535,24 @@ def _rescue_eof_words_result(path: Path, model, primary: list[tuple[float, float
 
 def _rescue_eof_words(path: Path, model, primary: list[tuple[float, float, str]],
                       duration: float, *, hotwords: str = "",
-                      initial_prompt: str = "") -> list[tuple[float, float, str]]:
+                      initial_prompt: str = "", legacy_initial_prompt: str = "") \
+        -> list[tuple[float, float, str]]:
     """Compatibility wrapper; persistence callers use the result form's success bit."""
     return _rescue_eof_words_result(
         path, model, primary, duration, hotwords=hotwords,
-        initial_prompt=initial_prompt)[1]
+        initial_prompt=initial_prompt, legacy_initial_prompt=legacy_initial_prompt)[1]
 
 
 def _transcribe_words_result(path: Path, cfg: ClipConfig, *, duration: float = 0.0,
-                             hotwords: str = "", initial_prompt: str = "") \
+                             hotwords: str = "", initial_prompt: str = "",
+                             legacy_initial_prompt: str = "") \
         -> tuple[bool, list[tuple[float, float, str]]]:
     """Return ``(decode_succeeded, timed_words)`` without conflating silence and failure."""
     try:
         model = _whisper(cfg)
         segments, _info = _transcribe_with_vocabulary(
             model, path, word_timestamps=True, vad_filter=True, hotwords=hotwords,
-            initial_prompt=initial_prompt)
+            initial_prompt=initial_prompt, legacy_initial_prompt=legacy_initial_prompt)
         words = _timed_words(segments)
     except Exception:
         return False, []
@@ -521,16 +565,17 @@ def _transcribe_words_result(path: Path, cfg: ClipConfig, *, duration: float = 0
             return False, words
     return _rescue_eof_words_result(
         path, model, words, duration, hotwords=hotwords,
-        initial_prompt=initial_prompt)
+        initial_prompt=initial_prompt, legacy_initial_prompt=legacy_initial_prompt)
 
 
 def transcribe_words(path: Path, cfg: ClipConfig, *, duration: float = 0.0,
-                     hotwords: str = "", initial_prompt: str = "") \
+                     hotwords: str = "", initial_prompt: str = "",
+                     legacy_initial_prompt: str = "") \
         -> list[tuple[float, float, str]]:
     """Compatibility wrapper returning words; use result form when persistence depends on success."""
     return _transcribe_words_result(
         path, cfg, duration=duration, hotwords=hotwords,
-        initial_prompt=initial_prompt)[1]
+        initial_prompt=initial_prompt, legacy_initial_prompt=legacy_initial_prompt)[1]
 
 
 def _assign_transcript(shots: list[Shot], words: list[tuple[float, float, str]]) -> None:
@@ -1325,8 +1370,10 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
     meta_file = proj.index_dir / f"{source.id}.index.meta.json"
     asr_hotwords = _project_asr_hotwords(proj, fallback=roster)
     asr_initial_prompt = _project_asr_initial_prompt(proj, fallback=roster)
+    asr_legacy_initial_prompt = _project_asr_legacy_initial_prompt(
+        proj, fallback=roster)
     asr_fingerprint = _asr_prompt_fingerprint(
-        cfg, asr_hotwords, asr_initial_prompt)
+        cfg, asr_hotwords, asr_initial_prompt, asr_legacy_initial_prompt)
     # capabilities this call wants — a cache built WITHOUT them (e.g. by the manual pipeline,
     # roster-less) must not satisfy an auto-mode call that needs Face-ID/OCR signals. "Wanted"
     # includes availability, else a missing OCR lib would force a futile re-index every run.
@@ -1363,7 +1410,8 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
                     and source.status == SOURCE_OK and source.local_path):
                 refreshed = refresh_source_words(
                     proj, source, cfg, progress=progress, hotwords=asr_hotwords,
-                    initial_prompt=asr_initial_prompt)
+                    initial_prompt=asr_initial_prompt,
+                    legacy_initial_prompt=asr_legacy_initial_prompt)
                 if refreshed:
                     log(f"index: {source.id} ASR cache upgraded for current model/vocabulary "
                         f"({len(refreshed)} shots; visual index preserved)")
@@ -1409,7 +1457,8 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
     # 2) transcript
     asr_succeeded, words = _transcribe_words_result(
         path, cfg, duration=source.duration, hotwords=asr_hotwords,
-        initial_prompt=asr_initial_prompt)
+        initial_prompt=asr_initial_prompt,
+        legacy_initial_prompt=asr_legacy_initial_prompt)
     log(f"index: {source.id} transcript words={len(words)}")
     if not asr_succeeded:
         log(f"index: ⚠ {source.id} ASR failed; visual index will remain reusable but word "
@@ -1584,6 +1633,7 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
 def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
                          *, progress=None, hotwords: Optional[str] = None,
                          initial_prompt: Optional[str] = None,
+                         legacy_initial_prompt: Optional[str] = None,
                          allow_empty: bool = False) -> list[Shot]:
     """Refresh one source's ASR words and shot transcripts without rebuilding visual indexes.
 
@@ -1608,10 +1658,15 @@ def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig
         asr_initial_prompt = _project_asr_initial_prompt(proj)
     else:
         asr_initial_prompt = str(initial_prompt or "")
+    if legacy_initial_prompt is None:
+        asr_legacy_initial_prompt = _project_asr_legacy_initial_prompt(proj)
+    else:
+        asr_legacy_initial_prompt = str(legacy_initial_prompt or "")
     old_valid, old_words = _load_words_result(proj, source.id)
     asr_succeeded, words = _transcribe_words_result(
         Path(source.local_path), cfg, duration=source.duration, hotwords=asr_hotwords,
-        initial_prompt=asr_initial_prompt)
+        initial_prompt=asr_initial_prompt,
+        legacy_initial_prompt=asr_legacy_initial_prompt)
     if not asr_succeeded:
         if progress:
             progress(f"index: ⚠ {source.id} word refresh failed technically; cache preserved")
@@ -1700,7 +1755,7 @@ def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig
     meta.update({
         "words": True,
         "asr_prompt_fingerprint": _asr_prompt_fingerprint(
-            cfg, asr_hotwords, asr_initial_prompt),
+            cfg, asr_hotwords, asr_initial_prompt, asr_legacy_initial_prompt),
         "schema": INDEX_SCHEMA,
     })
     meta.pop("asr_refresh_in_progress", None)
