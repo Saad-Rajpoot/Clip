@@ -26,6 +26,9 @@ GOOD = {
 }
 
 
+_REAL_CONFIRM_PROMPTED_QUOTE = R._confirm_prompted_quote_span_unprompted
+
+
 @pytest.fixture(autouse=True)
 def _explicit_rev8_unprompted_confirmation(monkeypatch):
     """Byte-sentinel media cannot be decoded; model independent confirmation explicitly."""
@@ -165,6 +168,16 @@ def test_confirmation_artifact_binds_result_bytes_and_rejects_any_uncertain_segm
         "confirmed_span": [0.2, 0.7, 1.0],
         "timed_asr_ratio": 1.0,
         "match_method": "exact_contiguous_timed_asr+unprompted_confirmation",
+        "decoder_used": "primary",
+        "primary_model": str(cfg.whisper_model),
+        "rescue_model": R.QUOTE_CONFIRMATION_RESCUE_MODEL,
+        "primary_decode_status": "ok",
+        "primary_decode_reason": "",
+        "primary_phrase_matched": True,
+        "rescue_attempted": False,
+        "rescue_decode_status": "",
+        "rescue_decode_reason": "",
+        "rescue_phrase_matched": False,
     }
     artifact["result_content_sha256"] = R._quote_confirmation_result_sha256(artifact)
     path = tmp_path / "confirmation.json"
@@ -184,6 +197,87 @@ def test_confirmation_artifact_binds_result_bytes_and_rejects_any_uncertain_segm
     path.write_text(json.dumps(uncertain))
     assert R._validated_quote_confirmation_artifact(path, binding) is None
 
+    wrong_branch = json.loads(json.dumps(artifact))
+    wrong_branch["decoder_used"] = "rescue"
+    wrong_branch["result_content_sha256"] = R._quote_confirmation_result_sha256(wrong_branch)
+    path.write_text(json.dumps(wrong_branch))
+    assert R._validated_quote_confirmation_artifact(path, binding) is None
+
+    wrong_model = json.loads(json.dumps(artifact))
+    wrong_model["rescue_model"] = "different-model"
+    wrong_model["result_content_sha256"] = R._quote_confirmation_result_sha256(wrong_model)
+    path.write_text(json.dumps(wrong_model))
+    assert R._validated_quote_confirmation_artifact(path, binding) is None
+
+
+@pytest.mark.parametrize(("primary", "rescue", "expected", "decoder_used"), [
+    ("match", "unused", "confirmed", "primary"),
+    ("miss", "match", "confirmed", "rescue"),
+    ("miss", "miss", "rejected", "rescue"),
+    ("inconclusive", "inconclusive", "inconclusive", None),
+])
+def test_unprompted_quote_confirmation_rescues_without_weakening_floors(
+        tmp_path, monkeypatch, primary, rescue, expected, decoder_used):
+    quote = "Real words."
+    proj, _seg, _sel = _fixture(tmp_path, quote=quote)
+    cfg = load_clip_config()
+    calls = []
+
+    def decode(_path, decoder_cfg, start, end, **kwargs):
+        model = str(decoder_cfg.whisper_model)
+        calls.append((model, kwargs))
+        outcome = primary if model == str(cfg.whisper_model) else rescue
+        if outcome == "inconclusive":
+            return {"status": "inconclusive", "reason": "segment_confidence_below_floor"}
+        words = ([[0.2, 0.4, "Real"], [0.4, 0.7, "words"]]
+                 if outcome == "match" else
+                 [[0.2, 0.4, "Wrong"], [0.4, 0.7, "phrase"]])
+        return {
+            "status": "ok",
+            "reason": "",
+            "decode_window": [round(float(start), 3), round(float(end), 3)],
+            "timed_words": words,
+            "segment_confidence": [{
+                "no_speech_prob": 0.05, "avg_logprob": -0.1, "accepted": True,
+            }],
+        }
+
+    monkeypatch.setattr(IX, "transcribe_unprompted_window", decode)
+    result = _REAL_CONFIRM_PROMPTED_QUOTE(
+        proj, proj.source("s1"), quote, [0.2, 0.7, 1.0], cfg,
+        exact_contiguous_required=True)
+
+    assert result["status"] == expected
+    expected_models = [str(cfg.whisper_model)]
+    if primary != "match":
+        expected_models.append(R.QUOTE_CONFIRMATION_RESCUE_MODEL)
+    assert [row[0] for row in calls] == expected_models
+    assert all(row[1]["max_no_speech"] == R.QUOTE_CONFIRMATION_MAX_NO_SPEECH
+               for row in calls)
+    assert all(row[1]["min_avg_logprob"] == R.QUOTE_CONFIRMATION_MIN_AVG_LOGPROB
+               for row in calls)
+    if decoder_used is None:
+        assert result["rescue_attempted"] is True
+        assert result["rescue_decode_status"] == "inconclusive"
+        return
+    assert result["decoder_used"] == decoder_used
+    assert result["rescue_attempted"] is (decoder_used == "rescue")
+    assert result["rescue_decode_status"] == ("ok" if decoder_used == "rescue" else "")
+    before_cache_calls = len(calls)
+    cached = _REAL_CONFIRM_PROMPTED_QUOTE(
+        proj, proj.source("s1"), quote, [0.2, 0.7, 1.0], cfg,
+        exact_contiguous_required=True)
+    assert cached["status"] == expected
+    assert cached["cache_hit"] is True
+    assert len(calls) == before_cache_calls
+    assert R._validated_quote_confirmation_artifact(
+        R._quote_confirmation_artifact_path(
+            proj, R._quote_confirmation_binding(
+                proj, proj.source("s1"), quote, [0.2, 0.7, 1.0], cfg,
+                exact_contiguous_required=True)[0]),
+        R._quote_confirmation_binding(
+            proj, proj.source("s1"), quote, [0.2, 0.7, 1.0], cfg,
+            exact_contiguous_required=True)[0]) is not None
 
 def test_exact_positive_selection_passes_and_generic_negative_is_untouched(tmp_path):
     proj, seg, _ = _fixture(tmp_path / "exact")

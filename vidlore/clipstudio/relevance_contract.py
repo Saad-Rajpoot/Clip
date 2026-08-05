@@ -13,6 +13,7 @@ import json
 import hashlib
 import re
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 from . import policy as _policy
@@ -32,15 +33,21 @@ from .verify import (
 # v10 makes short/common quote typing fail closed: fuzzy or non-contiguous token overlap can no
 # longer turn an analyzer paraphrase into a hard promise of verbatim show dialogue. v11 requires
 # every prompted-ASR quote hit to survive an independently decoded, unprompted narrow audio window
-# before it can type a quote or prove a selected/breakout window.
-SCHEMA_VERSION = 11
+# before it can type a quote or prove a selected/breakout window. v12 keeps the same acoustic and
+# phrase floors but retries an inconclusive/phrase-missing base decode with a stronger, still fully
+# unprompted English decoder. This prevents noisy real dialogue from becoming an unsatisfiable
+# contract (or being mislabeled as a paraphrase) without letting prompted retrieval prove itself.
+SCHEMA_VERSION = 12
 AUDIT_FILENAME = "selection_relevance_audit.json"
 QUOTE_DIALOGUE_FLOOR = 0.78
 QUOTE_WINDOW_TOLERANCE_SEC = 0.75
 SHORT_QUOTE_EXACT_MAX_TOKENS = 3
 SHORT_QUOTE_MAX_INTERWORD_GAP_SEC = 1.0
-QUOTE_CONFIRMATION_SCHEMA = 1
-QUOTE_CONFIRMATION_ALGORITHM = "faster-whisper-unprompted-window-v1"
+QUOTE_CONFIRMATION_SCHEMA = 2
+QUOTE_CONFIRMATION_ALGORITHM = "faster-whisper-unprompted-cascade-v2"
+QUOTE_CONFIRMATION_RESCUE_MODEL = "medium.en"
+QUOTE_CONFIRMATION_RESCUE_POLICY = (
+    "primary_inconclusive_or_phrase_not_found_at_unchanged_floor")
 QUOTE_CONFIRMATION_SAMPLE_RATE = 16000
 QUOTE_CONFIRMATION_PAD_SEC = 2.0
 QUOTE_CONFIRMATION_MAX_WINDOW_SEC = 30.0
@@ -423,13 +430,18 @@ def _prompted_quote_candidate_spans(
 
 
 def _quote_confirmation_decoder_fingerprint(cfg) -> str:
-    """Semantic identity of the independent no-prompt narrow decoder."""
+    """Semantic identity of the independent no-prompt narrow decoder cascade."""
     from . import index as _index
 
+    primary_model = str(getattr(cfg, "whisper_model", "") or "")
+    rescue_model = ("" if primary_model == QUOTE_CONFIRMATION_RESCUE_MODEL
+                    else QUOTE_CONFIRMATION_RESCUE_MODEL)
     payload = {
         "schema_version": QUOTE_CONFIRMATION_SCHEMA,
         "algorithm": QUOTE_CONFIRMATION_ALGORITHM,
-        "model": str(getattr(cfg, "whisper_model", "") or ""),
+        "primary_model": primary_model,
+        "rescue_model": rescue_model,
+        "rescue_trigger": QUOTE_CONFIRMATION_RESCUE_POLICY,
         "compute": str(getattr(cfg, "whisper_compute", "") or ""),
         "faster_whisper": str(_index._faster_whisper_version() or "unknown"),
         "sample_rate_hz": QUOTE_CONFIRMATION_SAMPLE_RATE,
@@ -527,6 +539,11 @@ def _quote_confirmation_binding(
         "ratio_floor": QUOTE_DIALOGUE_FLOOR,
         "maximum_hint_gap_sec": QUOTE_CONFIRMATION_MAX_HINT_GAP_SEC,
         "decoder_fingerprint": _quote_confirmation_decoder_fingerprint(cfg),
+        "primary_decoder_model": str(getattr(cfg, "whisper_model", "") or ""),
+        "rescue_decoder_model": (
+            "" if str(getattr(cfg, "whisper_model", "") or "")
+            == QUOTE_CONFIRMATION_RESCUE_MODEL else QUOTE_CONFIRMATION_RESCUE_MODEL),
+        "rescue_policy": QUOTE_CONFIRMATION_RESCUE_POLICY,
     }
     raw = json.dumps(binding, sort_keys=True, separators=(",", ":"))
     binding["binding_fingerprint"] = hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -575,6 +592,10 @@ def _validated_quote_confirmation_artifact(path: Path, binding: dict) -> dict | 
     if raw.get("schema_version") != QUOTE_CONFIRMATION_SCHEMA \
             or raw.get("algorithm") != QUOTE_CONFIRMATION_ALGORITHM:
         return None
+    if (raw.get("decoder_fingerprint") != binding.get("decoder_fingerprint")
+            or raw.get("decode_window") != binding.get("decode_window")
+            or raw.get("prompted_span") != binding.get("prompted_span")):
+        return None
     result_sha256 = str(raw.get("result_content_sha256", "") or "")
     if (len(result_sha256) != 64
             or any(char not in "0123456789abcdef" for char in result_sha256)
@@ -583,6 +604,38 @@ def _validated_quote_confirmation_artifact(path: Path, binding: dict) -> dict | 
     status = str(raw.get("status", "") or "")
     if status not in ("confirmed", "rejected"):
         return None
+
+    decoder_used = str(raw.get("decoder_used", "") or "")
+    primary_model = str(raw.get("primary_model", "") or "")
+    rescue_model = str(raw.get("rescue_model", "") or "")
+    primary_status = str(raw.get("primary_decode_status", "") or "")
+    rescue_attempted = raw.get("rescue_attempted")
+    rescue_status = str(raw.get("rescue_decode_status", "") or "")
+    primary_phrase_matched = raw.get("primary_phrase_matched")
+    rescue_phrase_matched = raw.get("rescue_phrase_matched")
+    if (decoder_used not in ("primary", "rescue") or not primary_model
+            or primary_model != str(binding.get("primary_decoder_model", "") or "")
+            or rescue_model != str(binding.get("rescue_decoder_model", "") or "")
+            or binding.get("rescue_policy") != QUOTE_CONFIRMATION_RESCUE_POLICY
+            or primary_status not in ("ok", "inconclusive")
+            or type(primary_phrase_matched) is not bool
+            or type(rescue_phrase_matched) is not bool
+            or type(rescue_attempted) is not bool
+            or not isinstance(raw.get("primary_decode_reason"), str)
+            or not isinstance(raw.get("rescue_decode_reason"), str)):
+        return None
+    if decoder_used == "primary":
+        if primary_status != "ok" or rescue_attempted or rescue_status or primary_phrase_matched != (
+                status == "confirmed") or rescue_phrase_matched:
+            return None
+        # A conclusive primary miss is only cacheable without a second pass when primary already
+        # is the rescue model. Otherwise the cascade contract requires the stronger acoustic pass.
+        if status == "rejected" and rescue_model:
+            return None
+    else:
+        if (not rescue_attempted or not rescue_model or rescue_status != "ok"
+                or primary_phrase_matched or rescue_phrase_matched != (status == "confirmed")):
+            return None
 
     confidence = raw.get("segment_confidence")
     if not isinstance(confidence, list) or not confidence:
@@ -656,7 +709,10 @@ def _quote_confirmation_summary(evidence: dict) -> dict:
         for key in (
             "schema_version", "algorithm", "status", "reason", "artifact_key",
             "artifact_path", "decoder_fingerprint", "decode_window", "prompted_span",
-            "confirmed_span", "timed_asr_ratio", "match_method", "result_content_sha256")
+            "confirmed_span", "timed_asr_ratio", "match_method", "result_content_sha256",
+            "decoder_used", "primary_model", "rescue_model", "primary_decode_status",
+            "primary_decode_reason", "primary_phrase_matched", "rescue_attempted",
+            "rescue_decode_status", "rescue_decode_reason", "rescue_phrase_matched")
         if key in evidence
     }
 
@@ -686,39 +742,138 @@ def _confirm_prompted_quote_span_unprompted(
         }
 
     from . import index as _index
-    decode = _index.transcribe_unprompted_window(
-        getattr(src, "local_path", "") or "", cfg,
-        binding["decode_window"][0], binding["decode_window"][1],
-        sample_rate=QUOTE_CONFIRMATION_SAMPLE_RATE,
-        max_no_speech=QUOTE_CONFIRMATION_MAX_NO_SPEECH,
-        min_avg_logprob=QUOTE_CONFIRMATION_MIN_AVG_LOGPROB)
-    if str(decode.get("status", "") or "") != "ok":
+
+    primary_model = str(getattr(cfg, "whisper_model", "") or "")
+    rescue_model = ("" if primary_model == QUOTE_CONFIRMATION_RESCUE_MODEL
+                    else QUOTE_CONFIRMATION_RESCUE_MODEL)
+
+    def _decode(decoder_cfg):
+        result = _index.transcribe_unprompted_window(
+            getattr(src, "local_path", "") or "", decoder_cfg,
+            binding["decode_window"][0], binding["decode_window"][1],
+            sample_rate=QUOTE_CONFIRMATION_SAMPLE_RATE,
+            max_no_speech=QUOTE_CONFIRMATION_MAX_NO_SPEECH,
+            min_avg_logprob=QUOTE_CONFIRMATION_MIN_AVG_LOGPROB)
+        if (str(result.get("status", "") or "") == "ok"
+                and result.get("decode_window") != binding["decode_window"]):
+            return {
+                "status": "inconclusive",
+                "reason": "unprompted_decode_window_mismatch",
+            }
+        return result
+
+    def _locate(result):
+        if str(result.get("status", "") or "") != "ok":
+            return None
+        located = _quote_confirmation_locator(
+            list(result.get("timed_words") or []), str(binding["authored_quote"]),
+            exact_contiguous_required=exact_contiguous_required, index_module=_index)
+        if located is not None and not _confirmation_span_near_hint(
+                located, binding["prompted_span"]):
+            return None
+        return located
+
+    primary_decode = _decode(cfg)
+    primary_status = ("ok" if str(primary_decode.get("status", "") or "") == "ok"
+                      else "inconclusive")
+    primary_reason = str(primary_decode.get("reason", "") or "")
+    primary_span = _locate(primary_decode)
+    rescue_attempted = False
+    rescue_decode: dict = {}
+    rescue_span = None
+
+    # A decoder returning bytes for a different interval violates the physical-window binding.
+    # A second model must not hide that structural defect.
+    if primary_reason == "unprompted_decode_window_mismatch":
         return {
             "schema_version": QUOTE_CONFIRMATION_SCHEMA,
             "algorithm": QUOTE_CONFIRMATION_ALGORITHM,
             "status": "inconclusive",
-            "reason": str(decode.get("reason", "") or "unprompted_decode_inconclusive"),
+            "reason": primary_reason,
             "artifact_key": binding["binding_fingerprint"],
             "artifact_path": _quote_confirmation_artifact_display_path(proj, artifact_path),
             "decoder_fingerprint": binding["decoder_fingerprint"],
             "decode_window": binding["decode_window"],
             "prompted_span": binding["prompted_span"],
+            "primary_model": primary_model,
+            "rescue_model": rescue_model,
+            "primary_decode_status": primary_status,
+            "primary_decode_reason": primary_reason,
+            "primary_phrase_matched": False,
+            "rescue_attempted": False,
+            "rescue_decode_status": "",
+            "rescue_decode_reason": "",
+            "rescue_phrase_matched": False,
         }
-    if decode.get("decode_window") != binding["decode_window"]:
+
+    # A base-model miss is not conclusive on shouted/noisy show dialogue. Retry the exact same
+    # physical PCM window with a stronger decoder, still without prompt/hotwords, and keep every
+    # confidence/phrase floor unchanged. If that stronger pass is uncertain, fail closed.
+    if primary_span is None and rescue_model:
+        rescue_attempted = True
+        try:
+            rescue_cfg = replace(cfg, whisper_model=rescue_model)
+        except (TypeError, ValueError):
+            return {
+                "schema_version": QUOTE_CONFIRMATION_SCHEMA,
+                "algorithm": QUOTE_CONFIRMATION_ALGORITHM,
+                "status": "inconclusive",
+                "reason": "quote_confirmation_rescue_config_invalid",
+                "artifact_key": binding["binding_fingerprint"],
+            }
+        rescue_decode = _decode(rescue_cfg)
+        if str(rescue_decode.get("status", "") or "") != "ok":
+            return {
+                "schema_version": QUOTE_CONFIRMATION_SCHEMA,
+                "algorithm": QUOTE_CONFIRMATION_ALGORITHM,
+                "status": "inconclusive",
+                "reason": str(rescue_decode.get("reason", "")
+                              or "rescue_unprompted_decode_inconclusive"),
+                "artifact_key": binding["binding_fingerprint"],
+                "artifact_path": _quote_confirmation_artifact_display_path(
+                    proj, artifact_path),
+                "decoder_fingerprint": binding["decoder_fingerprint"],
+                "decode_window": binding["decode_window"],
+                "prompted_span": binding["prompted_span"],
+                "primary_model": primary_model,
+                "rescue_model": rescue_model,
+                "primary_decode_status": primary_status,
+                "primary_decode_reason": primary_reason,
+                "primary_phrase_matched": False,
+                "rescue_attempted": True,
+                "rescue_decode_status": str(
+                    rescue_decode.get("status", "") or "inconclusive"),
+                "rescue_decode_reason": str(rescue_decode.get("reason", "") or ""),
+                "rescue_phrase_matched": False,
+            }
+        rescue_span = _locate(rescue_decode)
+
+    if primary_span is None and not rescue_model and primary_status != "ok":
         return {
             "schema_version": QUOTE_CONFIRMATION_SCHEMA,
             "algorithm": QUOTE_CONFIRMATION_ALGORITHM,
             "status": "inconclusive",
-            "reason": "unprompted_decode_window_mismatch",
+            "reason": primary_reason or "unprompted_decode_inconclusive",
             "artifact_key": binding["binding_fingerprint"],
+            "artifact_path": _quote_confirmation_artifact_display_path(proj, artifact_path),
+            "decoder_fingerprint": binding["decoder_fingerprint"],
+            "decode_window": binding["decode_window"],
+            "prompted_span": binding["prompted_span"],
+            "primary_model": primary_model,
+            "rescue_model": rescue_model,
+            "primary_decode_status": primary_status,
+            "primary_decode_reason": primary_reason,
+            "primary_phrase_matched": False,
+            "rescue_attempted": False,
+            "rescue_decode_status": "",
+            "rescue_decode_reason": "",
+            "rescue_phrase_matched": False,
         }
 
+    decoder_used = "primary" if primary_span is not None or not rescue_attempted else "rescue"
+    decode = primary_decode if decoder_used == "primary" else rescue_decode
+    span = primary_span if decoder_used == "primary" else rescue_span
     words = list(decode.get("timed_words") or [])
-    span = _quote_confirmation_locator(
-        words, str(binding["authored_quote"]),
-        exact_contiguous_required=exact_contiguous_required, index_module=_index)
-    if span is not None and not _confirmation_span_near_hint(span, binding["prompted_span"]):
-        span = None
     status = "confirmed" if span is not None else "rejected"
     method = ("exact_contiguous_timed_asr+unprompted_confirmation"
               if exact_contiguous_required
@@ -738,6 +893,16 @@ def _confirm_prompted_quote_span_unprompted(
                             round(float(span[2]), 3)] if span is not None else None),
         "timed_asr_ratio": round(float(span[2]), 3) if span is not None else 0.0,
         "match_method": method,
+        "decoder_used": decoder_used,
+        "primary_model": primary_model,
+        "rescue_model": rescue_model,
+        "primary_decode_status": primary_status,
+        "primary_decode_reason": primary_reason,
+        "primary_phrase_matched": primary_span is not None,
+        "rescue_attempted": rescue_attempted,
+        "rescue_decode_status": str(rescue_decode.get("status", "") or ""),
+        "rescue_decode_reason": str(rescue_decode.get("reason", "") or ""),
+        "rescue_phrase_matched": rescue_span is not None,
     }
     artifact["result_content_sha256"] = _quote_confirmation_result_sha256(artifact)
     # Revalidate the exact bytes before publishing the cache entry. A malformed decoder result is
