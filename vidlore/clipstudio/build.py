@@ -1737,6 +1737,21 @@ def _select_breakouts(proj, segments, total: float, work: Path, log, cfg=None) -
     # even when the throne-room shot is too dim for Face-ID. (User's cold-open / "let the scene speak".)
     _verbatim_strong = set()
     _verbatim_first = None        # (seg_idx, key) of the EARLIEST verbatim quote = cold-open hook
+    # SAME LINE, TWO SPELLINGS, TWICE THE DECODING.
+    #
+    # This search reads the quote only through its normalised token run and through the
+    # short-quote exactness rule, which counts those same tokens — so two scripts writing
+    # "I demand a trial by combat!" and "I demand a trial by combat." pose one question and get one
+    # answer. Measured on a real 180-scene job: 757 unprompted decodes over 19 authored quotes that
+    # are only 17 distinct lines, and the two duplicated pairs alone cost 160 of those decodes
+    # (21.1%). This memo removes exactly that repetition and nothing else.
+    #
+    # It is emphatically NOT an early exit. The loop below keeps the BEST-scoring confirmed
+    # candidate, so stopping at the first confirmation would change which window airs — that is a
+    # quality change wearing an optimisation's clothes, and it is not made here.
+    _quote_search_memo: dict = {}
+    _quote_search_stats = {"hit": 0, "miss": 0}
+
     def _locate_quote9(_q):
         """Retrieve then independently confirm a scripted quote in downloaded footage.
 
@@ -1747,6 +1762,11 @@ def _select_breakouts(proj, segments, total: float, work: Path, log, cfg=None) -
         """
         qw = _rw(_q)[:8]
         _exact_required = _quote_exact_required9(_q, index_module=_index)
+        _memo_key = (tuple(qw), bool(_exact_required))
+        if _memo_key in _quote_search_memo:
+            _quote_search_stats["hit"] += 1
+            return _quote_search_memo[_memo_key]
+        _quote_search_stats["miss"] += 1
         best = None
         for s in srcs:
             if s.id not in ok_audio:
@@ -1840,6 +1860,7 @@ def _select_breakouts(proj, segments, total: float, work: Path, log, cfg=None) -
                     if best is None or score > best[0]:
                         best = (score, s, _confirmed_sh, _confirmed_run,
                                 (_cqs, _cqe, _cratio), _summary)
+        _quote_search_memo[_memo_key] = best
         return best
 
     def _admit_quote9(seg, _q, best):
@@ -1853,6 +1874,11 @@ def _select_breakouts(proj, segments, total: float, work: Path, log, cfg=None) -
                                    round(float(best[4][1]), 3),
                                    round(float(best[4][2]), 3)],
                 "confirmation": dict(best[5] or {}),
+                # The confirmation artifact is bound to the exact string that was decoded against.
+                # When two beats quote the same line with different punctuation the search is
+                # memoised across them, so the binding can name the sibling spelling. Record what
+                # THIS beat asked for, so the audit never quietly implies otherwise.
+                "authored_quote_as_requested": str(_q),
             }
         # Face-ID BYPASS requires a STRONG verbatim match (>=4 words, >=70% coverage, a content
         # word) — a bare 3-4-word generic prefix used to steal the gate and air a DIFFERENT line.
