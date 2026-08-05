@@ -34,6 +34,74 @@ _AUTHORIZED_SOURCE_COMPARE_FILTERS = {
     "crop=iw*0.840:ih*0.840:iw*0.160:ih*0.160",
 }
 
+# AUTHORIZED TRANSFORM SCHEMA
+#
+# Lineage compares a delivered frame against its source window, and the pipeline is allowed to have
+# punched a corner crop into that frame on the way. So the comparison has to apply the SAME crop —
+# which means the crop has to be declared, and a declared transform is an input an attacker (or a
+# bug) could use to make foreign pixels compare equal. The original defence was a set of four
+# literal filter strings: airtight, and brittle in a way that matters — an identical crop written
+# `iw*0.84` instead of `iw*0.840` is the same geometry and was refused, so any downstream change to
+# how the filter is formatted silently turned a provable frame into a blocked render.
+#
+# Generalised WITHOUT widening what is permitted: the declaration is now PARSED into canonical
+# geometry and checked against this schema, rather than string-matched. What survives is exactly
+# what survived before — a pure corner crop, at an authorized fraction, anchored to a real corner:
+#   * only `crop`; no filter graph, no chaining, no second filter, no arbitrary expression
+#   * the fraction must be one this pipeline actually produces (_AUTHORIZED_CROP_FRACTIONS)
+#   * width and height fractions must be equal (a corner bug crop is square in fraction terms)
+#   * the offsets must be exactly 0 or exactly the complement (1 - fraction) on their own axis
+# Anything else — a different fraction, a shifted origin, a scale, an eq, a drawbox, a second
+# clause, or a filter naming a file — parses to None and is rejected exactly as before.
+_AUTHORIZED_CROP_FRACTIONS = (0.840,)
+_CROP_RX = re.compile(
+    r"^crop=iw\*(?P<w>[0-9]*\.?[0-9]+):ih\*(?P<h>[0-9]*\.?[0-9]+)"
+    r":(?P<x>0|iw\*[0-9]*\.?[0-9]+):(?P<y>0|ih\*[0-9]*\.?[0-9]+)$")
+
+
+def canonical_source_compare_transform(filter_expr: str):
+    """Canonical geometry for an authorized corner crop, or None if it is not one.
+
+    None means "refuse" at every call site. This never executes the expression; it only decides
+    whether the declaration describes a transform the pipeline is allowed to have applied."""
+    text = str(filter_expr or "").strip()
+    if not text:
+        return None
+    m = _CROP_RX.match(text)
+    if not m:
+        return None
+    try:
+        w = float(m.group("w"))
+        h = float(m.group("h"))
+    except (TypeError, ValueError):
+        return None
+    frac = next((f for f in _AUTHORIZED_CROP_FRACTIONS if abs(w - f) <= 1e-6), None)
+    if frac is None or abs(w - h) > 1e-6:
+        return None
+    comp = round(1.0 - frac, 6)
+
+    def _axis(raw: str, unit: str):
+        if raw == "0":
+            return 0.0
+        try:
+            val = float(raw.split("*", 1)[1])
+        except (IndexError, TypeError, ValueError):
+            return None
+        return val if abs(val - comp) <= 1e-6 else None
+
+    x = _axis(m.group("x"), "iw")
+    y = _axis(m.group("y"), "ih")
+    if x is None or y is None:
+        return None
+    return {"schema": "source_compare_transform/1", "kind": "corner_crop",
+            "w_frac": round(frac, 6), "h_frac": round(frac, 6),
+            "x_frac": round(x, 6), "y_frac": round(y, 6)}
+
+
+def source_compare_filter_authorized(filter_expr: str) -> bool:
+    """True only for a declaration this pipeline is allowed to have applied."""
+    return canonical_source_compare_transform(filter_expr) is not None
+
 
 class SceneLineageError(RuntimeError):
     """An assembled frame cannot be proved to belong to its planned beat."""
@@ -292,8 +360,8 @@ def bind_encode_plan(encode_plan: list[dict], raw: Any) -> tuple[list[dict], lis
                                 "verified selection source window is non-positive")
                         source_filter = str(raw_row.get(
                             "selection_source_compare_filter") or "").strip()
-                        if source_filter and source_filter not in \
-                                _AUTHORIZED_SOURCE_COMPARE_FILTERS:
+                        if source_filter and not source_compare_filter_authorized(
+                                source_filter):
                             raise SceneLineageError(
                                 "selection source comparison declares an unauthorized filter")
                         cache_key = (str(source_path), round(win_start, 4),
