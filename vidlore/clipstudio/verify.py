@@ -1258,6 +1258,54 @@ def _project_source_title(proj, source_id: str) -> str:
     return ((getattr(source, "title", "") or "") + " " + str(source_id or ""))
 
 
+def _subject_terms(seg, char2actor: dict) -> set:
+    """Every name that would identify this beat's required subject on screen.
+
+    The beat names a CHARACTER; Face-ID and many upload titles name the ACTOR, so the roster
+    mapping has to be applied or "Shae" never matches a title that says "Sibel Kekilli". Returns
+    lowercased word-level terms, ignoring one- and two-letter fragments that match everything."""
+    ent = (getattr(seg, "required_entity", "") or "").strip()
+    if not ent or (getattr(seg, "required_kind", "") or "").lower() not in (
+            "character", "actor", "montage", ""):
+        return set()
+    out: set = set()
+    for name in re.split(r",|\band\b|/|\+|;", ent):
+        name = name.strip().lower()
+        if not name:
+            continue
+        for form in (name, str((char2actor or {}).get(name, "") or "").lower()):
+            for w in re.findall(r"[a-z']{3,}", form):
+                out.add(w)
+    return out
+
+
+def _subject_affinity(cand, terms: set, proj) -> float:
+    """How strongly this candidate is associated with the wanted subject. ORDERING ONLY.
+
+    Nothing here admits a candidate: `_try_promote` applies the same strict verifier bar to
+    whatever it is handed. This only decides which candidate that bar looks at first, which is the
+    difference between finding the right person on the bench and never reaching them.
+
+    Two independent signals, so a mislabelled title alone cannot carry a candidate:
+      * the source TITLE naming the subject (what a human uploader wrote about the clip)
+      * the match-time face/identity signals on the candidate itself
+    """
+    if not terms:
+        return 0.0
+    score = 0.0
+    title = _project_source_title(proj, getattr(cand, "source_id", "") or "").lower()
+    if title:
+        hits = sum(1 for t in terms if t in title)
+        score += min(1.0, hits / max(1, min(2, len(terms))))
+    sig = getattr(cand, "signals", None) or {}
+    ident = " ".join(str(x) for x in (
+        sig.get("identity", ""), sig.get("face_ids", ""), sig.get("identities", ""))).lower()
+    if ident and any(t in ident for t in terms):
+        score += 1.0
+    score += 0.25 * float(sig.get("faceid", 0.0) or 0.0)
+    return score
+
+
 def _project_exact_cast_warning(proj, seg, source_id: str) -> str:
     """Compute the conditional strict-prompt warning from the canonical project roster."""
     return _source_title_exact_cast_conflict(
@@ -4603,6 +4651,22 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 if _bench and _must_see(seg) and v.get("target_visible") is False:
                     _bench.sort(key=lambda c: float(
                         (getattr(c, "signals", None) or {}).get("target_vis", 0.0)), reverse=True)
+                # WRONG-SUBJECT ordering: the same idea for the other way a pick can be wrong about
+                # WHO is on screen. When the verifier reports the beat's required subject absent and
+                # a different one present, the bench is very often holding the right person — it is
+                # simply further down a ranking that knows nothing about the verdict that was just
+                # returned. Measured, job ee93371e41 beat 134 (required_entity 'Shae', verdict
+                # correct_subject_visible=False / wrong_subject_visible=True): 24 of its 61
+                # candidates come from Shae/Tywin-titled sources, including the S04E06 Shae scene,
+                # and the beat still shipped an Oberyn compilation. Nothing was missing from the
+                # bench; nothing put the right people at the front of it.
+                # Ordering ONLY, exactly like the look-miss rule above: `_try_promote` still applies
+                # the same strict bar to whatever it reaches, so this can change which candidate is
+                # examined first and can never admit one that would otherwise be refused.
+                if _bench and v.get("correct_subject_visible") is False:
+                    _want = _subject_terms(seg, _char2actor)
+                    if _want:
+                        _bench.sort(key=lambda c: _subject_affinity(c, _want, proj), reverse=True)
                 if _bench and _try_promote(downgrade=False, pool=_bench):
                     log(f"verify: seg{sel.segment_index} rescued from the deep bench "
                         f"({len(_bench)} extra candidate(s)) — exact scene found, no downgrade")
