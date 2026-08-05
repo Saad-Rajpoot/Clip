@@ -27,6 +27,12 @@ _VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".ts"}
 _FEATURE_W = 17
 _FEATURE_H = 16
 _FEATURE_BYTES = _FEATURE_W * _FEATURE_H * 3
+_AUTHORIZED_SOURCE_COMPARE_FILTERS = {
+    "crop=iw*0.840:ih*0.840:0:0",
+    "crop=iw*0.840:ih*0.840:0:ih*0.160",
+    "crop=iw*0.840:ih*0.840:iw*0.160:0",
+    "crop=iw*0.840:ih*0.840:iw*0.160:ih*0.160",
+}
 
 
 class SceneLineageError(RuntimeError):
@@ -210,7 +216,7 @@ def bind_encode_plan(encode_plan: list[dict], raw: Any) -> tuple[list[dict], lis
     # Several beats may point into one source file.  Cache only the small
     # decoded bank for an exact source window; never hash a multi-GB source once
     # per beat.
-    source_bank_cache: dict[tuple[str, float, float], list[dict]] = {}
+    source_bank_cache: dict[tuple[str, float, float, str], list[dict]] = {}
     consumed: set[tuple[int, int]] = set()
     for plan_row in encode_plan:
         scene = _as_int(plan_row.get("scene_index"), _as_int(plan_row.get("j")))
@@ -284,16 +290,26 @@ def bind_encode_plan(encode_plan: list[dict], raw: Any) -> tuple[list[dict], lis
                         if win_end <= win_start:
                             raise SceneLineageError(
                                 "verified selection source window is non-positive")
-                        cache_key = (str(source_path), round(win_start, 4), round(win_end, 4))
+                        source_filter = str(raw_row.get(
+                            "selection_source_compare_filter") or "").strip()
+                        if source_filter and source_filter not in \
+                                _AUTHORIZED_SOURCE_COMPARE_FILTERS:
+                            raise SceneLineageError(
+                                "selection source comparison declares an unauthorized filter")
+                        cache_key = (str(source_path), round(win_start, 4),
+                                     round(win_end, 4), source_filter)
                         source_features = source_bank_cache.get(cache_key)
                         if source_features is None:
                             source_features = _features_at_times(
                                 source_path,
                                 _uniform_times(source_path, 5, start=win_start,
                                                duration=win_end - win_start),
+                                filter_prefix=source_filter,
                             )
                             source_bank_cache[cache_key] = source_features
                         source_comparison = _compare_bank(bound_features, source_features)
+                        if source_filter:
+                            source_comparison["authorized_source_filter"] = source_filter
                         if not source_comparison["passed"]:
                             raise SceneLineageError(
                                 "planned derivative visually mismatches its selected source window")
@@ -396,7 +412,8 @@ def _fingerprint_filter(prefix: str = "") -> str:
     )
 
 
-def _features_at_times(path: Path, times: list[float]) -> list[dict]:
+def _features_at_times(path: Path, times: list[float],
+                       *, filter_prefix: str = "") -> list[dict]:
     """Seek several timestamps in one ffmpeg process and fingerprint them."""
     path = Path(path)
     if not times:
@@ -411,9 +428,10 @@ def _features_at_times(path: Path, times: list[float]) -> list[dict]:
     labels = []
     for pos in range(len(times)):
         label = f"f{pos}"
+        prefix = f"{filter_prefix}," if filter_prefix else ""
         chains.append(
             f"[{pos}:v]trim=end_frame=1,setpts=PTS-STARTPTS,"
-            f"{_fingerprint_filter()}[{label}]")
+            f"{_fingerprint_filter(prefix)}[{label}]")
         labels.append(f"[{label}]")
     chains.append("".join(labels) + f"concat=n={len(labels)}:v=1:a=0[out]")
     args += [

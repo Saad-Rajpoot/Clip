@@ -7694,12 +7694,19 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         if path:
             _lineage_roots[_lineage_key(path)] = dict(root)
 
-    def _lineage_derive(path, parent, *, via: str = "selection_derivative") -> bool:
+    def _lineage_derive(path, parent, *, via: str = "selection_derivative",
+                        selection_source_compare_filter: str = "") -> bool:
         """Register ``path`` as a derivative of ``parent``; unknown roots fail later, never infer."""
         inherited = _lineage_roots.get(_lineage_key(parent)) if parent else None
         if not inherited or not path:
             return False
-        _lineage_register(path, {**inherited, "via": via})
+        derived = {**inherited, "via": via}
+        if selection_source_compare_filter:
+            # This is not an exemption from decoded lineage comparison.  It tells the independent
+            # canary to apply the exact build-authorized corner crop to the source-window bank too,
+            # so removing a channel bug cannot masquerade as a foreign-scene swap.
+            derived["selection_source_compare_filter"] = selection_source_compare_filter
+        _lineage_register(path, derived)
         return True
 
     def _selection_root(sel, final_scene: int) -> dict:
@@ -8305,7 +8312,9 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         _owned = _fit_verified_selection_clip(
             _selected_clip, _owned_full, sum(_owned_lens),
             crop_filter=_owned_crop, zoom_to=_owned_zoom)
-        if _owned is None or not _lineage_derive(_owned, _selected_clip):
+        if _owned is None or not _lineage_derive(
+                _owned, _selected_clip,
+                selection_source_compare_filter=_owned_crop):
             from .verify import NonRetryableBuildError
             raise NonRetryableBuildError(
                 f"scene-lineage gate: could not make a complete owned derivative for beat "

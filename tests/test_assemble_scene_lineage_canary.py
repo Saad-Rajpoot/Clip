@@ -139,6 +139,34 @@ def test_foreign_derivative_at_expected_filename_fails_selected_source_window(
     assert any("selected source window" in reason for reason in rows[0]["reasons"])
 
 
+def test_authorized_watermark_crop_is_compared_exactly_without_admitting_foreign_bytes(
+        textured_clips):
+    root, selected_source, foreign, _, _ = textured_clips
+    cropped = root / "authorized_crop.mp4"
+    _run_ffmpeg([
+        "-i", str(selected_source),
+        "-vf", "crop=iw*0.840:ih*0.840:0:0,scale=320:180",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(cropped),
+    ])
+    exp = _expectation(0, cropped)
+    exp.update({
+        "selected_source_id": "selected",
+        "selection_source_path": str(selected_source),
+        "selected_window": ["selected", 0.0, 1.5],
+        "selection_source_compare_filter": "crop=iw*0.840:ih*0.840:0:0",
+    })
+    plan = [_plan_row(0, cropped)]
+    rows, failures = bind_encode_plan(plan, [exp])
+    assert failures == []
+    assert rows[0]["selected_source_comparison"]["authorized_source_filter"] \
+        == "crop=iw*0.840:ih*0.840:0:0"
+
+    foreign_exp = dict(exp, file=str(foreign))
+    foreign_rows, foreign_failures = bind_encode_plan(
+        [_plan_row(0, foreign)], [foreign_exp])
+    assert foreign_failures and foreign_rows[0]["passed"] is False
+
+
 def test_empty_or_partial_contract_fails_closed(tmp_path):
     clip = tmp_path / "clip.mp4"
     clip.write_bytes(b"x")
