@@ -102,3 +102,29 @@ def test_the_refusal_is_reported_not_swallowed():
     i = SRC.index("_asr_upgrade_refused.add(source.id)")
     assert "progress(" in SRC[max(0, i - 500):i]
     assert "barred from quote" in SRC[max(0, i - 500):i]
+
+
+# ------------------------------------------------------------------ the bar must not just move
+#
+# MEASURED: after the first fix, a 72-minute run reached the pool-completeness check and died there
+# instead — `ASR evidence incomplete for 13/141 usable source(s)` — with the two barred sources
+# reappearing as `asr_prompt_fingerprint_mismatch`. Refusing a source's quote evidence and then
+# demanding that same source carry a current quote-evidence fingerprint is incoherent: it relocates
+# the abort rather than resolving it.
+def test_a_barred_source_is_not_required_to_carry_a_current_prompt_fingerprint():
+    src = inspect.getsource(I.asr_pool_cache_audit)
+    i = src.index('"asr_prompt_fingerprint_mismatch"')
+    guard = src.rindex("_asr_upgrade_refused", 0, i)
+    assert guard < i, "the exclusion must gate the mismatch, not follow it"
+
+
+def test_the_exclusion_is_scoped_to_the_fingerprint_check_only():
+    """Every other integrity reason still applies to a barred source — missing shots, corrupt
+    words, uncertified evidence, stale schema, interrupted refresh, bad provenance."""
+    src = inspect.getsource(I.asr_pool_cache_audit)
+    assert src.count("_asr_upgrade_refused") == 1
+    for reason in ("shots_cache_invalid_or_missing", "words_cache_invalid_or_missing",
+                   "word_evidence_not_certified", "word_evidence_schema_stale",
+                   "asr_refresh_interrupted"):
+        i = src.index(reason)
+        assert "_asr_upgrade_refused" not in src[max(0, i - 300):i], reason

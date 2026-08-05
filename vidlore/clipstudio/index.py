@@ -1205,7 +1205,15 @@ def asr_pool_cache_audit(proj, cfg: ClipConfig, sources=None) -> dict:
         if not schema_current:
             invalid.append({"source_id": sid, "reason": "word_evidence_schema_stale"})
             continue
-        if str(meta.get("asr_prompt_fingerprint", "") or "") != expected:
+        if str(meta.get("asr_prompt_fingerprint", "") or "") != expected \
+                and sid not in _asr_upgrade_refused:
+            # A source barred from quote retrieval is OUT of the whole-pool quote scope, so its
+            # transcript currency is not part of what that scope's soundness rests on. Demanding a
+            # current prompt fingerprint from a source we have already refused to take quote
+            # evidence FROM would only relocate the abort — and it did exactly that: the barred
+            # sources reappeared here as `asr_prompt_fingerprint_mismatch` and stopped a 72-minute
+            # run at the completeness check instead of at the source. It is excluded from the
+            # requirement because it is excluded from the claim, never to make the claim easier.
             invalid.append({"source_id": sid, "reason": "asr_prompt_fingerprint_mismatch"})
             continue
         provenance_ok, provenance_reason, _provenance = \

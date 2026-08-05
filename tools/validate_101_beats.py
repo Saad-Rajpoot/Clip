@@ -54,10 +54,19 @@ stages = doc.get("meta", {}).get("pipeline", {}).get("stages", {})
 dropped = [s for s in STAGES if s in stages]
 for s in dropped:
     stages.pop(s, None)
+# Selections belong to the segmentation that produced them. Re-running `match` means they are
+# about to be rebuilt, and leaving the old ones behind makes the pool audit see selections
+# pointing at sources the current pool no longer holds — measured: 11 of 13
+# `selected_source_not_in_usable_pool` rows in a run whose fresh analyze changed 101 beats to 97.
+n_sel = len(doc.get("selections") or [])
+if "match" in dropped and n_sel:
+    doc["selections"] = []
 tmp = pj.with_suffix(".json.tmp")
 tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
 os.replace(tmp, pj)
-log(f"invalidated checkpoints: {dropped or '(none present)'}")
+log(f"invalidated checkpoints: {dropped or '(none present)'}"
+    + (f"; dropped {n_sel} stale selection(s) belonging to the previous segmentation"
+       if "match" in dropped and n_sel else ""))
 log(f"kept: {sorted(stages)}")
 
 cats = musiclib.scan()
