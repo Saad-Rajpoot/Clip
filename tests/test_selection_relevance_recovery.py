@@ -198,6 +198,33 @@ def _write_mock_recovery_page(proj, kw, *, deferred=(), page_completed=True,
     (proj.output_dir / kw["audit_filename"]).write_text(json.dumps(audit))
 
 
+def _write_persisted_semantic_cursor(proj, segs, audit, *, deferred, completed,
+                                     pool_changed=False):
+    """Model the atomic marker+cross-process receipt written by one conclusive strict page."""
+    from vidlore.clipstudio import relevance_contract as R
+
+    previous = copy.deepcopy(
+        proj.meta.get("selection_relevance_recovery"))
+    blockers = sorted(int(e["segment_index"]) for e in audit["blockers"])
+    content = O._selection_relevance_audit_without(audit, set())
+    marker = {
+        "schema_version": R.SCHEMA_VERSION,
+        "before": blockers,
+        "after": blockers,
+        "post_fingerprint": O._selection_relevance_retry_fingerprint(
+            proj, segs, content),
+        "deferred": list(deferred),
+        "pool_fingerprint": O._semantic_recovery_pool_fingerprint(proj),
+        "pool_changed_during_page": bool(pool_changed),
+        "completed_page_scope": list(completed),
+        "technical_blockers": [],
+    }
+    marker[O._SEMANTIC_PAGINATION_RECEIPT_KEY] = \
+        O._advance_semantic_pagination_receipt(previous, marker)
+    proj.meta["selection_relevance_recovery"] = marker
+    proj.save()
+
+
 def _quote_cache_fixture(tmp_path):
     bad = {**GOOD, "verdict": "replace", "matches_narration": False,
            "specific_enough": False, "correct_subject_visible": False}
@@ -1454,23 +1481,6 @@ def test_single_preflight_drain_finishes_tail_and_pool_growth_rebound(tmp_path):
     calls = []
     rebound_calls = []
 
-    def record_marker(audit, *, deferred, completed):
-        blockers = sorted(int(e["segment_index"]) for e in audit["blockers"])
-        content = O._selection_relevance_audit_without(audit, set())
-        proj.meta["selection_relevance_recovery"] = {
-            "schema_version": R.SCHEMA_VERSION,
-            "before": [0, 1, 2],
-            "after": blockers,
-            "post_fingerprint": O._selection_relevance_retry_fingerprint(
-                proj, segs, content),
-            "deferred": list(deferred),
-            "pool_fingerprint": O._semantic_recovery_pool_fingerprint(proj),
-            "pool_changed_during_page": len(calls) == 2,
-            "completed_page_scope": list(completed),
-            "technical_blockers": [],
-        }
-        proj.save()
-
     def recover_one_page():
         calls.append(len(calls) + 1)
         if len(calls) == 2:
@@ -1484,11 +1494,14 @@ def test_single_preflight_drain_finishes_tail_and_pool_growth_rebound(tmp_path):
         audit = R.evaluate_selection_relevance(proj, segs)
         assert audit["blocked_count"] == 3
         if len(calls) == 1:
-            record_marker(audit, deferred=[2], completed=[0, 1])
+            _write_persisted_semantic_cursor(
+                proj, segs, audit, deferred=[2], completed=[0, 1])
         elif len(calls) == 2:
-            record_marker(audit, deferred=[0, 1], completed=[2])
+            _write_persisted_semantic_cursor(
+                proj, segs, audit, deferred=[0, 1], completed=[2], pool_changed=True)
         else:
-            record_marker(audit, deferred=[], completed=[0, 1])
+            _write_persisted_semantic_cursor(
+                proj, segs, audit, deferred=[], completed=[0, 1])
         return audit
 
     env = {
@@ -1523,15 +1536,8 @@ def test_single_preflight_drain_rejects_repeated_deferred_state(tmp_path):
     def stuck_page():
         calls.append(len(calls) + 1)
         audit = R.evaluate_selection_relevance(proj, segs)
-        content = O._selection_relevance_audit_without(audit, set())
-        proj.meta["selection_relevance_recovery"] = {
-            "schema_version": R.SCHEMA_VERSION,
-            "before": [0], "after": [0], "deferred": [0],
-            "post_fingerprint": O._selection_relevance_retry_fingerprint(
-                proj, segs, content),
-            "pool_fingerprint": O._semantic_recovery_pool_fingerprint(proj),
-            "completed_page_scope": [], "technical_blockers": [],
-        }
+        _write_persisted_semantic_cursor(
+            proj, segs, audit, deferred=[0], completed=[])
         return audit
 
     with mock.patch.dict(os.environ, {
@@ -1559,15 +1565,8 @@ def test_single_preflight_drain_has_finite_whole_walk_guard(tmp_path):
             id=f"growth_{len(calls)}", url=f"u:growth:{len(calls)}", title="New scene",
             permission="owner", status="ok", local_path=str(media)))
         audit = R.evaluate_selection_relevance(proj, segs)
-        content = O._selection_relevance_audit_without(audit, set())
-        proj.meta["selection_relevance_recovery"] = {
-            "schema_version": R.SCHEMA_VERSION,
-            "before": [0], "after": [0], "deferred": [0],
-            "post_fingerprint": O._selection_relevance_retry_fingerprint(
-                proj, segs, content),
-            "pool_fingerprint": O._semantic_recovery_pool_fingerprint(proj),
-            "completed_page_scope": [], "technical_blockers": [],
-        }
+        _write_persisted_semantic_cursor(
+            proj, segs, audit, deferred=[0], completed=[], pool_changed=True)
         return audit
 
     with mock.patch.dict(os.environ, {
@@ -1577,6 +1576,253 @@ def test_single_preflight_drain_has_finite_whole_walk_guard(tmp_path):
                 proj, segs, always_growing_page,
                 rebind_page=lambda: None, log=lambda _m: None)
     assert calls == [1, 2]
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    pytest.param("schema_version", "__delete__", id="missing-schema"),
+    pytest.param("schema_version", 0, id="falsey-schema"),
+    pytest.param("before", "__delete__", id="missing-before"),
+    pytest.param("before", [], id="falsey-before"),
+    pytest.param("deferred", "__delete__", id="missing-deferred"),
+    pytest.param("deferred", None, id="falsey-deferred"),
+    pytest.param("post_fingerprint", "", id="falsey-content-fingerprint"),
+    pytest.param("pool_fingerprint", "", id="falsey-pool-fingerprint"),
+    pytest.param("completed_page_scope", None, id="falsey-completed-scope"),
+])
+def test_preflight_rejects_malformed_current_cursor_before_work_or_rebind(
+        tmp_path, field, value):
+    """A current-looking partial cursor is technical state, never an exhausted content verdict."""
+    from vidlore.clipstudio import relevance_contract as R
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    audit = R.evaluate_selection_relevance(proj, segs)
+    _write_persisted_semantic_cursor(
+        proj, segs, audit, deferred=[0], completed=[])
+    if value == "__delete__":
+        proj.meta["selection_relevance_recovery"].pop(field)
+    else:
+        proj.meta["selection_relevance_recovery"][field] = value
+    proj.save()
+    recover = mock.Mock()
+    rebind = mock.Mock()
+
+    with pytest.raises(O.PipelineError, match="semantic recovery cursor"):
+        O._drain_semantic_recovery_pages(
+            proj, segs, recover, initial_audit=audit,
+            rebind_page=rebind, log=lambda _m: None)
+
+    recover.assert_not_called()
+    rebind.assert_not_called()
+
+
+def test_falsey_present_pagination_receipt_is_not_re_adopted_as_legacy(tmp_path):
+    """Only an absent receipt means old schema-9; a present partial receipt is corruption."""
+    from vidlore.clipstudio import relevance_contract as R
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    audit = R.evaluate_selection_relevance(proj, segs)
+    _write_persisted_semantic_cursor(
+        proj, segs, audit, deferred=[0], completed=[])
+    proj.meta["selection_relevance_recovery"][
+        O._SEMANTIC_PAGINATION_RECEIPT_KEY] = {}
+    proj.save()
+    recover = mock.Mock()
+    rebind = mock.Mock()
+
+    with pytest.raises(O.PipelineError, match="pagination receipt is malformed"):
+        O._drain_semantic_recovery_pages(
+            proj, segs, recover, initial_audit=audit,
+            rebind_page=rebind, log=lambda _m: None)
+    recover.assert_not_called()
+    rebind.assert_not_called()
+
+
+def test_fully_valid_explicit_empty_deferred_cursor_is_exhausted(tmp_path):
+    """Only a complete, hash-bound marker may use deferred=[] as an exhausted-generation receipt."""
+    from vidlore.clipstudio import relevance_contract as R
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    audit = R.evaluate_selection_relevance(proj, segs)
+    _write_persisted_semantic_cursor(
+        proj, segs, audit, deferred=[], completed=[0])
+    # A terminal/exhausted marker does not need an executable pagination receipt.
+    proj.meta["selection_relevance_recovery"].pop(
+        O._SEMANTIC_PAGINATION_RECEIPT_KEY)
+    proj.save()
+    recover = mock.Mock()
+    rebind = mock.Mock()
+
+    result = O._drain_semantic_recovery_pages(
+        proj, segs, recover, initial_audit=audit,
+        rebind_page=rebind, log=lambda _m: None)
+
+    assert result["blocked_count"] == 1
+    recover.assert_not_called()
+    rebind.assert_called_once_with()
+
+
+def test_valid_schema9_cursor_is_adopted_before_next_page_and_survives_reload(tmp_path):
+    """The live pre-receipt marker gets one safe adoption, persisted before another page spends."""
+    from vidlore.clipstudio import relevance_contract as R
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    audit = R.evaluate_selection_relevance(proj, segs)
+    _write_persisted_semantic_cursor(
+        proj, segs, audit, deferred=[0], completed=[])
+    legacy = proj.meta["selection_relevance_recovery"]
+    legacy.pop(O._SEMANTIC_PAGINATION_RECEIPT_KEY)
+    proj.save()
+    observed = {}
+
+    def final_page():
+        receipt = proj.meta["selection_relevance_recovery"][
+            O._SEMANTIC_PAGINATION_RECEIPT_KEY]
+        observed["memory"] = copy.deepcopy(receipt)
+        observed["disk"] = copy.deepcopy(ClipProject.load(tmp_path).meta[
+            "selection_relevance_recovery"][O._SEMANTIC_PAGINATION_RECEIPT_KEY])
+        current = R.evaluate_selection_relevance(proj, segs)
+        _write_persisted_semantic_cursor(
+            proj, segs, current, deferred=[], completed=[0])
+        return current
+
+    with mock.patch.dict(os.environ, {
+            "VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY_MAX_PAGES": "4"}):
+        result = O._drain_semantic_recovery_pages(
+            proj, segs, final_page, initial_audit=audit,
+            rebind_page=lambda: None, log=lambda _m: None)
+
+    assert result["blocked_count"] == 1
+    assert observed["memory"] == observed["disk"]
+    assert observed["memory"]["page_count"] == 1
+    persisted = ClipProject.load(tmp_path).meta["selection_relevance_recovery"][
+        O._SEMANTIC_PAGINATION_RECEIPT_KEY]
+    assert persisted["page_count"] == 2
+    assert len(persisted["attempted_state_digests"]) == 2
+
+
+def test_finite_page_guard_remains_terminal_after_process_reload(tmp_path):
+    """A new Python process cannot reset page_count/max_pages by rebuilding the in-memory loop."""
+    from vidlore.clipstudio import relevance_contract as R
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    audit = R.evaluate_selection_relevance(proj, segs)
+    with mock.patch.dict(os.environ, {
+            "VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY_MAX_PAGES": "2"}):
+        _write_persisted_semantic_cursor(
+            proj, segs, audit, deferred=[0], completed=[])
+
+    reloaded = ClipProject.load(tmp_path)
+    reloaded_segs = reloaded.segments
+    reloaded_audit = R.evaluate_selection_relevance(reloaded, reloaded_segs)
+
+    def second_page():
+        media = tmp_path / "reload-growth.mp4"
+        media.write_bytes(b"second and final bounded pool generation")
+        reloaded.sources.append(SourceVideo(
+            id="reload_growth", url="u:reload-growth", title="New exact scene",
+            permission="owner", status="ok", local_path=str(media)))
+        current = R.evaluate_selection_relevance(reloaded, reloaded_segs)
+        _write_persisted_semantic_cursor(
+            reloaded, reloaded_segs, current,
+            deferred=[0], completed=[], pool_changed=True)
+        return current
+
+    with mock.patch.dict(os.environ, {
+            "VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY_MAX_PAGES": "2"}):
+        with pytest.raises(O.PipelineError, match="finite 2-page guard"):
+            O._drain_semantic_recovery_pages(
+                reloaded, reloaded_segs, second_page,
+                initial_audit=reloaded_audit, rebind_page=lambda: None,
+                log=lambda _m: None)
+
+    final_reload = ClipProject.load(tmp_path)
+    final_audit = R.evaluate_selection_relevance(final_reload, final_reload.segments)
+    never_again = mock.Mock()
+    # Even a larger environment override cannot reset a walk whose limit was persisted as two.
+    with mock.patch.dict(os.environ, {
+            "VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY_MAX_PAGES": "99"}):
+        with pytest.raises(O.PipelineError, match="finite 2-page guard"):
+            O._drain_semantic_recovery_pages(
+                final_reload, final_reload.segments, never_again,
+                initial_audit=final_audit, rebind_page=lambda: None,
+                log=lambda _m: None)
+    never_again.assert_not_called()
+    receipt = final_reload.meta["selection_relevance_recovery"][
+        O._SEMANTIC_PAGINATION_RECEIPT_KEY]
+    assert receipt["page_count"] == receipt["max_pages"] == 2
+    assert receipt["terminal_reason"].startswith("finite_guard:2:")
+
+
+def test_repeated_cursor_state_remains_terminal_after_process_reload(tmp_path):
+    """A repeated state is persisted as terminal, so Resume cannot buy the same page forever."""
+    from vidlore.clipstudio import relevance_contract as R
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    audit = R.evaluate_selection_relevance(proj, segs)
+    _write_persisted_semantic_cursor(
+        proj, segs, audit, deferred=[0], completed=[])
+    reloaded = ClipProject.load(tmp_path)
+    current = R.evaluate_selection_relevance(reloaded, reloaded.segments)
+
+    def stuck_page():
+        same = R.evaluate_selection_relevance(reloaded, reloaded.segments)
+        _write_persisted_semantic_cursor(
+            reloaded, reloaded.segments, same, deferred=[0], completed=[])
+        return same
+
+    with pytest.raises(O.PipelineError, match="made no forward progress"):
+        O._drain_semantic_recovery_pages(
+            reloaded, reloaded.segments, stuck_page, initial_audit=current,
+            rebind_page=lambda: None, log=lambda _m: None)
+
+    final_reload = ClipProject.load(tmp_path)
+    final_audit = R.evaluate_selection_relevance(final_reload, final_reload.segments)
+    never_again = mock.Mock()
+    with pytest.raises(O.PipelineError, match="made no forward progress"):
+        O._drain_semantic_recovery_pages(
+            final_reload, final_reload.segments, never_again,
+            initial_audit=final_audit, rebind_page=lambda: None, log=lambda _m: None)
+    never_again.assert_not_called()
+    receipt = final_reload.meta["selection_relevance_recovery"][
+        O._SEMANTIC_PAGINATION_RECEIPT_KEY]
+    assert receipt["page_count"] == 2
+    assert len(receipt["attempted_state_digests"]) == 1
+    assert receipt["terminal_reason"].startswith("no_progress:")
+
+
+def test_post_page_cursor_is_validated_before_checkpoint_rebind(tmp_path):
+    from vidlore.clipstudio import relevance_contract as R
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    audit = R.evaluate_selection_relevance(proj, segs)
+    rebound = mock.Mock()
+
+    def malformed_page():
+        _write_persisted_semantic_cursor(
+            proj, segs, audit, deferred=[0], completed=[])
+        proj.meta["selection_relevance_recovery"]["schema_version"] = None
+        proj.save()
+        return audit
+
+    with pytest.raises(O.PipelineError, match="cursor schema"):
+        O._drain_semantic_recovery_pages(
+            proj, segs, malformed_page, initial_audit=audit,
+            rebind_page=rebound, log=lambda _m: None)
+    rebound.assert_not_called()
 
 
 def test_page_growth_restores_hidden_29th_blocker_into_same_bounded_generation(tmp_path):

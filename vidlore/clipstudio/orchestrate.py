@@ -3770,6 +3770,7 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
     _recovery_deferred: list[int] = []
     _page_pool_changed = False
     _completed_page_scope: set[int] = set()
+    _semantic_page_completed = False
     if blockers and not backend_down:
         # One unchanged generation walks its capped scope exactly once. The first round receives all
         # blockers and persists the cap tail; the next Resume receives ONLY that tail. Passing the
@@ -3801,6 +3802,7 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
                 # Do not write selection_relevance_recovery, and do not let an empty/stale audit
                 # turn an unattempted strict page into permission for stills or specificity loss.
                 raise
+            _semantic_page_completed = True
             _recovery_deferred = sorted({
                 int(i) for i in (_ra.get("deferred_retriable") or [])
                 if str(i).lstrip("-").isdigit()})
@@ -3998,6 +4000,17 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
                 if _content_generation_exhausted else sorted(_completed_page_scope)),
             "technical_blockers": _technical_details,
         })
+        # The page receipt is part of the same atomic project save as its cursor.  If the process
+        # dies after this save but before checkpoint rebinding, Resume can validate/adopt the exact
+        # completed state without resetting either its repeat detector or its finite page budget.
+        if _semantic_page_completed:
+            _marker["pagination_receipt"] = _advance_semantic_pagination_receipt(
+                previous if _same_recovery_generation else None, _marker)
+        elif not _recovery_deferred:
+            # An exhausted marker needs no executable cursor.  In particular, an authorized gap
+            # ladder can change the final fingerprint without spending another strict page; do not
+            # carry a receipt bound to the old fingerprint into that terminal state.
+            _marker.pop("pagination_receipt", None)
         proj.meta["selection_relevance_recovery"] = _marker
     proj.save()
     if after and _recovery_deferred:
@@ -4023,126 +4036,321 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
     return final
 
 
-def _pending_semantic_recovery_page(proj, segs, audit: dict) \
-        -> tuple[list[int], tuple[str, tuple[int, ...], str]]:
-    """Validate and identify the next persisted strict-semantic page.
+_SEMANTIC_PAGINATION_RECEIPT_SCHEMA = 1
+_SEMANTIC_PAGINATION_RECEIPT_KEY = "pagination_receipt"
 
-    ``deferred`` is executable recovery state, not a diagnostic hint.  Before an autonomous build
-    spends another bounded page, bind that cursor to the exact current blocker facts and source/
-    index bytes.  A stale, malformed, or partially-written marker is a retryable technical fault;
-    it must never cause either an infinite retry or a false claim that content is exhausted.
-    """
-    from . import relevance_contract as _R_page
 
+def _semantic_cursor_int_list(marker: dict, field: str, *, require_nonempty: bool = False) \
+        -> list[int]:
+    """Read one cursor index list without accepting bools, strings, or missing/falsey fields."""
+    if field not in marker:
+        raise PipelineError(f"semantic recovery cursor is missing {field!r}")
+    value = marker[field]
+    if (not isinstance(value, list)
+            or any(isinstance(i, bool) or not isinstance(i, int) or i < 0 for i in value)
+            or len(value) != len(set(value))
+            or (require_nonempty and not value)):
+        raise PipelineError(f"semantic recovery cursor field {field!r} is malformed")
+    return sorted(value)
+
+
+def _semantic_recovery_marker_fields(marker) -> dict:
+    """Validate every core field consumed by pagination before it can drive work or rebinding."""
+    from . import relevance_contract as _R_cursor
+
+    if not isinstance(marker, dict) or not marker:
+        raise PipelineError("semantic recovery cursor is missing or malformed")
+    schema = marker.get("schema_version")
+    if (isinstance(schema, bool) or not isinstance(schema, int)
+            or schema != int(_R_cursor.SCHEMA_VERSION)):
+        raise PipelineError("semantic recovery cursor schema is missing or malformed")
+    before = _semantic_cursor_int_list(marker, "before", require_nonempty=True)
+    after = _semantic_cursor_int_list(marker, "after")
+    deferred = _semantic_cursor_int_list(marker, "deferred")
+    completed = _semantic_cursor_int_list(marker, "completed_page_scope")
+    post_fp = marker.get("post_fingerprint")
+    pool_fp = marker.get("pool_fingerprint")
+    if not isinstance(post_fp, str) or not post_fp.strip():
+        raise PipelineError("semantic recovery cursor post fingerprint is missing or malformed")
+    if not isinstance(pool_fp, str) or not pool_fp.strip():
+        raise PipelineError("semantic recovery cursor pool fingerprint is missing or malformed")
+    if not isinstance(marker.get("pool_changed_during_page"), bool):
+        raise PipelineError("semantic recovery cursor pool-change receipt is missing or malformed")
+    if not isinstance(marker.get("technical_blockers"), list):
+        raise PipelineError("semantic recovery cursor technical-blocker receipt is missing or malformed")
+    if not set(deferred).issubset(set(after)):
+        raise PipelineError("semantic recovery cursor contains a deferred non-blocker")
+    if set(completed) & set(deferred):
+        raise PipelineError("semantic recovery completed and deferred scopes overlap")
+    return {
+        "before": before, "after": after, "deferred": deferred, "completed": completed,
+        "post_fingerprint": post_fp, "pool_fingerprint": pool_fp,
+    }
+
+
+def _semantic_pagination_state_digest(marker: dict) -> str:
+    """Digest the progress-bearing state; receipt/log fields deliberately cannot create progress."""
+    import hashlib as _hashlib_page_state
+    import json as _json_page_state
+
+    fields = _semantic_recovery_marker_fields(marker)
+    payload = {
+        "post_fingerprint": fields["post_fingerprint"],
+        "deferred": fields["deferred"],
+        "pool_fingerprint": fields["pool_fingerprint"],
+    }
+    raw = _json_page_state.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return _hashlib_page_state.sha256(raw.encode("utf-8", "replace")).hexdigest()
+
+
+def _semantic_pagination_max_pages(marker: dict) -> int:
+    """Derive the finite walk ceiling once; the persisted value wins on every later process."""
+    import math as _math_pages
+    import os as _os_pages
+
+    fields = _semantic_recovery_marker_fields(marker)
+    try:
+        page_cap = max(1, int(_os_pages.environ.get(
+            "VIDLORE_CLIPSTUDIO_RECOVERY_MAX_BEATS", "8") or 8))
+    except (TypeError, ValueError) as exc:
+        raise PipelineError(
+            "VIDLORE_CLIPSTUDIO_RECOVERY_MAX_BEATS is not an integer") from exc
+    generation_size = max(
+        len(fields["before"]), len(fields["after"]), len(fields["deferred"]), 1)
+    default_max = max(4, 2 * int(_math_pages.ceil(generation_size / page_cap)) + 4)
+    try:
+        return max(1, int(_os_pages.environ.get(
+            "VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY_MAX_PAGES", str(default_max))
+            or default_max))
+    except (TypeError, ValueError) as exc:
+        raise PipelineError(
+            "VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY_MAX_PAGES is not an integer") from exc
+
+
+def _seed_semantic_pagination_receipt(marker: dict) -> dict:
+    """Adopt one valid pre-receipt (schema-9) marker without resetting its completed first page."""
+    fields = _semantic_recovery_marker_fields(marker)
+    digest = _semantic_pagination_state_digest(marker)
+    max_pages = _semantic_pagination_max_pages(marker)
+    terminal = ""
+    if fields["deferred"] and max_pages <= 1:
+        terminal = (f"finite_guard:{max_pages}:"
+                    + ",".join(str(i) for i in fields["deferred"]))
+    return {
+        "schema_version": _SEMANTIC_PAGINATION_RECEIPT_SCHEMA,
+        "generation_fingerprint": fields["post_fingerprint"],
+        "generation_pool_fingerprint": fields["pool_fingerprint"],
+        "cursor_fingerprint": fields["post_fingerprint"],
+        "cursor_pool_fingerprint": fields["pool_fingerprint"],
+        "page_count": 1,
+        "max_pages": max_pages,
+        "attempted_state_digests": [digest],
+        "terminal_reason": terminal,
+    }
+
+
+def _validate_semantic_pagination_receipt(marker: dict) -> dict:
+    """Validate the persisted cross-process budget and repeat detector against this cursor."""
+    fields = _semantic_recovery_marker_fields(marker)
+    if _SEMANTIC_PAGINATION_RECEIPT_KEY not in marker:
+        raise PipelineError("semantic recovery pagination receipt is missing")
+    receipt = marker[_SEMANTIC_PAGINATION_RECEIPT_KEY]
+    if not isinstance(receipt, dict) or not receipt:
+        raise PipelineError("semantic recovery pagination receipt is malformed")
+    schema = receipt.get("schema_version")
+    if (isinstance(schema, bool) or not isinstance(schema, int)
+            or schema != _SEMANTIC_PAGINATION_RECEIPT_SCHEMA):
+        raise PipelineError("semantic recovery pagination receipt schema is malformed")
+    for field in ("generation_fingerprint", "generation_pool_fingerprint",
+                  "cursor_fingerprint", "cursor_pool_fingerprint"):
+        if not isinstance(receipt.get(field), str) or not receipt[field].strip():
+            raise PipelineError(
+                f"semantic recovery pagination receipt field {field!r} is malformed")
+    if (receipt["cursor_fingerprint"] != fields["post_fingerprint"]
+            or receipt["cursor_pool_fingerprint"] != fields["pool_fingerprint"]):
+        raise PipelineError("semantic recovery pagination receipt is not bound to the current cursor")
+    page_count = receipt.get("page_count")
+    max_pages = receipt.get("max_pages")
+    if (isinstance(page_count, bool) or not isinstance(page_count, int) or page_count < 1
+            or isinstance(max_pages, bool) or not isinstance(max_pages, int) or max_pages < 1
+            or page_count > max_pages):
+        raise PipelineError("semantic recovery pagination page budget is malformed")
+    digests = receipt.get("attempted_state_digests")
+    if (not isinstance(digests, list) or not digests
+            or any(not isinstance(item, str) or not item.strip() for item in digests)
+            or len(digests) != len(set(digests)) or len(digests) > page_count):
+        raise PipelineError("semantic recovery pagination attempted-state receipt is malformed")
+    current_digest = _semantic_pagination_state_digest(marker)
+    if current_digest not in digests:
+        raise PipelineError("semantic recovery pagination receipt does not include current state")
+    terminal = receipt.get("terminal_reason")
+    if not isinstance(terminal, str):
+        raise PipelineError("semantic recovery pagination terminal receipt is malformed")
+    if terminal and not (terminal.startswith("no_progress:")
+                         or terminal.startswith("finite_guard:")):
+        raise PipelineError("semantic recovery pagination terminal reason is unrecognized")
+    return dict(receipt)
+
+
+def _advance_semantic_pagination_receipt(previous_marker, marker: dict) -> dict:
+    """Atomically advance page count/state with the new marker written by a conclusive page."""
+    fields = _semantic_recovery_marker_fields(marker)
+    digest = _semantic_pagination_state_digest(marker)
+    if previous_marker is None:
+        return _seed_semantic_pagination_receipt(marker)
+
+    _semantic_recovery_marker_fields(previous_marker)
+    if _SEMANTIC_PAGINATION_RECEIPT_KEY in previous_marker:
+        previous = _validate_semantic_pagination_receipt(previous_marker)
+    else:
+        # One-time compatibility adoption for the live schema-9 marker created before receipts.
+        previous = _seed_semantic_pagination_receipt(previous_marker)
+    count = int(previous["page_count"]) + 1
+    max_pages = int(previous["max_pages"])
+    if count > max_pages:
+        raise PipelineError(
+            f"semantic recovery pagination refused page {count} beyond persisted {max_pages}-page guard")
+    digests = list(previous["attempted_state_digests"])
+    terminal = ""
+    if digest in digests:
+        terminal = "no_progress:" + ",".join(str(i) for i in fields["deferred"])
+    else:
+        digests.append(digest)
+    if fields["deferred"] and count >= max_pages and not terminal:
+        terminal = (f"finite_guard:{max_pages}:"
+                    + ",".join(str(i) for i in fields["deferred"]))
+    return {
+        **previous,
+        "cursor_fingerprint": fields["post_fingerprint"],
+        "cursor_pool_fingerprint": fields["pool_fingerprint"],
+        "page_count": count,
+        "attempted_state_digests": digests,
+        "terminal_reason": terminal,
+    }
+
+
+def _semantic_recovery_cursor(proj, segs, audit: dict, *, allow_absent: bool,
+                              allow_stale: bool, adopt_legacy: bool) -> dict:
+    """Classify and validate a persisted cursor against the exact current semantic facts."""
     if not isinstance(audit, dict):
         raise PipelineError("semantic recovery page returned no current relevance audit")
+    all_blockers = list(audit.get("blockers") or [])
+    if not all_blockers:
+        return {"status": "clear", "deferred": [], "audit": audit}
     technical = _persistent_verifier_technical_indices(audit)
     content_audit = _selection_relevance_audit_without(audit, technical)
     blockers = sorted({
         int(entry.get("segment_index", -1))
         for entry in (content_audit.get("blockers") or [])
     })
-    # A strict-clear page is authoritative; an old marker may legitimately survive from an earlier
-    # generation because the marker is progress metadata, not publication state. The independent
-    # assertion after the drain proves the clear result again against persisted selections.
     if not blockers:
-        return [], ("", (), "")
-    marker = (getattr(proj, "meta", {}) or {}).get("selection_relevance_recovery") or {}
-    raw_deferred = marker.get("deferred") or []
-    if not raw_deferred:
-        return [], ("", (), "")
-    if (not isinstance(raw_deferred, list)
-            or any(isinstance(i, bool) or not isinstance(i, int) for i in raw_deferred)
-            or len(raw_deferred) != len(set(raw_deferred))):
-        raise PipelineError("semantic recovery deferred cursor is malformed")
-    deferred = sorted(raw_deferred)
+        # Technical verifier facts still need `_retry_selection_relevance`; they simply do not own
+        # an executable content-pagination cursor and therefore cannot consume/reset its budget.
+        return {"status": "unpaged", "deferred": [], "audit": content_audit}
 
-    raw_after = marker.get("after")
-    if (not isinstance(raw_after, list)
-            or any(isinstance(i, bool) or not isinstance(i, int) for i in raw_after)
-            or len(raw_after) != len(set(raw_after))
-            or sorted(raw_after) != blockers):
-        raise PipelineError(
-            "semantic recovery deferred cursor does not match current content blockers")
-    if not set(deferred).issubset(set(blockers)):
-        raise PipelineError(
-            "semantic recovery deferred cursor contains a non-blocked beat")
-    if int(marker.get("schema_version", 0) or 0) != int(_R_page.SCHEMA_VERSION):
-        raise PipelineError("semantic recovery deferred cursor schema mismatch")
-
+    meta = getattr(proj, "meta", {}) or {}
+    if "selection_relevance_recovery" not in meta:
+        if allow_absent:
+            return {"status": "absent", "deferred": [], "audit": content_audit}
+        raise PipelineError("semantic recovery page did not persist its cursor")
+    marker = meta["selection_relevance_recovery"]
+    fields = _semantic_recovery_marker_fields(marker)
     current_pool = _semantic_recovery_pool_fingerprint(proj)
-    if str(marker.get("pool_fingerprint", "") or "") != current_pool:
-        raise PipelineError(
-            "semantic recovery deferred cursor source/index pool changed before continuation")
     current_content = _selection_relevance_retry_fingerprint(proj, segs, content_audit)
-    if str(marker.get("post_fingerprint", "") or "") != current_content:
+    if (fields["pool_fingerprint"] != current_pool
+            or fields["post_fingerprint"] != current_content):
+        if allow_stale:
+            return {"status": "stale", "deferred": [], "audit": content_audit}
+        raise PipelineError("semantic recovery page cursor is stale against current content/pool")
+    if fields["after"] != blockers:
         raise PipelineError(
-            "semantic recovery deferred cursor blocker fingerprint changed before continuation")
+            "semantic recovery cursor does not match current content blockers")
 
-    completed = marker.get("completed_page_scope")
-    if (not isinstance(completed, list)
-            or any(isinstance(i, bool) or not isinstance(i, int) for i in completed)
-            or len(completed) != len(set(completed))):
-        raise PipelineError("semantic recovery completed-page receipt is malformed")
-    return deferred, (current_content, tuple(deferred), current_pool)
+    receipt = None
+    if _SEMANTIC_PAGINATION_RECEIPT_KEY in marker:
+        receipt = _validate_semantic_pagination_receipt(marker)
+    elif fields["deferred"]:
+        if not adopt_legacy:
+            raise PipelineError("semantic recovery page omitted its pagination receipt")
+        receipt = _seed_semantic_pagination_receipt(marker)
+        marker[_SEMANTIC_PAGINATION_RECEIPT_KEY] = receipt
+        proj.meta["selection_relevance_recovery"] = marker
+        proj.save()
+    return {
+        "status": "current", "deferred": fields["deferred"], "audit": content_audit,
+        "marker": marker, "receipt": receipt,
+    }
 
 
-def _drain_semantic_recovery_pages(proj, segs, recover_page, *, rebind_page=None,
-                                   log=print) -> dict:
-    """Run every audited deferred page inside one build, preserving the per-page work cap.
+def _pagination_terminal_error(cursor: dict):
+    receipt = cursor.get("receipt") or {}
+    reason = str(receipt.get("terminal_reason", "") or "")
+    deferred = list(cursor.get("deferred") or [])
+    if reason.startswith("no_progress:"):
+        return PipelineError(
+            "semantic recovery pagination made no forward progress: repeated current "
+            f"deferred scope {deferred}")
+    if reason.startswith("finite_guard:"):
+        return PipelineError(
+            f"semantic recovery pagination reached its finite {receipt.get('max_pages')}-page "
+            f"guard with current deferred scope {deferred}")
+    return None
 
-    The recovery helper deliberately caps each page (normally eight beats/four sources).  That cap
-    protects cost and remains unchanged here.  What must not happen is exposing the cap boundary as
-    a terminal content verdict: a page that enlarges the pool explicitly promises to re-check its
-    out-of-page blockers.  Continue only from a current hash-bound cursor, reject repeated states,
-    and retain a finite whole-walk ceiling.  The caller still runs the unchanged publication
-    assertion after this returns, so a genuinely exhausted blocker remains a hard failure.
-    """
-    import math as _math_pages
-    import os as _os_pages
 
-    seen: set[tuple[str, tuple[int, ...], str]] = set()
-    page_count = 0
-    max_pages = None
-    last_audit: dict = {}
-    while True:
-        page_count += 1
-        last_audit = recover_page()
+def _pending_semantic_recovery_page(proj, segs, audit: dict) \
+        -> tuple[list[int], tuple[str, tuple[int, ...], str]]:
+    """Compatibility wrapper returning a fully validated post-page cursor."""
+    cursor = _semantic_recovery_cursor(
+        proj, segs, audit, allow_absent=False, allow_stale=False, adopt_legacy=False)
+    if cursor["status"] in ("clear", "unpaged"):
+        return [], ("", (), "")
+    marker = cursor["marker"]
+    return list(cursor["deferred"]), (
+        str(marker["post_fingerprint"]), tuple(cursor["deferred"]),
+        str(marker["pool_fingerprint"]))
+
+
+def _drain_semantic_recovery_pages(proj, segs, recover_page, *, initial_audit=None,
+                                   rebind_page=None, log=print) -> dict:
+    """Drain a hash-bound finite walk; its receipt remains authoritative across process reloads."""
+    if initial_audit is None:
+        from . import relevance_contract as _R_initial_page
+        initial_audit = _R_initial_page.evaluate_selection_relevance(proj, segs)
+    last_audit = initial_audit
+    initial = _semantic_recovery_cursor(
+        proj, segs, initial_audit,
+        allow_absent=True, allow_stale=True, adopt_legacy=True)
+    if initial["status"] == "clear":
+        return initial_audit
+    if initial["status"] == "current":
+        # A prior process may have died after atomically saving its page but before this repair.
+        # Rebind only after the cursor and receipt prove which exact pool/artifacts were completed.
         if rebind_page is not None:
             rebind_page()
-        deferred, state = _pending_semantic_recovery_page(proj, segs, last_audit)
-        if not deferred:
+        terminal = _pagination_terminal_error(initial)
+        if terminal is not None:
+            raise terminal
+        if not initial["deferred"]:
+            return initial_audit
+
+    while True:
+        last_audit = recover_page()
+        current = _semantic_recovery_cursor(
+            proj, segs, last_audit,
+            allow_absent=False, allow_stale=False, adopt_legacy=False)
+        # Checkpoint signatures are writes. They may never bless a malformed, stale, cap-reset, or
+        # repeated cursor, but a validated terminal page still needs its completed artifacts bound.
+        if rebind_page is not None:
+            rebind_page()
+        if current["status"] == "clear" or not current["deferred"]:
             return last_audit
-
-        marker = (getattr(proj, "meta", {}) or {}).get("selection_relevance_recovery") or {}
-        if max_pages is None:
-            page_cap = max(1, int(_os_pages.environ.get(
-                "VIDLORE_CLIPSTUDIO_RECOVERY_MAX_BEATS", "8") or 8))
-            generation_size = max(
-                len(marker.get("before") or []), len(marker.get("after") or []), len(deferred), 1)
-            # Two complete walks cover the normal tail plus one pool-growth rebound; four spare
-            # pages cover newly-restored softened beats without turning a malformed cursor into an
-            # unbounded downloader. Operators may set a larger explicit ceiling for unusual jobs.
-            default_max = max(4, 2 * int(_math_pages.ceil(generation_size / page_cap)) + 4)
-            try:
-                max_pages = max(1, int(_os_pages.environ.get(
-                    "VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY_MAX_PAGES", str(default_max))
-                    or default_max))
-            except (TypeError, ValueError) as exc:
-                raise PipelineError(
-                    "VIDLORE_CLIPSTUDIO_SEMANTIC_RECOVERY_MAX_PAGES is not an integer") from exc
-
-        if state in seen:
-            raise PipelineError(
-                "semantic recovery pagination made no forward progress: repeated current "
-                f"deferred scope {deferred}")
-        seen.add(state)
-        if page_count >= max_pages:
-            raise PipelineError(
-                f"semantic recovery pagination reached its finite {max_pages}-page guard with "
-                f"current deferred scope {deferred}")
-        log(f"semantic-recovery: page {page_count} complete; continuing {len(deferred)} "
-            f"audited deferred beat(s) inside this render {deferred}")
+        terminal = _pagination_terminal_error(current)
+        if terminal is not None:
+            raise terminal
+        receipt = current["receipt"]
+        log(f"semantic-recovery: page {receipt['page_count']} complete; continuing "
+            f"{len(current['deferred'])} audited deferred beat(s) inside this render "
+            f"{current['deferred']}")
 
 
 def produce_auto_resilient(project_dir, **kw):
@@ -4900,11 +5108,31 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
                     reason="conclusive_semantic_recovery_pool")
 
         try:
+            # The assertion that invoked recovery atomically wrote this exact viewer-facing audit.
+            # Reuse it to validate any persisted cursor *before* spending the next page.  A mocked
+            # or legacy caller may lack the file; only that absence falls back to a fresh read-only
+            # evaluation. Corrupt JSON is a technical fault, never permission to reset the walk.
+            import json as _json_sr_cursor
+            _sr_audit_path = proj.output_dir / "selection_relevance_audit.json"
+            if _sr_audit_path.is_file():
+                try:
+                    _sr_initial_audit = _json_sr_cursor.loads(
+                        _sr_audit_path.read_text(encoding="utf-8"))
+                except Exception as _cursor_audit_error:
+                    raise PipelineError(
+                        "semantic recovery could not read the preflight relevance audit: "
+                        f"{type(_cursor_audit_error).__name__}: {_cursor_audit_error}") \
+                        from _cursor_audit_error
+            else:
+                from . import relevance_contract as _R_sr_initial
+                _sr_initial_audit = _R_sr_initial.evaluate_selection_relevance(
+                    proj, segs, cfg=cfg)
             _drain_semantic_recovery_pages(
                 proj, segs,
                 lambda: _retry_selection_relevance(
                     proj, segs, cfg, analysis, eng, faceid_obj=faceid_obj, refs=refs,
                     roster=roster, policy=policy, log=log),
+                initial_audit=_sr_initial_audit,
                 rebind_page=_rebind_semantic_page, log=log)
         except Exception as _se:                     # technical repair fault cannot bypass gate
             _raise_semantic_recovery_failure(_original_error, _se, log)
