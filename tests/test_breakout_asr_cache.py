@@ -20,6 +20,7 @@ every gate downstream — relevance, caption coverage, the admission judge — s
 from __future__ import annotations
 
 import json
+import pathlib
 
 import pytest
 
@@ -44,6 +45,23 @@ def _wav(tmp_path, name="a.wav", payload=b"RIFFfake-audio-bytes"):
     p = tmp_path / name
     p.write_bytes(payload + b"\x00" * 64)
     return p
+
+
+def _extraction_succeeds(monkeypatch):
+    """Make every planned chunk extraction succeed.
+
+    The original tests here mocked subprocess.run to return returncode 1 — EVERY chunk extraction
+    failing — and then asserted the (empty) result was cached. That mock was the bug in miniature:
+    a transcription in which nothing was decoded is not a transcription, and persisting it made a
+    "this clip is silent" verdict permanent. These tests now exercise a run that actually decodes.
+    """
+    def _run(cmd, *a, **k):
+        try:                                   # the last argument is the chunk path ffmpeg writes
+            pathlib.Path(cmd[-1]).write_bytes(b"RIFF" + b"\x00" * 128)
+        except Exception:                      # noqa: BLE001
+            pass
+        return type("P", (), {"returncode": 0})()
+    monkeypatch.setattr(A.subprocess, "run", _run)
 
 
 # ------------------------------------------------------------------ the key
@@ -132,7 +150,7 @@ def test_the_second_call_does_not_transcribe_again(tmp_path, monkeypatch):
     wav = _wav(tmp_path)
     model = FakeModel()
     monkeypatch.setattr(A, "probe", lambda p: {"duration": 2.0})
-    monkeypatch.setattr(A.subprocess, "run", lambda *a, **k: type("P", (), {"returncode": 1})())
+    _extraction_succeeds(monkeypatch)
     first = A.transcribe_breakout_words(wav, model=model, duration=2.0)
     calls_after_first = model.calls
     second = A.transcribe_breakout_words(wav, model=model, duration=2.0)
@@ -145,7 +163,7 @@ def test_cache_false_forces_a_fresh_transcription(tmp_path, monkeypatch):
     wav = _wav(tmp_path)
     model = FakeModel()
     monkeypatch.setattr(A, "probe", lambda p: {"duration": 2.0})
-    monkeypatch.setattr(A.subprocess, "run", lambda *a, **k: type("P", (), {"returncode": 1})())
+    _extraction_succeeds(monkeypatch)
     A.transcribe_breakout_words(wav, model=model, duration=2.0)
     n = model.calls
     A.transcribe_breakout_words(wav, model=model, duration=2.0, cache=False)
@@ -157,7 +175,7 @@ def test_rewriting_the_audio_in_place_invalidates_the_entry(tmp_path, monkeypatc
     wav = _wav(tmp_path, payload=b"RIFFfirst")
     model = FakeModel()
     monkeypatch.setattr(A, "probe", lambda p: {"duration": 2.0})
-    monkeypatch.setattr(A.subprocess, "run", lambda *a, **k: type("P", (), {"returncode": 1})())
+    _extraction_succeeds(monkeypatch)
     A.transcribe_breakout_words(wav, model=model, duration=2.0)
     key_before = A._asr_cache_key(A._wav_digest(wav), model, 3.8, 0.6, 5.0)
     wav.write_bytes(b"RIFFsecond" + b"\x00" * 64)
@@ -167,7 +185,7 @@ def test_rewriting_the_audio_in_place_invalidates_the_entry(tmp_path, monkeypatc
 
 
 def test_hits_and_misses_are_counted_for_the_audit_trail():
-    assert set(A._ASR_CACHE_STATS) == {"hit", "miss", "unidentified_model"}
+    assert set(A._ASR_CACHE_STATS) == {"hit", "miss", "unidentified_model", "incomplete"}
 
 
 # ------------------------------------------------------------------ what the first key could not see
@@ -237,3 +255,67 @@ def test_quantisation_and_device_reach_the_identity():
 
 def test_an_unidentified_model_is_counted_not_hidden():
     assert "unidentified_model" in A._ASR_CACHE_STATS
+
+
+# ------------------------------------------------------------------ incompleteness must not pass
+#
+# Each chunk in the walk can be skipped on a transient fault — an ffmpeg hiccup, a decode error, an
+# extraction timeout. The words from that window are then simply absent, and absence reads
+# downstream as "nothing was said there". That INVERTS the caption-completeness gate, which scores
+# captioned/spoken: lose half the spoken words and coverage climbs toward 1.0, so a half-heard
+# breakout looks more completely captioned than a fully-heard one. Persisting it made the inflated
+# verdict permanent for every later run over the same audio.
+def test_an_incomplete_transcription_is_never_written_to_the_cache():
+    import inspect
+    src = inspect.getsource(A.transcribe_breakout_words)
+    i_flag = src.index("complete = (decoded == len(starts))")
+    i_write = src.index("_asr_cache_write(_cache_path, _key, _out)")
+    assert i_flag < i_write, "completeness must be decided before the write"
+    assert "and complete:" in src, "the write must be conditional on completeness"
+
+
+def test_a_cache_hit_is_complete_by_construction():
+    """Only complete observations are written, so a hit needs no re-derivation."""
+    import inspect
+    src = inspect.getsource(A.transcribe_breakout_words)
+    head = src[:src.index('_ASR_CACHE_STATS["miss"]')]
+    assert '"complete": True' in head
+
+
+def test_status_reports_the_chunk_accounting():
+    import inspect
+    src = inspect.getsource(A.transcribe_breakout_words)
+    for field in ("chunks_planned", "chunks_decoded", "complete"):
+        assert field in src, field
+
+
+def test_incompleteness_is_counted():
+    assert "incomplete" in A._ASR_CACHE_STATS
+
+
+def test_an_extraction_timeout_is_a_missed_window_not_a_silent_one():
+    """subprocess.run(timeout=90) raises rather than returning; unhandled it aborted the whole
+    transcription, and the chunk it lost must count against completeness either way."""
+    import inspect
+    src = inspect.getsource(A.transcribe_breakout_words)
+    assert "except subprocess.TimeoutExpired:" in src
+    assert src.index("except subprocess.TimeoutExpired:") < src.index("decoded += 1")
+
+
+def test_the_caption_coverage_gate_fails_closed_on_an_incomplete_read():
+    """build.py must treat 'we did not manage to listen' exactly as 'nothing was said'."""
+    import inspect
+    from vidlore.clipstudio import build as B
+    src = inspect.getsource(B)
+    i = src.index("transcribe_breakout_words(\n                str(cap[\"audio\"])")
+    tail = src[i:i + 1200]
+    assert "with_status=True" in tail
+    assert '_asr_status.get("complete", False)' in tail
+
+
+def test_the_breakout_ground_truth_reader_fails_closed_too():
+    import inspect
+    from vidlore.clipstudio import build as B
+    src = inspect.getsource(B._asr_wav_words)
+    assert "with_status=True" in src
+    assert 'status.get("complete", False)' in src

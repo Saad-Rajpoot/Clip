@@ -99,7 +99,7 @@ def _dedupe_overlaps(words: list[tuple[str, float, float, float]]) -> list[tuple
 # consumed a fresh transcript consumes the cached one identically.
 _ASR_CACHE_SCHEMA = 4
 # hit/miss counters for the audit trail — reset by callers that want a per-stage figure
-_ASR_CACHE_STATS = {"hit": 0, "miss": 0, "unidentified_model": 0}
+_ASR_CACHE_STATS = {"hit": 0, "miss": 0, "unidentified_model": 0, "incomplete": 0}
 
 # The tag we stamp on a model WE construct, so its size is recoverable afterwards. faster-whisper
 # does not keep it: see _model_identity.
@@ -213,8 +213,7 @@ def _asr_cache_write(path: Path, key: dict, words: list) -> None:
 
 def transcribe_breakout_words(wav_path, *, model=None, duration: float | None = None,
                               window: float = 3.8, overlap: float = 0.6,
-                              cache: bool = True) \
-        -> list[tuple[str, float, float, float]]:
+                              cache: bool = True, with_status: bool = False):
     """Transcribe a Breakout in overlapping windows with clip-relative times.
 
     Memoised on the audio's content digest (see the note above). `cache=False` forces a fresh
@@ -233,7 +232,8 @@ def transcribe_breakout_words(wav_path, *, model=None, duration: float | None = 
         duration = float(probe(wav).get("duration", 0.0) or 0.0)
     duration = float(duration or 0.0)
     if duration <= 0.05:
-        return []
+        return ([], {"complete": False, "chunks_planned": 0, "chunks_decoded": 0,
+                     "words": 0}) if with_status else []
     window = max(1.5, float(window))
     overlap = min(max(0.2, float(overlap)), window * 0.45)
     _key = _cache_path = None
@@ -247,7 +247,10 @@ def transcribe_breakout_words(wav_path, *, model=None, duration: float | None = 
                 _hit = _asr_cache_read(_cache_path, _key)
                 if _hit is not None:
                     _ASR_CACHE_STATS["hit"] += 1
-                    return _hit
+                    # only complete observations are ever written, so a hit is complete
+                    return ((_hit, {"complete": True, "chunks_planned": -1,
+                                    "chunks_decoded": -1, "words": len(_hit)})
+                            if with_status else _hit)
                 _ASR_CACHE_STATS["miss"] += 1
         except Exception:                                # noqa: BLE001 — a cache fault must never
             _key = _cache_path = None                    # cost a transcript; fall through and work
@@ -265,24 +268,48 @@ def transcribe_breakout_words(wav_path, *, model=None, duration: float | None = 
         starts.append(tail)
 
     observed: list[tuple[str, float, float, float]] = []
+    decoded = 0
     for offset in starts:
         span = min(window, duration - offset)
         with tempfile.TemporaryDirectory(prefix="breakout_asr_") as td:
             chunk = Path(td) / "chunk.wav"
-            p = subprocess.run(
-                [ffmpeg_exe(), "-y", "-loglevel", "error", "-ss", f"{offset:.3f}",
-                 "-t", f"{span:.3f}", "-i", str(wav), "-ar", "16000", "-ac", "1", str(chunk)],
-                capture_output=True, timeout=90)
+            try:
+                p = subprocess.run(
+                    [ffmpeg_exe(), "-y", "-loglevel", "error", "-ss", f"{offset:.3f}",
+                     "-t", f"{span:.3f}", "-i", str(wav), "-ar", "16000", "-ac", "1", str(chunk)],
+                    capture_output=True, timeout=90)
+            except subprocess.TimeoutExpired:
+                continue                                 # a window we never heard — see below
             if p.returncode != 0 or not chunk.exists() or chunk.stat().st_size <= 44:
                 continue
             try:
                 for text, start, end, prob in _materialize_words(model, chunk):
                     observed.append((text, offset + start, min(duration, offset + end), prob))
-            except Exception:
+            except Exception:                            # noqa: BLE001 — a decode that did not run
                 continue
+            decoded += 1
     _out = _dedupe_overlaps(observed)
-    if _key is not None and _cache_path is not None:
+
+    # A WINDOW WE FAILED TO LISTEN TO IS NOT A WINDOW THAT WAS SILENT.
+    #
+    # Each `continue` above drops a chunk on a transient fault — an ffmpeg hiccup, a decode error,
+    # an extraction timeout. The words from that chunk are then simply absent, and absence reads
+    # downstream as "nothing was said there". That inverts the caption-completeness gate, which
+    # scores captioned/spoken: lose half the spoken words and coverage rises toward 1.0, so an
+    # incomplete transcription looks MORE completely captioned than a real one. Persisting it made
+    # the inflated verdict permanent for every later run over the same audio.
+    #
+    # So an incomplete observation is never written to the cache, and it is reported. A hit is
+    # therefore complete by construction. Callers that gate on coverage must fail closed on
+    # `complete=False` exactly as they do on no words at all.
+    complete = (decoded == len(starts))
+    if _key is not None and _cache_path is not None and complete:
         _asr_cache_write(_cache_path, _key, _out)
+    if not complete:
+        _ASR_CACHE_STATS["incomplete"] += 1
+    if with_status:
+        return _out, {"complete": complete, "chunks_planned": len(starts),
+                      "chunks_decoded": decoded, "words": len(_out)}
     return _out
 
 

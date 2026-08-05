@@ -1122,8 +1122,10 @@ def _asr_wav_words(wav_path) -> tuple:
     prefix-only result from hiding the last several seconds of dialogue. () on failure."""
     try:
         from .breakout_asr import transcribe_breakout_words, speech_seconds
-        timed = transcribe_breakout_words(wav_path)
-        words = [w[0] for w in timed]
+        timed, status = transcribe_breakout_words(wav_path, with_status=True)
+        if not status.get("complete", False):
+            return ([], "", 0.0)      # a window we failed to hear is not ground truth — the
+        words = [w[0] for w in timed] # caller skips the breakout rather than judge a partial read
         return (words, " ".join(words), speech_seconds(timed))
     except Exception:
         return ([], "", 0.0)
@@ -7058,11 +7060,21 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None, *, preset=None) -
     for cap in caps:
         try:
             from .breakout_asr import transcribe_breakout_words, caption_coverage
-            words = transcribe_breakout_words(
-                str(cap["audio"]), model=m, duration=float(cap.get("dur") or 0.0))
+            words, _asr_status = transcribe_breakout_words(
+                str(cap["audio"]), model=m, duration=float(cap.get("dur") or 0.0),
+                with_status=True)
         except Exception:
-            words = []
+            words, _asr_status = [], {"complete": False}
         _spoken_words = list(words)
+        # An incomplete transcription must fail this gate exactly as no transcription does.
+        # Coverage is captioned/spoken, so words we FAILED TO HEAR raise it — a half-heard breakout
+        # scores nearer 1.0 than a fully-heard one. Reading "we did not manage to listen" as
+        # "nothing was said there" is the one way this measurement can approve on error.
+        if words and not _asr_status.get("complete", False):
+            log(f"breakout captions: incomplete ASR for seg {cap.get('seg_index')} "
+                f"({_asr_status.get('chunks_decoded')}/{_asr_status.get('chunks_planned')} "
+                f"windows) — failing coverage rather than scoring a partial transcript")
+            words = []
         if not words:
             _cov0 = {"spoken_words": 0, "captioned_words": 0, "coverage": 0.0,
                      "asr_last_word_s": 0.0, "caption_last_word_s": 0.0,
