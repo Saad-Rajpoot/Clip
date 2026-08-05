@@ -1128,6 +1128,40 @@ def load_quote_retrieval_words(
 # index_source; consulted by quote_retrieval_source_eligible.
 _asr_upgrade_refused: set = set()
 
+_ASR_REFUSED_META_KEY = "asr_upgrade_refused"
+
+
+def _remember_asr_refusal(proj, sid: str) -> None:
+    """Record the bar in process state AND on the project.
+
+    The in-memory set is what `quote_retrieval_source_eligible` can reach — it is handed a source
+    and its shots, never the project. But a render that resumes runs in a NEW process, where that
+    set is empty, and the pool audit would then demand quote evidence from a source this run had
+    already refused to take any from: the abort simply returns. So the bar is also written to the
+    project, and `index_all` seeds the set from there before it indexes anything."""
+    _asr_upgrade_refused.add(sid)
+    try:
+        meta = getattr(proj, "meta", None)
+        if isinstance(meta, dict):
+            cur = list(meta.get(_ASR_REFUSED_META_KEY) or [])
+            if sid not in cur:
+                cur.append(sid)
+                meta[_ASR_REFUSED_META_KEY] = cur
+    except Exception:                                    # noqa: BLE001 — bookkeeping, never fatal
+        pass
+
+
+def _seed_asr_refusals(proj) -> None:
+    """Restore bars recorded by an earlier process before any audit consults them."""
+    try:
+        meta = getattr(proj, "meta", None)
+        if isinstance(meta, dict):
+            for sid in (meta.get(_ASR_REFUSED_META_KEY) or []):
+                if isinstance(sid, str) and sid:
+                    _asr_upgrade_refused.add(sid)
+    except Exception:                                    # noqa: BLE001
+        pass
+
 
 def quote_retrieval_source_eligible(source: SourceVideo, shots: list[Shot]) -> bool:
     """Use the same trusted-show-audio boundary as whole-pool quote classification."""
@@ -2162,7 +2196,7 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
                             progress(f"index: {source.id} ASR could not be upgraded to the current "
                                      f"prompt ({state} cache preserved) — barred from quote "
                                      f"retrieval for this render, indexing continues")
-                        _asr_upgrade_refused.add(source.id)
+                        _remember_asr_refusal(proj, source.id)
                         refreshed = cached_shots
                 retrieval_needed_after_refresh = bool(
                     authored_retrieval_prompt
@@ -2660,6 +2694,7 @@ def refresh_source_quote_retrieval(
 
 def index_all(proj: ClipProject, cfg: ClipConfig, *, references=None, faceid=None, roster=None,
               force: bool = False, progress=None) -> dict[str, list[Shot]]:
+    _seed_asr_refusals(proj)          # bars recorded by an earlier process outlive that process
     out: dict[str, list[Shot]] = {}
     for src in proj.sources:
         if src.status != SOURCE_OK:
