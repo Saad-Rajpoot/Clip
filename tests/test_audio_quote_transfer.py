@@ -315,6 +315,96 @@ def test_ledger_preserves_valid_transfer_proof_outside_numeric_signals(tmp_path)
     assert record[A.AUDIO_QUOTE_TRANSFER_SIGNAL] == evidence
 
 
+def _persist_direct_confirmation(proj, sel, seg):
+    cfg = load_clip_config()
+    prompted = [1.0, 2.0, 1.0]
+    binding, reason = R._quote_confirmation_binding(
+        proj, proj.source(sel.source_id), seg.quote, prompted, cfg,
+        exact_contiguous_required=True)
+    assert reason == "" and binding is not None
+    artifact = {
+        "schema_version": R.QUOTE_CONFIRMATION_SCHEMA,
+        "algorithm": R.QUOTE_CONFIRMATION_ALGORITHM,
+        "binding": binding,
+        "status": "confirmed",
+        "reason": "",
+        "decoder_fingerprint": binding["decoder_fingerprint"],
+        "decode_window": binding["decode_window"],
+        "prompted_span": binding["prompted_span"],
+        "timed_words": [[1.0, 1.35, "He's"], [1.35, 2.0, "choking"]],
+        "segment_confidence": [{
+            "no_speech_prob": .05, "avg_logprob": -.1, "accepted": True,
+        }],
+        "confirmed_span": [1.0, 2.0, 1.0],
+        "timed_asr_ratio": 1.0,
+        "match_method": "exact_contiguous_timed_asr+unprompted_confirmation",
+        "decoder_used": "primary",
+        "primary_model": str(cfg.whisper_model),
+        "rescue_model": R.QUOTE_CONFIRMATION_RESCUE_MODEL,
+        "primary_decode_status": "ok",
+        "primary_decode_reason": "",
+        "primary_phrase_matched": True,
+        "rescue_attempted": False,
+        "rescue_decode_status": "",
+        "rescue_decode_reason": "",
+        "rescue_phrase_matched": False,
+    }
+    artifact["result_content_sha256"] = R._quote_confirmation_result_sha256(artifact)
+    path = R._quote_confirmation_artifact_path(proj, binding)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    enriched = {
+        **artifact,
+        "artifact_key": binding["binding_fingerprint"],
+        "artifact_path": R._quote_confirmation_artifact_display_path(proj, path),
+    }
+    return R._quote_confirmation_summary(enriched), path
+
+
+def test_ledger_preserves_valid_direct_confirmation_outside_numeric_signals(tmp_path):
+    proj, seg, sel = _project(tmp_path)
+    sel.source_id = "dirty"
+    sel.in_point, sel.out_point = .5, 2.5
+    summary, _path = _persist_direct_confirmation(proj, sel, seg)
+    sel.signals = {"dialogue": 1.0, "quote_unprompted_confirmation": summary}
+
+    L.write_ledger(proj, [seg])
+
+    record = json.loads(proj.ledger_path.read_text().strip())
+    assert record["signals"] == {"dialogue": 1.0}
+    assert record["quote_unprompted_confirmation"] == summary
+
+
+@pytest.mark.parametrize("mutation", [
+    "summary", "result_hash", "source", "quote", "path_traversal", "missing_artifact",
+])
+def test_ledger_rejects_stale_or_fabricated_direct_confirmation(
+        tmp_path, mutation):
+    proj, seg, sel = _project(tmp_path)
+    sel.source_id = "dirty"
+    sel.in_point, sel.out_point = .5, 2.5
+    summary, path = _persist_direct_confirmation(proj, sel, seg)
+    summary = copy.deepcopy(summary)
+    if mutation == "summary":
+        summary["timed_asr_ratio"] = .99
+    elif mutation == "result_hash":
+        raw = json.loads(path.read_text())
+        raw["result_content_sha256"] = "0" * 64
+        path.write_text(json.dumps(raw), encoding="utf-8")
+    elif mutation == "source":
+        sel.source_id = "clean"
+    elif mutation == "quote":
+        seg.quote = "Different authored quote."
+    elif mutation == "path_traversal":
+        summary["artifact_path"] = "../project.json"
+    elif mutation == "missing_artifact":
+        path.unlink()
+    sel.signals = {"quote_unprompted_confirmation": summary}
+
+    with pytest.raises(ValueError, match="quote_unprompted_confirmation"):
+        L.write_ledger(proj, [seg])
+
+
 def test_ledger_rejects_malformed_or_unrecognized_structured_signal_evidence(tmp_path):
     proj, seg, sel = _project(tmp_path)
 

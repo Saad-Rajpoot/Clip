@@ -44,6 +44,77 @@ _LEGACY_SIGNAL_COUNT_FIELDS = {
 # the selection it audits.  This is an explicit one-field allow-list, not a generic structured-
 # signal escape hatch; every other dict/list still reaches float() and fails closed below.
 _QUOTE_AUDIO_TRANSFER_EVIDENCE = "quote_audio_transfer_evidence"
+_QUOTE_UNPROMPTED_CONFIRMATION = "quote_unprompted_confirmation"
+
+
+def _validated_ledger_quote_confirmation(proj, sel, segment, summary) -> dict:
+    """Revalidate the one structured direct-quote proof admitted to the ledger.
+
+    The score map intentionally remains numeric. Quote-window promotion also retains an immutable
+    no-prompt ASR result for audit, so move only that named proof to a top-level ledger field after
+    proving its artifact, source, authored quote, path, and selected-window containment again.
+    """
+    if not isinstance(summary, dict):
+        raise ValueError(
+            f"invalid selection signal {_QUOTE_UNPROMPTED_CONFIRMATION}: not_an_object")
+    try:
+        from . import relevance_contract as _relevance
+
+        display_path = str(summary.get("artifact_path", "") or "")
+        artifact_key = str(summary.get("artifact_key", "") or "")
+        if not display_path or not artifact_key:
+            raise ValueError("artifact_identity_missing")
+        raw_path = Path(display_path)
+        artifact_path = (raw_path if raw_path.is_absolute()
+                         else Path(proj.root_path) / raw_path).resolve()
+        confirmation_root = (Path(proj.index_dir) / "quote_confirmations").resolve()
+        try:
+            artifact_path.relative_to(confirmation_root)
+        except ValueError as exc:
+            raise ValueError("artifact_path_outside_confirmation_root") from exc
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        binding = artifact.get("binding") if isinstance(artifact, dict) else None
+        if not isinstance(binding, dict):
+            raise ValueError("artifact_binding_missing")
+        expected_path = _relevance._quote_confirmation_artifact_path(
+            proj, binding).resolve()
+        if artifact_path != expected_path or artifact_path.stem != artifact_key \
+                or str(binding.get("binding_fingerprint", "") or "") != artifact_key:
+            raise ValueError("artifact_identity_mismatch")
+        validated = _relevance._validated_quote_confirmation_artifact(
+            artifact_path, binding)
+        if validated is None or str(validated.get("status", "") or "") != "confirmed":
+            raise ValueError("artifact_validation_failed")
+        if str(binding.get("source_id", "") or "") != str(sel.source_id or ""):
+            raise ValueError("source_id_mismatch")
+        authored_quote = " ".join(str(getattr(segment, "quote", "") or "").strip().split())
+        if not authored_quote or str(binding.get("authored_quote", "") or "") != authored_quote:
+            raise ValueError("authored_quote_mismatch")
+        enriched = {
+            **validated,
+            "artifact_key": artifact_key,
+            "artifact_path": _relevance._quote_confirmation_artifact_display_path(
+                proj, artifact_path),
+        }
+        expected_summary = _relevance._quote_confirmation_summary(enriched)
+        if summary != expected_summary:
+            raise ValueError("confirmation_summary_mismatch")
+        span = validated.get("confirmed_span")
+        q0, q1 = float(span[0]), float(span[1])
+        w0, w1 = float(sel.in_point), float(sel.out_point)
+        tolerance = float(_relevance.QUOTE_WINDOW_TOLERANCE_SEC)
+        if not (w1 > w0 >= 0.0 and q1 > q0 >= 0.0
+                and q0 >= w0 - tolerance and q1 <= w1 + tolerance):
+            raise ValueError("confirmed_span_outside_selected_window")
+        return json.loads(json.dumps(summary, allow_nan=False))
+    except ValueError as exc:
+        reason = str(exc) or type(exc).__name__
+        raise ValueError(
+            f"invalid selection signal {_QUOTE_UNPROMPTED_CONFIRMATION}: {reason}") from exc
+    except Exception as exc:
+        raise ValueError(
+            f"invalid selection signal {_QUOTE_UNPROMPTED_CONFIRMATION}: "
+            f"{type(exc).__name__}") from exc
 
 
 def _ledger_signal_payload(signals: dict) -> tuple[dict, Optional[dict]]:
@@ -179,7 +250,16 @@ def write_ledger(proj: ClipProject, segments: list[ScriptSegment]) -> Path:
     for sel in sorted(proj.selections, key=lambda s: s.segment_index):
         src = proj.source(sel.source_id)
         seg = by_idx.get(sel.segment_index)
-        _numeric_signals, _quote_transfer_evidence = _ledger_signal_payload(sel.signals)
+        _signals = dict(sel.signals or {})
+        _quote_confirmation = None
+        if _QUOTE_UNPROMPTED_CONFIRMATION in _signals:
+            if seg is None:
+                raise ValueError(
+                    f"invalid selection signal {_QUOTE_UNPROMPTED_CONFIRMATION}: "
+                    "segment_missing")
+            _quote_confirmation = _validated_ledger_quote_confirmation(
+                proj, sel, seg, _signals.pop(_QUOTE_UNPROMPTED_CONFIRMATION))
+        _numeric_signals, _quote_transfer_evidence = _ledger_signal_payload(_signals)
         # HONEST relevance class (req. 4) — one of: exact_scene (verifier-kept moving footage on an
         # exact beat, or a validated web-exact-scene still) · contextual_fallback (right character/
         # scene/era but the exact moment is unconfirmed) · generic_filler (thematic) · exact_scene_
@@ -244,6 +324,8 @@ def write_ledger(proj: ClipProject, segments: list[ScriptSegment]) -> Path:
             # Keep score consumers on the stable numeric ``signals`` contract while retaining the
             # complete quote-transfer proof for viewer's-eye / publication audits.
             rec[_QUOTE_AUDIO_TRANSFER_EVIDENCE] = _quote_transfer_evidence
+        if _quote_confirmation is not None:
+            rec[_QUOTE_UNPROMPTED_CONFIRMATION] = _quote_confirmation
         lines.append(json.dumps(rec))
     proj.ledger_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
     return proj.ledger_path
