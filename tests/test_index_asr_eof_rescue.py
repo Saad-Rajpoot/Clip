@@ -137,7 +137,7 @@ def test_asr_cache_identity_changes_with_model_options_and_vocabulary():
     assert fp != IX._asr_prompt_fingerprint(other_model, "Cersei Olenna")
 
 
-def test_project_asr_vocabulary_includes_deduplicated_authored_dialogue_after_names():
+def test_project_asr_prompt_includes_dialogue_but_hotwords_remain_names_only():
     proj = NS(
         meta={"analysis": {
             "characters": [{"name": "Tywin Lannister"}],
@@ -155,16 +155,15 @@ def test_project_asr_vocabulary_includes_deduplicated_authored_dialogue_after_na
         ],
     )
 
-    vocabulary = IX._project_asr_hotwords(proj)
+    vocabulary = IX._project_asr_initial_prompt(proj)
 
     assert vocabulary.split(", ") == [
-        "Tywin Lannister",
         "You shot me.",
         "You're no son of mine.",
         "I am your son. I have always been your son.",
         "A longer line whose comma must not split the decoder entry.",
-        "Charles Dance",
     ]
+    assert IX._project_asr_hotwords(proj) == "Tywin Lannister, Charles Dance"
 
 
 def test_authored_quote_changes_project_asr_semantic_fingerprint():
@@ -200,7 +199,7 @@ def test_audited_softening_keeps_original_quote_prompt_identity_stable():
     assert IX.asr_semantic_fingerprint(proj, cfg) == baseline
 
 
-def test_bounded_project_vocabulary_keeps_character_names_ahead_of_short_quotes():
+def test_bounded_project_prompt_keeps_compact_quotes_deterministically():
     class Encoding:
         def __init__(self, ids):
             self.ids = ids
@@ -221,14 +220,41 @@ def test_bounded_project_vocabulary_keeps_character_names_ahead_of_short_quotes(
         }},
         segments=[NS(quote=f"Line {i}") for i in range(40)],
     )
-    requested = IX._project_asr_hotwords(proj)
+    requested = IX._project_asr_initial_prompt(proj)
 
     first = IX._bound_asr_vocabulary(model, requested, duplicated=True)
     second = IX._bound_asr_vocabulary(model, requested, duplicated=True)
 
     assert first == second
-    assert first.startswith("Priority Character One, Priority Character Two")
+    assert first.startswith("Line 0, Line 1")
     assert "Line 39" not in first
+    assert IX._project_asr_hotwords(proj).startswith(
+        "Priority Character One, Priority Character Two")
+
+
+def test_sentence_dialogue_is_context_only_never_faster_whisper_hotword_bias(tmp_path):
+    class Model:
+        max_length = 448
+        hf_tokenizer = None
+
+        def __init__(self):
+            self.kwargs = None
+
+        def transcribe(self, _path, **kwargs):
+            self.kwargs = kwargs
+            return iter([]), NS()
+
+    model = Model()
+    names = "Tywin Lannister, Charles Dance"
+    context = names + ", You're no son of mine., I am your son."
+
+    IX._transcribe_with_vocabulary(
+        model, tmp_path / "s.mp4", hotwords=names, initial_prompt=context)
+
+    assert model.kwargs["hotwords"] == names
+    assert "You're no son of mine." in model.kwargs["initial_prompt"]
+    assert "I am your son." in model.kwargs["initial_prompt"]
+    assert "son of mine" not in model.kwargs["hotwords"]
 
 
 def test_whisper_model_cache_is_bound_to_every_constructor_input(monkeypatch):
@@ -290,6 +316,7 @@ def test_index_cache_prompt_mismatch_refreshes_only_asr(monkeypatch, tmp_path):
 
     assert out == [shot]
     assert seen["hotwords"] == "Cersei Lannister, Lena Headey"
+    assert seen["initial_prompt"] == "Cersei Lannister, Lena Headey"
 
 
 def test_vocabulary_is_bounded_by_real_token_count_and_keeps_complete_priority_names(tmp_path):
