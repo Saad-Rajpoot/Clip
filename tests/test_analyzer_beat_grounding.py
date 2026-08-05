@@ -29,6 +29,127 @@ def _apply(text: str, **directive) -> ScriptSegment:
     return beat
 
 
+def test_short_common_quote_without_literal_narration_is_sanitized_only():
+    """The measured ``Very well`` trap must not become an unrelated ASR scene lock."""
+    expected = "Tywin Lannister grants Tyrion's demand for a trial by combat without argument"
+    query = "Game of Thrones Tywin grants trial by combat Tyrion very well"
+    beat = _apply(
+        "He does not argue, and he does not refuse.",
+        expected_visual=expected,
+        scene_query=query,
+        quote="Very well.",
+        required_entity="Tywin Lannister",
+        required_kind="character",
+    )
+
+    assert beat.visual_policy == P.EXACT
+    assert beat.is_specific_claim is True
+    assert beat.expected_visual == expected
+    assert beat.scene_query == "Game of Thrones Tywin grants trial by combat Tyrion"
+    assert beat.required_entity == "Tywin Lannister"
+    assert beat.required_kind == "character"
+    assert beat.quote == ""
+    marker = beat._analyzer_grounding_guard
+    assert marker["branch"] == "grounded_exact_sanitized"
+    assert marker["reason"] == "short_common_quote_not_literally_narrated"
+    assert marker["sanitized_fields"] == ["scene_query", "quote"]
+    assert marker["sanitized_values"] == {
+        "scene_query": "Game of Thrones Tywin grants trial by combat Tyrion",
+        "quote": "",
+    }
+
+
+@pytest.mark.parametrize(("text", "quote"), [
+    ("Tywin answers, 'Very well.'", "Very well."),
+    ("Tyrion fires while Tywin says nothing.", "You shot me."),
+])
+def test_literal_or_three_token_quote_remains_for_downstream_proof(text, quote):
+    beat = _apply(
+        text,
+        expected_visual="Tyrion and Tywin in the promised exact scene",
+        scene_query="Game of Thrones Tyrion Tywin exact scene",
+        quote=quote,
+        required_entity="Tywin Lannister",
+        required_kind="character",
+    )
+
+    assert beat.quote == quote
+    assert beat._analyzer_grounding_guard["branch"] == "grounded_exact"
+
+
+def test_schema9_cached_revalidation_clears_short_quote_and_auto_breakout_idempotently():
+    """Existing schema-8 portal jobs receive the guard without re-running the LLM analyzer."""
+    beats = [
+        ScriptSegment(
+            index=index,
+            text=text,
+            expected_visual=expected,
+            scene_query="Game of Thrones Tywin grants trial by combat Tyrion very well",
+            quote="Very well.",
+            required_entity="Tywin Lannister",
+            required_kind="character",
+            visual_policy=P.EXACT,
+            is_specific_claim=True,
+            breakout_candidate=True,
+        )
+        for index, text, expected in (
+            (87,
+             "In a single sentence, Tyrion transfers the decision from Tywin's panel to a fight.",
+             "Tywin Lannister, irritated, saying 'Very well.'"),
+            (90,
+             "He does not argue, and he does not refuse.",
+             "Tywin grants Tyrion's demand for trial by combat without argument"),
+        )
+    ]
+    analysis = A.ScriptAnalysis(beat_grounding_audit={
+        "schema": 8,
+        "beats": {
+            str(beat.index): {
+                "branch": "grounded_exact",
+                "reason": "conservative_no_mismatch_proven",
+                "guard_schema": 8,
+                "cached_revalidation_schema": 8,
+            }
+            for beat in beats
+        },
+        "breakout_provenance": {"87": "quote_derived", "90": "quote_derived"},
+    })
+
+    first = A.revalidate_cached_directions(beats, analysis)
+
+    assert first["changed_indices"] == [87, 90]
+    assert all(beat.quote == "" for beat in beats)
+    assert all(beat.breakout_candidate is False for beat in beats)
+    assert all(beat.visual_policy == P.EXACT for beat in beats)
+    assert beats[0].expected_visual == beats[0].text
+    assert beats[1].expected_visual == \
+        "Tywin grants Tyrion's demand for trial by combat without argument"
+    assert all(beat.scene_query == "Game of Thrones Tywin grants trial by combat Tyrion"
+               for beat in beats)
+    assert beats[0]._analyzer_grounding_guard["sanitized_fields"] == [
+        "expected_visual", "scene_query", "quote"]
+    assert beats[0]._analyzer_grounding_guard["sanitized_values"] == {
+        "expected_visual": beats[0].text,
+        "scene_query": "Game of Thrones Tywin grants trial by combat Tyrion",
+        "quote": "",
+    }
+    assert beats[1]._analyzer_grounding_guard["sanitized_fields"] == [
+        "scene_query", "quote"]
+    assert analysis.beat_grounding_audit["schema"] == 9
+    assert analysis.beat_grounding_audit["counts"]["short_common_quote_sanitized"] == 2
+    assert analysis.beat_grounding_audit["breakout_provenance"] == {
+        "87": "quote_derived_cleared", "90": "quote_derived_cleared"}
+
+    resumed_beats = [ScriptSegment.from_dict(beat.to_dict()) for beat in beats]
+    resumed_analysis = A.ScriptAnalysis.from_dict(analysis.to_dict())
+    second = A.revalidate_cached_directions(resumed_beats, resumed_analysis)
+
+    assert second["changed_count"] == 0
+    assert second["exact_revalidated"] == 0
+    assert resumed_analysis.beat_grounding_audit["schema"] == 9
+    assert resumed_analysis.beat_grounding_audit["counts"]["short_common_quote_sanitized"] == 2
+
+
 @pytest.mark.parametrize(
     "text, directive",
     [
@@ -693,16 +814,16 @@ def test_whole_script_action_owner_beats_aftermath_but_ambiguous_copies_fail_clo
     assert aftermath._analyzer_grounding_guard["quote_owner_index"] == 142
 
     first = _apply(
-        "He agrees behind the closed door.", expected_visual="Tywin says 'Done'",
-        scene_query="Tywin agrees", quote="Done.", required_entity="Tywin",
+        "He agrees behind the closed door.", expected_visual="Tywin says 'It is done'",
+        scene_query="Tywin agrees", quote="It is done.", required_entity="Tywin",
         required_kind="character")
     second = _apply(
-        "Tywin agrees immediately.", expected_visual="Tywin says 'Done' immediately",
-        scene_query="Tywin agrees", quote="Done.", required_entity="Tywin",
+        "Tywin agrees immediately.", expected_visual="Tywin says 'It is done' immediately",
+        scene_query="Tywin agrees", quote="It is done.", required_entity="Tywin",
         required_kind="character")
     first.index, second.index = 14, 20
     assert A._sanitize_adjacent_quote_borrowing([first, second]) == 0
-    assert first.quote == second.quote == "Done."
+    assert first.quote == second.quote == "It is done."
     group = first._analyzer_grounding_guard["quote_ownership_group"]
     assert group["status"] == "ambiguous_preserved"
     assert group["owner_index"] is None
@@ -833,6 +954,7 @@ def test_grounding_branches_persist_in_analysis_metadata_and_round_trip():
         "sanitized_exact": 1,
         "information_staging_sanitized": 1,
         "record_intent_quote_sanitized": 0,
+        "short_common_quote_sanitized": 0,
         "bare_named_event_sanitized": 0,
         "unsupported_camera_composition_sanitized": 0,
         "adjacent_quote_copy_sanitized": 0,
@@ -845,7 +967,7 @@ def test_grounding_branches_persist_in_analysis_metadata_and_round_trip():
         "to_generic_filler": 1,
         "to_abstract_effect": 0,
     }
-    assert analysis.beat_grounding_audit["schema"] == 8
+    assert analysis.beat_grounding_audit["schema"] == 9
     restored = A.ScriptAnalysis.from_dict(analysis.to_dict())
     assert restored.beat_grounding_audit == analysis.beat_grounding_audit
     assert restored.beat_grounding_audit["beats"]["0"]["branch"] == \
@@ -1036,7 +1158,7 @@ def test_resume_preserves_fresh_sanitizer_reason_when_post_state_changes_nothing
     assert marker["branch"] == "grounded_exact_sanitized"
     assert marker["reason"] == "record_intent_is_not_verbatim_dialogue"
     assert marker["sanitized_fields"] == ["quote"]
-    assert marker["cached_revalidation_schema"] == 8
+    assert marker["cached_revalidation_schema"] == 9
     saved_audit = loaded_analysis.to_dict()["beat_grounding_audit"]
 
     loaded_again = ScriptSegment.from_dict(loaded.to_dict())
@@ -1145,7 +1267,7 @@ def test_schema5_migrates_measured_comparison_event_and_cached_nominal_role_cont
     assert grounded_control.visual_policy == P.EXACT
     assert manual_control.required_entity == "Janos Slynt"
     assert manual_control.scene_query == ""
-    assert analysis.beat_grounding_audit["schema"] == 8
+    assert analysis.beat_grounding_audit["schema"] == 9
 
     saved = analysis.to_dict()
     reloaded = [ScriptSegment.from_dict(row.to_dict()) for row in rows]
@@ -1197,7 +1319,7 @@ def test_schema5_corrects_cached_schema4_role_migration_and_preserves_provenance
     assert marker["analyzer_guessed_required_entity"] == "Aron Santagar"
     assert marker["schema_migration"] == "nominal_guessed_identity_contract_v5"
     assert marker["previous_schema_migration"] == "nominal_role_contract_v4"
-    assert marker["cached_revalidation_schema"] == 8
+    assert marker["cached_revalidation_schema"] == 9
 
     saved = analysis.to_dict()
     loaded = ScriptSegment.from_dict(beat.to_dict())
@@ -1262,8 +1384,8 @@ def test_schema8_migrates_cached_camera_contracts_once_and_preserves_material_di
     for beat in (dagger, brothel):
         assert beat.visual_policy == P.EXACT
         assert beat.is_specific_claim is True
-        assert beat._analyzer_grounding_guard["guard_schema"] == 8
-        assert beat._analyzer_grounding_guard["cached_revalidation_schema"] == 8
+        assert beat._analyzer_grounding_guard["guard_schema"] == 9
+        assert beat._analyzer_grounding_guard["cached_revalidation_schema"] == 9
     assert analysis.beat_grounding_audit["counts"][
         "unsupported_camera_composition_sanitized"] == 2
 
@@ -1329,10 +1451,10 @@ def test_schema8_preserves_effective_schema6_sanitizer_but_migrates_negative_exi
     assert camera.visual_policy == P.EXACT
     assert camera._analyzer_grounding_guard["reason"] == \
         "unsupported_camera_composition_removed"
-    assert camera._analyzer_grounding_guard["guard_schema"] == 8
-    assert camera._analyzer_grounding_guard["cached_revalidation_schema"] == 8
+    assert camera._analyzer_grounding_guard["guard_schema"] == 9
+    assert camera._analyzer_grounding_guard["cached_revalidation_schema"] == 9
     assert negative.visual_policy == P.ABSTRACT
     assert negative.scene_query == negative.required_entity == negative.required_kind == ""
     assert negative._analyzer_grounding_guard["reason"] == \
         "negative_existence_is_not_an_observable_exact_scene"
-    assert negative._analyzer_grounding_guard["cached_revalidation_schema"] == 8
+    assert negative._analyzer_grounding_guard["cached_revalidation_schema"] == 9

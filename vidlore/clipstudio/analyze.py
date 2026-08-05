@@ -703,6 +703,67 @@ def _narrates_authored_quote(narration: str, quote: str) -> bool:
     return bool(q_terms and len(q_terms & n_terms) / len(q_terms) >= 0.8)
 
 
+def _unsupported_short_quote_contract(beat: ScriptSegment, directive: dict) -> dict | None:
+    """Reject a retrieval-ambiguous tiny quote the narration never actually says.
+
+    One- and two-token phrases such as ``Very well`` occur in many unrelated scenes.  The beat
+    analyzer used to attach them from whole-story memory, after which one unrelated ASR occurrence
+    could turn the hint into a hard verbatim promise and even steer exact recovery to the wrong
+    scene.  Beat-local narration is the only deterministic ownership evidence available here: keep
+    a tiny quote when the narration literally contains its complete normalized token sequence;
+    otherwise remove the phrase from every retrieval/verifier field it poisoned while preserving
+    the independently grounded visual contract.
+
+    Three-token lines remain outside this guard.  That boundary preserves action-bearing dialogue
+    such as ``You shot me`` while the complete-pool ASR and visual publication gates continue to
+    verify it downstream.
+    """
+    quote = str(directive.get("quote", "") or "").strip()
+    quote_tokens = [token.lower() for token in _GROUNDING_WORD_RX.findall(quote)]
+    if not 1 <= len(quote_tokens) <= 2:
+        return None
+    def _tokens(value: str) -> list[str]:
+        return [token.lower() for token in _GROUNDING_WORD_RX.findall(value or "")]
+
+    def _contains(value: str) -> bool:
+        tokens = _tokens(value)
+        return any(tokens[offset:offset + size] == quote_tokens
+                   for offset in range(0, len(tokens) - size + 1))
+
+    def _without_quote(value: str) -> str:
+        # ``scene_query`` is retrieval keywords rather than display prose. Rebuilding its lexical
+        # tokens is safer than a punctuation-sensitive substitution and keeps every non-quote
+        # anchor (for example, ``Tywin trial by combat``) intact.
+        original = _GROUNDING_WORD_RX.findall(value or "")
+        lowered = [token.lower() for token in original]
+        for offset in range(0, len(lowered) - size + 1):
+            if lowered[offset:offset + size] == quote_tokens:
+                return " ".join(original[:offset] + original[offset + size:])
+        return str(value or "")
+
+    narration = str(getattr(beat, "text", "") or "")
+    size = len(quote_tokens)
+    if _contains(narration):
+        return None
+    fields = []
+    values = {}
+    expected = str(directive.get("expected_visual", "") or "")
+    if _contains(expected):
+        fields.append("expected_visual")
+        values["expected_visual"] = narration
+    scene_query = str(directive.get("scene_query", "") or "")
+    if _contains(scene_query):
+        fields.append("scene_query")
+        values["scene_query"] = _without_quote(scene_query)
+    fields.append("quote")
+    values["quote"] = ""
+    return {
+        "reason": "short_common_quote_not_literally_narrated",
+        "sanitize_fields": fields,
+        "sanitized_values": values,
+    }
+
+
 def _has_scene_action(text: str) -> bool:
     terms = _grounding_terms(text)
     if terms & _SCENE_ACTION_ROOTS:
@@ -867,6 +928,27 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
     grounding = (_exact_direction_grounding(beat, directive)
                  if resolved == _policy.EXACT else None)
     if grounding is not None and grounding.get("grounded"):
+        short_quote_guard = _unsupported_short_quote_contract(beat, directive)
+        if short_quote_guard:
+            grounding = dict(grounding)
+            existing_fields = list(grounding.get("sanitize_fields") or [])
+            existing_values = dict(grounding.get("sanitized_values") or {})
+            added_fields = []
+            for field in short_quote_guard["sanitize_fields"]:
+                if field in existing_fields:
+                    continue
+                existing_fields.append(field)
+                existing_values[field] = short_quote_guard["sanitized_values"][field]
+                added_fields.append(field)
+            if added_fields and not grounding.get("sanitize_fields"):
+                grounding["reason"] = short_quote_guard["reason"]
+            elif added_fields:
+                reasons = list(grounding.get("sanitization_reasons") or [])
+                if short_quote_guard["reason"] not in reasons:
+                    reasons.append(short_quote_guard["reason"])
+                grounding["sanitization_reasons"] = reasons
+            grounding["sanitize_fields"] = existing_fields
+            grounding["sanitized_values"] = existing_values
         camera_guard = _unsupported_camera_contract(beat, directive)
         if camera_guard:
             grounding = dict(grounding)
@@ -1196,7 +1278,7 @@ def _sanitize_adjacent_quote_borrowing(beats) -> int:
     return changed
 
 
-_BEAT_GROUNDING_AUDIT_SCHEMA = 8
+_BEAT_GROUNDING_AUDIT_SCHEMA = 9
 
 
 def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
@@ -1242,6 +1324,10 @@ def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
         "record_intent_quote_sanitized": sum(
             m.get("reason") == "record_intent_is_not_verbatim_dialogue"
             for m in records.values()),
+        "short_common_quote_sanitized": sum(
+            m.get("reason") == "short_common_quote_not_literally_narrated"
+            or "short_common_quote_not_literally_narrated"
+            in (m.get("sanitization_reasons") or []) for m in records.values()),
         "bare_named_event_sanitized": sum(
             m.get("reason") == "bare_named_event_staging_removed"
             for m in records.values()),
