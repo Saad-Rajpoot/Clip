@@ -631,6 +631,103 @@ def test_literal_pronoun_action_and_locally_authored_dialogue_are_not_sanitized(
     assert action_with_line.quote == "Not today."
 
 
+def test_whole_script_quote_owner_removes_only_distant_unrelated_visual_copies():
+    aim = _apply(
+        "Everyone remembers how it ended, the crossbow and the privy.",
+        expected_visual="Tyrion holding a crossbow aiming at Tywin on the privy",
+        scene_query="Tyrion kills Tywin crossbow privy",
+        quote="You're no son of mine.", required_entity="Tyrion and Tywin",
+        required_kind="scene", shot_intent="action")
+    speech = _apply(
+        "because of what he chooses to say to his son in the last conversation of his life.",
+        expected_visual="Tywin saying 'You're no son of mine' on the privy",
+        scene_query="Tywin says you're no son of mine",
+        quote="You're no son of mine.", required_entity="Tywin",
+        required_kind="character", shot_intent="emotional_closeup")
+    death = _apply(
+        "Tywin dies from Tyrion's crossbow.",
+        expected_visual="Tywin being shot by Tyrion's crossbow, dying",
+        scene_query="Tywin shot by Tyrion crossbow death",
+        quote="You're no son of mine.", required_entity="Tywin",
+        required_kind="character", shot_intent="action")
+    aim.index, speech.index, death.index = 4, 79, 146
+
+    assert A._sanitize_adjacent_quote_borrowing([aim, speech, death]) == 2
+    assert aim.quote == death.quote == ""
+    assert speech.quote == "You're no son of mine."
+    assert aim.expected_visual.startswith("Tyrion holding")
+    assert death.expected_visual.startswith("Tywin being shot")
+    assert aim._analyzer_grounding_guard["original_quote"] == "You're no son of mine."
+    assert death._analyzer_grounding_guard["quote_owner_index"] == 79
+    assert A._sanitize_adjacent_quote_borrowing([aim, speech, death]) == 0
+
+    audit = A.ScriptAnalysis()
+    counts = A._record_beat_grounding_audit(audit, [aim, speech, death])
+    assert counts["whole_script_quote_copy_sanitized"] == 2
+    assert audit.beat_grounding_audit["quote_ownership"] == [{
+        "quote": "You're no son of mine.",
+        "members": [4, 79, 146],
+        "owner_index": 79,
+        "owner_reason": "literal_line_in_expected_visual",
+        "sanitized_indices": [4, 146],
+        "status": "resolved",
+    }]
+
+
+def test_whole_script_action_owner_beats_aftermath_but_ambiguous_copies_fail_closed():
+    aftermath = _apply(
+        "The son stands over his dying father.",
+        expected_visual="Tyrion standing over Tywin after shooting him",
+        scene_query="Tyrion standing over Tywin", quote="You shot me.",
+        required_entity="Tyrion and Tywin", required_kind="scene",
+        shot_intent="emotional_closeup")
+    trigger = _apply(
+        "Tyrion fired the crossbow.",
+        expected_visual="Tyrion pulls the crossbow trigger and shoots Tywin",
+        scene_query="Tyrion shoots Tywin", quote="You shot me.",
+        required_entity="Tyrion", required_kind="character", shot_intent="action")
+    aftermath.index, trigger.index = 5, 142
+    assert A._sanitize_adjacent_quote_borrowing([aftermath, trigger]) == 1
+    assert aftermath.quote == ""
+    assert trigger.quote == "You shot me."
+    assert aftermath._analyzer_grounding_guard["quote_owner_index"] == 142
+
+    first = _apply(
+        "He agrees behind the closed door.", expected_visual="Tywin says 'Done'",
+        scene_query="Tywin agrees", quote="Done.", required_entity="Tywin",
+        required_kind="character")
+    second = _apply(
+        "Tywin agrees immediately.", expected_visual="Tywin says 'Done' immediately",
+        scene_query="Tywin agrees", quote="Done.", required_entity="Tywin",
+        required_kind="character")
+    first.index, second.index = 14, 20
+    assert A._sanitize_adjacent_quote_borrowing([first, second]) == 0
+    assert first.quote == second.quote == "Done."
+    group = first._analyzer_grounding_guard["quote_ownership_group"]
+    assert group["status"] == "ambiguous_preserved"
+    assert group["owner_index"] is None
+
+
+def test_distant_repeat_of_same_spoken_event_keeps_both_hard_quote_contracts():
+    direct = _apply(
+        "Tyrion stands and demands trial by combat.",
+        expected_visual="Tyrion shouts 'I demand a trial by combat'",
+        scene_query="Tyrion trial by combat", quote="I demand a trial by combat!",
+        required_entity="Tyrion", required_kind="character", shot_intent="action")
+    revisit = _apply(
+        "He lost the verdict he arranged.",
+        expected_visual="Tyrion demands a trial by combat in the throne room",
+        scene_query="Tyrion trial by combat court", quote="I demand a trial by combat.",
+        required_entity="Tyrion", required_kind="character", shot_intent="action")
+    direct.index, revisit.index = 83, 172
+
+    assert A._sanitize_adjacent_quote_borrowing([direct, revisit]) == 0
+    assert direct.quote and revisit.quote
+    group = direct._analyzer_grounding_guard["quote_ownership_group"]
+    assert group["owner_index"] == 83
+    assert group["status"] == "co_temporal_duplicates_preserved"
+
+
 def test_direct_exact_action_indirect_scene_pointer_and_narrated_dialogue_stay_exact():
     direct = _apply(
         "Joffrey collapses at the wedding feast, clawing at his throat.",
@@ -739,6 +836,7 @@ def test_grounding_branches_persist_in_analysis_metadata_and_round_trip():
         "bare_named_event_sanitized": 0,
         "unsupported_camera_composition_sanitized": 0,
         "adjacent_quote_copy_sanitized": 0,
+        "whole_script_quote_copy_sanitized": 0,
         "nominal_role_contract_narrowed": 0,
         "nominal_guessed_identity_cleared": 0,
         "negative_existence_downgraded": 0,
@@ -747,7 +845,7 @@ def test_grounding_branches_persist_in_analysis_metadata_and_round_trip():
         "to_generic_filler": 1,
         "to_abstract_effect": 0,
     }
-    assert analysis.beat_grounding_audit["schema"] == 7
+    assert analysis.beat_grounding_audit["schema"] == 8
     restored = A.ScriptAnalysis.from_dict(analysis.to_dict())
     assert restored.beat_grounding_audit == analysis.beat_grounding_audit
     assert restored.beat_grounding_audit["beats"]["0"]["branch"] == \
@@ -938,7 +1036,7 @@ def test_resume_preserves_fresh_sanitizer_reason_when_post_state_changes_nothing
     assert marker["branch"] == "grounded_exact_sanitized"
     assert marker["reason"] == "record_intent_is_not_verbatim_dialogue"
     assert marker["sanitized_fields"] == ["quote"]
-    assert marker["cached_revalidation_schema"] == 7
+    assert marker["cached_revalidation_schema"] == 8
     saved_audit = loaded_analysis.to_dict()["beat_grounding_audit"]
 
     loaded_again = ScriptSegment.from_dict(loaded.to_dict())
@@ -1047,7 +1145,7 @@ def test_schema5_migrates_measured_comparison_event_and_cached_nominal_role_cont
     assert grounded_control.visual_policy == P.EXACT
     assert manual_control.required_entity == "Janos Slynt"
     assert manual_control.scene_query == ""
-    assert analysis.beat_grounding_audit["schema"] == 7
+    assert analysis.beat_grounding_audit["schema"] == 8
 
     saved = analysis.to_dict()
     reloaded = [ScriptSegment.from_dict(row.to_dict()) for row in rows]
@@ -1099,7 +1197,7 @@ def test_schema5_corrects_cached_schema4_role_migration_and_preserves_provenance
     assert marker["analyzer_guessed_required_entity"] == "Aron Santagar"
     assert marker["schema_migration"] == "nominal_guessed_identity_contract_v5"
     assert marker["previous_schema_migration"] == "nominal_role_contract_v4"
-    assert marker["cached_revalidation_schema"] == 7
+    assert marker["cached_revalidation_schema"] == 8
 
     saved = analysis.to_dict()
     loaded = ScriptSegment.from_dict(beat.to_dict())
@@ -1114,7 +1212,7 @@ def test_schema5_corrects_cached_schema4_role_migration_and_preserves_provenance
     assert resumed["last_material_revalidation"]["changed_indices"] == [32]
 
 
-def test_schema7_migrates_cached_camera_contracts_once_and_preserves_material_diff():
+def test_schema8_migrates_cached_camera_contracts_once_and_preserves_material_diff():
     dagger = ScriptSegment(
         index=3,
         text="the weapon they left behind is the only thing she has.",
@@ -1164,8 +1262,8 @@ def test_schema7_migrates_cached_camera_contracts_once_and_preserves_material_di
     for beat in (dagger, brothel):
         assert beat.visual_policy == P.EXACT
         assert beat.is_specific_claim is True
-        assert beat._analyzer_grounding_guard["guard_schema"] == 7
-        assert beat._analyzer_grounding_guard["cached_revalidation_schema"] == 7
+        assert beat._analyzer_grounding_guard["guard_schema"] == 8
+        assert beat._analyzer_grounding_guard["cached_revalidation_schema"] == 8
     assert analysis.beat_grounding_audit["counts"][
         "unsupported_camera_composition_sanitized"] == 2
 
@@ -1181,7 +1279,7 @@ def test_schema7_migrates_cached_camera_contracts_once_and_preserves_material_di
         "last_material_revalidation"]["changed_indices"] == [3, 51]
 
 
-def test_schema7_preserves_effective_schema6_sanitizer_but_migrates_negative_existence():
+def test_schema8_preserves_effective_schema6_sanitizer_but_migrates_negative_existence():
     camera = ScriptSegment(
         index=3,
         text="the weapon they left behind is the only thing she has.",
@@ -1231,10 +1329,10 @@ def test_schema7_preserves_effective_schema6_sanitizer_but_migrates_negative_exi
     assert camera.visual_policy == P.EXACT
     assert camera._analyzer_grounding_guard["reason"] == \
         "unsupported_camera_composition_removed"
-    assert camera._analyzer_grounding_guard["guard_schema"] == 7
-    assert camera._analyzer_grounding_guard["cached_revalidation_schema"] == 7
+    assert camera._analyzer_grounding_guard["guard_schema"] == 8
+    assert camera._analyzer_grounding_guard["cached_revalidation_schema"] == 8
     assert negative.visual_policy == P.ABSTRACT
     assert negative.scene_query == negative.required_entity == negative.required_kind == ""
     assert negative._analyzer_grounding_guard["reason"] == \
         "negative_existence_is_not_an_observable_exact_scene"
-    assert negative._analyzer_grounding_guard["cached_revalidation_schema"] == 7
+    assert negative._analyzer_grounding_guard["cached_revalidation_schema"] == 8

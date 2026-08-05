@@ -62,9 +62,9 @@ def test_transcribe_threads_roster_hotwords_to_primary_and_rescue(monkeypatch, t
     assert model.calls[0]["hotwords"] == "Cersei Lannister Olenna Tyrell"
     assert model.calls[1]["hotwords"] == "Cersei Lannister Olenna Tyrell"
     assert model.calls[0]["initial_prompt"] == (
-        "Cast and character names: Cersei Lannister Olenna Tyrell")
+        "Cast, character names, and quoted dialogue: Cersei Lannister Olenna Tyrell")
     assert model.calls[1]["initial_prompt"] == (
-        "Cast and character names: Cersei Lannister Olenna Tyrell")
+        "Cast, character names, and quoted dialogue: Cersei Lannister Olenna Tyrell")
 
 
 def test_old_faster_whisper_signature_uses_initial_prompt_without_hotwords(monkeypatch, tmp_path):
@@ -86,7 +86,9 @@ def test_old_faster_whisper_signature_uses_initial_prompt_without_hotwords(monke
 
     assert [word for _, _, word in words] == ["Cersei", "speaks"]
     assert model.calls == [{
-        "initial_prompt": "Cast and character names: Cersei Lannister Olenna Tyrell",
+        "initial_prompt": (
+            "Cast, character names, and quoted dialogue: "
+            "Cersei Lannister Olenna Tyrell"),
         "vad_filter": True,
     }]
 
@@ -119,7 +121,8 @@ def test_old_faster_whisper_large_roster_keeps_priority_prefix_inside_half_conte
     IX._transcribe_with_vocabulary(model, tmp_path / "s.mp4", hotwords=names)
 
     assert model.prompt.startswith(
-        "Cast and character names: Priority Character0, Priority Character1")
+        "Cast, character names, and quoted dialogue: "
+        "Priority Character0, Priority Character1")
     assert "Character39" not in model.prompt
     prompt_tokens = model.hf_tokenizer.encode(
         " " + model.prompt, add_special_tokens=False).ids
@@ -132,6 +135,100 @@ def test_asr_cache_identity_changes_with_model_options_and_vocabulary():
     fp = IX._asr_prompt_fingerprint(base, "Cersei Olenna")
     assert fp != IX._asr_prompt_fingerprint(base, "Olenna Cersei")
     assert fp != IX._asr_prompt_fingerprint(other_model, "Cersei Olenna")
+
+
+def test_project_asr_vocabulary_includes_deduplicated_authored_dialogue_after_names():
+    proj = NS(
+        meta={"analysis": {
+            "characters": [{"name": "Tywin Lannister"}],
+            "actors": ["Charles Dance", "charles dance"],
+            "anchor_scenes": [{"dialogue": [
+                "You shot me",  # punctuation-insensitive duplicate of the beat quote
+                "I am your son. I have always been your son.",
+                "A longer line, whose comma must not split the decoder entry.",
+            ]}],
+        }},
+        segments=[
+            NS(quote=" You're no son of mine. "),
+            NS(quote="You shot me."),
+            NS(quote=""),
+        ],
+    )
+
+    vocabulary = IX._project_asr_hotwords(proj)
+
+    assert vocabulary.split(", ") == [
+        "Tywin Lannister",
+        "You shot me.",
+        "You're no son of mine.",
+        "I am your son. I have always been your son.",
+        "A longer line whose comma must not split the decoder entry.",
+        "Charles Dance",
+    ]
+
+
+def test_authored_quote_changes_project_asr_semantic_fingerprint():
+    cfg = NS(whisper_model="base", whisper_compute="int8")
+    proj = NS(
+        meta={"analysis": {
+            "characters": [{"name": "Tywin Lannister"}],
+            "actors": ["Charles Dance"],
+        }},
+        segments=[NS(quote="You shot me.")],
+    )
+    baseline = IX.asr_semantic_fingerprint(proj, cfg)
+
+    proj.segments[0].quote = "I am your son. I have always been your son."
+
+    assert IX.asr_semantic_fingerprint(proj, cfg) != baseline
+
+
+def test_audited_softening_keeps_original_quote_prompt_identity_stable():
+    cfg = NS(whisper_model="base", whisper_compute="int8")
+    quote = "Kill his men."
+    proj = NS(
+        meta={"analysis": {"characters": [], "actors": []}},
+        segments=[NS(quote=quote)],
+    )
+    baseline = IX.asr_semantic_fingerprint(proj, cfg)
+
+    proj.segments[0].quote = ""
+    proj.meta["selection_relevance_gap_softening"] = {"beats": [{
+        "original": {"quote": quote},
+    }]}
+
+    assert IX.asr_semantic_fingerprint(proj, cfg) == baseline
+
+
+def test_bounded_project_vocabulary_keeps_character_names_ahead_of_short_quotes():
+    class Encoding:
+        def __init__(self, ids):
+            self.ids = ids
+
+    class Tokenizer:
+        def encode(self, text, add_special_tokens=False):
+            del add_special_tokens
+            return Encoding(list(range(len(text.split()))))
+
+    model = NS(max_length=64, hf_tokenizer=Tokenizer())
+    proj = NS(
+        meta={"analysis": {
+            "characters": [
+                {"name": "Priority Character One"},
+                {"name": "Priority Character Two"},
+            ],
+            "actors": [],
+        }},
+        segments=[NS(quote=f"Line {i}") for i in range(40)],
+    )
+    requested = IX._project_asr_hotwords(proj)
+
+    first = IX._bound_asr_vocabulary(model, requested, duplicated=True)
+    second = IX._bound_asr_vocabulary(model, requested, duplicated=True)
+
+    assert first == second
+    assert first.startswith("Priority Character One, Priority Character Two")
+    assert "Line 39" not in first
 
 
 def test_whisper_model_cache_is_bound_to_every_constructor_input(monkeypatch):
@@ -222,7 +319,7 @@ def test_vocabulary_is_bounded_by_real_token_count_and_keeps_complete_priority_n
 
     effective = model.kwargs["hotwords"]
     assert effective == model.kwargs["initial_prompt"].removeprefix(
-        "Cast and character names: ")
+        "Cast, character names, and quoted dialogue: ")
     assert effective.startswith("Character Name0, Character Name1")
     assert "Character Name29" not in effective
     assert not effective.endswith("Character")

@@ -32,8 +32,9 @@ from .segment import _STOP as _CONTENT_STOP
 #   1 → shots + per-shot transcript only
 #   2 → + <sid>.words.json (word-level ASR start/end/text) for quote-span location
 INDEX_SCHEMA = 2
-_ASR_PIPELINE_REVISION = 4
+_ASR_PIPELINE_REVISION = 5
 _ASR_PROMPT_RESERVE_TOKENS = 16
+_ASR_INITIAL_PROMPT_PREFIX = "Cast, character names, and quoted dialogue: "
 
 _WHISPER = {}   # cache: exact Whisper constructor identity -> WhisperModel
 
@@ -119,10 +120,85 @@ def _whisper(cfg: ClipConfig):
     return _WHISPER[key]
 
 
+def _asr_vocabulary_entry(value) -> str:
+    """Return one comma-safe decoder-vocabulary entry.
+
+    The bounded prompt uses commas as entry delimiters, while authored dialogue naturally contains
+    commas.  Removing only that delimiter preserves the spoken words and prevents one quote from
+    being split into several independently truncatable fragments.
+    """
+    text = str(value or "").translate(str.maketrans({"\u2018": "'", "\u2019": "'"}))
+    return " ".join(text.replace(",", " ").split()).strip()
+
+
+def _asr_vocabulary_key(value) -> str:
+    """Punctuation-insensitive identity for deterministic vocabulary de-duplication."""
+    text = _asr_vocabulary_entry(value).casefold()
+    return " ".join(re.findall(r"[\w]+", text, flags=re.UNICODE))
+
+
 def _asr_hotwords(roster) -> str:
-    """Stable, name-delimited vocabulary; order affects both truncation and decoder output."""
-    return ", ".join(dict.fromkeys(
-        str(name or "").strip() for name in (roster or []) if str(name or "").strip()))
+    """Stable, comma-delimited vocabulary; order affects truncation and decoder output."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in (roster or []):
+        entry = _asr_vocabulary_entry(raw)
+        key = _asr_vocabulary_key(entry)
+        if not entry or not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(entry)
+    return ", ".join(out)
+
+
+def _project_authored_quotes(proj, analysis: dict) -> list[str]:
+    """Collect current beat quotes plus analysis-authored anchor dialogue.
+
+    Within the quote tier, compact lines come first so a fixed Whisper context carries the largest
+    number of exact dialogue hints instead of being consumed by one long speech.  Original order
+    breaks ties, so the result is deterministic across resume.
+    """
+    rows: list[tuple[int, str]] = []
+    for seg in (getattr(proj, "segments", None) or []):
+        rows.append((len(rows), str(getattr(seg, "quote", "") or "")))
+    for scene in (analysis.get("anchor_scenes") or []):
+        if not isinstance(scene, dict):
+            continue
+        dialogue = scene.get("dialogue") or []
+        if isinstance(dialogue, str):
+            dialogue = [dialogue]
+        for quote in dialogue:
+            rows.append((len(rows), str(quote or "")))
+
+    # Deterministic contract normalization and reviewed footage-gap softening may clear a quote
+    # from the active segment while retaining it as audited source-locator provenance.  Keep that
+    # authored line in the decoder hints so a sanctioned softening does not invalidate its own ASR
+    # generation immediately after mutation.  This is only a recognition hint; no removed quote is
+    # restored as a publication promise by indexing it.
+    grounding = analysis.get("beat_grounding_audit") or {}
+    grounding_beats = grounding.get("beats") if isinstance(grounding, dict) else {}
+    if isinstance(grounding_beats, dict):
+        for marker in grounding_beats.values():
+            if isinstance(marker, dict):
+                rows.append((len(rows), str(marker.get("original_quote", "") or "")))
+    softening = (getattr(proj, "meta", {}) or {}).get(
+        "selection_relevance_gap_softening") or {}
+    for marker in (softening.get("beats") or []) if isinstance(softening, dict) else []:
+        original = marker.get("original") if isinstance(marker, dict) else {}
+        if isinstance(original, dict):
+            rows.append((len(rows), str(original.get("quote", "") or "")))
+
+    unique: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for order, raw in rows:
+        quote = _asr_vocabulary_entry(raw)
+        key = _asr_vocabulary_key(quote)
+        if not quote or not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append((order, quote))
+    unique.sort(key=lambda row: (len(row[1].split()), len(row[1]), row[0]))
+    return [quote for _order, quote in unique]
 
 
 def _project_asr_hotwords(proj, fallback=None) -> str:
@@ -131,10 +207,23 @@ def _project_asr_hotwords(proj, fallback=None) -> str:
     # Character names are the words the show actually speaks, so keep them first when an unusually
     # large cast must be bounded to Whisper's context. Actor names remain useful for interviews and
     # credits, but must not evict a scripted character name such as Cersei.
-    names = [str(row.get("name", "") or "")
-             for row in (analysis.get("characters") or []) if isinstance(row, dict)]
-    names.extend(analysis.get("actors") or [])
-    return _asr_hotwords(names or fallback)
+    characters = [str(row.get("name", "") or "")
+                  for row in (analysis.get("characters") or []) if isinstance(row, dict)]
+    actors = list(analysis.get("actors") or [])
+    # The quote contract can only locate dialogue that indexing actually heard.  Supplying the
+    # authored lines to Whisper is an ASR recall aid, not proof that a quote exists: timed words and
+    # the unchanged whole-pool/selected-window gates still have to establish that independently.
+    # Character identities are the highest-priority tier.  Exact dialogue follows, because it is
+    # spoken show audio and drives the hard quote contract.  Actor names remain useful for
+    # interviews/credits but sit last so they cannot crowd a demanded line out of a fixed context.
+    if not characters and not actors:
+        fallback_rows = [fallback] if isinstance(fallback, str) else list(fallback or [])
+        characters = fallback_rows
+    return _asr_hotwords([
+        *characters,
+        *_project_authored_quotes(proj, analysis),
+        *actors,
+    ])
 
 
 def _faster_whisper_version() -> str:
@@ -204,7 +293,7 @@ def _bound_asr_vocabulary(model, hotwords: str, *, duplicated: bool) -> str:
     half_limit = max(1, max_length // 2 - 1)
 
     def fits(value: str) -> bool:
-        initial = f"Cast and character names: {value}"
+        initial = f"{_ASR_INITIAL_PROMPT_PREFIX}{value}"
         if tokenizer is None:
             # Whisper uses byte-level BPE, so UTF-8 byte count is a conservative token upper bound
             # even for old wrappers/test doubles that do not expose ``hf_tokenizer``.
@@ -254,7 +343,7 @@ def _transcribe_with_vocabulary(model, path: Path, *, hotwords: str = "", **kwar
             # The requested proper-name vocabulary is part of the persisted ASR identity. Decoding
             # without it and stamping the full-roster fingerprint would be false provenance.
             raise RuntimeError("ASR vocabulary could not be bounded/tokenized safely")
-        kwargs["initial_prompt"] = f"Cast and character names: {bounded}"
+        kwargs["initial_prompt"] = f"{_ASR_INITIAL_PROMPT_PREFIX}{bounded}"
         if supports_hotwords:
             kwargs["hotwords"] = bounded
     return model.transcribe(str(path), **kwargs)

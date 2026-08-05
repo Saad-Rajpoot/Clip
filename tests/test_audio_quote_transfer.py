@@ -78,6 +78,9 @@ def _project(tmp_path):
         confidence=.8, signals={"dialogue": .98})
     proj.segments = [seg]
     proj.selections = [sel]
+    # ASR provenance is bound to authored quote hints as well as model/cast options.
+    _stamp(proj, "dirty")
+    _stamp(proj, "clean")
     return proj, seg, sel
 
 

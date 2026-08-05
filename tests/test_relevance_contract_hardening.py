@@ -474,6 +474,40 @@ def test_project_roster_keeps_name_only_rows_without_none_actor_alias():
         "catelyn stark": "", "petyr baelish": "Aidan Gillen"}
 
 
+def test_project_roster_uses_repeated_explicit_title_alias_without_learning_vs_opponent():
+    proj = NS(
+        meta={"analysis": {"characters": [
+            {"name": "Tywin Lannister", "actor": "Charles Dance"},
+            {"name": "Oberyn Martell", "actor": "Pedro Pascal"},
+            {"name": "The Mountain", "actor": "Hafthor Bjornsson"},
+        ]}},
+        sources=[
+            NS(title="How Oberyn Martell became The Red Viper"),
+            NS(title="Oberyn Martell || The Red Viper"),
+            NS(title="Oberyn Martell vs The Mountain"),
+        ],
+    )
+    roster = V._project_char2actor(proj)
+    beat = _seg(
+        "Tywin watches the trial he convened.", visual_policy=P.EXACT,
+        is_specific_claim=True, required_entity="Tywin Lannister",
+        required_kind="character",
+        expected_visual="Tywin worried as Oberyn Martell gains the upper hand",
+        scene_query="Tywin reaction Oberyn winning trial by combat")
+
+    assert roster.identity_aliases == {"oberyn martell": ("red viper", "viper")}
+    assert V._named_roster_characters("The Viper", roster) == {"oberyn martell"}
+    assert V._source_title_exact_cast_conflict(
+        beat, "The Viper vs The Mountain full fight", roster) == ""
+
+    # One unsupported title (and an ordinary versus title) cannot manufacture an identity alias.
+    weak = NS(meta=proj.meta, sources=[
+        NS(title="Oberyn Martell became The Red Viper"),
+        NS(title="Oberyn Martell vs The Mountain"),
+    ])
+    assert V._project_char2actor(weak).identity_aliases == {}
+
+
 def test_exact_title_cast_warning_is_resolved_from_pixels_and_fingerprinted(
         tmp_path, monkeypatch):
     from vidlore.clipstudio import llm as L

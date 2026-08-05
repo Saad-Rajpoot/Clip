@@ -1012,8 +1012,63 @@ def _quote_narration_support(narration: str, quote: str) -> float:
     return len(q_terms & _grounding_terms(narration)) / len(q_terms)
 
 
+def _quote_clause_keys(quote: str) -> list[str]:
+    """Return meaningful normalized clauses without weakening verbatim quote identity."""
+    clauses = []
+    for raw in re.split(r"[.!?;]+", str(quote or "")):
+        key = _normalized_grounding_quote(raw)
+        if len(key.split()) >= 3 and key not in clauses:
+            clauses.append(key)
+    return clauses
+
+
+def _whole_script_quote_owner_score(beat, quote: str) -> tuple[int, str]:
+    """Conservative, beat-local evidence that one duplicate line belongs to this beat.
+
+    A quote is an on-screen promise, so merely describing the same scene is not ownership.  The
+    strongest evidence is the narration actually reciting the line; next is an expected visual
+    that explicitly contains the whole line (or one substantial authored clause).  One narrow
+    action tie-break covers dialogue that names the immediately resulting physical act (``You shot
+    me``): an ACTION beat depicting the shot owns that line over a later aftermath/reaction beat.
+    """
+    qkey = _normalized_grounding_quote(quote)
+    narration = _normalized_grounding_quote(str(getattr(beat, "text", "") or ""))
+    expected = _normalized_grounding_quote(str(getattr(beat, "expected_visual", "") or ""))
+    clauses = _quote_clause_keys(quote)
+    if qkey and qkey in narration:
+        return 3, "literal_line_in_narration"
+    if qkey and qkey in expected:
+        return 2, "literal_line_in_expected_visual"
+    if any(clause in expected for clause in clauses):
+        return 2, "literal_quote_clause_in_expected_visual"
+
+    # A short reaction line can name the action whose exact instant the analyzer also assigned to
+    # a separate beat.  Keep this deliberately tiny and require both an ACTION shot contract and
+    # explicit action wording; ordinary emotional/aftermath beats never win by this rule.
+    quote_action = ""
+    if re.search(r"\bshot\b", qkey):
+        quote_action = r"\b(?:shoot|shoots|shooting|shot|fire|fires|firing|trigger)\b"
+    elif re.search(r"\bstabbed\b", qkey):
+        quote_action = r"\b(?:stab|stabs|stabbing|stabbed)\b"
+    elif re.search(r"\bpoisoned\b", qkey):
+        quote_action = r"\b(?:poison|poisons|poisoning|poisoned)\b"
+    if (quote_action
+            and str(getattr(beat, "shot_intent", "") or "").strip().lower() == "action"
+            and re.search(quote_action, " ".join((narration, expected)), re.I)):
+        return 1, "quote_named_action_in_action_beat"
+    return 0, ""
+
+
+def _mark_quote_owner_group(group, rows) -> None:
+    """Persist one deterministic ownership decision on every participating beat marker."""
+    for beat in rows:
+        marker = getattr(beat, "_analyzer_grounding_guard", None)
+        if isinstance(marker, dict):
+            marker["quote_ownership_group"] = dict(group)
+
+
 def _sanitize_adjacent_quote_borrowing(beats) -> int:
-    """Remove only a demonstrably copied quote from a distinct, grounded visual event.
+    """Remove demonstrably copied quote contracts, locally and across the whole script.
 
     The beat analyzer works in global-context batches and can paste the strongest line from a long
     scene onto several adjacent beats.  When one beat narrates a concrete physical instant and a
@@ -1023,6 +1078,8 @@ def _sanitize_adjacent_quote_borrowing(beats) -> int:
     """
     rows = list(beats or [])
     changed = 0
+    # Preserve the original narrow neighbouring-beat repair.  It has useful paraphrase support
+    # evidence that does not by itself establish a unique owner across an entire essay.
     for beat in rows:
         quote = str(getattr(beat, "quote", "") or "")
         qkey = _normalized_grounding_quote(quote)
@@ -1060,10 +1117,86 @@ def _sanitize_adjacent_quote_borrowing(beats) -> int:
         marker["quote_support_beat"] = strongest_index
         marker["quote_support"] = round(strongest_support, 4)
         changed += 1
+
+    # Global-context analyzer batches can repeat one memorable line dozens of beats later.  A
+    # verbatim floor on every copy makes unrelated action beats unsatisfiable by construction.  Do
+    # not choose among ambiguous repeats: only a unique, affirmative owner may absorb a duplicate
+    # group, and only when the copies are genuinely non-local (the adjacent repair above remains
+    # responsible for local scene prose).
+    grouped: dict[str, list] = {}
+    for beat in rows:
+        key = _normalized_grounding_quote(str(getattr(beat, "quote", "") or ""))
+        if key:
+            grouped.setdefault(key, []).append(beat)
+    for qkey, members in grouped.items():
+        if len(members) < 2:
+            continue
+        indices = sorted(int(getattr(beat, "index", -1)) for beat in members)
+        if indices[-1] - indices[0] <= 3:
+            continue
+        quote = str(getattr(members[0], "quote", "") or "")
+        scored = [(_whole_script_quote_owner_score(beat, quote), beat) for beat in members]
+        top = max((score[0] for score, _beat in scored), default=0)
+        owners = [(score, beat) for score, beat in scored if score[0] == top and top > 0]
+        if len(owners) != 1:
+            group = {
+                "quote": quote,
+                "members": indices,
+                "owner_index": None,
+                "owner_reason": "",
+                "sanitized_indices": [],
+                "status": "ambiguous_preserved",
+            }
+            _mark_quote_owner_group(group, members)
+            continue
+        owner_score, owner = owners[0]
+        owner_index = int(getattr(owner, "index", -1))
+        sanitized = []
+        for beat in members:
+            if beat is owner:
+                continue
+            # Two distant essay beats may intentionally revisit the *same spoken event*.  If the
+            # loser's own expected visual strongly describes the quote's content, the line remains
+            # co-temporal and satisfiable there; ownership normalization is only for a copied line
+            # conjoined to a different visual action/state.
+            if _quote_narration_support(
+                    str(getattr(beat, "expected_visual", "") or ""), quote) >= 0.8:
+                continue
+            marker = getattr(beat, "_analyzer_grounding_guard", None)
+            if not isinstance(marker, dict) or not str(marker.get("branch", "")).startswith(
+                    "grounded_exact"):
+                continue
+            original_quote = str(getattr(beat, "quote", "") or "")
+            if not original_quote:
+                continue
+            beat.quote = ""
+            marker["branch"] = "grounded_exact_sanitized"
+            fields = list(marker.get("sanitized_fields") or [])
+            if "quote" not in fields:
+                fields.append("quote")
+            marker["sanitized_fields"] = fields
+            reasons = list(marker.get("sanitization_reasons") or [])
+            reason = "duplicate_quote_contract_assigned_to_better_beat"
+            if reason not in reasons:
+                reasons.append(reason)
+            marker["sanitization_reasons"] = reasons
+            marker["original_quote"] = original_quote
+            marker["quote_owner_index"] = owner_index
+            sanitized.append(int(getattr(beat, "index", -1)))
+            changed += 1
+        group = {
+            "quote": quote,
+            "members": indices,
+            "owner_index": owner_index,
+            "owner_reason": owner_score[1],
+            "sanitized_indices": sorted(sanitized),
+            "status": "resolved" if sanitized else "co_temporal_duplicates_preserved",
+        }
+        _mark_quote_owner_group(group, members)
     return changed
 
 
-_BEAT_GROUNDING_AUDIT_SCHEMA = 7
+_BEAT_GROUNDING_AUDIT_SCHEMA = 8
 
 
 def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
@@ -1073,12 +1206,17 @@ def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
     previous_breakout = (previous.get("breakout_provenance", {})
                          if isinstance(previous.get("breakout_provenance", {}), dict) else {})
     records = {}
+    quote_ownership = {}
     breakout_provenance = {}
     for beat in beats or []:
         key = str(int(getattr(beat, "index", -1)))
         marker = getattr(beat, "_analyzer_grounding_guard", None)
         if isinstance(marker, dict):
             records[key] = dict(marker)
+            group = marker.get("quote_ownership_group")
+            if isinstance(group, dict) and group.get("members"):
+                identity = "|".join(str(i) for i in group.get("members") or [])
+                quote_ownership[identity] = dict(group)
         if key in previous_breakout:
             breakout_provenance[key] = previous_breakout[key]
         elif bool(getattr(beat, "breakout_candidate", False)):
@@ -1114,6 +1252,9 @@ def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
         "adjacent_quote_copy_sanitized": sum(
             "adjacent_quote_borrowed_into_distinct_visual_event"
             in (m.get("sanitization_reasons") or []) for m in records.values()),
+        "whole_script_quote_copy_sanitized": sum(
+            "duplicate_quote_contract_assigned_to_better_beat"
+            in (m.get("sanitization_reasons") or []) for m in records.values()),
         "nominal_role_contract_narrowed": sum(
             bool(m.get("grounded_subject_role")) for m in records.values()),
         "nominal_guessed_identity_cleared": sum(
@@ -1137,6 +1278,9 @@ def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
     }
     if breakout_provenance:
         analysis.beat_grounding_audit["breakout_provenance"] = breakout_provenance
+    if quote_ownership:
+        analysis.beat_grounding_audit["quote_ownership"] = [
+            quote_ownership[key] for key in sorted(quote_ownership)]
     return counts
 
 

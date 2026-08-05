@@ -111,6 +111,8 @@ def _phase1_evidence_fixture(tmp_path, *, index=2, quote="", words=None,
         out_point=2.0, confidence=0.8, verifier=verdict,
         flag_reasons=["verifier_failed"])
     proj.meta["analysis"] = {"video_type": "multi_scene", "characters": [], "actors": []}
+    # Authored quotes are decoder hints and therefore part of the current ASR fingerprint.
+    proj.segments = [seg]
     if words is not None:
         (proj.index_dir / "show.index.meta.json").write_text(json.dumps({
             "schema": IX.INDEX_SCHEMA,
@@ -123,7 +125,6 @@ def _phase1_evidence_fixture(tmp_path, *, index=2, quote="", words=None,
         is_specific=evidence_is_specific,
         multiframe=True, faceid_names=[], era=V._project_beat_era(proj, seg),
         must_see=P.deictic_target(seg))
-    proj.segments = [seg]
     proj.selections = [sel]
     proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
         proj, [seg], [index], method="actual_frame_and_pool_audit")

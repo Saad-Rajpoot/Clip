@@ -986,6 +986,70 @@ def _source_title_named_death_conflict(seg, source_title: str, char2actor=None) 
     return ""
 
 
+class _CharacterRoster(dict):
+    """Canonical character→actor mapping with corpus-proven identity aliases."""
+
+    def __init__(self, *args, identity_aliases=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.identity_aliases = dict(identity_aliases or {})
+
+
+def _corpus_character_aliases(proj, canonical_names) -> dict[str, tuple[str, ...]]:
+    """Infer only explicit alias statements repeated across independent source titles.
+
+    A versus title is not alias evidence (``Oberyn vs The Mountain`` names two people).  Accepted
+    forms must state an identity relation such as ``became/known as`` or use the common title-card
+    apposition ``Canonical Name || The Epithet``.  Two distinct source titles must agree before an
+    alias affects a cast warning.  This turns corpus evidence like ``Oberyn Martell became The Red
+    Viper`` + ``Oberyn Martell || The Red Viper`` into a safe bridge for ``The Viper vs The
+    Mountain`` without hard-coding one show or trusting an analyzer guess.
+    """
+    titles = [str(getattr(src, "title", "") or "")
+              for src in (getattr(proj, "sources", None) or [])]
+    evidence: dict[str, dict[str, set[str]]] = {}
+    for canonical in canonical_names:
+        words = re.findall(r"[a-z0-9]+", str(canonical or "").lower())
+        if len(words) < 2:
+            continue
+        name_rx = r"\s+".join(re.escape(word) for word in words)
+        per_alias: dict[str, set[str]] = {}
+        for title in titles:
+            normalized = " ".join(re.findall(r"[a-z0-9|]+", title.lower()))
+            candidates = []
+            for pattern in (
+                    rf"\b{name_rx}\s+(?:became|(?:is\s+|was\s+)?known\s+as|a\s*k\s*a)\s+"
+                    r"(?:the\s+)?([a-z][a-z0-9'-]*(?:\s+[a-z][a-z0-9'-]*)?)",
+                    rf"\b{name_rx}\s*\|\|\s*(?:the\s+)?"
+                    r"([a-z][a-z0-9'-]*(?:\s+[a-z][a-z0-9'-]*)?)",
+            ):
+                match = re.search(pattern, normalized, re.I)
+                if match:
+                    candidates.append(" ".join(re.findall(
+                        r"[a-z0-9]+", match.group(1).lower())))
+            for alias in candidates:
+                if alias and alias != " ".join(words):
+                    per_alias.setdefault(alias, set()).add(title)
+        evidence[" ".join(words)] = per_alias
+
+    out: dict[str, tuple[str, ...]] = {}
+    canonical_tokens = {token for name in canonical_names
+                        for token in re.findall(r"[a-z0-9]+", str(name).lower())}
+    for canonical, aliases in evidence.items():
+        admitted = []
+        for alias, supporting_titles in sorted(aliases.items()):
+            if len(supporting_titles) < 2:
+                continue
+            admitted.append(alias)
+            parts = alias.split()
+            # A distinctive epithet noun remains recognizable when an uploader omits its modifier
+            # (``Red Viper`` → ``Viper``).  Require five characters and no canonical-name collision.
+            if len(parts) > 1 and len(parts[-1]) >= 5 and parts[-1] not in canonical_tokens:
+                admitted.append(parts[-1])
+        if admitted:
+            out[canonical] = tuple(dict.fromkeys(admitted))
+    return out
+
+
 def _project_char2actor(proj) -> dict[str, str]:
     """Return one canonical project roster for verification, relevance and build.
 
@@ -1001,7 +1065,8 @@ def _project_char2actor(proj) -> dict[str, str]:
         name = str(row.get("name") or "").strip().lower()
         if name:
             roster[name] = str(row.get("actor") or "").strip()
-    return roster
+    return _CharacterRoster(
+        roster, identity_aliases=_corpus_character_aliases(proj, roster.keys()))
 
 
 def _named_roster_characters(text: str, char2actor=None) -> set[str]:
@@ -1016,6 +1081,10 @@ def _named_roster_characters(text: str, char2actor=None) -> set[str]:
         char_parts = character.split()
         actor_parts = actor.split()
         aliases = [character]
+        aliases.extend(
+            str(alias or "").strip().lower()
+            for alias in (getattr(char2actor, "identity_aliases", {}) or {}).get(
+                character, ()) if str(alias or "").strip())
         # Distinctive given names are safe; surnames alone conflate Stark/Lannister relatives.
         if char_parts and len(char_parts[0]) >= 4:
             aliases.append(char_parts[0])

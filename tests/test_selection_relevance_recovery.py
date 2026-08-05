@@ -61,7 +61,6 @@ def _fixture(tmp_path, verifier):
                 keyframe_path=str(frame))
     proj.shots_path("s1").write_text(json.dumps([shot.to_dict()]))
     proj.meta["analysis"] = {"video_type": "multi_scene", "characters": [], "actors": []}
-    _stamp_current_asr_provenance(proj, "s1")
     seg = ScriptSegment(
         index=0, text="Olenna removes the stone from Sansa's necklace.",
         expected_visual="Olenna's hand removes a stone from Sansa's necklace",
@@ -2927,6 +2926,7 @@ def test_current_pool_recovery_clears_a_real_timed_quote_window_contract(tmp_pat
         multiframe=True, faceid_names=[], era="", must_see="")
     proj.segments = [seg]
     proj.selections = [old]
+    _stamp_current_asr_provenance(proj, "s1")
     initial = R.evaluate_selection_relevance(proj, [seg])
     assert initial["blockers"][0]["reasons"] == [
         "exact_quote_dialogue_signal_below_floor"]
@@ -3315,6 +3315,7 @@ def test_character_verbatim_quote_and_missing_branch_both_fail_closed(tmp_path):
     (proj.index_dir / "s1.words.json").write_text(json.dumps([
         [0.1 + i * .1, 0.2 + i * .1, word] for i, word in enumerate(words)
     ]))
+    _stamp_current_asr_provenance(proj, "s1")
     # The beat contract changed after the fixture bound its verifier; rebind the current negative
     # so the only reason for denial is quote typing, not stale selection evidence.
     V.bind_selection_verifier_evidence(
@@ -3375,6 +3376,7 @@ def test_phase2_confirmed_paraphrase_with_only_semantic_negatives_remains_eligib
     (proj.index_dir / "s1.words.json").write_text(json.dumps([
         [0.1, 0.2, "completely"], [0.3, 0.4, "unrelated"],
     ]))
+    _stamp_current_asr_provenance(proj, "s1")
     V.bind_selection_verifier_evidence(
         proj, sel, seg, sel.verifier, model="vision", is_specific=True,
         multiframe=True, faceid_names=[], era="", must_see="")
