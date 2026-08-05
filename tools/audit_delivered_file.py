@@ -353,6 +353,48 @@ def main() -> int:
         except Exception:                                          # noqa: BLE001
             return None
 
+    # Job-wide figures the build already computed, which beat any sample of 15. Read as data —
+    # the frame pairs above remain the independent check on whether the pipeline's own numbers
+    # describe the file that was actually delivered.
+    nat = _load("native_resolution_audit.json")
+    if isinstance(nat, dict):
+        sels = nat.get("selections")
+        rep["native_hd_jobwide"] = {
+            "passed": nat.get("passed"),
+            "selections": len(sels) if isinstance(sels, list) else sels,
+            "failures": len(nat.get("failures") or []),
+            "minimum_short_edge": nat.get("minimum_short_edge"),
+        }
+    cap = _load("caption_readability_audit.json")
+    if isinstance(cap, dict):
+        rep["caption_readability"] = {k: cap.get(k) for k in
+                                      ("passed", "hard_cps", "max_cps", "cue_count",
+                                       "word_count", "problem_count") if k in cap}
+        rep["caption_readability"]["blocked_windows"] = len(cap.get("blocked_windows") or [])
+    lin = _load("scene_lineage_audit.json")
+    if isinstance(lin, dict):
+        rep["scene_lineage_audit"] = {
+            "status": lin.get("status"),
+            "encoded_segments": len(lin.get("encoded_segments") or []),
+            "delivered_checks": len(lin.get("delivered_checks") or []),
+            "failures": len(lin.get("failures") or []),
+            "timeline_order_entries": (len(lin.get("timeline_order") or [])
+                                       if isinstance(lin.get("timeline_order"), list)
+                                       else lin.get("timeline_order")),
+        }
+
+    # The ad/promo gate reports through the build log rather than an artifact.
+    ads = []
+    for lg in sorted((job / "output").glob("build*.log")):
+        try:
+            for line in lg.read_text(encoding="utf-8", errors="replace").splitlines():
+                if "AD-GATE" in line or "ad-gate" in line:
+                    ads.append(line.strip()[:160])
+        except Exception:                                          # noqa: BLE001
+            pass
+    rep["ad_gate_log"] = ads[-4:]
+    rep["ad_gate_emergency_override"] = any("EMERGENCY OVERRIDE" in x for x in ads)
+
     sr = _load("selection_relevance_audit.json") or {}
     rep["semantic_blockers"] = sr.get("blocked_count", None)
     rf = _load("rejected_footage_audit.json") or {}
