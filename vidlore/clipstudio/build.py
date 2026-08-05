@@ -3221,14 +3221,14 @@ def _fit_verified_selection_clip(clip: Path, dest: Path, duration: float,
     # to fill a longer narration beat, do not clone its final decoded frame: container/frame
     # rounding can expose the first frame *after* the declared selection (and a shot ending on a
     # reverse cut would then freeze the wrong character for most of the beat).  Stop at the same
-    # stable, in-window 69% sample used by the lineage bank and hold that frame instead.  The held
+    # stable, in-window 88% sample used by the lineage bank and hold that frame instead.  The held
     # pixels therefore remain both inside the verified window and visually provable against it.
     # A generous pad plus an exact output frame count avoids stream looping.
     clip_duration = _ffprobe_duration(clip)
     vf = []
     if clip_duration > 0 and need > clip_duration + (2.0 / 30.0):
         safe_end = min(max(1.0 / 30.0, clip_duration - (2.0 / 30.0)),
-                       max(1.0 / 30.0, clip_duration * 0.69))
+                       max(1.0 / 30.0, clip_duration * 0.88))
         vf.extend([f"trim=end={safe_end:.3f}", "setpts=PTS-STARTPTS"])
     if crop_filter:
         vf.append(crop_filter)

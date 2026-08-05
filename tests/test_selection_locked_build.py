@@ -41,7 +41,7 @@ def test_owned_derivative_holds_a_safe_in_window_frame_without_double_zoom():
     fit = BUILD[fit_start:fit_end]
     block = _lock_block()
 
-    assert "clip_duration * 0.69" in fit
+    assert "clip_duration * 0.88" in fit
     assert 'vf.extend([f"trim=end={safe_end:.3f}", "setpts=PTS-STARTPTS"])' in fit
     assert fit.index("trim=end=") < fit.index("tpad=stop_mode=clone")
     assert "_owned_zoom = 1.0" in block
