@@ -1122,8 +1122,17 @@ def load_quote_retrieval_words(
         proj, source, cfg, fallback=fallback)[1]
 
 
+# Sources whose ASR could not be re-transcribed under the CURRENT authored prompt. They keep their
+# preserved words for every other purpose, but they cannot prove a quote under a prompt they were
+# never decoded with, so quote retrieval and whole-pool absence must not count them. Populated by
+# index_source; consulted by quote_retrieval_source_eligible.
+_asr_upgrade_refused: set = set()
+
+
 def quote_retrieval_source_eligible(source: SourceVideo, shots: list[Shot]) -> bool:
     """Use the same trusted-show-audio boundary as whole-pool quote classification."""
+    if str(getattr(source, "id", "") or "") in _asr_upgrade_refused:
+        return False                       # not decoded under this prompt — cannot prove a quote
     title = str(getattr(source, "title", "") or "")
     try:
         from .build import _breakout_src_ok, _ESSAYISH_RX
@@ -2121,8 +2130,32 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
                     if not refreshed:
                         state = ("corrupt/missing" if not words_cache_valid else
                                  ("non-empty" if old_words else "silent"))
-                        raise RuntimeError(
-                            f"ASR cache upgrade failed for {source.id}; {state} cache preserved")
+                        # ONE SOURCE THAT CANNOT BE UPGRADED IS NOT A DEAD RENDER.
+                        #
+                        # Measured: a 101-beat validation ran 21 minutes and died here because a
+                        # single 231-second lore-essay source ("Everything About Valyrian Steel")
+                        # would not re-transcribe under the new authored prompt. Its whole existing
+                        # transcript is FOUR words at t=223-230 — an end-credits cast read-out — and
+                        # that valid cache was preserved, exactly as intended. Nothing was lost and
+                        # nothing was corrupted; the render was simply killed.
+                        #
+                        # A source whose ASR could not be brought to the CURRENT prompt must not be
+                        # trusted to prove a quote under that prompt, so it is barred from quote
+                        # retrieval and from whole-pool absence claims. That is strictly less trust
+                        # than before, not more — it cannot admit anything. It keeps its preserved
+                        # words for every other purpose, and the run continues.
+                        #
+                        # A corrupt or missing cache is different in kind: there is no trustworthy
+                        # prior state to fall back on, so that still raises.
+                        if not (words_cache_valid and old_words):
+                            raise RuntimeError(
+                                f"ASR cache upgrade failed for {source.id}; {state} cache preserved")
+                        if progress:
+                            progress(f"index: {source.id} ASR could not be upgraded to the current "
+                                     f"prompt ({state} cache preserved) — barred from quote "
+                                     f"retrieval for this render, indexing continues")
+                        _asr_upgrade_refused.add(source.id)
+                        refreshed = cached_shots
                 retrieval_needed_after_refresh = bool(
                     authored_retrieval_prompt
                     and quote_retrieval_source_eligible(source, refreshed))
