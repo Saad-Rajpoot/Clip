@@ -118,6 +118,7 @@ _PIPELINE_CKPT_VERSION = 2   # bump when a stage's semantics change so old check
 # by their data/config inputs.  Keep these separate from _PIPELINE_CKPT_VERSION: changing a source
 # admission rule must replay backfill + match, but it must not throw away valid downloads/indexes.
 _MATCH_GATE_VERSION = "gatev5-typed-quotes-entity-safe-era"
+_VERIFY_GATE_VERSION = "verifyv2-exact-reaction-context"
 _BACKFILL_SIGNATURE_VERSION = "backfillv6-native-hd-actual-bytes"
 
 
@@ -242,7 +243,7 @@ def _footage_stage_signatures(download_sig: str, sources, *, force_index: bool,
     sig_index = _sig(download_sig, source_identity, bool(force_index), str(asr_signature or ""))
     sig_match = _sig(sig_index, _seg_sig(segments), _MATCH_GATE_VERSION)
     sig_cut = _sig(sig_match)
-    sig_verify = _sig(sig_cut, bool(verify))
+    sig_verify = _sig(sig_cut, bool(verify), _VERIFY_GATE_VERSION)
     return sig_index, sig_match, sig_cut, sig_verify, _sig(sig_verify)
 
 
@@ -3558,6 +3559,23 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
     # branches and validates source/index provenance plus quote/resolved-policy state on every use;
     # callers cannot inject a permissive ``paraphrase`` classification.
     _quote_pool_cache_sr = _R_sr._RequestQuotePoolClassificationCache()
+
+    # Authored retrieval artifacts are generation-bound to every project quote.  A reviewed beat's
+    # provenance can therefore become stale when an unrelated analyzer quote is removed even though
+    # its beat, footage pools, and conclusive paraphrase result did not change. Refresh only that
+    # narrow global-generation binding before deriving the bounded-retry fingerprint; the helper
+    # fails closed on every semantic/evidence change. Persisting here makes the refresh auditable and
+    # gives it a new retry generation instead of letting an old exhausted marker fast-return first.
+    from . import selfheal as _selfheal_review_refresh_sr
+    _review_refresh = \
+        _selfheal_review_refresh_sr.refresh_selection_relevance_gap_review_quote_bindings(
+            proj, cfg=cfg)
+    if _review_refresh.get("refreshed"):
+        proj.save()
+        log("semantic-gap: refreshed unchanged paraphrase review quote binding for beat(s) "
+            f"{_review_refresh.get('reviewed_beats', [])} after unrelated retrieval generation "
+            f"{str(_review_refresh.get('previous_generation_fingerprint', ''))[:12]}→"
+            f"{str(_review_refresh.get('current_generation_fingerprint', ''))[:12]}")
 
     audit_path = proj.output_dir / _R_sr.AUDIT_FILENAME
     audit = _R_sr.evaluate_selection_relevance(

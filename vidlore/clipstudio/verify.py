@@ -1393,6 +1393,206 @@ def _contextual_subject_ok(vd) -> bool:
                 and vd.get("correct_subject_visible") is not False))
 
 
+_EXACT_REACTION_INACTION_RX = re.compile(
+    r"\b(?:does\s+not|doesn['’]?t|did\s+not|didn['’]?t|without|"
+    r"refus(?:e|es|ed|ing)|silent(?:ly)?|no\s+argument|not\s+argu(?:e|ing))\b",
+    re.I,
+)
+_EXACT_REACTION_CONTEXT_PRE_SEC = 30.0
+_EXACT_REACTION_CONTEXT_POST_SEC = 5.0
+_EXACT_REACTION_CONTEXT_MAX_SPAN_SEC = 30.0
+_EXACT_REACTION_CONTEXT_SCHEMA = 1
+
+
+def _exact_reaction_context_required(seg) -> bool:
+    """Whether pixels alone cannot prove this exact reaction/inaction claim.
+
+    A silent face of the correct actor occurs in many unrelated scenes.  Tighten only the measured
+    failure shape: an EXACT beat explicitly labelled as a reaction whose narration/storyboard says
+    that the subject *does not* act, refuses nothing, or remains silent.  Ordinary reaction shots,
+    visible actions and character filler retain their existing contracts.
+    """
+    if seg is None or not _policy.verify_strict(seg):
+        return False
+    if str(getattr(seg, "shot_intent", "") or "").strip().lower() != "reaction":
+        return False
+    text = " ".join((
+        str(getattr(seg, "text", "") or ""),
+        str(getattr(seg, "expected_visual", "") or ""),
+    ))
+    return bool(_EXACT_REACTION_INACTION_RX.search(text))
+
+
+def _exact_reaction_context_evidence(proj, selection, seg, *, cfg=None) -> dict:
+    """Re-derive a source/window-bound scene locator for an exact silent reaction.
+
+    Vision must still return a strict KEEP, but that answer is not sufficient for an invisible
+    non-action (the measured model hallucinated a trial decision over a marriage conversation).
+    Require at least two non-roster storyboard terms in compact timed ASR immediately around the
+    selected reaction.  The result is recomputed from the current indexed source by both verifier
+    repair and the final publication audit; a persisted model assertion never proves this lock.
+    """
+    required = _exact_reaction_context_required(seg)
+    detail = {
+        "schema_version": _EXACT_REACTION_CONTEXT_SCHEMA,
+        "required": required,
+        "passed": not required,
+        "reason": "not_required" if not required else "exact_reaction_context_unproven",
+    }
+    if not required:
+        return detail
+    sid = str(getattr(selection, "source_id", "") or "")
+    try:
+        w0 = float(getattr(selection, "in_point", 0.0) or 0.0)
+        w1 = float(getattr(selection, "out_point", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return detail
+    detail.update({
+        "source_id": sid,
+        "selection_window": [round(w0, 3), round(w1, 3)],
+        "pre_roll_sec": _EXACT_REACTION_CONTEXT_PRE_SEC,
+        "post_roll_sec": _EXACT_REACTION_CONTEXT_POST_SEC,
+    })
+    if not sid or not (w1 > w0 >= 0.0):
+        return detail
+    try:
+        source = proj.source(sid)
+    except Exception:
+        source = None
+    if source is None or str(getattr(source, "status", "") or "") != "ok":
+        return detail
+    source_fp = _file_fingerprint(str(getattr(source, "local_path", "") or ""))
+    if source_fp in ("", "missing", "unreadable"):
+        return detail
+    detail["source_content_fingerprint"] = source_fp
+
+    # The complete pipeline validates every ASR sidecar before match.  Re-check the selected
+    # source here as well so a standalone publication audit cannot certify edited/stale words.
+    try:
+        use_cfg = cfg if cfg is not None else ClipConfig()
+        meta_path = Path(proj.index_dir) / f"{sid}.index.meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        expected_asr = _index.asr_semantic_fingerprint(proj, use_cfg)
+        meta_current = bool(
+            isinstance(meta, dict)
+            and not meta.get("asr_refresh_in_progress")
+            and meta.get("words") is True
+            and int(meta.get("schema", 0) or 0) >= int(_index.INDEX_SCHEMA)
+            and str(meta.get("asr_prompt_fingerprint", "") or "") == expected_asr)
+    except Exception:
+        meta_current = False
+        expected_asr = ""
+    detail["asr_prompt_fingerprint_expected"] = expected_asr
+    if not meta_current:
+        detail["reason"] = "exact_reaction_context_asr_provenance_invalid"
+        return detail
+
+    try:
+        from .discover import _STOPQ as stop_words
+    except Exception:
+        stop_words = set()
+
+    def _terms(value: str) -> set[str]:
+        out = set()
+        for raw_word in re.findall(r"[a-z0-9']+", str(value or "").lower()):
+            word = raw_word[:-2] if raw_word.endswith("'s") else raw_word
+            if len(word) >= 4 and word not in stop_words:
+                out.add(word)
+        return out
+
+    analysis = (getattr(proj, "meta", None) or {}).get("analysis", {}) or {}
+    excluded = _terms(str(analysis.get("movie_title", "") or ""))
+    excluded |= _terms(str(getattr(seg, "required_entity", "") or ""))
+    excluded |= _terms(" ".join(str(x or "") for x in (
+        getattr(seg, "entities", None) or [])))
+    roster = _project_char2actor(proj)
+    for character, actor in (roster or {}).items():
+        excluded |= _terms(character)
+        excluded |= _terms(actor)
+    for aliases in (getattr(roster, "identity_aliases", {}) or {}).values():
+        excluded |= _terms(" ".join(str(alias or "") for alias in aliases))
+    # These describe the invisible decision, not the scene which independently locates it.
+    excluded |= {
+        "argue", "argued", "arguing", "argument", "doesn", "grant", "grants", "granted",
+        "refuse", "refused", "refuses", "refusing", "silent", "silently", "without",
+    }
+    generic = {
+        "game", "thrones", "scene", "episode", "season", "clip", "video", "exact",
+        "character", "watching", "reaction", "shows", "showing", "visible", "moment",
+    }
+    target_terms = (
+        _terms(str(getattr(seg, "scene_query", "") or ""))
+        | _terms(str(getattr(seg, "expected_visual", "") or ""))
+    ) - excluded - generic
+    detail["target_terms"] = sorted(target_terms)
+    import hashlib as _hashlib_context
+    detail["target_hash"] = _hashlib_context.sha256(
+        "\x1f".join(sorted(target_terms)).encode("utf-8", "replace")).hexdigest()
+    if len(target_terms) < 2:
+        return detail
+
+    def _token_matches(target: str, actual: str) -> bool:
+        target = re.sub(r"[^a-z0-9]", "", target.lower())
+        actual = re.sub(r"[^a-z0-9]", "", actual.lower())
+        if not target or not actual:
+            return False
+        if target == actual:
+            return True
+        return bool(
+            min(len(target), len(actual)) >= 5
+            and abs(len(target) - len(actual)) <= 3
+            and (target.startswith(actual) or actual.startswith(target)))
+
+    rows = []
+    context0, context1 = w0 - _EXACT_REACTION_CONTEXT_PRE_SEC, \
+        w1 + _EXACT_REACTION_CONTEXT_POST_SEC
+    try:
+        shots = sorted(_index.load_shots(proj, sid), key=lambda shot: (
+            float(getattr(shot, "start", 0.0) or 0.0), int(getattr(shot, "index", -1))))
+    except Exception:
+        shots = []
+    for shot in shots:
+        try:
+            s0, s1 = float(shot.start), float(shot.end)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if s1 < context0 or s0 > context1:
+            continue
+        actual_tokens = re.findall(
+            r"[a-z0-9']+", str(getattr(shot, "transcript", "") or "").lower())
+        matched = {
+            target for target in target_terms
+            if any(_token_matches(target, token) for token in actual_tokens)
+        }
+        if matched:
+            rows.append((s0, s1, int(getattr(shot, "index", -1)), matched))
+    best = None
+    for start in range(len(rows)):
+        matched = set()
+        for end in range(start, len(rows)):
+            span0 = rows[start][0]
+            span1 = rows[end][1]
+            if span1 - span0 > _EXACT_REACTION_CONTEXT_MAX_SPAN_SEC:
+                break
+            matched |= rows[end][3]
+            if len(matched) >= 2:
+                rank = (len(matched), -(span1 - span0), -span0)
+                if best is None or rank > best[0]:
+                    best = (rank, span0, span1, rows[start][2], rows[end][2], set(matched))
+    if best is None:
+        detail["matched_terms"] = []
+        return detail
+    _rank, span0, span1, first_shot, last_shot, matched = best
+    detail.update({
+        "passed": True,
+        "reason": "timed_asr_scene_locator",
+        "matched_terms": sorted(matched),
+        "context_span": [round(span0, 3), round(span1, 3)],
+        "context_shots": [first_shot, last_shot],
+    })
+    return detail
+
+
 def _season_num(text: str):
     """Season number declared anywhere in a string (S03E10 / 'season 3' / 'season three' / 3x10)."""
     return _era.parse_season(text or "")
@@ -1579,8 +1779,27 @@ def _scene_affinity_order(alts, seg, proj, orig_source_id: str):
     _mv = {w for w in _re_aff.findall(
         r"[a-z']+", (((getattr(proj, "meta", None) or {}).get("analysis", {}) or {})
                      .get("movie_title", "") or "").lower()) if len(w) > 2}
-    toks = {w for w in _re_aff.findall(r"[a-z']+", (getattr(seg, "scene_query", "") or "").lower())
-            if len(w) > 2 and w not in _mv and w not in _AFF_STOP}
+
+    def _aff_terms(value) -> set[str]:
+        return {
+            w for w in _re_aff.findall(r"[a-z']+", str(value or "").lower())
+            if len(w) > 2 and w not in _mv and w not in _AFF_STOP
+        }
+
+    # Character names identify a cast member, not a scene.  Counting Tywin+Tyrion as two scene
+    # anchors promoted every conversation between them into the trial tier (the measured marriage
+    # false-positive).  Remove the complete project roster and beat entities; two *event/location*
+    # terms such as trial+combat are still required for tier zero.
+    roster_terms = _aff_terms(getattr(seg, "required_entity", "") or "")
+    roster_terms |= _aff_terms(" ".join(
+        str(value or "") for value in (getattr(seg, "entities", None) or [])))
+    roster = _project_char2actor(proj)
+    for character, actor in (roster or {}).items():
+        roster_terms |= _aff_terms(character)
+        roster_terms |= _aff_terms(actor)
+    for aliases in (getattr(roster, "identity_aliases", {}) or {}).values():
+        roster_terms |= _aff_terms(" ".join(str(alias or "") for alias in aliases))
+    toks = _aff_terms(getattr(seg, "scene_query", "") or "") - roster_terms
 
     def _tier(a):
         try:
@@ -1920,7 +2139,11 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
 
         best = None
         roll_radius = 2                  # at most five adjacent timed shots establish a passage
-        reserve_radius = 2               # the same five shots may consume strict-vision calls
+        reaction_tail = _exact_reaction_context_required(seg)
+        # A silent reaction can resolve several edits after the line which locates its scene.  The
+        # measured Tywin reaction is +4 edits / 17s after "trial by combat".  Widen only that
+        # fail-closed reaction/inaction shape; the ordinary timed reserve stays byte-for-byte +/-2.
+        reserve_radius = 4 if reaction_tail else 2
         for center in range(len(rows)):
             lo = max(0, center - roll_radius)
             hi = min(len(rows), center + roll_radius + 1)
@@ -1981,12 +2204,14 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
             record = {
                 "anchor": anchor_index,
                 "reserve_radius": reserve_radius,
+                "reaction_tail": reaction_tail,
                 "matches": tuple(sorted(matches)),
                 "rare_matches": tuple(sorted(rare_matches)),
                 "score": round(weighted, 4),
                 "strength": explicit_strength,
                 "first_match_index": rows[first_pos][0],
                 "last_match_index": rows[last_pos][0],
+                "span_end": round(span_end, 3),
             }
             if best is None or rank_key > best[0]:
                 best = (rank_key, record)
@@ -2640,8 +2865,20 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
             # not already reach.  This prevents double counting when its anchor is just beyond the
             # radius and keeps the old head-region search byte-for-byte unchanged.
             in_deep_region = deep_distance <= radius and distance > radius
+            _ordinary_timed = bool(_timed_info and timed_distance <= 2)
+            _reaction_tail = False
+            if _timed_info and _timed_info.get("reaction_tail"):
+                try:
+                    _reaction_tail = bool(
+                        shot_index > int(_timed_info["last_match_index"])
+                        and shot_index - int(_timed_info["anchor"]) <= _timed_radius
+                        and float(getattr(sh, "start", 0.0) or 0.0)
+                        - float(_timed_info["span_end"])
+                        <= _EXACT_REACTION_CONTEXT_MAX_SPAN_SEC)
+                except (KeyError, TypeError, ValueError):
+                    _reaction_tail = False
             in_timed_region = bool(
-                _timed_info and timed_distance <= _timed_radius and distance > radius)
+                _timed_info and (_ordinary_timed or _reaction_tail) and distance > radius)
             key = (sid, shot_index)
             if (key in excluded
                     or (distance > radius and not in_deep_region and not in_timed_region)):
@@ -2776,9 +3013,16 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
                         timed_signals["timed_text_tail_window"] = True
                 except (TypeError, ValueError, AttributeError):
                     pass
+                if _timed_info.get("reaction_tail"):
+                    # Under the unchanged five-call reserve, see the four post-dialogue edits
+                    # before the line itself; those pixels are where a silent reaction can exist.
+                    timed_rank = (
+                        0 if shot_index > int(_timed_info["last_match_index"]) else 1,
+                        timed_distance, order_key, shot_index)
+                else:
+                    timed_rank = (timed_distance, order_key, shot_index)
                 timed_region_ranked.setdefault(source_rank, []).append(
-                    ((timed_distance, order_key, shot_index),
-                     _candidate(timed_in, timed_out, timed_signals)))
+                    (timed_rank, _candidate(timed_in, timed_out, timed_signals)))
             if not in_deep_region and not in_timed_region and not is_retained_reserve:
                 ranked.append((source_rank, order_key,
                                _candidate(in_point, out_point, signals)))
@@ -3657,6 +3901,15 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             if _exact:
                 _primary_contract_rejection = _strict_keep_rejection_reason(
                     v, seg, _src_title_of(sel), _char2actor, must_see=_must_see(seg))
+                if not _primary_contract_rejection:
+                    _reaction_context = _exact_reaction_context_evidence(
+                        proj, sel, seg, cfg=cfg)
+                    if _reaction_context.get("required"):
+                        v["exact_reaction_context"] = _reaction_context
+                        if not _reaction_context.get("passed"):
+                            _primary_contract_rejection = str(
+                                _reaction_context.get("reason")
+                                or "exact_reaction_context_unproven")
             elif _character:
                 _primary_contract_rejection = _character_keep_rejection_reason(
                     v, seg, _src_title_of(sel), _char2actor, must_see=_must_see(seg))
@@ -4007,6 +4260,15 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                         if _exact:
                             _strict_reject = _strict_keep_rejection_reason(
                                 av, seg, _atitle, _char2actor, must_see=_alt_must_see)
+                            if not _strict_reject:
+                                _reaction_context = _exact_reaction_context_evidence(
+                                    proj, alt, seg, cfg=cfg)
+                                if _reaction_context.get("required"):
+                                    av["exact_reaction_context"] = _reaction_context
+                                    if not _reaction_context.get("passed"):
+                                        _strict_reject = str(
+                                            _reaction_context.get("reason")
+                                            or "exact_reaction_context_unproven")
                         elif _character:
                             _strict_reject = _character_keep_rejection_reason(
                                 av, seg, _atitle, _char2actor, must_see=_alt_must_see)
@@ -4046,7 +4308,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
 
                         # Promote the alternate into the selection, but do not update reuse/replaced
                         # accounting or emit a success log until its clip is proven materialized.
-                        old_sid, old_in = sel.source_id, sel.in_point
+                        old_sid, old_shot, old_in, old_out = (
+                            sel.source_id, sel.shot_index, sel.in_point, sel.out_point)
                         _old_key = (sel.source_id, sel.shot_index)
                         sel.source_id = alt.source_id
                         sel.shot_index = alt.shot_index
@@ -4074,7 +4337,12 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                                             for fs, fi in failed_wins)]
                         sel.beat_windows = [new_win] + kept
                         av["status"] = "ok"
-                        av["replaced_from"] = {"shot": shot.index if shot else -1}
+                        av["replaced_from"] = {
+                            "source_id": str(old_sid or ""),
+                            "shot": int(old_shot),
+                            "in_point": round(float(old_in), 3),
+                            "out_point": round(float(old_out), 3),
+                        }
                         if downgrade:
                             av["verdict"] = "keep"
                             av["downgraded"] = label or "exact→contextual"

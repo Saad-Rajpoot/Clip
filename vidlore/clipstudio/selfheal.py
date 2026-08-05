@@ -1671,6 +1671,185 @@ def _quote_review_branch_bindings(proj, segments, cfg=None) -> dict[str, dict]:
     return out
 
 
+def refresh_selection_relevance_gap_review_quote_bindings(proj, *, cfg=None) -> dict:
+    """Refresh a still-current ordinary gap review after unrelated quote-prompt churn.
+
+    The authored retrieval sidecars are generation-bound to *every* project quote.  Consequently,
+    removing an unrelated analyzer hallucination changes every sidecar generation and used to make
+    a reviewed paraphrase gap permanently stale even when the reviewed beat, both footage pools,
+    and every quote-classification result were byte-for-byte identical.
+
+    This is deliberately a very narrow provenance migration, not a new gap classification.  It may
+    replace only the global retrieval-generation fields, and only when all objective review facts
+    and every per-beat paraphrase/result field still match.  Any real quote, indeterminate result,
+    incomplete retrieval pool, changed confirmation result, beat drift, pool drift, or strict-
+    exhaustion review remains stale and therefore release-blocking.
+    """
+    unchanged = {"refreshed": False, "reason": "no_refreshable_gap_review"}
+    try:
+        review = (getattr(proj, "meta", {}) or {}).get(
+            "selection_relevance_gap_review") or {}
+        if int(review.get("schema_version", 0) or 0) != 2:
+            return {**unchanged, "reason": "gap_review_schema_not_refreshable"}
+        if str(review.get("method", "") or "") != "actual_frame_and_pool_audit":
+            return {**unchanged, "reason": "gap_review_method_not_refreshable"}
+        # Strict-exhaustion rows bind a separate content-hashed evidence artifact.  Rewriting any
+        # part of those reviews requires that artifact's own validator, never this ordinary-review
+        # migration.
+        if review.get("strict_acquisition_exhaustion"):
+            return {**unchanged, "reason": "strict_exhaustion_review_not_refreshable"}
+
+        raw_confirmed = review.get("confirmed_gap_beats")
+        if not isinstance(raw_confirmed, (list, tuple, set)) or not raw_confirmed:
+            return {**unchanged, "reason": "confirmed_gap_beats_missing"}
+        confirmed = sorted({int(index) for index in raw_confirmed})
+        by_seg = {
+            int(getattr(seg, "index", -1)): seg
+            for seg in (getattr(proj, "segments", None) or [])
+        }
+        bound_beats = review.get("beat_fingerprints")
+        if not isinstance(bound_beats, dict) or any(
+                index not in by_seg
+                or str(bound_beats.get(str(index), "") or "")
+                != _gap_beat_fingerprint(by_seg[index]) for index in confirmed):
+            return {**unchanged, "reason": "gap_review_beat_changed"}
+
+        pool_fp, pool_n = _gap_pool_fingerprint(proj)
+        absence_fp, absence_n = _gap_absence_pool_fingerprint(proj)
+        if (str(review.get("pool_fingerprint", "") or "") != pool_fp
+                or review.get("pool_source_count") != pool_n):
+            return {**unchanged, "reason": "gap_review_publishable_pool_changed"}
+        if (str(review.get("absence_pool_scope", "") or "")
+                != _GAP_ABSENCE_POOL_SCOPE
+                or str(review.get("absence_pool_fingerprint", "") or "") != absence_fp
+                or review.get("absence_pool_source_count") != absence_n):
+            return {**unchanged, "reason": "gap_review_absence_pool_changed"}
+
+        quoted = [
+            by_seg[index] for index in confirmed
+            if str(getattr(by_seg[index], "quote", "") or "").strip()
+        ]
+        if not quoted:
+            return {**unchanged, "reason": "gap_review_has_no_quoted_beats"}
+
+        stored_pool = review.get("quote_retrieval_binding")
+        if not isinstance(stored_pool, dict) or stored_pool.get("complete") is not True:
+            return {**unchanged, "reason": "stored_quote_retrieval_binding_incomplete"}
+        current_pool = _quote_retrieval_pool_binding(proj, cfg)
+        if not isinstance(current_pool, dict) or current_pool.get("complete") is not True:
+            return {**unchanged, "reason": "current_quote_retrieval_binding_incomplete"}
+        if stored_pool.get("invalid_sources") not in ([], ()) \
+                or current_pool.get("invalid_sources") not in ([], ()):
+            return {**unchanged, "reason": "quote_retrieval_binding_has_invalid_sources"}
+
+        old_generation = str(stored_pool.get("generation_fingerprint", "") or "")
+        new_generation = str(current_pool.get("generation_fingerprint", "") or "")
+        if old_generation == new_generation:
+            return {**unchanged, "reason": "quote_retrieval_generation_is_current"}
+        if not re.fullmatch(r"[0-9a-f]{64}", old_generation) \
+                or not re.fullmatch(r"[0-9a-f]{64}", new_generation):
+            return {**unchanged, "reason": "quote_retrieval_generation_malformed"}
+        if not re.fullmatch(
+                r"[0-9a-f]{64}", str(stored_pool.get("sidecar_pool_fingerprint", "") or "")) \
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(current_pool.get("sidecar_pool_fingerprint", "") or "")):
+            return {**unchanged, "reason": "quote_retrieval_sidecar_pool_fingerprint_malformed"}
+
+        # Generation and the hash of the generation-stamped sidecars are the only global fields
+        # allowed to move. Source eligibility/completeness and every future field must match.
+        global_generation_fields = {"generation_fingerprint", "sidecar_pool_fingerprint"}
+        stored_pool_facts = {
+            key: value for key, value in stored_pool.items()
+            if key not in global_generation_fields
+        }
+        current_pool_facts = {
+            key: value for key, value in current_pool.items()
+            if key not in global_generation_fields
+        }
+        if stored_pool_facts != current_pool_facts:
+            return {**unchanged, "reason": "quote_retrieval_pool_facts_changed"}
+
+        stored_branches = review.get("quote_branch_bindings")
+        if not isinstance(stored_branches, dict):
+            return {**unchanged, "reason": "stored_quote_branch_bindings_missing"}
+        current_branches = _quote_review_branch_bindings(proj, quoted, cfg)
+        retrieval_field = "quote_retrieval_fingerprint_expected"
+        refreshed_indices = []
+        expected_branch_keys = {str(int(getattr(seg, "index", -1))) for seg in quoted}
+        if set(stored_branches) != expected_branch_keys \
+                or set(current_branches) != expected_branch_keys:
+            return {**unchanged, "reason": "quote_branch_binding_scope_changed"}
+        for seg in quoted:
+            index = int(getattr(seg, "index", -1))
+            stored = stored_branches.get(str(index))
+            current = current_branches.get(str(index))
+            if not isinstance(stored, dict) or not isinstance(current, dict):
+                return {**unchanged, "reason": "quote_branch_binding_missing"}
+            quote = " ".join(str(getattr(seg, "quote", "") or "").strip().split())
+            quote_hash = hashlib.sha256(quote.encode("utf-8", "replace")).hexdigest()
+            if stored.get("authored_quote_sha256") != quote_hash \
+                    or current.get("authored_quote_sha256") != quote_hash:
+                return {**unchanged, "reason": "authored_quote_changed"}
+            if stored.get("branch") != "paraphrase" or current.get("branch") != "paraphrase":
+                return {**unchanged, "reason": "quote_branch_not_matching_paraphrase"}
+            for binding in (stored, current):
+                if binding.get("binding_schema_version") != 1:
+                    return {**unchanged, "reason": "quote_branch_binding_schema_mismatch"}
+                for field in (
+                        "confirmation_generation_fingerprint",
+                        "confirmation_result_fingerprint"):
+                    if not re.fullmatch(
+                            r"[0-9a-f]{64}", str(binding.get(field, "") or "")):
+                        return {**unchanged, "reason": "quote_branch_fingerprint_malformed"}
+                if binding.get("confirmation_attempts_shape_valid") is not True:
+                    return {**unchanged, "reason": "quote_confirmation_shape_invalid"}
+                for field in (
+                        "confirmation_attempt_count", "confirmation_confirmed_count",
+                        "confirmation_rejected_count", "confirmation_inconclusive_count",
+                        "retrieval_truncated_stream_count"):
+                    value = binding.get(field)
+                    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                        return {**unchanged, "reason": "quote_branch_count_malformed"}
+                if binding.get("confirmation_confirmed_count") != 0 \
+                        or binding.get("confirmation_inconclusive_count") != 0 \
+                        or binding.get("retrieval_truncated_stream_count") != 0:
+                    return {**unchanged, "reason": "quote_branch_not_conclusive_paraphrase"}
+            if stored.get(retrieval_field) != old_generation \
+                    or current.get(retrieval_field) != new_generation:
+                return {**unchanged, "reason": "quote_branch_generation_mismatch"}
+            stored_facts = {
+                key: value for key, value in stored.items() if key != retrieval_field
+            }
+            current_facts = {
+                key: value for key, value in current.items() if key != retrieval_field
+            }
+            if stored_facts != current_facts:
+                return {**unchanged, "reason": "quote_branch_results_changed"}
+            refreshed_indices.append(index)
+
+        updated = copy.deepcopy(review)
+        updated["quote_retrieval_binding"] = copy.deepcopy(current_pool)
+        updated["quote_branch_bindings"] = copy.deepcopy(current_branches)
+        updated["quote_binding_refresh"] = {
+            "schema_version": 1,
+            "reason": "unrelated_global_quote_retrieval_generation_changed",
+            "previous_generation_fingerprint": old_generation,
+            "current_generation_fingerprint": new_generation,
+            "reviewed_beats": sorted(refreshed_indices),
+        }
+        proj.meta["selection_relevance_gap_review"] = updated
+        return {
+            "refreshed": True,
+            "reason": "unrelated_global_quote_retrieval_generation_changed",
+            "previous_generation_fingerprint": old_generation,
+            "current_generation_fingerprint": new_generation,
+            "reviewed_beats": sorted(refreshed_indices),
+        }
+    except Exception as exc:                             # noqa: BLE001 — migration fails closed
+        return {**unchanged, "reason": f"quote_binding_refresh_error:{type(exc).__name__}"}
+
+
 def _strict_original_quote_branch_binding(proj, seg, original: dict, cfg=None) -> dict:
     """Recompute one active softening's quote contract against its authored strict state."""
     binding_proj, strict_seg = _strict_original_project_view(proj, seg, original)

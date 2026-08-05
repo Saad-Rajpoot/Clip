@@ -764,6 +764,87 @@ def _unsupported_short_quote_contract(beat: ScriptSegment, directive: dict) -> d
     }
 
 
+_LEADING_NAMED_SUBJECT_RX = re.compile(
+    r"^\s*(?P<subject>[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,2})\b")
+
+
+def _multi_event_required_entity_contract(beat: ScriptSegment, directive: dict) -> dict | None:
+    """Narrow an enumerated exact contract to the one event its retrieval fields target.
+
+    A narration can rapidly enumerate several different scenes while one analyzer directive can
+    retrieve only one short window.  Requiring that window to show all enumerated scenes creates an
+    impossible conjunction even when the chosen scene is exact.  This guard is deliberately tight:
+    the expected visual must reproduce the narration, contain at least three comma/semicolon clauses
+    led by pairwise-distinct named subjects, and exactly one clause must match both the declared
+    entity and the scene query.  If the query mentions another clause's subject, the montage remains
+    untouched because retrieval may genuinely be targeting the combined scene.
+
+    Exactness, specificity, entity, kind, and query all survive.  Only the verifier-facing prose is
+    narrowed to the same observable event already selected by ``required_entity``/``scene_query``.
+    """
+    if str(directive.get("required_kind", "") or "").strip().lower() not in {
+            "actor", "character"}:
+        return None
+    narration = str(getattr(beat, "text", "") or "").strip()
+    expected = str(directive.get("expected_visual", "") or "").strip()
+    if not narration or not expected:
+        return None
+    # Scope this to analyzer contracts that faithfully repeat an authored enumeration.  A
+    # storyboard paraphrase or invented montage is handled by the other grounding guards.
+    if ([token.lower() for token in _GROUNDING_WORD_RX.findall(narration)]
+            != [token.lower() for token in _GROUNDING_WORD_RX.findall(expected)]):
+        return None
+
+    clauses = [part.strip(" \t\r\n,;:.") for part in re.split(r"[,;]+", expected)]
+    clauses = [part for part in clauses if part]
+    if len(clauses) < 3:
+        return None
+
+    subject_terms = []
+    clause_terms = []
+    for clause in clauses:
+        match = _LEADING_NAMED_SUBJECT_RX.match(clause)
+        if not match:
+            return None
+        subject = _grounding_terms(match.group("subject"))
+        if not subject:
+            return None
+        subject_terms.append(subject)
+        clause_terms.append(_grounding_terms(clause))
+    # Repeated subjects normally describe simultaneous details of one scene, not a cross-scene
+    # enumeration.  Pairwise disjoint leading subjects are the conservative signal we need here.
+    if any(left & right for i, left in enumerate(subject_terms)
+           for right in subject_terms[i + 1:]):
+        return None
+
+    entity_terms = _grounding_terms(str(directive.get("required_entity", "") or ""))
+    query_terms = _grounding_terms(str(directive.get("scene_query", "") or ""))
+    if not entity_terms or not entity_terms <= query_terms:
+        return None
+    targets = [i for i, subject in enumerate(subject_terms) if entity_terms <= subject]
+    if len(targets) != 1:
+        return None
+    target_index = targets[0]
+    target_terms = clause_terms[target_index]
+    # Require a non-entity scene anchor (``bed`` in the measured Shae case), not merely a character
+    # name.  Also refuse to narrow when the query names any other enumerated subject.
+    if not ((target_terms & query_terms) - entity_terms):
+        return None
+    if any(subject & query_terms for i, subject in enumerate(subject_terms)
+           if i != target_index):
+        return None
+
+    target = clauses[target_index]
+    return {
+        "reason": "multi_event_contract_narrowed_to_required_entity",
+        "sanitize_fields": ["expected_visual"],
+        "sanitized_values": {"expected_visual": target[:200]},
+        "multi_event_clause_count": len(clauses),
+        "multi_event_target_clause": target[:200],
+        "multi_event_original_expected_visual": expected[:200],
+    }
+
+
 def _has_scene_action(text: str) -> bool:
     terms = _grounding_terms(text)
     if terms & _SCENE_ACTION_ROOTS:
@@ -928,6 +1009,32 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
     grounding = (_exact_direction_grounding(beat, directive)
                  if resolved == _policy.EXACT else None)
     if grounding is not None and grounding.get("grounded"):
+        multi_event_guard = _multi_event_required_entity_contract(beat, directive)
+        if multi_event_guard:
+            grounding = dict(grounding)
+            existing_fields = list(grounding.get("sanitize_fields") or [])
+            existing_values = dict(grounding.get("sanitized_values") or {})
+            added_fields = []
+            for field in multi_event_guard["sanitize_fields"]:
+                if field in existing_fields:
+                    continue
+                existing_fields.append(field)
+                existing_values[field] = multi_event_guard["sanitized_values"][field]
+                added_fields.append(field)
+            if added_fields and not grounding.get("sanitize_fields"):
+                grounding["reason"] = multi_event_guard["reason"]
+            elif added_fields:
+                reasons = list(grounding.get("sanitization_reasons") or [])
+                if multi_event_guard["reason"] not in reasons:
+                    reasons.append(multi_event_guard["reason"])
+                grounding["sanitization_reasons"] = reasons
+            if added_fields:
+                grounding["sanitize_fields"] = existing_fields
+                grounding["sanitized_values"] = existing_values
+                for field in (
+                        "multi_event_clause_count", "multi_event_target_clause",
+                        "multi_event_original_expected_visual"):
+                    grounding[field] = multi_event_guard[field]
         short_quote_guard = _unsupported_short_quote_contract(beat, directive)
         if short_quote_guard:
             grounding = dict(grounding)
@@ -1011,6 +1118,11 @@ def _apply_beat_direction(beat: ScriptSegment, directive: dict) -> None:
             marker["camera_cues"] = list(grounding["camera_cues"])
         if grounding.get("camera_original_values"):
             marker["camera_original_values"] = dict(grounding["camera_original_values"])
+        for field in (
+                "multi_event_clause_count", "multi_event_target_clause",
+                "multi_event_original_expected_visual"):
+            if grounding.get(field) not in (None, ""):
+                marker[field] = grounding[field]
         if sanitize_fields:
             marker["sanitized_fields"] = sanitize_fields
             sanitized_values = dict(grounding.get("sanitized_values") or {})
@@ -1278,7 +1390,7 @@ def _sanitize_adjacent_quote_borrowing(beats) -> int:
     return changed
 
 
-_BEAT_GROUNDING_AUDIT_SCHEMA = 9
+_BEAT_GROUNDING_AUDIT_SCHEMA = 10
 
 
 def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
@@ -1327,6 +1439,10 @@ def _record_beat_grounding_audit(analysis: ScriptAnalysis, beats) -> dict:
         "short_common_quote_sanitized": sum(
             m.get("reason") == "short_common_quote_not_literally_narrated"
             or "short_common_quote_not_literally_narrated"
+            in (m.get("sanitization_reasons") or []) for m in records.values()),
+        "multi_event_contract_narrowed": sum(
+            m.get("reason") == "multi_event_contract_narrowed_to_required_entity"
+            or "multi_event_contract_narrowed_to_required_entity"
             in (m.get("sanitization_reasons") or []) for m in records.values()),
         "bare_named_event_sanitized": sum(
             m.get("reason") == "bare_named_event_staging_removed"
@@ -1542,6 +1658,42 @@ def revalidate_cached_directions(beats, analysis: ScriptAnalysis | None = None) 
                             cached_nominal_roles_migrated += 1
                     existing_marker["cached_revalidation_schema"] = \
                         _CACHED_DIRECTION_GUARD_SCHEMA
+            continue
+        cached_multi_event_guard = _multi_event_required_entity_contract(
+            beat, _cached_direction(beat))
+        if (prior_guard_schema < _CACHED_DIRECTION_GUARD_SCHEMA
+                and cached_multi_event_guard
+                and isinstance(existing_marker, dict)
+                and _sanitized_guard_is_effective(beat, existing_marker)):
+            # A prior sanitizer may already own ``expected_visual`` (beat 134 first had an
+            # unsupported tiny quote removed by schema 9).  Replaying the post-sanitized directive
+            # would erase that truthful provenance.  Merge this one-field schema migration in place
+            # and retain both reasons instead.
+            beat.expected_visual = str(
+                cached_multi_event_guard["sanitized_values"]["expected_visual"])[:200]
+            existing_marker["branch"] = "grounded_exact_sanitized"
+            fields = list(existing_marker.get("sanitized_fields") or [])
+            if "expected_visual" not in fields:
+                fields.append("expected_visual")
+            existing_marker["sanitized_fields"] = fields
+            values = (dict(existing_marker.get("sanitized_values") or {})
+                      if isinstance(existing_marker.get("sanitized_values"), dict) else {})
+            values["expected_visual"] = beat.expected_visual
+            existing_marker["sanitized_values"] = values
+            reason = cached_multi_event_guard["reason"]
+            if existing_marker.get("reason") != reason:
+                reasons = list(existing_marker.get("sanitization_reasons") or [])
+                if reason not in reasons:
+                    reasons.append(reason)
+                existing_marker["sanitization_reasons"] = reasons
+            for field in (
+                    "multi_event_clause_count", "multi_event_target_clause",
+                    "multi_event_original_expected_visual"):
+                existing_marker[field] = cached_multi_event_guard[field]
+            existing_marker["guard_schema"] = _CACHED_DIRECTION_GUARD_SCHEMA
+            existing_marker["cached_revalidation_schema"] = \
+                _CACHED_DIRECTION_GUARD_SCHEMA
+            exact_revalidated += 1
             continue
         if (isinstance(existing_marker, dict)
                 and existing_marker.get("cached_revalidation_schema")

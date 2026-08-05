@@ -3321,6 +3321,115 @@ def test_new_bound_gap_review_runs_ladder_after_same_generation_was_already_exha
     assert proj.meta["selection_relevance_recovery"]["gap_softening"] == result_payload
 
 
+def test_unrelated_quote_generation_refresh_happens_before_exhausted_fast_return(
+        monkeypatch, tmp_path):
+    """Removing another beat's quote must not strand an unchanged reviewed paraphrase gap."""
+    from vidlore.clipstudio import relevance_contract as R
+    from vidlore.clipstudio import selfheal as S
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    seg = segs[0]
+    seg.quote = "I'm taking you to the docks."
+    # Rebind the verifier after adding the authored quote; the quote itself remains a paraphrase in
+    # both generations and must not turn prompt drift into a technical verifier blocker.
+    shot = Shot.from_dict(json.loads(proj.shots_path("s1").read_text())[0])
+    V.bind_selection_verifier_evidence(
+        proj, _sel, seg, _sel.verifier, shot=shot, model="vision",
+        is_specific=True, multiframe=True, faceid_names=[], era="", must_see="")
+
+    old_generation, new_generation = "1" * 64, "2" * 64
+    state = {"generation": old_generation}
+
+    def pool_binding(_proj, _cfg=None):
+        generation = state["generation"]
+        return {
+            "generation_fingerprint": generation,
+            "eligible_source_count": 1,
+            "sidecar_pool_fingerprint": (
+                "3" if generation == old_generation else "4") * 64,
+            "complete": True,
+            "invalid_sources": [],
+        }
+
+    def paraphrase_contracts(_proj, targets, *, cfg=None):
+        del cfg
+        generation = state["generation"]
+        return {
+            int(target.index): {
+                "authored_quote": target.quote,
+                "branch": "paraphrase",
+                "branch_reason": "no_qualifying_timed_asr_phrase_match",
+                "verbatim_required": False,
+                "quote_retrieval_fingerprint_expected": generation,
+                "confirmation_decoder_fingerprint_expected": "5" * 64,
+                "unprompted_confirmation_attempt_count": 0,
+                "unprompted_confirmation_confirmed_count": 0,
+                "unprompted_confirmation_rejected_count": 0,
+                "unprompted_confirmation_inconclusive_count": 0,
+                "unprompted_confirmation_attempts": [],
+                "retrieval_truncated_stream_count": 0,
+            }
+            for target in targets if str(getattr(target, "quote", "") or "").strip()
+        }
+
+    monkeypatch.setattr(S, "_quote_retrieval_pool_binding", pool_binding)
+    monkeypatch.setattr(R, "_quote_pool_branches", paraphrase_contracts)
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, segs, [seg.index], method="actual_frame_and_pool_audit")
+
+    # Model the terminal failed run: current artifacts already use the new global generation, but
+    # the actual-frame review still carries the old one and the exhausted marker fingerprints that
+    # stale review. Without the JIT refresh, `_retry_selection_relevance` returns immediately.
+    state["generation"] = new_generation
+    current = R.evaluate_selection_relevance(proj, segs)
+    stale_fp = O._selection_relevance_retry_fingerprint(proj, segs, current)
+    proj.meta["selection_relevance_recovery"] = {
+        "schema_version": R.SCHEMA_VERSION,
+        "before": [seg.index],
+        "after": [seg.index],
+        "post_fingerprint": stale_fp,
+        "deferred": [],
+        "gap_softening": {},
+    }
+    logs = []
+
+    def exhausted(_proj, _segs, _analysis, _cfg, _eng, **kwargs):
+        _write_mock_recovery_page(_proj, kwargs)
+        return 0
+
+    def settle_gap(_proj, targets, *_args, **_kwargs):
+        target = targets[0]
+        target.visual_policy = P.ABSTRACT
+        target.required_entity = ""
+        target.required_kind = ""
+        target.quote = ""
+        target.scene_query = ""
+        target.is_specific_claim = False
+        return {"candidate_count": 1, "softened_count": 1}
+
+    with mock.patch.object(O, "_recover_unresolved_beats", side_effect=exhausted) as recover, \
+            mock.patch.object(O, "_fill_image_fallbacks") as images, \
+            mock.patch.object(S, "heal_selection_relevance_gaps",
+                              side_effect=settle_gap) as ladder:
+        final = O._retry_selection_relevance(
+            proj, segs, ClipConfig(), SimpleNamespace(movie_title="Game of Thrones"),
+            SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+            policy="approved_testing", log=logs.append)
+
+    assert final["status"] == "pass"
+    recover.assert_called_once(), "binding refresh must open exactly one new bounded generation"
+    images.assert_called_once()
+    ladder.assert_called_once()
+    refreshed = proj.meta["selection_relevance_gap_review"]
+    assert refreshed["quote_retrieval_binding"]["generation_fingerprint"] == new_generation
+    assert refreshed["quote_binding_refresh"]["previous_generation_fingerprint"] == \
+        old_generation
+    assert O._selection_relevance_retry_fingerprint(proj, segs, current) != stale_fp
+    assert any("refreshed unchanged paraphrase review quote binding" in line for line in logs)
+
+
 def test_pool_growth_revalidates_exhausted_gap_and_returns_it_to_strict_recovery(
         tmp_path):
     from vidlore.clipstudio import selfheal as S

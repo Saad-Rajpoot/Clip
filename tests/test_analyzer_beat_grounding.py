@@ -77,6 +77,122 @@ def test_literal_or_three_token_quote_remains_for_downstream_proof(text, quote):
     assert beat._analyzer_grounding_guard["branch"] == "grounded_exact"
 
 
+def test_enumerated_exact_contract_follows_its_single_required_entity_target():
+    """Beat 134 must verify the Shae scene it retrieves, not three separate scenes at once."""
+    narration = (
+        "Jaime opening the cell, Varys moving him through the city, "
+        "Shae in his father's bed,")
+    query = "Game of Thrones Tyrion finds Shae in Tywin's bed 'It's you'"
+
+    beat = _apply(
+        narration,
+        expected_visual=narration,
+        scene_query=query,
+        required_entity="Shae",
+        required_kind="character",
+    )
+
+    assert beat.visual_policy == P.EXACT
+    assert beat.is_specific_claim is True
+    assert beat.expected_visual == "Shae in his father's bed"
+    assert beat.scene_query == query
+    assert beat.required_entity == "Shae"
+    assert beat.required_kind == "character"
+    marker = beat._analyzer_grounding_guard
+    assert marker["branch"] == "grounded_exact_sanitized"
+    assert marker["reason"] == "multi_event_contract_narrowed_to_required_entity"
+    assert marker["sanitized_fields"] == ["expected_visual"]
+    assert marker["sanitized_values"] == {
+        "expected_visual": "Shae in his father's bed"}
+    assert marker["multi_event_clause_count"] == 3
+    assert marker["multi_event_target_clause"] == "Shae in his father's bed"
+    assert marker["multi_event_original_expected_visual"] == narration
+
+
+@pytest.mark.parametrize(
+    ("narration", "query"),
+    [
+        # Two clauses can be a single ordinary scene; the measured defect needs three named events.
+        ("Tyrion faces Tywin, Bronn watches him",
+         "Game of Thrones Tyrion faces Tywin"),
+        # A query naming another enumerated subject may genuinely target their combined scene.
+        ("Tyrion faces Tywin, Bronn watches him, Jaime enters the room",
+         "Game of Thrones Tyrion Tywin Bronn confrontation"),
+    ],
+)
+def test_ordinary_or_combined_multi_subject_exact_contract_is_not_narrowed(
+        narration, query):
+    beat = _apply(
+        narration,
+        expected_visual=narration,
+        scene_query=query,
+        required_entity="Tyrion",
+        required_kind="character",
+    )
+
+    assert beat.visual_policy == P.EXACT
+    assert beat.expected_visual == narration
+    assert beat._analyzer_grounding_guard["branch"] == "grounded_exact"
+
+
+def test_schema10_migrates_cached_beat134_contract_without_losing_quote_provenance():
+    narration = (
+        "Jaime opening the cell, Varys moving him through the city, "
+        "Shae in his father's bed,")
+    beat = ScriptSegment(
+        index=134,
+        text=narration,
+        expected_visual=narration,
+        scene_query="Game of Thrones Tyrion finds Shae in Tywin's bed 'It's you'",
+        quote="",
+        required_entity="Shae",
+        required_kind="character",
+        visual_policy=P.EXACT,
+        is_specific_claim=True,
+    )
+    prior_marker = {
+        "branch": "grounded_exact_sanitized",
+        "reason": "short_common_quote_not_literally_narrated",
+        "from_policy": P.EXACT,
+        "shared_terms": ["bed", "shae"],
+        "entity_grounded": True,
+        "guard_schema": 9,
+        "sanitized_fields": ["expected_visual", "quote"],
+        "sanitized_values": {"expected_visual": narration, "quote": ""},
+        "cached_revalidation_schema": 9,
+    }
+    analysis = A.ScriptAnalysis(beat_grounding_audit={
+        "schema": 9,
+        "counts": {},
+        "beats": {"134": prior_marker},
+    })
+
+    first = A.revalidate_cached_directions([beat], analysis)
+
+    assert first["changed_indices"] == [134]
+    assert first["exact_revalidated"] == 1
+    assert first["changes"]["134"]["changed_fields"] == ["expected_visual"]
+    assert beat.expected_visual == "Shae in his father's bed"
+    assert beat.visual_policy == P.EXACT
+    marker = analysis.beat_grounding_audit["beats"]["134"]
+    assert marker["reason"] == "short_common_quote_not_literally_narrated"
+    assert marker["sanitization_reasons"] == [
+        "multi_event_contract_narrowed_to_required_entity"]
+    assert marker["sanitized_values"] == {
+        "expected_visual": "Shae in his father's bed", "quote": ""}
+    assert analysis.beat_grounding_audit["counts"]["short_common_quote_sanitized"] == 1
+    assert analysis.beat_grounding_audit["counts"]["multi_event_contract_narrowed"] == 1
+    assert analysis.beat_grounding_audit["schema"] == 10
+
+    loaded = ScriptSegment.from_dict(beat.to_dict())
+    loaded_analysis = A.ScriptAnalysis.from_dict(analysis.to_dict())
+    second = A.revalidate_cached_directions([loaded], loaded_analysis)
+
+    assert second["changed_count"] == 0
+    assert second["exact_revalidated"] == 0
+    assert loaded.expected_visual == "Shae in his father's bed"
+
+
 def test_schema9_cached_revalidation_clears_short_quote_and_auto_breakout_idempotently():
     """Existing schema-8 portal jobs receive the guard without re-running the LLM analyzer."""
     beats = [
@@ -135,7 +251,7 @@ def test_schema9_cached_revalidation_clears_short_quote_and_auto_breakout_idempo
     }
     assert beats[1]._analyzer_grounding_guard["sanitized_fields"] == [
         "scene_query", "quote"]
-    assert analysis.beat_grounding_audit["schema"] == 9
+    assert analysis.beat_grounding_audit["schema"] == 10
     assert analysis.beat_grounding_audit["counts"]["short_common_quote_sanitized"] == 2
     assert analysis.beat_grounding_audit["breakout_provenance"] == {
         "87": "quote_derived_cleared", "90": "quote_derived_cleared"}
@@ -146,7 +262,7 @@ def test_schema9_cached_revalidation_clears_short_quote_and_auto_breakout_idempo
 
     assert second["changed_count"] == 0
     assert second["exact_revalidated"] == 0
-    assert resumed_analysis.beat_grounding_audit["schema"] == 9
+    assert resumed_analysis.beat_grounding_audit["schema"] == 10
     assert resumed_analysis.beat_grounding_audit["counts"]["short_common_quote_sanitized"] == 2
 
 
@@ -955,6 +1071,7 @@ def test_grounding_branches_persist_in_analysis_metadata_and_round_trip():
         "information_staging_sanitized": 1,
         "record_intent_quote_sanitized": 0,
         "short_common_quote_sanitized": 0,
+        "multi_event_contract_narrowed": 0,
         "bare_named_event_sanitized": 0,
         "unsupported_camera_composition_sanitized": 0,
         "adjacent_quote_copy_sanitized": 0,
@@ -967,7 +1084,7 @@ def test_grounding_branches_persist_in_analysis_metadata_and_round_trip():
         "to_generic_filler": 1,
         "to_abstract_effect": 0,
     }
-    assert analysis.beat_grounding_audit["schema"] == 9
+    assert analysis.beat_grounding_audit["schema"] == 10
     restored = A.ScriptAnalysis.from_dict(analysis.to_dict())
     assert restored.beat_grounding_audit == analysis.beat_grounding_audit
     assert restored.beat_grounding_audit["beats"]["0"]["branch"] == \
@@ -1158,7 +1275,7 @@ def test_resume_preserves_fresh_sanitizer_reason_when_post_state_changes_nothing
     assert marker["branch"] == "grounded_exact_sanitized"
     assert marker["reason"] == "record_intent_is_not_verbatim_dialogue"
     assert marker["sanitized_fields"] == ["quote"]
-    assert marker["cached_revalidation_schema"] == 9
+    assert marker["cached_revalidation_schema"] == 10
     saved_audit = loaded_analysis.to_dict()["beat_grounding_audit"]
 
     loaded_again = ScriptSegment.from_dict(loaded.to_dict())
@@ -1267,7 +1384,7 @@ def test_schema5_migrates_measured_comparison_event_and_cached_nominal_role_cont
     assert grounded_control.visual_policy == P.EXACT
     assert manual_control.required_entity == "Janos Slynt"
     assert manual_control.scene_query == ""
-    assert analysis.beat_grounding_audit["schema"] == 9
+    assert analysis.beat_grounding_audit["schema"] == 10
 
     saved = analysis.to_dict()
     reloaded = [ScriptSegment.from_dict(row.to_dict()) for row in rows]
@@ -1319,7 +1436,7 @@ def test_schema5_corrects_cached_schema4_role_migration_and_preserves_provenance
     assert marker["analyzer_guessed_required_entity"] == "Aron Santagar"
     assert marker["schema_migration"] == "nominal_guessed_identity_contract_v5"
     assert marker["previous_schema_migration"] == "nominal_role_contract_v4"
-    assert marker["cached_revalidation_schema"] == 9
+    assert marker["cached_revalidation_schema"] == 10
 
     saved = analysis.to_dict()
     loaded = ScriptSegment.from_dict(beat.to_dict())
@@ -1384,8 +1501,8 @@ def test_schema8_migrates_cached_camera_contracts_once_and_preserves_material_di
     for beat in (dagger, brothel):
         assert beat.visual_policy == P.EXACT
         assert beat.is_specific_claim is True
-        assert beat._analyzer_grounding_guard["guard_schema"] == 9
-        assert beat._analyzer_grounding_guard["cached_revalidation_schema"] == 9
+        assert beat._analyzer_grounding_guard["guard_schema"] == 10
+        assert beat._analyzer_grounding_guard["cached_revalidation_schema"] == 10
     assert analysis.beat_grounding_audit["counts"][
         "unsupported_camera_composition_sanitized"] == 2
 
@@ -1451,10 +1568,10 @@ def test_schema8_preserves_effective_schema6_sanitizer_but_migrates_negative_exi
     assert camera.visual_policy == P.EXACT
     assert camera._analyzer_grounding_guard["reason"] == \
         "unsupported_camera_composition_removed"
-    assert camera._analyzer_grounding_guard["guard_schema"] == 9
-    assert camera._analyzer_grounding_guard["cached_revalidation_schema"] == 9
+    assert camera._analyzer_grounding_guard["guard_schema"] == 10
+    assert camera._analyzer_grounding_guard["cached_revalidation_schema"] == 10
     assert negative.visual_policy == P.ABSTRACT
     assert negative.scene_query == negative.required_entity == negative.required_kind == ""
     assert negative._analyzer_grounding_guard["reason"] == \
         "negative_existence_is_not_an_observable_exact_scene"
-    assert negative._analyzer_grounding_guard["cached_revalidation_schema"] == 9
+    assert negative._analyzer_grounding_guard["cached_revalidation_schema"] == 10

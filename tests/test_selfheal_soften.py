@@ -150,6 +150,125 @@ def _bind_current_quote_retrieval_review(proj, seg, words, *, cfg=None):
         proj, [seg], [seg.index], method="actual_frame_and_pool_audit", cfg=active_cfg)
 
 
+def _quote_binding_refresh_fixture(monkeypatch, tmp_path):
+    """A bound paraphrase review whose only current change is the global retrieval generation."""
+    seg = Seg(
+        index=77, quote="I'm taking you to the docks.", required_kind="character",
+        required_entity="Jaime Lannister")
+    proj = _phase1_fixture(tmp_path, seg)
+    old_generation, new_generation = "1" * 64, "2" * 64
+
+    def pool_binding(generation):
+        return {
+            "generation_fingerprint": generation,
+            "eligible_source_count": 0,
+            "sidecar_pool_fingerprint": ("3" if generation == old_generation else "4") * 64,
+            "complete": True,
+            "invalid_sources": [],
+        }
+
+    def branch_binding(generation):
+        quote = " ".join(seg.quote.strip().split())
+        return {
+            "binding_schema_version": 1,
+            "authored_quote_sha256": hashlib.sha256(quote.encode()).hexdigest(),
+            "branch": "paraphrase",
+            "branch_reason": "no_qualifying_timed_asr_phrase_match",
+            "quote_retrieval_fingerprint_expected": generation,
+            "confirmation_generation_fingerprint": "5" * 64,
+            "confirmation_attempts_shape_valid": True,
+            "confirmation_attempt_count": 0,
+            "confirmation_confirmed_count": 0,
+            "confirmation_rejected_count": 0,
+            "confirmation_inconclusive_count": 0,
+            "retrieval_truncated_stream_count": 0,
+            "confirmation_artifact_keys": [],
+            "confirmation_result_identities": [],
+            "confirmation_result_fingerprint": "6" * 64,
+        }
+
+    state = {
+        "pool": pool_binding(old_generation),
+        "branch": branch_binding(old_generation),
+    }
+    monkeypatch.setattr(
+        S, "_quote_retrieval_pool_binding",
+        lambda *_args, **_kwargs: copy.deepcopy(state["pool"]))
+    monkeypatch.setattr(
+        S, "_quote_review_branch_bindings",
+        lambda *_args, **_kwargs: {str(seg.index): copy.deepcopy(state["branch"])})
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, [seg], [seg.index], method="actual_frame_and_pool_audit")
+    state.update({
+        "pool": pool_binding(new_generation),
+        "branch": branch_binding(new_generation),
+    })
+    return proj, seg, state, old_generation, new_generation
+
+
+def test_gap_review_refreshes_only_unrelated_global_quote_generation(
+        monkeypatch, tmp_path):
+    proj, seg, _state, old_generation, new_generation = \
+        _quote_binding_refresh_fixture(monkeypatch, tmp_path)
+    before = copy.deepcopy(proj.meta["selection_relevance_gap_review"])
+
+    result = S.refresh_selection_relevance_gap_review_quote_bindings(proj)
+
+    assert result == {
+        "refreshed": True,
+        "reason": "unrelated_global_quote_retrieval_generation_changed",
+        "previous_generation_fingerprint": old_generation,
+        "current_generation_fingerprint": new_generation,
+        "reviewed_beats": [seg.index],
+    }
+    after = proj.meta["selection_relevance_gap_review"]
+    assert after["quote_retrieval_binding"]["generation_fingerprint"] == new_generation
+    assert after["quote_branch_bindings"][str(seg.index)][
+        "quote_retrieval_fingerprint_expected"] == new_generation
+    assert after["quote_binding_refresh"]["previous_generation_fingerprint"] == old_generation
+    for field in (
+            "schema_version", "method", "source", "confirmed_gap_beats",
+            "beat_fingerprints", "pool_fingerprint", "pool_source_count",
+            "absence_pool_scope", "absence_pool_fingerprint", "absence_pool_source_count"):
+        assert after[field] == before[field], f"refresh must not rewrite reviewed fact {field}"
+    assert S._gap_review_quote_binding_reason(proj, seg, after) == ""
+
+
+@pytest.mark.parametrize("changed", [
+    "beat", "pool", "verbatim", "indeterminate", "result", "incomplete", "strict",
+])
+def test_gap_review_quote_refresh_fails_closed_on_any_real_fact_change(
+        changed, monkeypatch, tmp_path):
+    proj, seg, state, old_generation, _new_generation = \
+        _quote_binding_refresh_fixture(monkeypatch, tmp_path)
+    before = copy.deepcopy(proj.meta["selection_relevance_gap_review"])
+    if changed == "beat":
+        seg.text += " Changed after the actual-frame review."
+    elif changed == "pool":
+        proj.sources.append(SourceVideo(
+            id="new-source", url="u", title="new indexed source", permission="owner",
+            status="ok", local_path=str(tmp_path / "new-source.mp4")))
+    elif changed in ("verbatim", "indeterminate"):
+        state["branch"]["branch"] = changed
+    elif changed == "result":
+        state["branch"]["confirmation_result_fingerprint"] = "9" * 64
+    elif changed == "incomplete":
+        state["pool"]["complete"] = False
+        state["pool"]["invalid_sources"] = [
+            {"source_id": "show", "reason": "sidecar_missing"}]
+    elif changed == "strict":
+        proj.meta["selection_relevance_gap_review"]["strict_acquisition_exhaustion"] = {
+            str(seg.index): {"evidence_sha256": "7" * 64}}
+        before = copy.deepcopy(proj.meta["selection_relevance_gap_review"])
+
+    result = S.refresh_selection_relevance_gap_review_quote_bindings(proj)
+
+    assert result["refreshed"] is False
+    assert proj.meta["selection_relevance_gap_review"] == before
+    assert proj.meta["selection_relevance_gap_review"][
+        "quote_retrieval_binding"]["generation_fingerprint"] == old_generation
+
+
 def _patch_confirmed_quote(monkeypatch, proj, seg, *, cfg=None):
     from vidlore.clipstudio import relevance_contract as R
 

@@ -21,6 +21,7 @@ from .models import SOURCE_OK
 from .verify import (
     _cast_warning_resolution_reason,
     _contradiction_reason,
+    _exact_reaction_context_evidence,
     _project_char2actor,
     _source_title_exact_cast_conflict,
     effective_deictic_target,
@@ -37,7 +38,9 @@ from .verify import (
 # phrase floors but retries an inconclusive/phrase-missing base decode with a stronger, still fully
 # unprompted English decoder. This prevents noisy real dialogue from becoming an unsatisfiable
 # contract (or being mislabeled as a paraphrase) without letting prompted retrieval prove itself.
-SCHEMA_VERSION = 12
+# v13 independently locates exact silent reaction/inaction beats in nearby timed ASR; a face of the
+# right actor in another scene can no longer be certified by a hallucinated vision KEEP alone.
+SCHEMA_VERSION = 13
 AUDIT_FILENAME = "selection_relevance_audit.json"
 QUOTE_DIALOGUE_FLOOR = 0.78
 QUOTE_WINDOW_TOLERANCE_SEC = 0.75
@@ -87,6 +90,8 @@ _CONCLUSIVE_CONTENT_REASONS = frozenset({
     "exact_quote_timed_asr_span_absent",
     "exact_quote_timed_asr_outside_selected_window",
     "exact_quote_unprompted_confirmation_rejected",
+    "exact_reaction_context_unproven",
+    "exact_reaction_context_asr_provenance_invalid",
 })
 
 
@@ -1773,6 +1778,7 @@ def evaluate_selection_relevance(proj, segments, *, cfg=None,
         reasons: list[str] = []
         coverage = "moving_video"
         quote_evidence: dict = dict(quote_contracts.get(idx) or {})
+        reaction_context_evidence: dict = {}
 
         if sel is None:
             reasons.append("selection_absent")
@@ -1876,6 +1882,15 @@ def evaluate_selection_relevance(proj, segments, *, cfg=None,
                         reasons.append("exact_source_title_cast_conflict_unresolved")
                         verifier = {**verifier, "source_title_cast_warning": cast_warning}
 
+                    if policy == _policy.EXACT:
+                        reaction_context_evidence = _exact_reaction_context_evidence(
+                            proj, sel, seg, cfg=cfg)
+                        if (reaction_context_evidence.get("required")
+                                and not reaction_context_evidence.get("passed")):
+                            reasons.append(str(
+                                reaction_context_evidence.get("reason")
+                                or "exact_reaction_context_unproven"))
+
         # A verified still suppresses the moving selection entirely, so its old moving-video
         # verdict is audit context rather than a publication blocker.
         if coverage.startswith("verified_still:"):
@@ -1889,6 +1904,7 @@ def evaluate_selection_relevance(proj, segments, *, cfg=None,
             "status": "blocked" if reasons else "pass",
             "reasons": reasons,
             "quote_evidence": quote_evidence,
+            "exact_reaction_context": reaction_context_evidence,
             "verifier": {
                 k: verifier.get(k) for k in (
                     "status", "verdict", "matches_narration", "specific_enough",
