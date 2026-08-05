@@ -58,15 +58,22 @@ for s in dropped:
 # about to be rebuilt, and leaving the old ones behind makes the pool audit see selections
 # pointing at sources the current pool no longer holds — measured: 11 of 13
 # `selected_source_not_in_usable_pool` rows in a run whose fresh analyze changed 101 beats to 97.
+# Drop them whenever they cannot belong to the CURRENT segmentation — not merely when `match` was
+# in this call's dropped list. A previous aborted run can leave the checkpoint already absent while
+# its selections survive, which is exactly how 101 selections came to sit against 97 segments.
 n_sel = len(doc.get("selections") or [])
-if "match" in dropped and n_sel:
+n_seg = len(doc.get("segments") or [])
+_stale_selections = bool(n_sel) and ("match" in dropped
+                                     or "match" not in stages
+                                     or n_sel != n_seg)
+if _stale_selections:
     doc["selections"] = []
 tmp = pj.with_suffix(".json.tmp")
 tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
 os.replace(tmp, pj)
 log(f"invalidated checkpoints: {dropped or '(none present)'}"
-    + (f"; dropped {n_sel} stale selection(s) belonging to the previous segmentation"
-       if "match" in dropped and n_sel else ""))
+    + (f"; dropped {n_sel} stale selection(s) against {n_seg} segment(s)"
+       if _stale_selections else ""))
 log(f"kept: {sorted(stages)}")
 
 cats = musiclib.scan()
