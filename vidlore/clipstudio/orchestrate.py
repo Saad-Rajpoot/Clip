@@ -4390,9 +4390,25 @@ def _semantic_recovery_cursor(proj, segs, audit: dict, *, allow_absent: bool,
     if (allow_stale and isinstance(marker_schema, int)
             and not isinstance(marker_schema, bool)
             and 0 < marker_schema < current_schema):
-        structural_marker = dict(marker)
-        structural_marker["schema_version"] = current_schema
-        _semantic_recovery_marker_fields(structural_marker)
+        # A stale cursor is being DISCARDED — that is what "stale" means here, and the fresh
+        # bounded page below replaces it. So validate only what an older schema is guaranteed to
+        # carry.
+        #
+        # The previous form stamped the CURRENT schema onto the old marker and then ran the current
+        # validator over it, which demands fields (`deferred`, `completed_page_scope`,
+        # `pool_fingerprint`, `gap_softening`) added long after that marker was written. Every
+        # cursor older than those additions therefore RAISED instead of being discarded, and the
+        # render died. MEASURED: the short end-to-end test crashed with "semantic recovery cursor is
+        # missing 'deferred'" against a real on-disk marker
+        # {"schema_version": 3, "before": [2, 5], "after": [2, 5], "post_fingerprint": "..."} while
+        # the current schema is 13 — a cursor left behind by an earlier build permanently breaking
+        # the job. Validating what is about to be thrown away is what turned recoverable state into
+        # a fatal error.
+        #
+        # `before` is the one list every schema of this cursor has carried, and a non-empty `before`
+        # is exactly the "complete positive older schema" this branch exists for. A corrupt one
+        # still raises, so a damaged marker is not silently accepted either.
+        _semantic_cursor_int_list(marker, "before", require_nonempty=True)
         return {"status": "stale", "deferred": [], "audit": content_audit}
     fields = _semantic_recovery_marker_fields(marker)
     current_pool = _semantic_recovery_pool_fingerprint(proj)
