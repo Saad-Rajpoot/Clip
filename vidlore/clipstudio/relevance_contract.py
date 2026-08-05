@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import uuid
 from pathlib import Path
 
 from . import policy as _policy
@@ -29,13 +30,24 @@ from .verify import (
 # co-character in its pixel evidence.  Old audits accepted a bare boolean even when the verdict's
 # own reason named nobody expected, so cached semantic recovery must not inherit that false proof.
 # v10 makes short/common quote typing fail closed: fuzzy or non-contiguous token overlap can no
-# longer turn an analyzer paraphrase into a hard promise of verbatim show dialogue.
-SCHEMA_VERSION = 10
+# longer turn an analyzer paraphrase into a hard promise of verbatim show dialogue. v11 requires
+# every prompted-ASR quote hit to survive an independently decoded, unprompted narrow audio window
+# before it can type a quote or prove a selected/breakout window.
+SCHEMA_VERSION = 11
 AUDIT_FILENAME = "selection_relevance_audit.json"
 QUOTE_DIALOGUE_FLOOR = 0.78
 QUOTE_WINDOW_TOLERANCE_SEC = 0.75
 SHORT_QUOTE_EXACT_MAX_TOKENS = 3
 SHORT_QUOTE_MAX_INTERWORD_GAP_SEC = 1.0
+QUOTE_CONFIRMATION_SCHEMA = 1
+QUOTE_CONFIRMATION_ALGORITHM = "faster-whisper-unprompted-window-v1"
+QUOTE_CONFIRMATION_SAMPLE_RATE = 16000
+QUOTE_CONFIRMATION_PAD_SEC = 2.0
+QUOTE_CONFIRMATION_MAX_WINDOW_SEC = 30.0
+QUOTE_CONFIRMATION_MAX_HINT_GAP_SEC = 2.0
+QUOTE_CONFIRMATION_MAX_NO_SPEECH = 0.60
+QUOTE_CONFIRMATION_MIN_AVG_LOGPROB = -1.0
+QUOTE_RETRIEVAL_MAX_OCCURRENCES_PER_STREAM = 32
 
 # A lenient verifier is allowed to say that the selected bytes are usable context while also
 # recording that they do not prove the authored exact moment.  That is a completed CONTENT
@@ -67,6 +79,7 @@ _CONCLUSIVE_CONTENT_REASONS = frozenset({
     "exact_quote_dialogue_signal_below_floor",
     "exact_quote_timed_asr_span_absent",
     "exact_quote_timed_asr_outside_selected_window",
+    "exact_quote_unprompted_confirmation_rejected",
 })
 
 
@@ -353,18 +366,18 @@ def _quote_requires_exact_contiguous_match(quote: str, *, index_module=None) -> 
     return len(tokens) <= SHORT_QUOTE_EXACT_MAX_TOKENS
 
 
-def _exact_contiguous_quote_span(words, quote: str, *, index_module=None):
-    """Locate an exact normalized adjacent-token phrase in timed ASR.
+def _exact_contiguous_quote_spans(words, quote: str, *, index_module=None) -> list[tuple]:
+    """Locate every distinct exact normalized adjacent-token phrase in timed ASR.
 
-    This is deliberately stricter than ``index.find_quote_span`` and is used only where a short or
-    common authored phrase would otherwise be easy to assemble from unrelated words.  Among exact
-    duplicates, prefer the tightest temporal occurrence, then the earliest.
+    Short/common authored phrases need exact adjacency, but a prompted retrieval stream may repeat
+    a hallucinated tight occurrence before/after the real utterance. Returning only the globally
+    tightest occurrence would let that false candidate hide the real one from confirmation.
     """
     if index_module is None:
         from . import index as index_module
     wanted = _normalized_quote_tokens(quote, index_module=index_module)
     if len(wanted) < 2 or not words:
-        return None
+        return []
     stream = []
     for row in words:
         try:
@@ -376,7 +389,7 @@ def _exact_contiguous_quote_span(words, quote: str, *, index_module=None):
         for token in _normalized_quote_tokens(raw, index_module=index_module):
             stream.append((token, start, end))
     size = len(wanted)
-    best = None
+    found: list[tuple] = []
     for offset in range(0, len(stream) - size + 1):
         window = stream[offset:offset + size]
         if [row[0] for row in window] != wanted:
@@ -384,11 +397,385 @@ def _exact_contiguous_quote_span(words, quote: str, *, index_module=None):
         if any(float(right[1]) - float(left[2]) > SHORT_QUOTE_MAX_INTERWORD_GAP_SEC
                for left, right in zip(window, window[1:])):
             continue
-        candidate = (float(window[0][1]), float(window[-1][2]), 1.0)
-        key = (candidate[1] - candidate[0], candidate[0])
-        if best is None or key < best[0]:
-            best = (key, candidate)
-    return best[1] if best is not None else None
+        found.append((float(window[0][1]), float(window[-1][2]), 1.0))
+    unique = list({(round(row[0], 3), round(row[1], 3), 1.0) for row in found})
+    return sorted(unique, key=lambda row: (row[1] - row[0], row[0]))
+
+
+def _exact_contiguous_quote_span(words, quote: str, *, index_module=None):
+    """Compatibility locator returning the tightest then earliest exact occurrence."""
+    spans = _exact_contiguous_quote_spans(
+        words, quote, index_module=index_module)
+    return spans[0] if spans else None
+
+
+def _prompted_quote_candidate_spans(
+        words, quote: str, *, exact_contiguous_required: bool,
+        index_module=None) -> list[tuple]:
+    """Enumerate distinct retrieval occurrences; every returned hint still needs confirmation."""
+    if index_module is None:
+        from . import index as index_module
+    if exact_contiguous_required:
+        return _exact_contiguous_quote_spans(
+            words, quote, index_module=index_module)
+    return list(index_module.find_quote_span(
+        words, quote, min_ratio=QUOTE_DIALOGUE_FLOOR, all_matches=True) or [])
+
+
+def _quote_confirmation_decoder_fingerprint(cfg) -> str:
+    """Semantic identity of the independent no-prompt narrow decoder."""
+    from . import index as _index
+
+    payload = {
+        "schema_version": QUOTE_CONFIRMATION_SCHEMA,
+        "algorithm": QUOTE_CONFIRMATION_ALGORITHM,
+        "model": str(getattr(cfg, "whisper_model", "") or ""),
+        "compute": str(getattr(cfg, "whisper_compute", "") or ""),
+        "faster_whisper": str(_index._faster_whisper_version() or "unknown"),
+        "sample_rate_hz": QUOTE_CONFIRMATION_SAMPLE_RATE,
+        "word_timestamps": True,
+        "vad_filter": False,
+        "condition_on_previous_text": False,
+        "initial_prompt": None,
+        "hotwords": None,
+        "maximum_no_speech_probability": QUOTE_CONFIRMATION_MAX_NO_SPEECH,
+        "minimum_average_log_probability": QUOTE_CONFIRMATION_MIN_AVG_LOGPROB,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _quote_confirmation_locator(words, quote: str, *, exact_contiguous_required: bool,
+                                index_module=None):
+    """Apply the unchanged branch-specific phrase locator to unprompted words."""
+    if index_module is None:
+        from . import index as index_module
+    if exact_contiguous_required:
+        return _exact_contiguous_quote_span(words, quote, index_module=index_module)
+    return index_module.find_quote_span(
+        words, quote, min_ratio=QUOTE_DIALOGUE_FLOOR)
+
+
+def _confirmation_span_near_hint(confirmed, prompted) -> bool:
+    try:
+        c0, c1 = float(confirmed[0]), float(confirmed[1])
+        p0, p1 = float(prompted[0]), float(prompted[1])
+    except (IndexError, TypeError, ValueError):
+        return False
+    if not (c1 > c0 >= 0.0 and p1 > p0 >= 0.0):
+        return False
+    gap = max(0.0, p0 - c1, c0 - p1)
+    return gap <= QUOTE_CONFIRMATION_MAX_HINT_GAP_SEC
+
+
+def _quote_confirmation_binding(
+        proj, src, quote: str, prompted_span, cfg, *,
+        exact_contiguous_required: bool) -> tuple[dict | None, str]:
+    """Bind one narrow confirmation request to immutable source/decoder/locator inputs."""
+    try:
+        p0, p1 = float(prompted_span[0]), float(prompted_span[1])
+        prompted_ratio = float(prompted_span[2])
+    except (IndexError, TypeError, ValueError):
+        return None, "prompted_span_invalid"
+    if not (p1 > p0 >= 0.0 and 0.0 <= prompted_ratio <= 1.000001):
+        return None, "prompted_span_invalid"
+    raw_quote = " ".join(str(quote or "").strip().split())
+    if len(_normalized_quote_tokens(raw_quote)) < 2:
+        return None, "authored_quote_invalid"
+
+    source_id = str(getattr(src, "id", "") or "")
+    source_path = str(getattr(src, "local_path", "") or "")
+    if not source_id or not source_path or not Path(source_path).is_file():
+        return None, "source_media_unavailable"
+    from .verify import _file_fingerprint
+    source_fingerprint = str(_file_fingerprint(source_path) or "")
+    if source_fingerprint in ("", "missing", "unreadable"):
+        return None, "source_content_fingerprint_unavailable"
+
+    source_end = float(getattr(src, "duration", 0.0) or 0.0)
+    if source_end <= 0.0:
+        try:
+            from . import index as _index
+            source_end = max(
+                (float(getattr(shot, "end", 0.0) or 0.0)
+                 for shot in _index.load_shots(proj, source_id)), default=0.0)
+        except Exception:
+            source_end = 0.0
+    lo = max(0.0, p0 - QUOTE_CONFIRMATION_PAD_SEC)
+    hi = p1 + QUOTE_CONFIRMATION_PAD_SEC
+    if source_end > 0.0:
+        hi = min(source_end, hi)
+    if not hi > lo:
+        return None, "confirmation_window_invalid"
+    if hi - lo > QUOTE_CONFIRMATION_MAX_WINDOW_SEC + 1e-9:
+        return None, "prompted_span_too_wide"
+
+    quote_hash = hashlib.sha256(raw_quote.encode("utf-8", "replace")).hexdigest()
+    locator_policy = ("exact_contiguous_short_common" if exact_contiguous_required
+                      else "fuzzy_distinctive_phrase")
+    binding = {
+        "schema_version": QUOTE_CONFIRMATION_SCHEMA,
+        "algorithm": QUOTE_CONFIRMATION_ALGORITHM,
+        "source_id": source_id,
+        "source_content_fingerprint": source_fingerprint,
+        "authored_quote": raw_quote,
+        "authored_quote_sha256": quote_hash,
+        "prompted_span": [round(p0, 3), round(p1, 3), round(prompted_ratio, 3)],
+        "decode_window": [round(lo, 3), round(hi, 3)],
+        "locator_policy": locator_policy,
+        "requires_exact_contiguous_match": bool(exact_contiguous_required),
+        "ratio_floor": QUOTE_DIALOGUE_FLOOR,
+        "maximum_hint_gap_sec": QUOTE_CONFIRMATION_MAX_HINT_GAP_SEC,
+        "decoder_fingerprint": _quote_confirmation_decoder_fingerprint(cfg),
+    }
+    raw = json.dumps(binding, sort_keys=True, separators=(",", ":"))
+    binding["binding_fingerprint"] = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return binding, ""
+
+
+def _quote_confirmation_artifact_path(proj, binding: dict) -> Path:
+    sid = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(binding.get("source_id", "") or ""))
+    key = str(binding.get("binding_fingerprint", "") or "")
+    return Path(proj.index_dir) / "quote_confirmations" / sid / f"{key}.json"
+
+
+def _quote_confirmation_artifact_display_path(proj, path: Path) -> str:
+    try:
+        return str(path.relative_to(Path(proj.root_path)))
+    except Exception:
+        return str(path)
+
+
+def _quote_confirmation_result_sha256(artifact: dict) -> str:
+    """Bind persisted decoder output separately from the request/cache-path identity."""
+    try:
+        payload = {
+            key: artifact[key]
+            for key in sorted(artifact)
+            if key != "result_content_sha256"
+        }
+        raw = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True, allow_nan=False)
+    except (KeyError, TypeError, ValueError):
+        return ""
+    return hashlib.sha256(
+        ("quote-confirmation-result-v1\x1f" + raw).encode("utf-8", "replace")) \
+        .hexdigest()
+
+
+def _validated_quote_confirmation_artifact(path: Path, binding: dict) -> dict | None:
+    """Load and recompute one content-bound confirmation result; malformed means cache miss."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(raw, dict) or raw.get("binding") != binding:
+        return None
+    if raw.get("schema_version") != QUOTE_CONFIRMATION_SCHEMA \
+            or raw.get("algorithm") != QUOTE_CONFIRMATION_ALGORITHM:
+        return None
+    result_sha256 = str(raw.get("result_content_sha256", "") or "")
+    if (len(result_sha256) != 64
+            or any(char not in "0123456789abcdef" for char in result_sha256)
+            or result_sha256 != _quote_confirmation_result_sha256(raw)):
+        return None
+    status = str(raw.get("status", "") or "")
+    if status not in ("confirmed", "rejected"):
+        return None
+
+    confidence = raw.get("segment_confidence")
+    if not isinstance(confidence, list) or not confidence:
+        return None
+    for row in confidence:
+        if not isinstance(row, dict) or type(row.get("accepted")) is not bool:
+            return None
+        try:
+            no_speech = float(row["no_speech_prob"])
+            avg_logprob = float(row["avg_logprob"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not (no_speech == no_speech and avg_logprob == avg_logprob
+                and abs(no_speech) != float("inf") and abs(avg_logprob) != float("inf")):
+            return None
+        accepted = (no_speech <= QUOTE_CONFIRMATION_MAX_NO_SPEECH
+                    and avg_logprob >= QUOTE_CONFIRMATION_MIN_AVG_LOGPROB)
+        if row["accepted"] != bool(accepted):
+            return None
+        if not accepted:
+            # Live decoding treats one uncertain segment as inconclusive. Cached results must not
+            # silently use a weaker confidence rule merely because their ``False`` flag is honest.
+            return None
+
+    words = raw.get("timed_words")
+    if not isinstance(words, list) or not words:
+        return None
+    try:
+        lo, hi = [float(value) for value in binding["decode_window"]]
+    except (KeyError, TypeError, ValueError):
+        return None
+    cleaned = []
+    for row in words:
+        try:
+            start, end, word = float(row[0]), float(row[1]), str(row[2])
+        except (IndexError, TypeError, ValueError):
+            return None
+        if (not word.strip() or not end > start >= lo - 0.25 or end > hi + 0.25
+                or start != start or end != end
+                or abs(start) == float("inf") or abs(end) == float("inf")):
+            return None
+        cleaned.append([start, end, word])
+    if cleaned != sorted(cleaned, key=lambda row: (row[0], row[1])):
+        return None
+
+    span = _quote_confirmation_locator(
+        cleaned, str(binding.get("authored_quote", "") or ""),
+        exact_contiguous_required=bool(binding.get("requires_exact_contiguous_match")))
+    if span is not None and not _confirmation_span_near_hint(
+            span, binding.get("prompted_span") or []):
+        span = None
+    expected_status = "confirmed" if span is not None else "rejected"
+    if status != expected_status:
+        return None
+    if span is not None:
+        saved = raw.get("confirmed_span")
+        try:
+            if any(abs(float(saved[i]) - float(span[i])) > 0.001 for i in range(3)):
+                return None
+        except (IndexError, TypeError, ValueError):
+            return None
+    elif raw.get("confirmed_span") not in (None, []):
+        return None
+    return raw
+
+
+def _quote_confirmation_summary(evidence: dict) -> dict:
+    """Small audit-safe view; the bound artifact retains words/confidence for revalidation."""
+    return {
+        key: evidence.get(key)
+        for key in (
+            "schema_version", "algorithm", "status", "reason", "artifact_key",
+            "artifact_path", "decoder_fingerprint", "decode_window", "prompted_span",
+            "confirmed_span", "timed_asr_ratio", "match_method", "result_content_sha256")
+        if key in evidence
+    }
+
+
+def _confirm_prompted_quote_span_unprompted(
+        proj, src, quote: str, prompted_span, cfg, *,
+        exact_contiguous_required: bool) -> dict:
+    """Confirm one prompted-ASR retrieval hit with an immutable narrow no-prompt decode."""
+    binding, binding_reason = _quote_confirmation_binding(
+        proj, src, quote, prompted_span, cfg,
+        exact_contiguous_required=exact_contiguous_required)
+    if binding is None:
+        return {
+            "schema_version": QUOTE_CONFIRMATION_SCHEMA,
+            "algorithm": QUOTE_CONFIRMATION_ALGORITHM,
+            "status": "inconclusive",
+            "reason": binding_reason,
+        }
+    artifact_path = _quote_confirmation_artifact_path(proj, binding)
+    cached = _validated_quote_confirmation_artifact(artifact_path, binding)
+    if cached is not None:
+        return {
+            **cached,
+            "artifact_key": binding["binding_fingerprint"],
+            "artifact_path": _quote_confirmation_artifact_display_path(proj, artifact_path),
+            "cache_hit": True,
+        }
+
+    from . import index as _index
+    decode = _index.transcribe_unprompted_window(
+        getattr(src, "local_path", "") or "", cfg,
+        binding["decode_window"][0], binding["decode_window"][1],
+        sample_rate=QUOTE_CONFIRMATION_SAMPLE_RATE,
+        max_no_speech=QUOTE_CONFIRMATION_MAX_NO_SPEECH,
+        min_avg_logprob=QUOTE_CONFIRMATION_MIN_AVG_LOGPROB)
+    if str(decode.get("status", "") or "") != "ok":
+        return {
+            "schema_version": QUOTE_CONFIRMATION_SCHEMA,
+            "algorithm": QUOTE_CONFIRMATION_ALGORITHM,
+            "status": "inconclusive",
+            "reason": str(decode.get("reason", "") or "unprompted_decode_inconclusive"),
+            "artifact_key": binding["binding_fingerprint"],
+            "artifact_path": _quote_confirmation_artifact_display_path(proj, artifact_path),
+            "decoder_fingerprint": binding["decoder_fingerprint"],
+            "decode_window": binding["decode_window"],
+            "prompted_span": binding["prompted_span"],
+        }
+    if decode.get("decode_window") != binding["decode_window"]:
+        return {
+            "schema_version": QUOTE_CONFIRMATION_SCHEMA,
+            "algorithm": QUOTE_CONFIRMATION_ALGORITHM,
+            "status": "inconclusive",
+            "reason": "unprompted_decode_window_mismatch",
+            "artifact_key": binding["binding_fingerprint"],
+        }
+
+    words = list(decode.get("timed_words") or [])
+    span = _quote_confirmation_locator(
+        words, str(binding["authored_quote"]),
+        exact_contiguous_required=exact_contiguous_required, index_module=_index)
+    if span is not None and not _confirmation_span_near_hint(span, binding["prompted_span"]):
+        span = None
+    status = "confirmed" if span is not None else "rejected"
+    method = ("exact_contiguous_timed_asr+unprompted_confirmation"
+              if exact_contiguous_required
+              else "fuzzy_phrase_timed_asr+unprompted_confirmation")
+    artifact = {
+        "schema_version": QUOTE_CONFIRMATION_SCHEMA,
+        "algorithm": QUOTE_CONFIRMATION_ALGORITHM,
+        "binding": binding,
+        "status": status,
+        "reason": "" if span is not None else "unprompted_phrase_not_found_near_hint",
+        "decoder_fingerprint": binding["decoder_fingerprint"],
+        "decode_window": binding["decode_window"],
+        "prompted_span": binding["prompted_span"],
+        "timed_words": words,
+        "segment_confidence": list(decode.get("segment_confidence") or []),
+        "confirmed_span": ([round(float(span[0]), 3), round(float(span[1]), 3),
+                            round(float(span[2]), 3)] if span is not None else None),
+        "timed_asr_ratio": round(float(span[2]), 3) if span is not None else 0.0,
+        "match_method": method,
+    }
+    artifact["result_content_sha256"] = _quote_confirmation_result_sha256(artifact)
+    # Revalidate the exact bytes before publishing the cache entry. A malformed decoder result is
+    # uncertainty, not a cacheable negative observation.
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    # A process can evaluate several projects/beats concurrently.  A PID-only name lets two
+    # confirmation writers in that process overwrite or unlink each other's candidate artifact.
+    # Give every atomic publication its own path; validation below still decides whether the bytes
+    # are admissible before the final replace.
+    tmp = artifact_path.with_name(
+        artifact_path.name + f".{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(json.dumps(artifact, sort_keys=True, indent=1), encoding="utf-8")
+        if _validated_quote_confirmation_artifact(tmp, binding) is None:
+            return {
+                "schema_version": QUOTE_CONFIRMATION_SCHEMA,
+                "algorithm": QUOTE_CONFIRMATION_ALGORITHM,
+                "status": "inconclusive",
+                "reason": "confirmation_artifact_self_validation_failed",
+                "artifact_key": binding["binding_fingerprint"],
+            }
+        tmp.replace(artifact_path)
+    except OSError as exc:
+        return {
+            "schema_version": QUOTE_CONFIRMATION_SCHEMA,
+            "algorithm": QUOTE_CONFIRMATION_ALGORITHM,
+            "status": "inconclusive",
+            "reason": f"confirmation_cache_write_error:{type(exc).__name__}",
+            "artifact_key": binding["binding_fingerprint"],
+        }
+    finally:
+        tmp.unlink(missing_ok=True)
+    return {
+        **artifact,
+        "artifact_key": binding["binding_fingerprint"],
+        "artifact_path": _quote_confirmation_artifact_display_path(proj, artifact_path),
+        "cache_hit": False,
+    }
 
 
 def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
@@ -427,7 +814,7 @@ def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
     except Exception:
         _REACTION_TITLE = None
 
-    streams: list[tuple[object, list]] = []
+    streams: list[tuple[object, list[tuple[str, list]]]] = []
     indexed = 0
     rejected_commentary = 0
     invalid_provenance: list[dict] = []
@@ -492,10 +879,30 @@ def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
         if not dialogue_eligible:
             rejected_commentary += 1
             continue
+        try:
+            retrieval_valid, retrieval_streams, retrieval_reason, retrieval_complete = \
+                _index._load_quote_retrieval_streams_result(
+                    proj, src, cfg, require_complete=True)
+        except Exception:
+            retrieval_valid, retrieval_streams, retrieval_complete = False, [], False
+            retrieval_reason = "quote_retrieval_validation_error"
+        if not retrieval_valid or not retrieval_complete:
+            # Clean general ASR can miss real dialogue. Absence is only conclusive after the
+            # separate authored-prompt retrieval stream is complete for every eligible source.
+            invalid_provenance.append({
+                "source_id": sid,
+                "reason": retrieval_reason or "quote_retrieval_cache_invalid_or_missing",
+                "actual_asr_prompt_fingerprint": actual_fingerprint,
+            })
+            continue
         # An empty cache with current provenance is a valid observation of silence.  Retain it in
         # the scanned set so an entirely silent but fully-current pool can classify a quote as a
         # paraphrase rather than pretending the index is absent.
-        streams.append((src, words))
+        source_streams = [("general_names_only_asr", words)]
+        source_streams.extend(
+            (f"authored_prompt_retrieval_chunk_{chunk_index}", stream["words"])
+            for chunk_index, stream in enumerate(retrieval_streams))
+        streams.append((src, source_streams))
 
     by_quote: dict[str, dict] = {}
     out: dict[int, dict] = {}
@@ -504,18 +911,29 @@ def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
         key = " ".join(quote.lower().split())
         branch = by_quote.get(key)
         if branch is None:
-            best = None
+            best: dict | None = None
             matches: list[dict] = []
+            confirmation_attempts: list[dict] = []
+            confirmation_inconclusive: list[dict] = []
+            prompted_pool_hit_count = 0
+            general_pool_hit_count = 0
+            retrieval_candidate_hit_count = 0
+            confirmation_rejected_count = 0
             fuzzy_only_best = None
             fuzzy_only_count = 0
             exact_contiguous_required = _quote_requires_exact_contiguous_match(
                 quote, index_module=_index)
-            for src, words in streams:
-                try:
-                    if exact_contiguous_required:
-                        span = _exact_contiguous_quote_span(
-                            words, quote, index_module=_index)
-                        if span is None:
+            seen_candidates: set[tuple] = set()
+            truncated_candidate_streams: list[dict] = []
+            locator_errors: list[dict] = []
+            for src, source_streams in streams:
+                for stream_kind, words in source_streams:
+                    try:
+                        candidate_spans = _prompted_quote_candidate_spans(
+                            words, quote,
+                            exact_contiguous_required=exact_contiguous_required,
+                            index_module=_index)
+                        if exact_contiguous_required and not candidate_spans:
                             fuzzy_only = _index.find_quote_span(
                                 words, quote, min_ratio=QUOTE_DIALOGUE_FLOOR)
                             if fuzzy_only:
@@ -524,40 +942,118 @@ def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
                                         or float(fuzzy_only[2])
                                         > float(fuzzy_only_best[1][2])):
                                     fuzzy_only_best = (src, fuzzy_only)
-                    else:
-                        span = _index.find_quote_span(
-                            words, quote, min_ratio=QUOTE_DIALOGUE_FLOOR)
-                except Exception:
-                    span = None
-                if span:
-                    match = {
-                        "source_id": str(getattr(src, "id", "") or ""),
-                        "source_title": str(getattr(src, "title", "") or ""),
-                        "timed_asr_span": [
-                            round(float(span[0]), 3), round(float(span[1]), 3)],
-                        "timed_asr_ratio": round(float(span[2]), 3),
-                        "match_method": ("exact_contiguous_timed_asr"
-                                         if exact_contiguous_required
-                                         else "fuzzy_phrase_timed_asr"),
-                    }
-                    matches.append(match)
-                    # Preserve the historical ``pool_match`` choice exactly: first source at the
-                    # strongest phrase ratio wins.  Recovery consumes ``pool_matches`` below so an
-                    # arbitrary equal-ratio first source (often a 360p copy) is evidence of
-                    # existence, not an accidental recommendation.
-                    if best is None or float(span[2]) > float(best[1][2]):
-                        best = (src, span)
+                    except Exception as exc:
+                        # A locator failure is missing evidence, not evidence that the authored
+                        # phrase is absent.  Preserve it in the contract so the publication branch
+                        # fails closed instead of silently becoming ``paraphrase``.
+                        locator_errors.append({
+                            "source_id": str(getattr(src, "id", "") or ""),
+                            "retrieval_stream": stream_kind,
+                            "reason": f"quote_locator_error:{type(exc).__name__}",
+                        })
+                        candidate_spans = []
+                    if len(candidate_spans) > QUOTE_RETRIEVAL_MAX_OCCURRENCES_PER_STREAM:
+                        truncated_candidate_streams.append({
+                            "source_id": str(getattr(src, "id", "") or ""),
+                            "retrieval_stream": stream_kind,
+                            "candidate_count": len(candidate_spans),
+                            "attempted_count": QUOTE_RETRIEVAL_MAX_OCCURRENCES_PER_STREAM,
+                        })
+                        candidate_spans = candidate_spans[
+                            :QUOTE_RETRIEVAL_MAX_OCCURRENCES_PER_STREAM]
+                    for span in candidate_spans:
+                        candidate_key = (
+                            str(getattr(src, "id", "") or ""),
+                            round(float(span[0]), 3), round(float(span[1]), 3),
+                            round(float(span[2]), 3))
+                        if candidate_key in seen_candidates:
+                            continue
+                        seen_candidates.add(candidate_key)
+                        retrieval_candidate_hit_count += 1
+                        if stream_kind.startswith("authored_prompt_retrieval_chunk_"):
+                            prompted_pool_hit_count += 1
+                        else:
+                            general_pool_hit_count += 1
+                        try:
+                            confirmation = _confirm_prompted_quote_span_unprompted(
+                                proj, src, quote, span, cfg,
+                                exact_contiguous_required=exact_contiguous_required)
+                        except Exception as exc:
+                            confirmation = {
+                                "schema_version": QUOTE_CONFIRMATION_SCHEMA,
+                                "algorithm": QUOTE_CONFIRMATION_ALGORITHM,
+                                "status": "inconclusive",
+                                "reason": f"confirmation_internal_error:{type(exc).__name__}",
+                            }
+                        confirmation_summary = _quote_confirmation_summary(confirmation)
+                        confirmation_summary.update({
+                            "source_id": str(getattr(src, "id", "") or ""),
+                            "source_title": str(getattr(src, "title", "") or ""),
+                            "retrieval_stream": stream_kind,
+                        })
+                        confirmation_attempts.append(confirmation_summary)
+                        confirmation_status = str(confirmation.get("status", "") or "")
+                        if confirmation_status == "rejected":
+                            confirmation_rejected_count += 1
+                            continue
+                        if confirmation_status != "confirmed":
+                            confirmation_inconclusive.append(confirmation_summary)
+                            continue
+                        confirmed_span = confirmation.get("confirmed_span")
+                        try:
+                            confirmed_span = (
+                                float(confirmed_span[0]), float(confirmed_span[1]),
+                                float(confirmed_span[2]))
+                        except (IndexError, TypeError, ValueError):
+                            malformed = dict(confirmation_summary)
+                            malformed.update({
+                                "status": "inconclusive",
+                                "reason": "confirmed_span_invalid",
+                            })
+                            confirmation_inconclusive.append(malformed)
+                            continue
+                        match = {
+                            "source_id": str(getattr(src, "id", "") or ""),
+                            "source_title": str(getattr(src, "title", "") or ""),
+                            "timed_asr_span": [
+                                round(confirmed_span[0], 3), round(confirmed_span[1], 3)],
+                            "timed_asr_ratio": round(confirmed_span[2], 3),
+                            "prompted_asr_span": [
+                                round(float(span[0]), 3), round(float(span[1]), 3),
+                                round(float(span[2]), 3)],
+                            "match_method": str(confirmation.get("match_method", "") or ""),
+                            "retrieval_stream": stream_kind,
+                            "unprompted_confirmation": confirmation_summary,
+                        }
+                        matches.append(match)
+                        # The strongest independently confirmed phrase wins. Equal ratios preserve
+                        # stable source/occurrence order; all confirmed windows remain in matches.
+                        if (best is None or float(match["timed_asr_ratio"])
+                                > float(best["timed_asr_ratio"])):
+                            best = match
             if best is not None:
                 kind = "verbatim"
-                branch_reason = ("short_common_quote_exact_contiguous_timed_asr_match"
+                branch_reason = ("short_common_quote_exact_contiguous_timed_asr_"
+                                 "unprompted_confirmed"
                                  if exact_contiguous_required
-                                 else "distinctive_quote_fuzzy_phrase_timed_asr_match")
-            elif invalid_provenance or not streams:
+                                 else "distinctive_quote_fuzzy_phrase_timed_asr_"
+                                      "unprompted_confirmed")
+            elif (invalid_provenance or not streams or locator_errors
+                  or confirmation_inconclusive or truncated_candidate_streams):
                 kind = "indeterminate"
-                branch_reason = "usable_dialogue_pool_incomplete"
+                if locator_errors:
+                    branch_reason = "quote_locator_error"
+                elif confirmation_inconclusive:
+                    branch_reason = "unprompted_quote_confirmation_inconclusive"
+                elif truncated_candidate_streams:
+                    branch_reason = "quote_retrieval_occurrence_bound_exhausted"
+                else:
+                    branch_reason = "usable_dialogue_pool_incomplete"
             else:
                 kind = "paraphrase"
-                if exact_contiguous_required and fuzzy_only_count:
+                if retrieval_candidate_hit_count and confirmation_rejected_count:
+                    branch_reason = "prompted_asr_hits_rejected_by_unprompted_confirmation"
+                elif exact_contiguous_required and fuzzy_only_count:
                     branch_reason = (
                         "short_common_quote_fuzzy_only_no_exact_contiguous_timed_asr_match")
                 elif exact_contiguous_required:
@@ -565,18 +1061,7 @@ def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
                         "short_common_quote_no_exact_contiguous_timed_asr_match")
                 else:
                     branch_reason = "no_qualifying_timed_asr_phrase_match"
-            match = None
-            if best is not None:
-                src, span = best
-                match = {
-                    "source_id": str(getattr(src, "id", "") or ""),
-                    "source_title": str(getattr(src, "title", "") or ""),
-                    "timed_asr_span": [round(float(span[0]), 3), round(float(span[1]), 3)],
-                    "timed_asr_ratio": round(float(span[2]), 3),
-                    "match_method": ("exact_contiguous_timed_asr"
-                                     if exact_contiguous_required
-                                     else "fuzzy_phrase_timed_asr"),
-                }
+            match = best
             fuzzy_only_match = None
             if fuzzy_only_best is not None:
                 fuzzy_src, fuzzy_span = fuzzy_only_best
@@ -603,12 +1088,31 @@ def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
                 "dialogue_eligible_sources_scanned": len(streams),
                 "commentary_sources_excluded": rejected_commentary,
                 "asr_prompt_fingerprint_expected": expected_asr_fingerprint,
+                "quote_retrieval_fingerprint_expected": (
+                    _index._quote_retrieval_fingerprint(proj, cfg)),
                 "asr_provenance_invalid_source_count": len(invalid_provenance),
                 "asr_provenance_invalid_sources": invalid_provenance,
+                "confirmation_decoder_fingerprint_expected": (
+                    _quote_confirmation_decoder_fingerprint(cfg)),
+                "prompted_pool_hit_count": prompted_pool_hit_count,
+                "general_pool_hit_count": general_pool_hit_count,
+                "retrieval_candidate_hit_count": retrieval_candidate_hit_count,
+                "retrieval_occurrence_bound": QUOTE_RETRIEVAL_MAX_OCCURRENCES_PER_STREAM,
+                "retrieval_truncated_stream_count": len(truncated_candidate_streams),
+                "retrieval_truncated_streams": truncated_candidate_streams,
+                "quote_locator_error_count": len(locator_errors),
+                "quote_locator_errors": locator_errors,
+                "unprompted_confirmation_attempt_count": len(confirmation_attempts),
+                "unprompted_confirmation_confirmed_count": len(matches),
+                "unprompted_confirmation_rejected_count": confirmation_rejected_count,
+                "unprompted_confirmation_inconclusive_count": len(
+                    confirmation_inconclusive),
+                "unprompted_confirmation_inconclusive": confirmation_inconclusive,
+                "unprompted_confirmation_attempts": confirmation_attempts,
                 "pool_match": match,
                 "rejected_fuzzy_pool_match_count": fuzzy_only_count,
                 "rejected_fuzzy_pool_match": fuzzy_only_match,
-                # Complete, source-deduplicated whole-pool location evidence.  This does not alter
+                # Complete, occurrence-deduplicated whole-pool location evidence. This does not alter
                 # quote typing or ranking.  A bounded scoped recovery rung may try these exact
                 # windows before buying another URL; every candidate still faces native-HD,
                 # selected-window, strict-vision and lineage gates.
@@ -644,19 +1148,24 @@ def _quote_pool_input_key(proj, segments, cfg) -> tuple:
             _stat(getattr(source, "local_path", "") or ""),
             _stat(proj.shots_path(sid)),
             _stat(Path(proj.index_dir) / f"{sid}.words.json"),
+            _stat(Path(proj.index_dir) / f"{sid}.quote_retrieval.json"),
             _stat(Path(proj.index_dir) / f"{sid}.index.meta.json"),
         ))
     try:
         asr_generation = str(_index.asr_semantic_fingerprint(proj, cfg) or "")
     except Exception:                                   # noqa: BLE001 — same fail-closed generation
         asr_generation = ""
+    try:
+        retrieval_generation = str(_index._quote_retrieval_fingerprint(proj, cfg) or "")
+    except Exception:
+        retrieval_generation = ""
     beat_state = tuple(
         (int(getattr(seg, "index", -1)),
          str(getattr(seg, "quote", "") or "").strip(),
          str(getattr(seg, "visual_policy", "") or ""),
          _policy.policy_of(seg))
         for seg in (segments or []))
-    return tuple(sources), asr_generation, beat_state
+    return tuple(sources), asr_generation, retrieval_generation, beat_state
 
 
 class _RequestQuotePoolClassificationCache:
@@ -692,7 +1201,7 @@ class _RequestQuotePoolClassificationCache:
 
 
 def _exact_quote_audio_transfer_evidence(
-        proj, sel, authored_quote: str, quote_contract: dict, evidence: dict) \
+        proj, sel, authored_quote: str, quote_contract: dict, evidence: dict, *, cfg=None) \
         -> tuple[bool, str, dict]:
     """Validate a cross-copy PCM quote location against current immutable inputs.
 
@@ -786,6 +1295,48 @@ def _exact_quote_audio_transfer_evidence(
             break
     if authoritative_match is None:
         return False, "reference_match_not_authoritative_in_current_contract", detail
+    confirmation = authoritative_match.get("unprompted_confirmation")
+    if not isinstance(confirmation, dict) or confirmation.get("status") != "confirmed":
+        return False, "reference_unprompted_confirmation_absent", detail
+    expected_confirmation_decoder = str((quote_contract or {}).get(
+        "confirmation_decoder_fingerprint_expected", "") or "").lower()
+    confirmation_key = str(confirmation.get("artifact_key", "") or "").lower()
+    confirmation_decoder = str(
+        confirmation.get("decoder_fingerprint", "") or "").lower()
+    if (len(confirmation_key) != 64
+            or any(ch not in "0123456789abcdef" for ch in confirmation_key)):
+        return False, "reference_unprompted_confirmation_artifact_invalid", detail
+    if (len(confirmation_decoder) != 64
+            or confirmation_decoder != expected_confirmation_decoder):
+        return False, "reference_unprompted_confirmation_decoder_invalid", detail
+    if str(evidence.get("reference_quote_confirmation_artifact_key", "") or "").lower() \
+            != confirmation_key:
+        return False, "reference_unprompted_confirmation_artifact_mismatch", detail
+    if str(evidence.get(
+            "reference_quote_confirmation_decoder_fingerprint", "") or "").lower() \
+            != confirmation_decoder:
+        return False, "reference_unprompted_confirmation_decoder_mismatch", detail
+    if cfg is None:
+        from .config import load_clip_config
+        cfg = load_clip_config()
+    reference_source_for_confirmation = proj.source(reference_sid)
+    prompted_span = authoritative_match.get("prompted_asr_span")
+    try:
+        revalidated_confirmation = _confirm_prompted_quote_span_unprompted(
+            proj, reference_source_for_confirmation, quote, prompted_span, cfg,
+            exact_contiguous_required=bool((quote_contract or {}).get(
+                "requires_exact_contiguous_match")))
+    except Exception as exc:
+        return False, f"reference_unprompted_confirmation_error:{type(exc).__name__}", detail
+    if revalidated_confirmation.get("status") != "confirmed":
+        return False, "reference_unprompted_confirmation_no_longer_current", detail
+    if str(revalidated_confirmation.get("artifact_key", "") or "").lower() != confirmation_key:
+        return False, "reference_unprompted_confirmation_binding_changed", detail
+    revalidated_span = _pair(revalidated_confirmation.get("confirmed_span"))
+    if (revalidated_span is None
+            or max(abs(revalidated_span[0] - reference_span[0]),
+                   abs(revalidated_span[1] - reference_span[1])) > 0.001):
+        return False, "reference_unprompted_confirmation_span_changed", detail
 
     expected_asr = str((quote_contract or {}).get(
         "asr_prompt_fingerprint_expected", "") or "")
@@ -829,7 +1380,7 @@ def _exact_quote_audio_transfer_evidence(
     return True, "", detail
 
 
-def exact_quote_dialogue_evidence(proj, sel, seg, *, quote_contract=None) \
+def exact_quote_dialogue_evidence(proj, sel, seg, *, quote_contract=None, cfg=None) \
         -> tuple[bool, str, dict]:
     """Prove an authored quote is spoken at the selected source window.
 
@@ -862,6 +1413,9 @@ def exact_quote_dialogue_evidence(proj, sel, seg, *, quote_contract=None) \
         return False, "exact_quote_pool_classification_indeterminate", detail
     if dialogue < QUOTE_DIALOGUE_FLOOR:
         return False, "exact_quote_dialogue_signal_below_floor", detail
+    if cfg is None:
+        from .config import load_clip_config
+        cfg = load_clip_config()
     source_id = str(getattr(sel, "source_id", "") or "")
     expected_fingerprint = str(detail.get("asr_prompt_fingerprint_expected", "") or "")
     provenance_ok, actual_fingerprint, provenance_reason = _source_asr_provenance(
@@ -872,27 +1426,65 @@ def exact_quote_dialogue_evidence(proj, sel, seg, *, quote_contract=None) \
     })
     if not provenance_ok:
         return False, "exact_quote_selected_asr_provenance_invalid", detail
+    w0 = float(getattr(sel, "in_point", 0.0) or 0.0)
+    w1 = float(getattr(sel, "out_point", 0.0) or 0.0)
+    candidate_spans: list[tuple] = []
+    exact_contiguous_required = bool(detail.get("requires_exact_contiguous_match", False))
     try:
         from . import index as _index
         words = _index.load_words(proj, source_id)
+        # Search the selected neighborhood, not the source-global strongest occurrence. Repeated
+        # dialogue can have an earlier equal/better occurrence while this trim contains another
+        # valid one. The independent decode is then bound to this local prompted hint.
+        selected_words = []
+        for row in words:
+            try:
+                start, end = float(row[0]), float(row[1])
+            except (IndexError, TypeError, ValueError):
+                continue
+            if (end >= w0 - QUOTE_WINDOW_TOLERANCE_SEC
+                    and start <= w1 + QUOTE_WINDOW_TOLERANCE_SEC):
+                selected_words.append(row)
         exact_contiguous_required = bool(detail.get(
             "requires_exact_contiguous_match",
             _quote_requires_exact_contiguous_match(quote, index_module=_index)))
-        if exact_contiguous_required:
-            span = _exact_contiguous_quote_span(words, quote, index_module=_index)
-            detail["quote_location_method"] = "exact_contiguous_timed_asr"
-        else:
-            span = _index.find_quote_span(
-                words, quote, min_ratio=QUOTE_DIALOGUE_FLOOR)
-            detail["quote_location_method"] = "fuzzy_phrase_timed_asr"
+        candidate_spans.extend(_prompted_quote_candidate_spans(
+            selected_words, quote,
+            exact_contiguous_required=exact_contiguous_required,
+            index_module=_index))
+        detail["quote_location_method"] = (
+            "exact_contiguous_timed_asr_candidates" if exact_contiguous_required
+            else "fuzzy_phrase_timed_asr_candidates")
     except Exception:
-        span = None
-    if not span:
+        candidate_spans = []
+    # The clean general stream intentionally has no authored sentence prompt and can miss a real
+    # line. Add every independently confirmed whole-pool retrieval candidate for this exact source;
+    # the confirmer is called again below to revalidate its immutable artifact under active cfg.
+    for pool_match in (detail.get("pool_matches") or []):
+        if str(pool_match.get("source_id", "") or "") != source_id:
+            continue
+        prompted = pool_match.get("prompted_asr_span")
+        try:
+            candidate_spans.append((
+                float(prompted[0]), float(prompted[1]), float(prompted[2])))
+        except (IndexError, TypeError, ValueError):
+            continue
+    unique_candidates = []
+    seen_candidate_spans = set()
+    for candidate in candidate_spans:
+        try:
+            key = tuple(round(float(value), 3) for value in candidate)
+        except (TypeError, ValueError):
+            continue
+        if key not in seen_candidate_spans:
+            seen_candidate_spans.add(key)
+            unique_candidates.append(candidate)
+    if not unique_candidates:
         transfer = signals.get("quote_audio_transfer_evidence")
         if transfer is not None:
             transfer_ok, transfer_reason, transfer_detail = \
                 _exact_quote_audio_transfer_evidence(
-                    proj, sel, quote, detail, transfer)
+                    proj, sel, quote, detail, transfer, cfg=cfg)
             detail["audio_transfer"] = transfer_detail
             detail["quote_location_method"] = "audio_transfer"
             if transfer_ok:
@@ -900,9 +1492,68 @@ def exact_quote_dialogue_evidence(proj, sel, seg, *, quote_contract=None) \
             detail["audio_transfer_status"] = transfer_reason
             return False, "exact_quote_audio_transfer_evidence_invalid", detail
         return False, "exact_quote_timed_asr_span_absent", detail
-    q0, q1, ratio = float(span[0]), float(span[1]), float(span[2])
-    w0 = float(getattr(sel, "in_point", 0.0) or 0.0)
-    w1 = float(getattr(sel, "out_point", 0.0) or 0.0)
+    src = proj.source(source_id)
+    confirmation_attempts = []
+    confirmed_choice = None
+    confirmed_outside = False
+    for span in unique_candidates[:QUOTE_RETRIEVAL_MAX_OCCURRENCES_PER_STREAM]:
+        try:
+            confirmation = _confirm_prompted_quote_span_unprompted(
+                proj, src, quote, span, cfg,
+                exact_contiguous_required=exact_contiguous_required)
+        except Exception as exc:
+            confirmation = {
+                "schema_version": QUOTE_CONFIRMATION_SCHEMA,
+                "algorithm": QUOTE_CONFIRMATION_ALGORITHM,
+                "status": "inconclusive",
+                "reason": f"confirmation_internal_error:{type(exc).__name__}",
+            }
+        summary = _quote_confirmation_summary(confirmation)
+        confirmation_attempts.append(summary)
+        if str(confirmation.get("status", "") or "") != "confirmed":
+            continue
+        confirmed_span = confirmation.get("confirmed_span")
+        try:
+            q0, q1, ratio = (
+                float(confirmed_span[0]), float(confirmed_span[1]),
+                float(confirmed_span[2]))
+        except (IndexError, TypeError, ValueError):
+            continue
+        contained_here = (
+            q1 >= q0 >= 0.0
+            and q0 >= w0 - QUOTE_WINDOW_TOLERANCE_SEC
+            and q1 <= w1 + QUOTE_WINDOW_TOLERANCE_SEC)
+        if contained_here:
+            confirmed_choice = (q0, q1, ratio, confirmation)
+            break
+        confirmed_outside = True
+    detail["unprompted_confirmation_attempts"] = confirmation_attempts
+    if confirmed_choice is None:
+        # PCM transfer is independent acoustic evidence and remains a valid alternate route when
+        # it is bound to an independently confirmed whole-pool reference quote.
+        transfer = signals.get("quote_audio_transfer_evidence")
+        if transfer is not None:
+            transfer_ok, transfer_reason, transfer_detail = \
+                _exact_quote_audio_transfer_evidence(
+                    proj, sel, quote, detail, transfer, cfg=cfg)
+            detail["audio_transfer"] = transfer_detail
+            detail["quote_location_method"] = "audio_transfer"
+            if transfer_ok:
+                return True, "", detail
+            detail["audio_transfer_status"] = transfer_reason
+        statuses = {str(row.get("status", "") or "") for row in confirmation_attempts}
+        if "inconclusive" in statuses or len(unique_candidates) \
+                > QUOTE_RETRIEVAL_MAX_OCCURRENCES_PER_STREAM:
+            return False, "exact_quote_unprompted_confirmation_inconclusive", detail
+        if confirmed_outside:
+            return False, "exact_quote_timed_asr_outside_selected_window", detail
+        if "rejected" in statuses:
+            return False, "exact_quote_unprompted_confirmation_rejected", detail
+        return False, "exact_quote_unprompted_confirmation_inconclusive", detail
+    q0, q1, ratio, confirmation = confirmed_choice
+    detail["unprompted_confirmation"] = _quote_confirmation_summary(confirmation)
+    detail["quote_location_method"] = str(
+        confirmation.get("match_method", "") or "unprompted_confirmation")
     gap = max(0.0, w0 - q1, q0 - w1)
     start_delta = q0 - w0
     end_delta = q1 - w1
@@ -1012,7 +1663,7 @@ def evaluate_selection_relevance(proj, segments, *, cfg=None,
                 # audit while still allowing an unrelated, silent right-subject window to pass.
                 if str(getattr(seg, "quote", "") or "").strip():
                     quote_ok, quote_why, quote_evidence = exact_quote_dialogue_evidence(
-                        proj, sel, seg, quote_contract=quote_evidence)
+                        proj, sel, seg, quote_contract=quote_evidence, cfg=cfg)
                     if not quote_ok:
                         reasons.append(quote_why)
 
@@ -1110,7 +1761,9 @@ def write_selection_relevance_audit(path: Path | str, audit: dict) -> Path:
     """Persist a complete audit atomically; an interrupted write never masquerades as a pass."""
     dest = Path(path)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    # Contract checks can run concurrently for portal monitoring and publication.  Each writer must
+    # own its temporary file so one cannot replace or clean up another writer's in-flight bytes.
+    tmp = dest.with_name(dest.name + f".{uuid.uuid4().hex}.tmp")
     try:
         tmp.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         tmp.replace(dest)
@@ -1129,7 +1782,7 @@ def assert_selection_relevance(proj, segments, audit_path: Path | str | None = N
     # Keep ``evaluate_selection_relevance`` itself read-only for audit/replay callers.
     try:
         from .selfheal import restore_stale_selection_relevance_softenings
-        restore_stale_selection_relevance_softenings(proj, segments)
+        restore_stale_selection_relevance_softenings(proj, segments, cfg=cfg)
     except Exception as exc:
         raise RuntimeError(
             f"could not restore stale pool-bound semantic softening before publication: {exc}"

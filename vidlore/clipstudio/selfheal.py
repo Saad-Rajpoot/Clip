@@ -148,7 +148,7 @@ def _soften_to_character(seg, log, *, surrender_verbatim_quote: bool = False) ->
         seg.required_entity = ""
         seg.required_kind = ""
     # A normal character fallback never erases real dialogue.  The sole exception is a separately
-    # validated schema-3 proof that the exact quote/scene exists only in native-SD bytes and no
+    # validated schema-4 proof that the exact quote/scene exists only in native-SD bytes and no
     # publishable-HD copy exists in the current, fully audited pool.  Clearing the field here makes
     # the surrendered promise explicit before a character still is judged; otherwise still
     # coverage could pass while project.json continued to claim timed on-screen dialogue.
@@ -1211,7 +1211,7 @@ def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
             if _phase1_softening_attempt(
                     proj, seg, sel, used, _try_unfillable_abstract,
                     basis="phase1_gate_forbidden_content",
-                    marker_original=marker_original):
+                    marker_original=marker_original, cfg=cfg):
                 resolved += 1
                 continue
         if still_recover(proj, seg, sel, eng, pool=pool, used_paths=used,
@@ -1235,7 +1235,7 @@ def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
                             reviewed_authorization.get("surrender_verbatim_quote"))),
                     basis="phase1_bound_strict_acquisition_exhausted",
                     marker_original=marker_original,
-                    authorization=reviewed_authorization):
+                    authorization=reviewed_authorization, cfg=cfg):
                 resolved += 1
             else:
                 log(f"self-heal: beat {bidx} — audited specificity ladder exhausted; "
@@ -1271,7 +1271,7 @@ def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
                                 lambda: _soften_and_retry(
                                     proj, seg, sel, eng, pool, used, log),
                                 basis="phase1_acquisition_exhausted",
-                                marker_original=marker_original):
+                                marker_original=marker_original, cfg=cfg):
                             resolved += 1
                             continue
                     log(f"self-heal: beat {bidx} unresolved this pass")
@@ -1282,7 +1282,7 @@ def heal_blocked_beats(proj, segments, cfg, *, blocked: list[int], policy: str,
                     proj, seg, sel, used,
                     lambda: _soften_and_retry(proj, seg, sel, eng, pool, used, log),
                     basis="phase1_strict_recovery_exhausted",
-                    marker_original=marker_original):
+                    marker_original=marker_original, cfg=cfg):
                 resolved += 1
                 continue
         log(f"self-heal: beat {bidx} unresolved this pass")
@@ -1301,6 +1301,7 @@ _SEMANTIC_TECHNICAL_REASONS = (
     "specific_enough_absent", "quality_ok_absent", "wrong_subject_visible_absent",
     "correct_subject_visible_absent", "target_visible_absent", "quality_ok_false",
     "exact_quote_pool_classification_indeterminate",
+    "exact_quote_unprompted_confirmation_inconclusive",
 )
 
 
@@ -1507,6 +1508,238 @@ def _gap_absence_pool_fingerprint(proj) -> tuple[str, int]:
 _GAP_ABSENCE_POOL_SCOPE = "all_source_ok_indexed"
 
 
+def _strict_original_project_view(proj, strict_segment, original: dict) -> tuple[object, object]:
+    """Return a non-mutating project/segment view with one softened beat made strict again."""
+    binding_proj = copy.copy(proj)
+    strict_copy = copy.deepcopy(strict_segment)
+    for field in _SOFTENING_SEGMENT_FIELDS:
+        if field in original:
+            setattr(strict_copy, field, copy.deepcopy(original[field]))
+    target_idx = int(getattr(strict_copy, "index", -1))
+    rebound_segments = []
+    replaced = False
+    for candidate in (getattr(proj, "segments", None) or []):
+        if int(getattr(candidate, "index", -1)) == target_idx and not replaced:
+            rebound_segments.append(strict_copy)
+            replaced = True
+        else:
+            rebound_segments.append(candidate)
+    if not replaced:
+        rebound_segments.append(strict_copy)
+    binding_proj.segments = rebound_segments
+    return binding_proj, strict_copy
+
+
+def _quote_retrieval_pool_binding(proj, cfg=None, *, strict_segment=None,
+                                  original: dict | None = None) -> dict:
+    """Identity/completeness of the separate authored-prompt retrieval universe.
+
+    ``*.words.json`` no longer owns quote absence: the names-only general transcript and the
+    authored-prompt retrieval stream are deliberately separate.  A gap review or active softening
+    must therefore bind the latter's decoder/prompt generation *and* every eligible sidecar's exact
+    bytes.  Merely adding those files after a review is not permission to reuse the old conclusion.
+    """
+    from . import index as _index_quote_binding
+    binding_proj = proj
+    if strict_segment is not None and isinstance(original, dict):
+        # Quote softening itself clears ``seg.quote``.  Retrieval provenance must remain bound to the
+        # authored promise that was reviewed, not to the deliberately weakened live segment.  A
+        # shallow project view plus one copied segment avoids mutating the shared project while the
+        # index helper recomputes prompt identity.
+        binding_proj, _strict_copy = _strict_original_project_view(
+            proj, strict_segment, original)
+    if cfg is None:
+        from .config import load_clip_config
+        cfg = load_clip_config()
+    try:
+        generation = str(_index_quote_binding._quote_retrieval_fingerprint(
+            binding_proj, cfg) or "")
+    except Exception:
+        generation = ""
+    rows = []
+    invalid = []
+    for src in sorted((getattr(proj, "sources", None) or []),
+                      key=lambda item: str(getattr(item, "id", "") or "")):
+        if str(getattr(src, "status", "") or "") != SOURCE_OK:
+            continue
+        sid = str(getattr(src, "id", "") or "")
+        try:
+            shots = list(_index_quote_binding.load_shots(binding_proj, sid) or [])
+            eligible = bool(_index_quote_binding.quote_retrieval_source_eligible(src, shots))
+        except Exception:
+            shots, eligible = [], True
+        if not eligible:
+            continue
+        try:
+            valid, _streams, reason, complete = \
+                _index_quote_binding._load_quote_retrieval_streams_result(
+                    binding_proj, src, cfg, require_complete=True)
+            valid = bool(valid and complete)
+        except Exception as exc:
+            valid, reason = False, f"quote_retrieval_validation_error:{type(exc).__name__}"
+        sidecar = Path(proj.index_dir) / f"{sid}.quote_retrieval.json"
+        try:
+            artifact_sha256 = hashlib.sha256(sidecar.read_bytes()).hexdigest()
+        except Exception:
+            artifact_sha256 = ""
+        row = {
+            "source_id": sid,
+            "current": bool(valid),
+            "artifact_sha256": artifact_sha256,
+            "reason": "" if valid else str(reason or "quote_retrieval_invalid"),
+        }
+        rows.append(row)
+        if not valid:
+            invalid.append({"source_id": sid, "reason": row["reason"]})
+    raw = json.dumps(rows, sort_keys=True, separators=(",", ":"))
+    return {
+        "generation_fingerprint": generation,
+        "eligible_source_count": len(rows),
+        "sidecar_pool_fingerprint": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "complete": bool(generation) and not invalid,
+        "invalid_sources": invalid,
+    }
+
+
+def _quote_review_branch_bindings(proj, segments, cfg=None) -> dict[str, dict]:
+    """Bind quote type to its independent decoder, artifacts, and conclusive results."""
+    quoted = [seg for seg in (segments or []) if str(getattr(seg, "quote", "") or "").strip()]
+    if not quoted:
+        return {}
+    try:
+        from . import relevance_contract as _rel_quote_binding
+        contracts = _rel_quote_binding._quote_pool_branches(proj, quoted, cfg=cfg)
+    except Exception:
+        contracts = {}
+    out = {}
+    for seg in quoted:
+        idx = int(getattr(seg, "index", -1))
+        quote = " ".join(str(getattr(seg, "quote", "") or "").strip().split())
+        contract = dict(contracts.get(idx) or {})
+        raw_attempts = contract.get("unprompted_confirmation_attempts")
+        attempts_shape_valid = isinstance(raw_attempts, list)
+        result_identities = []
+        artifact_keys = set()
+        for raw in raw_attempts if attempts_shape_valid else []:
+            if not isinstance(raw, dict):
+                result_identities.append({"malformed": True})
+                continue
+            identity = {
+                key: copy.deepcopy(raw.get(key))
+                for key in (
+                    "source_id", "retrieval_stream", "status", "reason", "artifact_key",
+                    "decoder_fingerprint", "prompted_span", "confirmed_span",
+                    "timed_asr_ratio", "match_method", "result_content_sha256")
+            }
+            result_identities.append(identity)
+            artifact_key = str(raw.get("artifact_key", "") or "").strip().lower()
+            if artifact_key:
+                artifact_keys.add(artifact_key)
+        result_raw = json.dumps(
+            result_identities, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+        def _count(field: str) -> int:
+            value = contract.get(field)
+            return value if isinstance(value, int) and not isinstance(value, bool) \
+                and value >= 0 else -1
+
+        out[str(idx)] = {
+            "binding_schema_version": 1,
+            "authored_quote_sha256": hashlib.sha256(
+                quote.encode("utf-8", "replace")).hexdigest(),
+            "branch": str(contract.get("branch", "") or "indeterminate"),
+            "branch_reason": str(contract.get("branch_reason", "") or ""),
+            "quote_retrieval_fingerprint_expected": str(contract.get(
+                "quote_retrieval_fingerprint_expected", "") or ""),
+            "confirmation_generation_fingerprint": str(contract.get(
+                "confirmation_decoder_fingerprint_expected", "") or "").strip().lower(),
+            "confirmation_attempts_shape_valid": attempts_shape_valid,
+            "confirmation_attempt_count": _count("unprompted_confirmation_attempt_count"),
+            "confirmation_confirmed_count": _count(
+                "unprompted_confirmation_confirmed_count"),
+            "confirmation_rejected_count": _count(
+                "unprompted_confirmation_rejected_count"),
+            "confirmation_inconclusive_count": _count(
+                "unprompted_confirmation_inconclusive_count"),
+            "retrieval_truncated_stream_count": _count(
+                "retrieval_truncated_stream_count"),
+            "confirmation_artifact_keys": sorted(artifact_keys),
+            "confirmation_result_identities": result_identities,
+            "confirmation_result_fingerprint": hashlib.sha256(
+                result_raw.encode("utf-8", "replace")).hexdigest(),
+        }
+    return out
+
+
+def _strict_original_quote_branch_binding(proj, seg, original: dict, cfg=None) -> dict:
+    """Recompute one active softening's quote contract against its authored strict state."""
+    binding_proj, strict_seg = _strict_original_project_view(proj, seg, original)
+    idx = int(getattr(strict_seg, "index", -1))
+    return _quote_review_branch_bindings(binding_proj, [strict_seg], cfg).get(str(idx)) or {}
+
+
+def _gap_review_quote_binding_reason(
+        proj, seg, review: dict, cfg=None, *, allow_native_verbatim: bool = False) -> str:
+    """Return why a quoted review is stale/incomplete; empty means current and conclusive."""
+    quote = " ".join(str(getattr(seg, "quote", "") or "").strip().split())
+    if not quote:
+        return ""
+    stored_pool = review.get("quote_retrieval_binding")
+    if not isinstance(stored_pool, dict) or stored_pool.get("complete") is not True:
+        return "gap_review_quote_retrieval_binding_missing_or_incomplete"
+    current_pool = _quote_retrieval_pool_binding(proj, cfg)
+    if current_pool.get("complete") is not True:
+        return "current_quote_retrieval_pool_incomplete"
+    for field in (
+            "generation_fingerprint", "eligible_source_count", "sidecar_pool_fingerprint"):
+        if stored_pool.get(field) != current_pool.get(field):
+            return f"stale_gap_review_quote_retrieval_{field}"
+    idx = int(getattr(seg, "index", -1))
+    stored_branches = review.get("quote_branch_bindings")
+    stored = stored_branches.get(str(idx)) if isinstance(stored_branches, dict) else None
+    if not isinstance(stored, dict):
+        return "gap_review_quote_branch_binding_missing"
+    quote_hash = hashlib.sha256(quote.encode("utf-8", "replace")).hexdigest()
+    if str(stored.get("authored_quote_sha256", "") or "") != quote_hash:
+        return "stale_gap_review_authored_quote_changed"
+    current = _quote_review_branch_bindings(proj, [seg], cfg).get(str(idx)) or {}
+    current_branch = str(current.get("branch", "") or "")
+    allowed = {"paraphrase", "verbatim"} if allow_native_verbatim else {"paraphrase"}
+    if current_branch not in allowed:
+        return "current_quote_branch_not_conclusive_paraphrase"
+    if stored.get("branch") != current_branch:
+        return "stale_gap_review_quote_branch_changed"
+    if current.get("quote_retrieval_fingerprint_expected") != current_pool.get(
+            "generation_fingerprint"):
+        return "current_quote_branch_retrieval_generation_mismatch"
+    if stored.get("quote_retrieval_fingerprint_expected") != current.get(
+            "quote_retrieval_fingerprint_expected"):
+        return "stale_gap_review_quote_branch_retrieval_generation"
+    stored_confirmation_generation = str(stored.get(
+        "confirmation_generation_fingerprint", "") or "").strip().lower()
+    current_confirmation_generation = str(current.get(
+        "confirmation_generation_fingerprint", "") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", stored_confirmation_generation):
+        return "gap_review_quote_confirmation_generation_missing_or_malformed"
+    if not re.fullmatch(r"[0-9a-f]{64}", current_confirmation_generation):
+        return "current_quote_confirmation_generation_missing_or_malformed"
+    if stored_confirmation_generation != current_confirmation_generation:
+        return "stale_gap_review_quote_confirmation_generation"
+    confirmation_identity_fields = (
+        "confirmation_attempts_shape_valid", "confirmation_attempt_count",
+        "confirmation_confirmed_count", "confirmation_rejected_count",
+        "confirmation_inconclusive_count", "retrieval_truncated_stream_count",
+        "confirmation_artifact_keys", "confirmation_result_identities",
+        "confirmation_result_fingerprint",
+    )
+    if any(stored.get(field) != current.get(field)
+           for field in confirmation_identity_fields):
+        return "stale_gap_review_quote_confirmation_results"
+    if stored != current:
+        return "stale_gap_review_quote_branch_binding_changed"
+    return ""
+
+
 _SOFTENING_SCHEMA = 3
 _SOFTENING_SEGMENT_FIELDS = (
     "visual_policy", "required_entity", "required_kind", "quote", "scene_query",
@@ -1551,7 +1784,7 @@ def _softening_row(proj, seg, sel, original: dict, *, phase: str, basis: str,
                    pool_fingerprint: str | None = None,
                    pool_source_count: int | None = None,
                    trigger_reasons=None, quote_branch: str = "",
-                   authorization=None) -> dict:
+                   authorization=None, cfg=None) -> dict:
     if pool_fingerprint is None or pool_source_count is None:
         pool_fingerprint, pool_source_count = _gap_pool_fingerprint(proj)
     row = {
@@ -1572,6 +1805,28 @@ def _softening_row(proj, seg, sel, original: dict, *, phase: str, basis: str,
         row["original"].get("required_entity") and not row["new"].get("required_entity"))
     row["surrendered_quote"] = bool(
         row["original"].get("quote") and not row["new"].get("quote"))
+    if str(row["original"].get("quote", "") or "").strip():
+        row["quote_retrieval_binding"] = _quote_retrieval_pool_binding(
+            proj, cfg, strict_segment=seg, original=row["original"])
+        row["quote_branch_binding"] = _strict_original_quote_branch_binding(
+            proj, seg, row["original"], cfg)
+        expected_branch = ("verbatim" if bool(
+            (authorization or {}).get("surrender_verbatim_quote")) else "paraphrase")
+        if row["quote_branch_binding"].get("branch") != expected_branch:
+            raise RuntimeError(
+                "semantic softening quote branch changed before persistence: "
+                f"expected {expected_branch}, got "
+                f"{row['quote_branch_binding'].get('branch') or 'missing'}")
+        generation = str(row["quote_branch_binding"].get(
+            "confirmation_generation_fingerprint", "") or "").strip().lower()
+        result_fp = str(row["quote_branch_binding"].get(
+            "confirmation_result_fingerprint", "") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", generation) \
+                or not re.fullmatch(r"[0-9a-f]{64}", result_fp):
+            raise RuntimeError(
+                "semantic softening quote confirmation binding is missing or malformed")
+        if not row["quote_branch"]:
+            row["quote_branch"] = expected_branch
     return row
 
 
@@ -1601,6 +1856,9 @@ def _merge_softening_payload(proj, new_rows: list[dict], *, basis: str,
             if isinstance(old, dict) and isinstance(old.get("original"), dict):
                 row = copy.deepcopy(row)
                 row["original"] = copy.deepcopy(old["original"])
+                for field in ("quote_retrieval_binding", "quote_branch_binding"):
+                    if field in old:
+                        row[field] = copy.deepcopy(old[field])
             rows[active_by_idx[idx]] = row
         else:
             rows.append(row)
@@ -1670,13 +1928,13 @@ def _persist_softening_payload(proj, payload: dict) -> None:
 
 def _record_phase1_softening(proj, seg, sel, original: dict, *, basis: str,
                              pool_fingerprint: str, pool_source_count: int,
-                             authorization=None) -> dict:
+                             authorization=None, cfg=None) -> dict:
     row = _softening_row(
         proj, seg, sel, original, phase="phase1_preassembly", basis=basis,
         pool_fingerprint=pool_fingerprint, pool_source_count=pool_source_count,
         quote_branch=str((authorization or {}).get("quote_branch", "") or "")
         if isinstance(authorization, dict) else "",
-        authorization=authorization)
+        authorization=authorization, cfg=cfg)
     payload = _merge_softening_payload(
         proj, [row], basis=basis,
         existing=(getattr(proj, "meta", {}) or {}).get(
@@ -1687,7 +1945,7 @@ def _record_phase1_softening(proj, seg, sel, original: dict, *, basis: str,
 
 def _phase1_softening_attempt(proj, seg, sel, used, attempt, *, basis: str,
                               marker_original: dict | None = None,
-                              authorization=None) -> bool:
+                              authorization=None, cfg=None) -> bool:
     """Run one authorized phase-1 policy mutation as an all-or-nothing transaction."""
     seg_before = copy.deepcopy(vars(seg))
     sel_before = copy.deepcopy(vars(sel))
@@ -1717,14 +1975,14 @@ def _phase1_softening_attempt(proj, seg, sel, used, attempt, *, basis: str,
         _record_phase1_softening(
             proj, seg, sel, original, basis=basis,
             pool_fingerprint=pool_fp, pool_source_count=pool_n,
-            authorization=authorization)
+            authorization=authorization, cfg=cfg)
         return True
     except Exception:
         _rollback()
         raise
 
 
-def restore_stale_selection_relevance_softenings(proj, segments, *, log=None) -> dict:
+def restore_stale_selection_relevance_softenings(proj, segments, *, cfg=None, log=None) -> dict:
     """Restore active semantic softenings before publication when their pool binding is stale.
 
     ``evaluate_selection_relevance`` remains read-only.  Its asserting wrapper calls this helper
@@ -1809,11 +2067,43 @@ def restore_stale_selection_relevance_softenings(proj, segments, *, log=None) ->
         evidence_bound = bool(
             isinstance(authorization, dict)
             and authorization.get("strict_acquisition_exhausted") is True)
-        if native_surrender and (
+        if isinstance(original, dict) and str(original.get("quote", "") or "").strip():
+            stored_retrieval = row.get("quote_retrieval_binding")
+            strict_base = persisted.get(idx) or passed.get(idx)
+            current_retrieval = _quote_retrieval_pool_binding(
+                proj, cfg, strict_segment=strict_base, original=original)
+            if not isinstance(stored_retrieval, dict) \
+                    or stored_retrieval.get("complete") is not True:
+                reason = "quote_retrieval_binding_missing_or_incomplete"
+            elif current_retrieval.get("complete") is not True:
+                reason = "quote_retrieval_pool_no_longer_complete"
+            else:
+                for field in (
+                        "generation_fingerprint", "eligible_source_count",
+                        "sidecar_pool_fingerprint"):
+                    if stored_retrieval.get(field) != current_retrieval.get(field):
+                        reason = f"quote_retrieval_{field}_changed"
+                        break
+            if not reason and strict_base is None:
+                reason = "quote_branch_strict_original_segment_missing"
+            if not reason:
+                stored_branch_binding = row.get("quote_branch_binding")
+                current_branch_binding = _strict_original_quote_branch_binding(
+                    proj, strict_base, original, cfg)
+                expected_branch = "verbatim" if native_surrender else "paraphrase"
+                if not isinstance(stored_branch_binding, dict):
+                    reason = "quote_branch_binding_missing"
+                elif str(stored_branch_binding.get("branch", "") or "") != expected_branch:
+                    reason = f"stored_quote_branch_not_{expected_branch}"
+                elif str(current_branch_binding.get("branch", "") or "") != expected_branch:
+                    reason = f"current_quote_branch_not_{expected_branch}"
+                elif stored_branch_binding != current_branch_binding:
+                    reason = "quote_branch_binding_changed"
+        if not reason and native_surrender and (
                 auth_kind != _NATIVE_HD_GAP_CLASSIFICATION
                 or authorization.get("surrender_verbatim_quote") is not True):
             reason = "native_gap_authorization_missing_or_malformed"
-        elif evidence_bound or native_surrender:
+        elif not reason and (evidence_bound or native_surrender):
             base = persisted.get(idx) or passed.get(idx)
             if not isinstance(original, dict) or base is None:
                 reason = "gap_evidence_original_state_missing"
@@ -1956,9 +2246,9 @@ def _phase1_softening_authorization(proj, seg, cfg=None, *,
     only when an actual-frame/pool review names this exact authored promise and is still bound to the
     complete current source/index pool.  Acquisition can change that pool inside the same healing
     pass, so callers check this immediately before every mutation rather than caching the answer.
-    The sole ``require_eligible_pool=False`` caller immediately validates a schema-2 or schema-3,
+    The sole ``require_eligible_pool=False`` caller immediately validates a schema-2 or schema-4,
     content-hashed exhaustion artifact over *all* indexed OK sources; it may ignore a matcher-only
-    pool shrink, but never a new source or changed media/index artifact.  Schema 3 can additionally
+    pool shrink, but never a new source or changed media/index artifact.  Schema 4 can additionally
     authorize one proven native-HD absence without changing the ordinary quote contract.
     """
     try:
@@ -1983,6 +2273,11 @@ def _phase1_softening_authorization(proj, seg, cfg=None, *,
             return False, "confirmed_beat_fingerprint_missing"
         if expected_beat != current_beat:
             return False, "stale_gap_review_beat_changed"
+        quote_binding_reason = _gap_review_quote_binding_reason(
+            proj, seg, review, cfg,
+            allow_native_verbatim=bool(allow_verified_native_gap))
+        if quote_binding_reason:
+            return False, quote_binding_reason
         if require_eligible_pool:
             expected_pool = str(review.get("pool_fingerprint", "") or "")
             if not expected_pool:
@@ -2001,7 +2296,7 @@ def _phase1_softening_authorization(proj, seg, cfg=None, *,
 
 
 _STRICT_ACQUISITION_EVIDENCE_SCHEMA = 2
-_NATIVE_HD_GAP_EVIDENCE_SCHEMA = 3
+_NATIVE_HD_GAP_EVIDENCE_SCHEMA = 4
 _NATIVE_HD_GAP_CLASSIFICATION = "publishable_native_hd_absence"
 _TOTAL_ABSENCE_GAP_SCOPE = "all_indexed_absence"
 _STRICT_ACQUISITION_CLAIMS = (
@@ -2053,12 +2348,12 @@ def _strict_claim_failure(row: dict, claims) -> str:
 
 
 def _validated_native_hd_gap_row(proj, seg, row: dict) -> tuple[dict | None, str]:
-    """Re-prove a schema-3 SD-only exact-scene claim from current bytes and ASR.
+    """Re-prove a schema-4 SD-only exact-scene claim from current bytes and ASR.
 
     The independent artifact owns the actual-frame/whole-pool classification.  Runtime still owns
     every objective premise that can drift: publication floors, source bytes/dimensions, the
     matcher rejection that keeps those pixels out of every visual pool, and the complete-pool
-    quote locations.  A schema-3 row is deliberately useful only for a located real quote; ordinary
+    quote locations.  A schema-4 row is deliberately useful only for a located real quote; ordinary
     quoted gaps retain the global verbatim denial and schema 2 keeps its total-absence meaning.
     """
     failure = _strict_claim_failure(row, _NATIVE_HD_GAP_CLAIMS)
@@ -2130,6 +2425,16 @@ def _validated_native_hd_gap_row(proj, seg, row: dict) -> tuple[dict | None, str
             return None, "strict_acquisition_nonpublishable_exact_quote_span_malformed"
         if not (q1 > q0 >= 0.0) or not (0.0 <= qratio <= 1.0):
             return None, "strict_acquisition_nonpublishable_exact_quote_span_malformed"
+        confirmation_key = str(source_row.get(
+            "quote_confirmation_artifact_key", "") or "").strip().lower()
+        confirmation_decoder = str(source_row.get(
+            "quote_confirmation_decoder_fingerprint", "") or "").strip().lower()
+        if len(confirmation_key) != 64 \
+                or any(c not in "0123456789abcdef" for c in confirmation_key):
+            return None, "strict_acquisition_quote_confirmation_artifact_key_malformed"
+        if len(confirmation_decoder) != 64 \
+                or any(c not in "0123456789abcdef" for c in confirmation_decoder):
+            return None, "strict_acquisition_quote_confirmation_decoder_malformed"
         normalized = {
             "source_id": sid,
             "source_checksum": checksum,
@@ -2139,6 +2444,8 @@ def _validated_native_hd_gap_row(proj, seg, row: dict) -> tuple[dict | None, str
             "actual_frame_target_verified": True,
             "timed_asr_span": [q0, q1],
             "timed_asr_ratio": qratio,
+            "quote_confirmation_artifact_key": confirmation_key,
+            "quote_confirmation_decoder_fingerprint": confirmation_decoder,
         }
         by_source[sid] = normalized
         normalized_sources.append(normalized)
@@ -2158,6 +2465,11 @@ def _validated_native_hd_gap_row(proj, seg, row: dict) -> tuple[dict | None, str
         contract.get("asr_prompt_fingerprint_expected", "") or "").strip()
     if not expected_asr_fingerprint:
         return None, "strict_acquisition_native_gap_asr_fingerprint_missing"
+    expected_confirmation_decoder = str(contract.get(
+        "confirmation_decoder_fingerprint_expected", "") or "").strip().lower()
+    if len(expected_confirmation_decoder) != 64 \
+            or any(c not in "0123456789abcdef" for c in expected_confirmation_decoder):
+        return None, "strict_acquisition_native_gap_confirmation_decoder_missing"
     try:
         invalid_asr_count = int(contract.get("asr_provenance_invalid_source_count", 0) or 0)
     except (TypeError, ValueError, OverflowError):
@@ -2167,6 +2479,22 @@ def _validated_native_hd_gap_row(proj, seg, row: dict) -> tuple[dict | None, str
         # any publishable-HD match.  One ASR-unknown source makes that absence unknowable, so this
         # exceptional path must stop even though the ordinary quote branch remains verbatim.
         return None, "strict_acquisition_native_gap_asr_pool_incomplete"
+    for field, malformed_reason, nonzero_reason in (
+            ("retrieval_truncated_stream_count",
+             "strict_acquisition_native_gap_retrieval_truncation_count_malformed",
+             "strict_acquisition_native_gap_retrieval_scan_truncated"),
+            ("unprompted_confirmation_inconclusive_count",
+             "strict_acquisition_native_gap_confirmation_inconclusive_count_malformed",
+             "strict_acquisition_native_gap_confirmation_inconclusive")):
+        value = contract.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None, malformed_reason
+        if value != 0:
+            # One confirmed native-SD occurrence types the quote as real, but it cannot prove that
+            # every remaining candidate failed publication. A truncated candidate stream or an
+            # unjudged no-prompt decode leaves a possible HD occurrence unresolved, so specificity
+            # surrender must remain blocked.
+            return None, nonzero_reason
     matches = list(contract.get("pool_matches") or [])
     if not matches and isinstance(contract.get("pool_match"), dict):
         matches = [contract["pool_match"]]
@@ -2191,6 +2519,28 @@ def _validated_native_hd_gap_row(proj, seg, row: dict) -> tuple[dict | None, str
         if abs(recorded[0] - m0) > 0.01 or abs(recorded[1] - m1) > 0.01 \
                 or abs(source_row["timed_asr_ratio"] - mratio) > 0.001:
             return None, "strict_acquisition_native_gap_quote_match_changed"
+        confirmation = match.get("unprompted_confirmation")
+        if not isinstance(confirmation, dict) \
+                or str(confirmation.get("status", "") or "") != "confirmed":
+            return None, "strict_acquisition_native_gap_quote_confirmation_absent"
+        current_key = str(confirmation.get("artifact_key", "") or "").strip().lower()
+        current_decoder = str(
+            confirmation.get("decoder_fingerprint", "") or "").strip().lower()
+        if current_decoder != expected_confirmation_decoder:
+            return None, "strict_acquisition_native_gap_quote_confirmation_decoder_changed"
+        if source_row["quote_confirmation_artifact_key"] != current_key:
+            return None, "strict_acquisition_native_gap_quote_confirmation_artifact_changed"
+        if source_row["quote_confirmation_decoder_fingerprint"] != current_decoder:
+            return None, "strict_acquisition_native_gap_quote_confirmation_decoder_changed"
+        confirmed_span = confirmation.get("confirmed_span")
+        try:
+            c0, c1, cratio = (float(confirmed_span[0]), float(confirmed_span[1]),
+                              float(confirmed_span[2]))
+        except (IndexError, TypeError, ValueError, OverflowError):
+            return None, "strict_acquisition_native_gap_quote_confirmation_span_malformed"
+        if abs(c0 - m0) > 0.001 or abs(c1 - m1) > 0.001 \
+                or abs(cratio - mratio) > 0.001:
+            return None, "strict_acquisition_native_gap_quote_confirmation_span_changed"
     if current_ids != set(by_source):
         # Do not let an artifact pad its proof with a visually asserted source that the current
         # complete-pool quote scan cannot reproduce.  Exact equality keeps this exception narrow.
@@ -2209,8 +2559,8 @@ def _validated_native_hd_gap_row(proj, seg, row: dict) -> tuple[dict | None, str
     }, "strict_acquisition_native_hd_gap_valid"
 
 
-def _validated_schema3_gap_row(proj, seg, row: dict) -> tuple[dict | None, str]:
-    """Validate either row profile allowed inside one mixed schema-3 evidence artifact."""
+def _validated_schema4_gap_row(proj, seg, row: dict) -> tuple[dict | None, str]:
+    """Validate either row profile allowed inside one mixed schema-4 evidence artifact."""
     classification = str(row.get("classification", "") or "")
     if classification == "footage_gap":
         failure = _strict_claim_failure(row, _SCHEMA3_TOTAL_ABSENCE_CLAIMS)
@@ -2226,7 +2576,7 @@ def _validated_schema3_gap_row(proj, seg, row: dict) -> tuple[dict | None, str]:
         }, "strict_acquisition_total_absence_valid"
     if classification == _NATIVE_HD_GAP_CLASSIFICATION:
         return _validated_native_hd_gap_row(proj, seg, row)
-    return None, "strict_acquisition_schema3_gap_classification_unknown"
+    return None, "strict_acquisition_schema4_gap_classification_unknown"
 
 
 def _strict_acquisition_evidence(proj, segments, beat_indices, *, source: str,
@@ -2276,7 +2626,7 @@ def _strict_acquisition_evidence(proj, segments, beat_indices, *, source: str,
     if isinstance(schema, bool) or not isinstance(schema, int) \
             or schema not in (_STRICT_ACQUISITION_EVIDENCE_SCHEMA,
                               _NATIVE_HD_GAP_EVIDENCE_SCHEMA):
-        return None, "strict_acquisition_evidence_schema_not_2_or_3"
+        return None, "strict_acquisition_evidence_schema_not_2_or_4"
     if str(artifact.get("status", "") or "") != "complete":
         return None, "strict_acquisition_evidence_status_not_complete"
     if str(artifact.get("pool_scope", "") or "") != _GAP_ABSENCE_POOL_SCOPE:
@@ -2329,10 +2679,10 @@ def _strict_acquisition_evidence(proj, segments, beat_indices, *, source: str,
                 "nonpublishable_exact_sources": [],
             }
         else:
-            schema3_row, schema3_reason = _validated_schema3_gap_row(proj, seg, row)
-            if schema3_row is None:
-                return None, schema3_reason
-            normalized_row = {"beat_fingerprint": current_beat, **schema3_row}
+            schema4_row, schema4_reason = _validated_schema4_gap_row(proj, seg, row)
+            if schema4_row is None:
+                return None, schema4_reason
+            normalized_row = {"beat_fingerprint": current_beat, **schema4_row}
 
         # The artifact is authoritative, but retain its normalized claims in project.json so audit
         # output remains self-describing.  A hand edit must agree byte-for-byte with the artifact;
@@ -2420,7 +2770,7 @@ def _phase1_reviewed_exhaustion_details(proj, seg, cfg=None) \
     # Matcher source gates may shrink the publishable pool after the independent audit.  The
     # content-hashed artifact covers all indexed OK sources, so it owns pool identity here.  The
     # common authorization still binds the reviewed beat and current semantic facts.  Only the
-    # schema-3 native-HD proof may admit a currently verbatim quote.
+    # schema-4 native-HD proof may admit a currently verbatim quote.
     ok, reason = _phase1_softening_authorization(
         proj, seg, cfg, require_eligible_pool=False,
         allow_verified_native_gap=bool(native_gap))
@@ -2437,7 +2787,8 @@ def _phase1_reviewed_exhaustion_authorization(proj, seg, cfg=None) -> tuple[bool
 
 def make_selection_relevance_gap_review(proj, segments, confirmed_gap_beats, *,
                                         method: str, source: str = "",
-                                        strict_acquisition_exhausted_beats=None) -> dict:
+                                        strict_acquisition_exhausted_beats=None,
+                                        cfg=None) -> dict:
     """Create a tamper/staleness-bound authorization for the specificity ladder.
 
     Bare beat numbers are unsafe: matching can rewrite a beat and strict recovery can add source
@@ -2463,6 +2814,14 @@ def make_selection_relevance_gap_review(proj, segments, confirmed_gap_beats, *,
         "absence_pool_fingerprint": absence_pool_fp,
         "absence_pool_source_count": absence_pool_n,
     }
+    quoted_review_segments = [
+        by_idx[i] for i in wanted
+        if str(getattr(by_idx[i], "quote", "") or "").strip()
+    ]
+    if quoted_review_segments:
+        payload["quote_retrieval_binding"] = _quote_retrieval_pool_binding(proj, cfg)
+        payload["quote_branch_bindings"] = _quote_review_branch_bindings(
+            proj, quoted_review_segments, cfg)
     exhausted = sorted({int(i) for i in (strict_acquisition_exhausted_beats or [])})
     if any(i not in wanted for i in exhausted):
         raise ValueError("strict-acquisition exhaustion must be a subset of confirmed gap beats")
@@ -2496,6 +2855,7 @@ _NATIVE_QUOTE_CONTENT_REASONS = frozenset({
     "exact_quote_dialogue_signal_below_floor",
     "exact_quote_timed_asr_span_absent",
     "exact_quote_timed_asr_outside_selected_window",
+    "exact_quote_unprompted_confirmation_rejected",
 })
 
 
@@ -2532,6 +2892,7 @@ def _semantic_gap_authorizations(proj, audit: dict, *, cfg=None) \
 
     from .relevance_contract import completed_deliberate_exact_downgrade
     out: dict[int, dict] = {}
+    quote_binding_denial = ""
     for entry in (audit.get("blockers") or []):
         idx = int(entry.get("segment_index", -1))
         reasons = [str(r) for r in (entry.get("reasons") or [])]
@@ -2541,10 +2902,18 @@ def _semantic_gap_authorizations(proj, audit: dict, *, cfg=None) \
         if idx not in confirmed or seg is None:
             continue
         # A real quote remains immutable by default.  The only exception is a current, hashed
-        # schema-3 actual-frame/pool proof that every exact quote source is native-SD and no
+        # schema-4 actual-frame/pool proof that every exact quote source is native-SD and no
         # publishable-HD copy exists.  Indeterminate/missing quote typing can never enter either
         # path.  Nonquoted and confirmed-paraphrase beats retain the existing schema-2 behavior.
         evidence, _evidence_reason = _reviewed_exhaustion_evidence(proj, seg)
+        quote_binding_reason = _gap_review_quote_binding_reason(
+            proj, seg, review, cfg,
+            allow_native_verbatim=bool(
+                isinstance(evidence, dict)
+                and evidence.get("authorization_kind") == _NATIVE_HD_GAP_CLASSIFICATION))
+        if quote_binding_reason:
+            quote_binding_denial = quote_binding_reason
+            continue
         # Ordinary actual-frame gap classifications are bound to the publishable pool and become
         # stale when it changes.  A completed strict-exhaustion row is stronger: it is content-
         # hashed against every indexed OK source, so matcher-only pool drift may still authorize
@@ -2601,6 +2970,8 @@ def _semantic_gap_authorizations(proj, audit: dict, *, cfg=None) \
         return out, "current_all_indexed_strict_exhaustion_evidence"
     if review_pool_stale:
         return {}, "stale_gap_review_source_pool_changed"
+    if quote_binding_denial:
+        return {}, quote_binding_denial
     return out, "confirmed_actual_frame_audit"
 
 
@@ -2625,7 +2996,7 @@ def heal_selection_relevance_gaps(proj, segments, cfg, audit: dict, *, policy: s
 
     The unchanged selection-relevance contract is evaluated again by the caller. This helper never
     turns a technical failure into an abstract pass. A located real quote is surrenderable only by
-    its current schema-3 native-HD-absence proof, and every surrendered requirement is persisted for
+    its current schema-4 native-HD-absence proof, and every surrendered requirement is persisted for
     the next audit.
     """
     from .config import engine_config
@@ -2685,7 +3056,7 @@ def heal_selection_relevance_gaps(proj, segments, cfg, audit: dict, *, policy: s
                     pool_source_count=softening_pool_n,
                     trigger_reasons=entry.get("reasons") or [],
                     quote_branch=str((entry.get("quote_evidence") or {}).get(
-                        "branch", "") or ""), authorization=authorization)
+                        "branch", "") or ""), authorization=authorization, cfg=cfg)
             else:
                 row = {
                     "segment_index": idx,

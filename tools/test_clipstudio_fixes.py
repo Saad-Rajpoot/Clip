@@ -2832,8 +2832,26 @@ def test_intro_coldopen_breakout():
     from pathlib import Path as _P
     from vidlore.clipstudio import build as B
     import vidlore.clipstudio.index as _idxmod
+    import vidlore.clipstudio.relevance_contract as _relmod
 
     _P("/tmp/x.mp4").write_bytes(b"x")                  # source path must exist (helpers are mocked)
+
+    def _timed(text, start):
+        return [(start + i * .35, start + i * .35 + .25, word)
+                for i, word in enumerate(text.split())]
+
+    def _confirmed(_proj, _src, _quote, prompted_span, _cfg, **_kwargs):
+        return {
+            "schema_version": _relmod.QUOTE_CONFIRMATION_SCHEMA,
+            "algorithm": _relmod.QUOTE_CONFIRMATION_ALGORITHM,
+            "status": "confirmed", "reason": "legacy_fixture_acoustic_confirmation",
+            "artifact_key": "a" * 64, "decoder_fingerprint": "b" * 64,
+            "prompted_span": list(prompted_span),
+            "confirmed_span": list(prompted_span),
+            "timed_asr_ratio": float(prompted_span[2]),
+            "match_method": "fixture_no_prompt_confirmation",
+            "result_content_sha256": "c" * 64,
+        }
 
     def _run(*, quote, asr, aired=None, face_ids=(), luma=80.0, burned=False,
              src_title="Cersei vs Littlefinger throne scene HD", n_segs=6):
@@ -2857,11 +2875,14 @@ def test_intro_coldopen_breakout():
                     text=("seize him cut his throat power king realm" if i == 0
                           else f"narration filler beat number {i} words here now"),
                     quote=(quote if i == 0 else "")) for i in range(n_segs)]
-        _orig_ls = _idxmod.load_shots
+        _orig_ls, _orig_lw = _idxmod.load_shots, _idxmod.load_words
+        _orig_confirm = _relmod._confirm_prompted_quote_span_unprompted
         _orig = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
                  B._asr_wav_words, B._breakout_window_admissible,
                  B._probe_breakout_native_dimensions)
         _idxmod.load_shots = lambda p, sid: shots
+        _idxmod.load_words = lambda p, sid: _timed(asr, 12.1)
+        _relmod._confirm_prompted_quote_span_unprompted = _confirmed
         # These cases exercise COLD-OPEN mechanics (quote coverage, hook stitching, audit
         # provenance) on synthetic beats whose narration is deliberately nonsense filler. The
         # post-extract admission judge is a separate concern with its own suite
@@ -2881,7 +2902,8 @@ def test_intro_coldopen_breakout():
         try:
             out = B._select_breakouts(proj, segs, 200.0, _P("/tmp"), lambda m: logs.append(str(m)))
         finally:
-            _idxmod.load_shots = _orig_ls
+            _idxmod.load_shots, _idxmod.load_words = _orig_ls, _orig_lw
+            _relmod._confirm_prompted_quote_span_unprompted = _orig_confirm
             (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
              B._asr_wav_words, B._breakout_window_admissible,
              B._probe_breakout_native_dimensions) = _orig
@@ -2971,11 +2993,15 @@ def test_intro_coldopen_breakout():
             "movie_title": "Game of Thrones", "episode_hint": ""}})
         segs = [fr[0], fr[1], fr[2], fr[3]] + [types.SimpleNamespace(
             index=i, quote="", text=f"narration filler beat {i} words here") for i in range(4, 9)]
-        _ls = _idxmod.load_shots
+        _ls, _lw = _idxmod.load_shots, _idxmod.load_words
+        _confirm = _relmod._confirm_prompted_quote_span_unprompted
         _o = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
               B._asr_wav_words, B._breakout_window_admissible,
               B._probe_breakout_native_dimensions)
         _idxmod.load_shots = lambda p, sid: shots
+        _idxmod.load_words = lambda p, sid: _timed(
+            "seize him cut his throat stop wait i have changed my mind let him go", 10.1)
+        _relmod._confirm_prompted_quote_span_unprompted = _confirmed
         # same reasoning as _run above: this case is about HOOK STITCHING, not relevance
         B._breakout_window_admissible = lambda *a, **k: (True, "stubbed for the hook case", [])
         B._probe_breakout_native_dimensions = lambda _p: {"width": 1920, "height": 1080}
@@ -2988,7 +3014,8 @@ def test_intro_coldopen_breakout():
         try:
             o = B._select_breakouts(proj, segs, 200.0, _P("/tmp"), lambda m: lg.append(str(m)))
         finally:
-            _idxmod.load_shots = _ls
+            _idxmod.load_shots, _idxmod.load_words = _ls, _lw
+            _relmod._confirm_prompted_quote_span_unprompted = _confirm
             (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
              B._asr_wav_words, B._breakout_window_admissible,
              B._probe_breakout_native_dimensions) = _o
@@ -3005,6 +3032,7 @@ def test_breakout_window_commentary_gate():
     from vidlore.clipstudio import build as B
     from vidlore.clipstudio.build import _ESSAYISH_RX, _breakout_src_ok
     import vidlore.clipstudio.index as _idxmod
+    import vidlore.clipstudio.relevance_contract as _relmod
 
     # B.4 — essay-analysis TITLE rejection (the real bad case + the user's listed phrases)
     check("essay title 'Cersei's Fatal Mistake with Littlefinger' caught",
@@ -3046,10 +3074,26 @@ def test_breakout_window_commentary_gate():
                 index=i,
                 text=("chaos is a ladder climb the realm" if i == 5 else f"narration filler beat {i} words"),
                 quote=("Chaos isn't a pit. Chaos is a ladder." if i == 5 else "")) for i in range(10)]
-    _orig_ls = _idxmod.load_shots
+    _orig_ls, _orig_lw = _idxmod.load_shots, _idxmod.load_words
+    _orig_confirm = _relmod._confirm_prompted_quote_span_unprompted
     _orig = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
              B._probe_breakout_native_dimensions)
     _idxmod.load_shots = lambda p, sid: shots
+    _idxmod.load_words = lambda p, sid: [
+        (581.10 + i * .35, 581.35 + i * .35, word)
+        for i, word in enumerate("chaos isn't a pit chaos is a ladder".split())]
+    _relmod._confirm_prompted_quote_span_unprompted = (
+        lambda _proj, _src, _quote, prompted_span, _cfg, **_kwargs: {
+            "schema_version": _relmod.QUOTE_CONFIRMATION_SCHEMA,
+            "algorithm": _relmod.QUOTE_CONFIRMATION_ALGORITHM,
+            "status": "confirmed", "reason": "legacy_fixture_acoustic_confirmation",
+            "artifact_key": "a" * 64, "decoder_fingerprint": "b" * 64,
+            "prompted_span": list(prompted_span),
+            "confirmed_span": list(prompted_span),
+            "timed_asr_ratio": float(prompted_span[2]),
+            "match_method": "fixture_no_prompt_confirmation",
+            "result_content_sha256": "c" * 64,
+        })
     B._probe_breakout_native_dimensions = lambda _p: {"width": 1920, "height": 1080}
     B._extract_breakout = lambda *a, **k: 7.5            # window [581, 588.5] spans the commentary shot
     B._breakout_window_luma = lambda *a, **k: 80.0
@@ -3058,7 +3102,8 @@ def test_breakout_window_commentary_gate():
     try:
         out = B._select_breakouts(proj, segs, 800.0, _P("/tmp"), lambda m: logs.append(str(m)))
     finally:
-        _idxmod.load_shots = _orig_ls
+        _idxmod.load_shots, _idxmod.load_words = _orig_ls, _orig_lw
+        _relmod._confirm_prompted_quote_span_unprompted = _orig_confirm
         (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
          B._probe_breakout_native_dimensions) = _orig
     lt = "\n".join(logs)
@@ -5104,7 +5149,7 @@ def test_breakout_correctness():
           "applies to COLD-OPENS too" in bsrc and "not _is_cold) and _ocov < _mincov" not in bsrc)
     check("candidate ORIGIN is explicit at creation, not inferred from _verbatim_strong",
           "_cand_origin[_k] = \"verbatim_quote\"" in bsrc and '"evidence_mined")' in bsrc
-          and "_cand_origin.get((idx, src.id" in bsrc)
+          and "_candidate_origin9 = _cand_origin.get(" in bsrc)
     check("final-mix breakout AUDIO QA fails CLOSED (probe failure = UNVERIFIED, not pass)",
           "BREAKOUT_AUDIO_QA" in bsrc and "UNVERIFIED (failing closed)" in bsrc
           and "could NOT be extracted" in bsrc)

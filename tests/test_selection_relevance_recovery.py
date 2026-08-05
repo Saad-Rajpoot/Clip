@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import inspect
 import json
 import os
@@ -45,6 +46,42 @@ def _stamp_current_asr_provenance(proj, sid, cfg=None):
         "words": True,
         "asr_prompt_fingerprint": IX.asr_semantic_fingerprint(proj, cfg),
     }))
+
+
+def _save_current_quote_retrieval(proj, words, *, cfg=None, source_id="s1"):
+    """Persist the separate authored-prompt retrieval stream for an intentional fixture."""
+    active_cfg = cfg or load_clip_config()
+    assert IX._save_quote_retrieval_words(
+        proj, proj.source(source_id), active_cfg, list(words))
+
+
+def _confirmed_unprompted_quote(
+        _proj, src, quote, prompted_span, cfg, *, exact_contiguous_required):
+    """Explicit independent confirmation for byte-sentinel media used by unit fixtures."""
+    from vidlore.clipstudio import relevance_contract as R
+
+    span = [round(float(value), 3) for value in prompted_span]
+    artifact_key = hashlib.sha256(json.dumps({
+        "source_id": str(getattr(src, "id", "") or ""),
+        "quote": str(quote),
+        "prompted_span": span,
+        "decoder": R._quote_confirmation_decoder_fingerprint(cfg),
+    }, sort_keys=True).encode("utf-8")).hexdigest()
+    return {
+        "schema_version": R.QUOTE_CONFIRMATION_SCHEMA,
+        "algorithm": R.QUOTE_CONFIRMATION_ALGORITHM,
+        "status": "confirmed",
+        "reason": "",
+        "artifact_key": artifact_key,
+        "decoder_fingerprint": R._quote_confirmation_decoder_fingerprint(cfg),
+        "prompted_span": span,
+        "confirmed_span": span,
+        "timed_asr_ratio": span[2],
+        "match_method": (
+            "exact_contiguous_timed_asr+unprompted_confirmation"
+            if exact_contiguous_required
+            else "fuzzy_phrase_timed_asr+unprompted_confirmation"),
+    }
 
 
 def _fixture(tmp_path, verifier):
@@ -148,11 +185,17 @@ def test_retry_uses_active_custom_asr_cfg_without_futile_recovery(tmp_path):
     assert IX.asr_semantic_fingerprint(proj, custom_cfg) != \
         IX.asr_semantic_fingerprint(proj, default_cfg)
     _stamp_current_asr_provenance(proj, "s1", custom_cfg)
+    _save_current_quote_retrieval(proj, [
+        [0.2 + i * .12, 0.3 + i * .12, word] for i, word in enumerate(words)
+    ], cfg=custom_cfg)
     V.bind_selection_verifier_evidence(
         proj, sel, seg, sel.verifier, model="vision", is_specific=True,
         multiframe=True, faceid_names=[], era="", must_see="")
 
-    with mock.patch.object(O, "_recover_unresolved_beats") as recover, \
+    with mock.patch(
+            "vidlore.clipstudio.relevance_contract._confirm_prompted_quote_span_unprompted",
+            side_effect=_confirmed_unprompted_quote), \
+            mock.patch.object(O, "_recover_unresolved_beats") as recover, \
             mock.patch("vidlore.clipstudio.verify.verify_and_repair") as reverify, \
             mock.patch.object(O, "_fill_image_fallbacks") as stills, \
             mock.patch("vidlore.clipstudio.selfheal.heal_selection_relevance_gaps") as ladder:
@@ -229,10 +272,13 @@ def _quote_cache_fixture(tmp_path):
            "specific_enough": False, "correct_subject_visible": False}
     proj, segs, _sel = _fixture(tmp_path, bad)
     segs[0].quote = "Who does this belong to?"
-    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+    unrelated = [
         [0.0, 0.2, "winter"], [0.2, 0.4, "is"], [0.4, 0.6, "coming"],
-    ]), encoding="utf-8")
+    ]
+    (proj.index_dir / "s1.words.json").write_text(
+        json.dumps(unrelated), encoding="utf-8")
     _stamp_current_asr_provenance(proj, "s1")
+    _save_current_quote_retrieval(proj, unrelated)
     return proj, segs
 
 
@@ -2927,9 +2973,9 @@ def test_current_pool_recovery_clears_a_real_timed_quote_window_contract(tmp_pat
     proj.segments = [seg]
     proj.selections = [old]
     _stamp_current_asr_provenance(proj, "s1")
-    initial = R.evaluate_selection_relevance(proj, [seg])
-    assert initial["blockers"][0]["reasons"] == [
-        "exact_quote_dialogue_signal_below_floor"]
+    _save_current_quote_retrieval(proj, [
+        [10.2 + i * .12, 10.3 + i * .12, word] for i, word in enumerate(words)
+    ])
 
     def rematch(_proj, _segs, _cfg, **_kw):
         new = ClipSelection(
@@ -2947,24 +2993,31 @@ def test_current_pool_recovery_clears_a_real_timed_quote_window_contract(tmp_pat
         path.write_bytes(b"quote-window-clip")
         return path
 
-    with mock.patch.object(O, "match_segments", side_effect=rematch), \
-            mock.patch("vidlore.clipstudio.verify.verify_and_repair",
-                       return_value=dict(VERIFY_OK)), \
-            mock.patch("vidlore.clipstudio.cut.cut_selection", side_effect=cut_one), \
-            mock.patch("vidlore.clipstudio.discover.discover_sources") as discover:
-        recovered = O._recover_unresolved_beats(
-            proj, [seg], SimpleNamespace(movie_title="Game of Thrones"), ClipConfig(),
-            SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
-            policy="approved_testing", log=lambda _m: None, only_indices={0},
-            audit_filename="strict-real-quote.json")
+    with mock.patch.object(
+            R, "_confirm_prompted_quote_span_unprompted",
+            side_effect=_confirmed_unprompted_quote):
+        initial = R.evaluate_selection_relevance(proj, [seg])
+        assert initial["blockers"][0]["reasons"] == [
+            "exact_quote_dialogue_signal_below_floor"]
 
-    assert recovered == 1
-    discover.assert_not_called()
-    assert proj.selections[0].in_point == 10.0
-    final = R.evaluate_selection_relevance(proj, [seg])
-    assert final["status"] == "pass"
-    assert final["quote_branch_counts"] == {
-        "verbatim": 1, "paraphrase": 0, "indeterminate": 0}
+        with mock.patch.object(O, "match_segments", side_effect=rematch), \
+                mock.patch("vidlore.clipstudio.verify.verify_and_repair",
+                           return_value=dict(VERIFY_OK)), \
+                mock.patch("vidlore.clipstudio.cut.cut_selection", side_effect=cut_one), \
+                mock.patch("vidlore.clipstudio.discover.discover_sources") as discover:
+            recovered = O._recover_unresolved_beats(
+                proj, [seg], SimpleNamespace(movie_title="Game of Thrones"), ClipConfig(),
+                SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
+                policy="approved_testing", log=lambda _m: None, only_indices={0},
+                audit_filename="strict-real-quote.json")
+
+        assert recovered == 1
+        discover.assert_not_called()
+        assert proj.selections[0].in_point == 10.0
+        final = R.evaluate_selection_relevance(proj, [seg])
+        assert final["status"] == "pass"
+        assert final["quote_branch_counts"] == {
+            "verbatim": 1, "paraphrase": 0, "indeterminate": 0}
 
 
 def test_quote_window_builder_contains_full_phrase_and_skips_sd_equal_ratio(tmp_path):
@@ -3034,6 +3087,54 @@ def test_quote_window_builder_contains_full_phrase_and_skips_sd_equal_ratio(tmp_
         "skipped_non_hd_or_unprobeable"
     assert next(row for row in rows if row["source_id"] == "quote_hd")["status"] == \
         "candidate"
+
+
+def test_quote_window_builder_tries_distinct_occurrences_in_same_source(tmp_path):
+    """A failed first occurrence must not suppress a later publishable occurrence in one upload."""
+    from vidlore.clipstudio import relevance_contract as R
+
+    proj, segs, old = _fixture(tmp_path, GOOD)
+    seg = segs[0]
+    seg.quote = "Chaos isn't a pit. Chaos is a ladder."
+    seg.est_duration = 1.0
+    old.flagged = True
+    old.flag_reasons = ["exact_quote_timed_asr_outside_selected_window"]
+    # Only the second confirmed occurrence belongs to an indexed shot.  The historical source-level
+    # dedup marked it duplicate after the first occurrence failed and returned no candidate.
+    frame = tmp_path / "s1_second_occurrence.jpg"
+    frame.write_bytes(b"second-occurrence-frame")
+    proj.shots_path("s1").write_text(json.dumps([
+        Shot(source_id="s1", index=7, start=10.0, end=12.0,
+             keyframe_path=str(frame), quality=.9).to_dict(),
+    ]))
+    branch = {
+        "authored_quote": seg.quote,
+        "branch": "verbatim",
+        "verbatim_required": True,
+        "pool_matches": [
+            {"source_id": "s1", "source_title": "same upload first occurrence",
+             "timed_asr_span": [2.0, 3.0], "timed_asr_ratio": 1.0},
+            {"source_id": "s1", "source_title": "same upload second occurrence",
+             "timed_asr_span": [10.2, 11.0], "timed_asr_ratio": 1.0},
+            {"source_id": "s1", "source_title": "duplicate second occurrence",
+             "timed_asr_span": [10.2, 11.0], "timed_asr_ratio": .99},
+        ],
+    }
+
+    with mock.patch.object(R, "_quote_pool_branches", return_value={0: branch}), \
+            mock.patch("vidlore.clipstudio.ingest.probe",
+                       return_value={"width": 1920, "height": 1080}):
+        built, audit = O._quote_window_recovery_selections(
+            proj, segs, ClipConfig(), {0})
+
+    assert set(built) == {0}
+    assert built[0].source_id == "s1"
+    assert built[0].shot_index == 7
+    assert built[0].in_point <= 10.2 and built[0].out_point >= 11.0
+    rows = audit["beats"][0]["candidates"]
+    assert [row["status"] for row in rows] == [
+        "quote_span_has_no_indexed_shot", "candidate", "duplicate_confirmed_occurrence",
+    ]
 
 
 def test_quote_window_rung_commits_before_broad_rematch_and_keeps_page_receipt(tmp_path):
@@ -3316,21 +3417,27 @@ def test_character_verbatim_quote_and_missing_branch_both_fail_closed(tmp_path):
         [0.1 + i * .1, 0.2 + i * .1, word] for i, word in enumerate(words)
     ]))
     _stamp_current_asr_provenance(proj, "s1")
+    _save_current_quote_retrieval(proj, [
+        [0.1 + i * .1, 0.2 + i * .1, word] for i, word in enumerate(words)
+    ])
     # The beat contract changed after the fixture bound its verifier; rebind the current negative
     # so the only reason for denial is quote typing, not stale selection evidence.
     V.bind_selection_verifier_evidence(
         proj, _sel, seg, _sel.verifier, model="vision", is_specific=True,
         multiframe=True, faceid_names=[], era="", must_see="")
-    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
-        proj, segs, [0], method="actual_frame_and_pool_audit")
+    with mock.patch.object(
+            R, "_confirm_prompted_quote_span_unprompted",
+            side_effect=_confirmed_unprompted_quote):
+        proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+            proj, segs, [0], method="actual_frame_and_pool_audit")
 
-    audit = R.evaluate_selection_relevance(proj, segs)
-    assert audit["blockers"][0]["quote_evidence"]["branch"] == "verbatim"
-    assert S.semantic_gap_candidates(proj, audit)[0] == []
+        audit = R.evaluate_selection_relevance(proj, segs)
+        assert audit["blockers"][0]["quote_evidence"]["branch"] == "verbatim"
+        assert S.semantic_gap_candidates(proj, audit)[0] == []
 
-    missing = copy.deepcopy(audit)
-    missing["blockers"][0]["quote_evidence"] = {}
-    assert S.semantic_gap_candidates(proj, missing)[0] == []
+        missing = copy.deepcopy(audit)
+        missing["blockers"][0]["quote_evidence"] = {}
+        assert S.semantic_gap_candidates(proj, missing)[0] == []
 
 
 def test_phase2_denies_mixed_or_unknown_evidence_reasons(tmp_path):
@@ -3373,10 +3480,12 @@ def test_phase2_confirmed_paraphrase_with_only_semantic_negatives_remains_eligib
     proj, segs, sel = _fixture(tmp_path, bad)
     seg = segs[0]
     seg.quote = "The essayist's paraphrase is not spoken dialogue."
-    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+    unrelated = [
         [0.1, 0.2, "completely"], [0.3, 0.4, "unrelated"],
-    ]))
+    ]
+    (proj.index_dir / "s1.words.json").write_text(json.dumps(unrelated))
     _stamp_current_asr_provenance(proj, "s1")
+    _save_current_quote_retrieval(proj, unrelated)
     V.bind_selection_verifier_evidence(
         proj, sel, seg, sel.verifier, model="vision", is_specific=True,
         multiframe=True, faceid_names=[], era="", must_see="")

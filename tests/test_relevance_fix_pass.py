@@ -577,7 +577,9 @@ def test_breakout_in_point_is_the_quote_not_the_shot():
     # count — the block legitimately grew when the "promised line is not spoken here" branch was
     # added, and a fixed window silently pushed `min_dur=_bk_min` out of view.
     blk = s[i:s.index("real = _extract_breakout(", i) + 400]
-    assert "find_quote_span" in blk, "the in-point must come from the quote's audio span"
+    assert "confirmed_span" in blk, (
+        "the in-point must come from an independently confirmed quote-audio span")
+    assert "_confirmation_record9" in blk
     assert "_bk_start = max(0.0, _qs - _BK_LEAD_S)" in blk
     assert "min_dur=_bk_min" in blk, "the window must be forbidden from ending before the line does"
     # the post-extract window gate must validate the window that ACTUALLY aired
@@ -636,10 +638,12 @@ def test_candidate_generation_uses_the_word_stream():
         encoding="utf-8")
     assert "WORD-STREAM PASS first" in s
     i = s.index("WORD-STREAM PASS first")
-    blk = s[i:i + 2200]
-    assert "find_quote_span" in blk
+    blk = s[i:i + 4200]
+    assert "_quote_candidate_spans9" in blk
+    assert "_confirm_quote_hit9" in blk, (
+        "prompt-assisted retrieval must not grant quote privileges without no-prompt confirmation")
     assert "_texty9(_sh)" in blk, "burned-text shots must still be excluded"
-    assert "word stream is strictly better evidence" in blk
+    assert "continuous word stream is better evidence" in blk
 
 
 def _cap_words(t):

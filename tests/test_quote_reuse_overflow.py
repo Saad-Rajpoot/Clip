@@ -4,6 +4,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from vidlore.clipstudio import policy as P
+from vidlore.clipstudio import index as I
+from vidlore.clipstudio import relevance_contract as RC
 from vidlore.clipstudio import verify as V
 from vidlore.clipstudio.config import ClipConfig
 from vidlore.clipstudio.models import (
@@ -76,7 +78,7 @@ def _owner(segment_index: int, source_id: str, shot_index: int) -> ClipSelection
         in_point=1.0, out_point=5.0, confidence=.9)
 
 
-def _configure(monkeypatch, get_shot):
+def _configure(monkeypatch, get_shot, *, confirm_quote: bool = True):
     monkeypatch.setattr(V, "_shot_lookup", lambda _proj: get_shot)
     monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", "1")
     monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "0")
@@ -86,6 +88,27 @@ def _configure(monkeypatch, get_shot):
     monkeypatch.setenv("VIDLORE_CLIPSTUDIO_EXACT_CONTEXTUAL_DOWNGRADE", "0")
     monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VENUE_FALLBACK", "0")
     monkeypatch.setenv("VIDLORE_CLIPSTUDIO_GENERIC_FILLER_DOWNGRADE", "0")
+    if confirm_quote:
+        # Rev8 deliberately treats vocabulary-prompted ASR as retrieval only.  These promotion
+        # tests are about reuse ordering, so give every strict alternate an explicit retrieval
+        # hint plus the independent no-prompt acoustic confirmation required by production.
+        words = [
+            (1.20, 1.35, "I"), (1.36, 1.55, "did"),
+            (1.56, 1.85, "warn"), (1.86, 2.05, "you"),
+            (2.06, 2.25, "not"), (2.26, 2.40, "to"),
+            (2.41, 2.70, "trust"), (2.71, 2.95, "me"),
+        ]
+        monkeypatch.setattr(I, "load_words", lambda *_args, **_kwargs: list(words))
+        monkeypatch.setattr(
+            I, "_load_quote_retrieval_words_result",
+            lambda *_args, **_kwargs: (True, list(words), ""))
+        monkeypatch.setattr(
+            RC, "_confirm_prompted_quote_span_unprompted",
+            lambda *_args, **_kwargs: {
+                "status": "confirmed", "reason": "fixture_acoustic_confirmation",
+                "confirmed_span": [1.20, 2.95, 1.0], "artifact_key": "a" * 64,
+                "decoder_signature": "fixture-unprompted-decoder",
+            })
 
 
 def _run(proj, seg, logs):
@@ -124,7 +147,7 @@ def test_exact_quote_overflow_uses_least_used_strict_candidate_and_audits_it(
     logs = []
     summary = _run(proj, seg, logs)
 
-    assert summary["replaced"] == 1
+    assert summary["replaced"] == 1, "\n".join(logs)
     assert (target.source_id, target.shot_index) == ("light", 2)
     assert not any(path.endswith("heavy.jpg") for path in calls), \
         "least-used ordering must not spend vision on a more heavily reused passing candidate"
@@ -159,7 +182,7 @@ def test_under_cap_strict_quote_candidate_wins_before_any_overflow(
     logs = []
     summary = _run(proj, seg, logs)
 
-    assert summary["replaced"] == 1
+    assert summary["replaced"] == 1, "\n".join(logs)
     assert (target.source_id, target.shot_index) == ("under", 3)
     assert not any(path.endswith("heavy.jpg") for path in calls)
     assert V.REUSE_CAP_OVERFLOW_EXACT_CONTRACT not in target.signals
@@ -172,7 +195,7 @@ def test_non_quote_selection_cannot_use_reuse_overflow(tmp_path, monkeypatch):
     target.alternates = [ClipCandidate(
         segment_index=0, source_id="heavy", shot_index=1, score=.99,
         in_point=1.0, out_point=5.0, signals={"dialogue": 1.0})]
-    _configure(monkeypatch, get_shot)
+    _configure(monkeypatch, get_shot, confirm_quote=False)
     monkeypatch.setattr(
         V, "verify_frame",
         lambda path, *_args, **_kwargs: _verdict(not str(path).endswith("wrong.jpg")))
@@ -195,7 +218,7 @@ def test_quote_locked_overflow_still_requires_candidate_quote_containment(
     target.alternates = [ClipCandidate(
         segment_index=0, source_id="heavy", shot_index=1, score=.99,
         in_point=1.0, out_point=5.0, signals={"dialogue": 1.0})]
-    _configure(monkeypatch, get_shot)
+    _configure(monkeypatch, get_shot, confirm_quote=False)
     calls = []
 
     def judge(path, *_args, **_kwargs):

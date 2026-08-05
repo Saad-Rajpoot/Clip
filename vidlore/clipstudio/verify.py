@@ -3726,52 +3726,115 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 if not _quote_locked:
                     return True
                 alt_signals = dict(getattr(alt, "signals", None) or {})
-                if alt_signals.get("quote_pool_exact"):
-                    return True
-                # A direct-ASR quote source does not need PCM evidence.  Preserve the neighborhood
-                # rescue that existed before this guard, but re-derive it from current timed words
-                # and the candidate's *post-Window-QC* trim instead of trusting matcher signals.
-                # The final publication contract independently rechecks ASR provenance and the
-                # whole-pool verbatim branch before this candidate can be committed.
+                # Rebuilt below only when confirmation is bound to this exact candidate/window.
+                alt_signals.pop("quote_unprompted_confirmation", None)
+                # ``quote_pool_exact`` is a matcher claim, not independent proof.  Prompted ASR may
+                # retrieve the location, but it cannot certify a phrase suggested by its own prompt.
+                # Re-locate inside THIS candidate's post-Window-QC window, then require the separate
+                # no-prompt narrow decoder to confirm the hit and bind its confirmed timestamps.
                 try:
                     from . import index as _index_quote_lock
                     from .relevance_contract import (
-                        QUOTE_DIALOGUE_FLOOR as _quote_floor,
+                        QUOTE_RETRIEVAL_MAX_OCCURRENCES_PER_STREAM as _quote_bound_lock,
                         QUOTE_WINDOW_TOLERANCE_SEC as _quote_tol,
+                        _confirm_prompted_quote_span_unprompted as _confirm_quote_lock,
+                        _quote_confirmation_summary as _quote_confirmation_summary_lock,
+                        _quote_requires_exact_contiguous_match as _quote_exact_required_lock,
+                        _prompted_quote_candidate_spans as _quote_candidate_spans_lock,
                     )
-                    direct = _index_quote_lock.find_quote_span(
-                        _index_quote_lock.load_words(proj, str(alt.source_id or "")),
-                        str(getattr(seg, "quote", "") or ""),
-                        min_ratio=float(_quote_floor))
                     window0, window1 = float(alt.in_point), float(alt.out_point)
-                    direct_contained = bool(
-                        direct and window1 > window0 >= 0.0
-                        and float(direct[1]) > float(direct[0]) >= 0.0
-                        and float(direct[0]) >= window0 - float(_quote_tol)
-                        and float(direct[1]) <= window1 + float(_quote_tol))
-                except (IndexError, TypeError, ValueError, OSError):
+                    quote_text = str(getattr(seg, "quote", "") or "")
+                    source_id = str(getattr(alt, "source_id", "") or "")
+                    source = proj.source(source_id)
+                    exact_required = _quote_exact_required_lock(
+                        quote_text, index_module=_index_quote_lock)
+                    general_words = _index_quote_lock.load_words(proj, source_id)
+                    retrieval_ok, retrieval_streams, _retrieval_reason, retrieval_complete = \
+                        _index_quote_lock._load_quote_retrieval_streams_result(
+                            proj, source, cfg, require_complete=True)
+                    streams = [general_words]
+                    if retrieval_ok and retrieval_complete:
+                        streams.extend(stream["words"] for stream in retrieval_streams)
+                    candidates = []
+                    for all_words in streams:
+                        # Local-window retrieval prevents a duplicate line elsewhere in the source
+                        # from legitimizing this alternate. Tolerance mirrors final containment.
+                        local_words = []
+                        for row in all_words:
+                            try:
+                                word0, word1 = float(row[0]), float(row[1])
+                            except (IndexError, TypeError, ValueError):
+                                continue
+                            if word1 >= window0 - float(_quote_tol) \
+                                    and word0 <= window1 + float(_quote_tol):
+                                local_words.append(row)
+                        candidates.extend(_quote_candidate_spans_lock(
+                            local_words, quote_text,
+                            exact_contiguous_required=exact_required,
+                            index_module=_index_quote_lock))
+                    unique = []
+                    seen = set()
+                    for candidate in candidates:
+                        key = tuple(round(float(value), 3) for value in candidate)
+                        if key not in seen:
+                            seen.add(key)
+                            unique.append(candidate)
                     direct = None
+                    confirmed = None
+                    confirmation = {"status": "inconclusive",
+                                    "reason": "selected_quote_candidate_absent"}
                     direct_contained = False
-                if direct_contained and direct is not None:
+                    if len(unique) <= _quote_bound_lock:
+                        for candidate in unique:
+                            checked = _confirm_quote_lock(
+                                proj, source, quote_text, candidate, cfg,
+                                exact_contiguous_required=exact_required)
+                            checked_span = (checked.get("confirmed_span")
+                                            if checked.get("status") == "confirmed" else None)
+                            contained = bool(
+                                checked_span and window1 > window0 >= 0.0
+                                and float(checked_span[1]) > float(checked_span[0]) >= 0.0
+                                and float(checked_span[0]) >= window0 - float(_quote_tol)
+                                and float(checked_span[1]) <= window1 + float(_quote_tol))
+                            if contained:
+                                direct, confirmed = candidate, checked_span
+                                confirmation, direct_contained = checked, True
+                                break
+                except Exception as exc:                       # decode/cache uncertainty rejects alt
+                    direct = None
+                    confirmed = None
+                    confirmation = {"status": "inconclusive",
+                                    "reason": ("selected_quote_confirmation_failed:"
+                                               f"{type(exc).__name__}")}
+                    direct_contained = False
+                if direct_contained and confirmed is not None:
                     try:
                         dialogue_signal = max(
                             float(alt_signals.get("dialogue", 0.0) or 0.0),
-                            float(direct[2]))
+                            float(confirmed[2]))
                     except (IndexError, TypeError, ValueError):
                         return False
                     alt_signals["quote_pool_exact"] = True
                     alt_signals["dialogue"] = dialogue_signal
+                    alt_signals["quote_unprompted_confirmation"] = \
+                        _quote_confirmation_summary_lock(confirmation)
                     alt.signals = alt_signals
                     return True
-                if not isinstance(_quote_transfer, dict):
+                # A same-target PCM transfer remains a separate valid proof path.  Prefer evidence
+                # already bound to the alternate; fall back to the primary lock's transfer only
+                # when it explicitly targets this source and survives the existing rebind checks.
+                alt_transfer = alt_signals.get("quote_audio_transfer_evidence")
+                if not isinstance(alt_transfer, dict):
+                    alt_transfer = _quote_transfer
+                if not isinstance(alt_transfer, dict):
                     return False
-                if str(_quote_transfer.get("target_source_id", "") or "") != \
+                if str(alt_transfer.get("target_source_id", "") or "") != \
                         str(getattr(alt, "source_id", "") or ""):
                     return False
                 try:
                     target_q0, target_q1 = (
-                        float(_quote_transfer["target_quote_span"][0]),
-                        float(_quote_transfer["target_quote_span"][1]))
+                        float(alt_transfer["target_quote_span"][0]),
+                        float(alt_transfer["target_quote_span"][1]))
                     window0, window1 = float(alt.in_point), float(alt.out_point)
                     from .relevance_contract import QUOTE_WINDOW_TOLERANCE_SEC as _quote_tol
                     contained = (
@@ -3785,7 +3848,7 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 try:
                     from . import audio_align as _audio_quote_lock
                     rebound = _audio_quote_lock.rebind_transfer_evidence_window(
-                        _quote_transfer, [window0, window1])
+                        alt_transfer, [window0, window1])
                 except Exception:
                     rebound = {}
                 if not rebound:

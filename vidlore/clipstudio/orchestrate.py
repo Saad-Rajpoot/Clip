@@ -1529,6 +1529,10 @@ def _quote_window_recovery_selections(proj, segs, cfg, scope, *, quote_pool_cach
         candidates = []
         candidate_rows: dict[tuple, dict] = {}
         candidate_shots: dict[tuple, object] = {}
+        seen_direct_occurrences: set[tuple[str, float, float]] = set()
+        # This remains source-level deliberately: a source with a direct timed-ASR hit must not be
+        # searched again through the weaker cross-copy PCM rung. Direct recovery itself, however,
+        # must try every distinct confirmed occurrence in that source.
         seen_sources: set[str] = set()
 
         def _target_quote_span(words):
@@ -1629,7 +1633,12 @@ def _quote_window_recovery_selections(proj, segs, cfg, scope, *, quote_pool_cach
                     reference_source_id=transfer_context["reference_source_id"],
                     reference_source_content_fingerprint=
                     transfer_context["reference_source_content_fingerprint"],
-                    reference_asr_ratio=ratio, target_source_id=sid,
+                    reference_asr_ratio=ratio,
+                    reference_quote_confirmation_artifact_key=
+                    transfer_context["reference_quote_confirmation_artifact_key"],
+                    reference_quote_confirmation_decoder_fingerprint=
+                    transfer_context["reference_quote_confirmation_decoder_fingerprint"],
+                    target_source_id=sid,
                     target_source_content_fingerprint=
                     transfer_context["target_source_content_fingerprint"],
                     target_selected_window=[cand.in_point, cand.out_point],
@@ -1665,19 +1674,24 @@ def _quote_window_recovery_selections(proj, segs, cfg, scope, *, quote_pool_cach
                 "status": "invalid_pool_match",
             }
             beat_row["candidates"].append(row)
-            if not sid or sid in seen_sources:
-                row["status"] = "duplicate_or_missing_source"
+            if not sid:
+                row["status"] = "missing_source_id"
                 continue
-            seen_sources.add(sid)
             try:
                 q0, q1 = (float(row["timed_asr_span"][0]),
                           float(row["timed_asr_span"][1]))
                 ratio = float(row["timed_asr_ratio"] or 0.0)
             except (IndexError, TypeError, ValueError):
                 continue
+            occurrence = (sid, round(q0, 3), round(q1, 3))
+            if occurrence in seen_direct_occurrences:
+                row["status"] = "duplicate_confirmed_occurrence"
+                continue
+            seen_direct_occurrences.add(occurrence)
             if ratio < float(_rel_quote.QUOTE_DIALOGUE_FLOOR):
                 row["status"] = "below_quote_floor"
                 continue
+            seen_sources.add(sid)
             row["quote_location_method"] = "timed_asr"
             _candidate_from_span(sid, q0, q1, ratio, row)
 
@@ -1756,6 +1770,15 @@ def _quote_window_recovery_selections(proj, segs, cfg, scope, *, quote_pool_cach
             0, len(target_source_ids) - _audio_target_source_cap)
         target_source_ids = target_source_ids[:_audio_target_source_cap]
 
+        reference_rejections = []
+
+        def _reject_reference(sid: str, reason: str):
+            reference_rejections.append({
+                "source_id": str(sid or ""),
+                "reason": str(reason or "reference_not_authoritative"),
+            })
+            return None
+
         def _reference_record(match):
             sid = str((match or {}).get("source_id", "") or "")
             try:
@@ -1763,23 +1786,71 @@ def _quote_window_recovery_selections(proj, segs, cfg, scope, *, quote_pool_cach
                           float((match or {}).get("timed_asr_span", [])[1]))
                 ratio = float((match or {}).get("timed_asr_ratio", 0.0) or 0.0)
             except (IndexError, TypeError, ValueError):
-                return None
+                return _reject_reference(sid, "confirmed_span_malformed")
             src = proj.source(sid)
             path = str(getattr(src, "local_path", "") or "") if src is not None else ""
             if (not sid or src is None or str(getattr(src, "status", "") or "") != SOURCE_OK
                     or not Path(path).is_file()
                     or ratio < float(_rel_quote.QUOTE_DIALOGUE_FLOOR)):
-                return None
+                return _reject_reference(sid, "source_or_ratio_ineligible")
             provenance_ok, _actual, _reason = _rel_quote._source_asr_provenance(
                 proj, sid, str(branch.get("asr_prompt_fingerprint_expected", "") or ""))
             if not provenance_ok:
-                return None
+                return _reject_reference(sid, f"prompted_asr_provenance_invalid:{_reason}")
+
+            # A prompted ASR hit is not an authoritative PCM template by itself.  Revalidate the
+            # exact immutable no-prompt artifact here, immediately before decoding its audio.  This
+            # also makes hand-authored/legacy branch dictionaries fail closed instead of silently
+            # manufacturing a cross-copy quote proof from the old prompted word cache.
+            confirmation = (match or {}).get("unprompted_confirmation")
+            if not isinstance(confirmation, dict) \
+                    or str(confirmation.get("status", "") or "") != "confirmed":
+                return _reject_reference(sid, "unprompted_confirmation_absent_or_not_confirmed")
+            artifact_key = str(confirmation.get("artifact_key", "") or "").strip().lower()
+            decoder_fingerprint = str(
+                confirmation.get("decoder_fingerprint", "") or "").strip().lower()
+            expected_decoder = str(branch.get(
+                "confirmation_decoder_fingerprint_expected", "") or "").strip().lower()
+
+            def _is_sha256(value):
+                return len(value) == 64 \
+                    and all(c in "0123456789abcdef" for c in value)
+            if not _is_sha256(artifact_key):
+                return _reject_reference(sid, "unprompted_confirmation_artifact_key_malformed")
+            if not _is_sha256(decoder_fingerprint) or decoder_fingerprint != expected_decoder:
+                return _reject_reference(sid, "unprompted_confirmation_decoder_mismatch")
+            prompted_span = (match or {}).get("prompted_asr_span")
+            try:
+                current_confirmation = _rel_quote._confirm_prompted_quote_span_unprompted(
+                    proj, src, str(getattr(seg, "quote", "") or ""), prompted_span, cfg,
+                    exact_contiguous_required=bool(
+                        branch.get("requires_exact_contiguous_match")))
+            except Exception as exc:
+                return _reject_reference(
+                    sid, f"unprompted_confirmation_revalidation_error:{type(exc).__name__}")
+            if str(current_confirmation.get("status", "") or "") != "confirmed":
+                return _reject_reference(
+                    sid, "unprompted_confirmation_no_longer_confirmed")
+            if str(current_confirmation.get("artifact_key", "") or "") != artifact_key \
+                    or str(current_confirmation.get("decoder_fingerprint", "") or "") \
+                    != decoder_fingerprint:
+                return _reject_reference(sid, "unprompted_confirmation_binding_changed")
+            current_span = current_confirmation.get("confirmed_span")
+            try:
+                c0, c1, cratio = (float(current_span[0]), float(current_span[1]),
+                                  float(current_span[2]))
+            except (IndexError, TypeError, ValueError):
+                return _reject_reference(sid, "unprompted_confirmation_span_malformed")
+            if max(abs(c0 - q0), abs(c1 - q1), abs(cratio - ratio)) > 0.001:
+                return _reject_reference(sid, "unprompted_confirmation_span_changed")
             fingerprint = _verify_quote._file_fingerprint(path)
             if fingerprint in ("", "missing", "unreadable"):
-                return None
+                return _reject_reference(sid, "source_content_fingerprint_unavailable")
             return {
                 "source_id": sid, "path": path, "quote_span": [q0, q1], "ratio": ratio,
                 "source_content_fingerprint": fingerprint,
+                "quote_confirmation_artifact_key": artifact_key,
+                "quote_confirmation_decoder_fingerprint": decoder_fingerprint,
             }
 
         reference_records = [record for record in (
@@ -1790,6 +1861,7 @@ def _quote_window_recovery_selections(proj, segs, cfg, scope, *, quote_pool_cach
         _audio_reference_cap = 3
         beat_row["audio_transfer_reference_count"] = len(reference_records)
         beat_row["audio_transfer_reference_cap"] = _audio_reference_cap
+        beat_row["audio_transfer_reference_rejections"] = reference_rejections
         reference_records = reference_records[:_audio_reference_cap]
 
         for target_sid in target_source_ids:
@@ -1892,6 +1964,10 @@ def _quote_window_recovery_selections(proj, segs, cfg, scope, *, quote_pool_cach
                     "reference_source_id": reference["source_id"],
                     "reference_source_content_fingerprint":
                     reference["source_content_fingerprint"],
+                    "reference_quote_confirmation_artifact_key":
+                    reference["quote_confirmation_artifact_key"],
+                    "reference_quote_confirmation_decoder_fingerprint":
+                    reference["quote_confirmation_decoder_fingerprint"],
                     "target_source_content_fingerprint": target_fp,
                 })
 
@@ -3343,6 +3419,7 @@ _PERSISTENT_VERIFIER_TECHNICAL_PREFIXES = (
     # evidence that the pool lacks the line.  It must be repaired, never acquired around/softened.
     "exact_quote_pool_classification_indeterminate",
     "exact_quote_selected_asr_provenance_invalid",
+    "exact_quote_unprompted_confirmation_inconclusive",
 )
 
 
@@ -3849,7 +3926,7 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
                     from . import selfheal as _selfheal_restore_sr
                     _restored_softenings = \
                         _selfheal_restore_sr.restore_stale_selection_relevance_softenings(
-                            proj, segs, log=log)
+                            proj, segs, cfg=cfg, log=log)
                 except Exception as exc:                 # noqa: BLE001 — retryable state repair
                     raise PipelineError(
                         "semantic recovery could not restore stale pool-bound softening "

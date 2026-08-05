@@ -19,6 +19,7 @@ import math
 import os
 import re
 import subprocess
+import uuid
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
@@ -32,7 +33,9 @@ from .segment import _STOP as _CONTENT_STOP
 #   1 → shots + per-shot transcript only
 #   2 → + <sid>.words.json (word-level ASR start/end/text) for quote-span location
 INDEX_SCHEMA = 2
-_ASR_PIPELINE_REVISION = 7
+_ASR_PIPELINE_REVISION = 8
+QUOTE_RETRIEVAL_SCHEMA = 2
+_QUOTE_RETRIEVAL_REVISION = 2
 _ASR_PROMPT_RESERVE_TOKENS = 16
 _ASR_INITIAL_PROMPT_PREFIX = "Cast, character names, and quoted dialogue: "
 
@@ -239,28 +242,34 @@ def _project_asr_hotwords(proj, fallback=None) -> str:
     return _asr_hotwords([*characters, *actors])
 
 
-def _project_asr_initial_prompt(proj, fallback=None) -> str:
-    """Names plus authored dialogue for context-only ASR prompting.
+def _project_authored_retrieval_prompt(proj) -> str:
+    """Authored lines for an optional, separate retrieval-only decode.
 
-    Timed ASR remains the evidence.  Dialogue here only tells Whisper which plausible words may be
-    spoken; it is deliberately excluded from Faster-Whisper's ``hotwords`` decoder bias.  Putting
-    full sentences in both channels caused the model to repeat an authored line across silence and
-    assign it fabricated long timestamps on a real source.
+    This value must never be passed to the decoder that produces the general ``.words.json``
+    stream. Even context-only sentence prompting was reproduced to fabricate the prompted words
+    repeatedly across unrelated audio. A future recall-oriented retrieval artifact may use this
+    prompt only when it is separately named/provenanced and every hit receives an independent
+    zero-prompt narrow-window confirmation before it can become evidence.
     """
     analysis = (getattr(proj, "meta", {}) or {}).get("analysis") or {}
-    quotes = _asr_hotwords(_project_authored_quotes(proj, analysis))
-    # Proper names already have their own hotword channel on supported Faster-Whisper versions.
-    # A quote-only prompt is both shorter and materially safer: on the measured full-scene source,
-    # a names+30-lines prompt lost the ending while the focused quote context recovered it.
-    return quotes or _project_asr_hotwords(proj, fallback=fallback)
+    return _asr_hotwords(_project_authored_quotes(proj, analysis))
+
+
+def _project_asr_initial_prompt(proj, fallback=None) -> str:
+    """No sentence prompt is permitted in the persisted general word index."""
+    del proj, fallback
+    return ""
 
 
 def _project_asr_legacy_initial_prompt(proj, fallback=None) -> str:
-    """Priority-safe single channel for Faster-Whisper versions without ``hotwords``."""
+    """Proper-name-only fallback for Faster-Whisper versions without ``hotwords``."""
+    return _project_asr_hotwords(proj, fallback=fallback)
+
+
+def _project_quote_retrieval_legacy_prompt(proj, fallback=None) -> str:
+    """Old-decoder single-channel equivalent of names + authored retrieval lines."""
     analysis = (getattr(proj, "meta", {}) or {}).get("analysis") or {}
     characters, actors = _project_asr_name_tiers(proj, fallback=fallback)
-    # Dialogue must precede lower-value actor names. A large actor roster was reproduced to consume
-    # the bounded 1.0.x context and silently evict every authored line when these tiers were flat.
     return _asr_hotwords([
         *characters,
         *_project_authored_quotes(proj, analysis),
@@ -286,9 +295,74 @@ def _asr_prompt_fingerprint(cfg: ClipConfig, hotwords: str,
         "compute": str(getattr(cfg, "whisper_compute", "") or ""),
         "faster_whisper": _faster_whisper_version(),
         "hotwords": str(hotwords or ""),
-        "initial_prompt": str(hotwords if initial_prompt is None else initial_prompt),
+        "initial_prompt": str("" if initial_prompt is None else initial_prompt),
         "legacy_initial_prompt": str(
             hotwords if legacy_initial_prompt is None else legacy_initial_prompt),
+        "dialogue_delivery": "excluded_from_general_word_index",
+        "primary": {"word_timestamps": True, "vad_filter": True},
+        "eof_rescue": {
+            "window_sec": _ASR_EOF_WINDOW_SEC,
+            "gap_sec": _ASR_EOF_RESCUE_GAP_SEC,
+            "max_no_speech": _ASR_EOF_MAX_NO_SPEECH,
+            "min_avg_logprob": _ASR_EOF_MIN_AVG_LOGPROB,
+            "vad_filter": False,
+            "condition_on_previous_text": False,
+        },
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _quote_retrieval_fingerprint(proj, cfg: ClipConfig, *, fallback=None) -> str:
+    """Identity of the separate authored-prompt candidate stream.
+
+    Its bytes are never generic transcript evidence. A phrase located here is only a retrieval
+    hint for the independent narrow zero-prompt confirmer.
+    """
+    payload = {
+        "schema_version": QUOTE_RETRIEVAL_SCHEMA,
+        "revision": _QUOTE_RETRIEVAL_REVISION,
+        "model": str(getattr(cfg, "whisper_model", "") or ""),
+        "compute": str(getattr(cfg, "whisper_compute", "") or ""),
+        "faster_whisper": _faster_whisper_version(),
+        "hotwords": _project_asr_hotwords(proj, fallback=fallback),
+        "initial_prompt": _project_authored_retrieval_prompt(proj),
+        "legacy_initial_prompt": _project_quote_retrieval_legacy_prompt(
+            proj, fallback=fallback),
+        "evidence_role": "retrieval_candidates_only_requires_unprompted_confirmation",
+        "prompt_chunking": {
+            "policy": "complete_authored_quote_coverage_v1",
+            "entries_are_atomic": True,
+            "each_entry_delivered_exactly_once": True,
+            "streams_are_scanned_independently": True,
+        },
+        "primary": {"word_timestamps": True, "vad_filter": True},
+        "eof_rescue": {
+            "window_sec": _ASR_EOF_WINDOW_SEC,
+            "gap_sec": _ASR_EOF_RESCUE_GAP_SEC,
+            "max_no_speech": _ASR_EOF_MAX_NO_SPEECH,
+            "min_avg_logprob": _ASR_EOF_MIN_AVG_LOGPROB,
+            "vad_filter": False,
+            "condition_on_previous_text": False,
+        },
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _legacy_rev7_general_fingerprint(proj, cfg: ClipConfig, *, fallback=None) -> str:
+    """Exact rev7 identity, used only to salvage already-computed prompted bytes as retrieval."""
+    hotwords = _project_asr_hotwords(proj, fallback=fallback)
+    prompt = _project_authored_retrieval_prompt(proj) or hotwords
+    legacy = _project_quote_retrieval_legacy_prompt(proj, fallback=fallback)
+    payload = {
+        "revision": 7,
+        "model": str(getattr(cfg, "whisper_model", "") or ""),
+        "compute": str(getattr(cfg, "whisper_compute", "") or ""),
+        "faster_whisper": _faster_whisper_version(),
+        "hotwords": hotwords,
+        "initial_prompt": prompt,
+        "legacy_initial_prompt": legacy,
         "dialogue_delivery": "initial_prompt_only",
         "primary": {"word_timestamps": True, "vad_filter": True},
         "eof_rescue": {
@@ -374,6 +448,15 @@ def _bound_asr_vocabulary(model, hotwords: str, *, duplicated: bool) -> str:
     return ", ".join(kept)
 
 
+def _model_supports_hotwords(model) -> bool:
+    try:
+        params = inspect.signature(model.transcribe).parameters.values()
+        return any(
+            p.name == "hotwords" or p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+    except (TypeError, ValueError):
+        return False
+
+
 def _transcribe_with_vocabulary(model, path: Path, *, hotwords: str = "",
                                 initial_prompt: str = "", legacy_initial_prompt: str = "",
                                 **kwargs):
@@ -385,14 +468,9 @@ def _transcribe_with_vocabulary(model, path: Path, *, hotwords: str = "",
     """
     requested_prompt = str(initial_prompt or "")
     if requested_prompt or hotwords:
-        try:
-            params = inspect.signature(model.transcribe).parameters.values()
-            supports_hotwords = any(
-                p.name == "hotwords" or p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
-        except (TypeError, ValueError):
-            supports_hotwords = False
+        supports_hotwords = _model_supports_hotwords(model)
         if supports_hotwords:
-            prompt_vocabulary = requested_prompt or str(hotwords or "")
+            prompt_vocabulary = requested_prompt
         else:
             # Indexing supplies character -> compact-dialogue -> actor priority explicitly. Keep a
             # compatible fallback for direct callers that only know the two modern channels.
@@ -400,16 +478,15 @@ def _transcribe_with_vocabulary(model, path: Path, *, hotwords: str = "",
                 *[entry.strip() for entry in str(hotwords or "").split(",") if entry.strip()],
                 *[entry.strip() for entry in requested_prompt.split(",") if entry.strip()],
             ])
-        # Bound the complete context as though it were duplicated when hotwords are supported.
-        # That is conservative: the actual hotword channel below contains only the shorter proper-
-        # name subset, never authored dialogue sentences.
-        bounded_prompt = _bound_asr_vocabulary(
-            model, prompt_vocabulary, duplicated=bool(supports_hotwords and hotwords))
-        if not bounded_prompt:
-            # The requested vocabulary is part of persisted ASR identity. Decoding without it and
-            # stamping the full prompt fingerprint would be false provenance.
-            raise RuntimeError("ASR vocabulary could not be bounded/tokenized safely")
-        kwargs["initial_prompt"] = f"{_ASR_INITIAL_PROMPT_PREFIX}{bounded_prompt}"
+        if prompt_vocabulary:
+            # Bound the complete context as though it were duplicated when hotwords are supported.
+            bounded_prompt = _bound_asr_vocabulary(
+                model, prompt_vocabulary, duplicated=bool(supports_hotwords and hotwords))
+            if not bounded_prompt:
+                # The requested vocabulary is part of persisted ASR identity. Decoding without it
+                # and stamping the full fingerprint would be false provenance.
+                raise RuntimeError("ASR vocabulary could not be bounded/tokenized safely")
+            kwargs["initial_prompt"] = f"{_ASR_INITIAL_PROMPT_PREFIX}{bounded_prompt}"
         if supports_hotwords and hotwords:
             bounded_hotwords = _bound_asr_vocabulary(model, hotwords, duplicated=True)
             if not bounded_hotwords:
@@ -578,6 +655,120 @@ def transcribe_words(path: Path, cfg: ClipConfig, *, duration: float = 0.0,
         initial_prompt=initial_prompt, legacy_initial_prompt=legacy_initial_prompt)[1]
 
 
+def transcribe_unprompted_window(
+        path: Path | str, cfg: ClipConfig, start: float, end: float, *,
+        sample_rate: int = 16000,
+        max_no_speech: float = _ASR_EOF_MAX_NO_SPEECH,
+        min_avg_logprob: float = _ASR_EOF_MIN_AVG_LOGPROB) -> dict:
+    """Decode one physically extracted audio window with no authored decoder hints.
+
+    Project ASR is deliberately prompted to improve recall. Its hits are retrieval candidates,
+    not independent proof that an authored line exists. This narrow pass receives only waveform
+    samples: no ``initial_prompt``, no ``hotwords``, no previous-text conditioning, and no whole-
+    source feature extraction. The caller binds/caches the result to immutable source/quote inputs.
+
+    ``status=ok`` means decoding completed and every returned segment carried finite confidence;
+    it does not mean a particular quote matched. Any technical or confidence uncertainty is
+    ``inconclusive`` so publication callers can fail closed.
+    """
+    try:
+        lo, hi = float(start), float(end)
+        rate = int(sample_rate)
+        no_speech_floor = float(max_no_speech)
+        logprob_floor = float(min_avg_logprob)
+    except (TypeError, ValueError):
+        return {"status": "inconclusive", "reason": "invalid_decode_parameters"}
+    if (not math.isfinite(lo) or not math.isfinite(hi) or not hi > lo >= 0.0
+            or rate < 8000 or not math.isfinite(no_speech_floor)
+            or not math.isfinite(logprob_floor)):
+        return {"status": "inconclusive", "reason": "invalid_decode_parameters"}
+
+    try:
+        from . import audio_align as _audio_window
+        pcm, decode_error = _audio_window._pcm_from_media(
+            path, lo, hi, sample_rate=rate)
+    except Exception as exc:
+        return {
+            "status": "inconclusive",
+            "reason": f"audio_extract_error:{type(exc).__name__}",
+        }
+    if decode_error:
+        return {"status": "inconclusive", "reason": str(decode_error)}
+
+    try:
+        model = _whisper(cfg)
+        # Do not route through `_transcribe_with_vocabulary`: even an empty authored prompt can
+        # acquire proper-name hotwords there. This pass must be acoustically independent.
+        segments, _info = model.transcribe(
+            pcm, word_timestamps=True, vad_filter=False,
+            condition_on_previous_text=False)
+        materialized = list(segments)
+    except Exception as exc:
+        return {
+            "status": "inconclusive",
+            "reason": f"unprompted_decode_error:{type(exc).__name__}",
+        }
+
+    confidence_rows: list[dict] = []
+    credible = []
+    rejected_confidence = False
+    if not materialized:
+        return {"status": "inconclusive", "reason": "segment_confidence_absent"}
+    for seg in materialized:
+        try:
+            no_speech = float(seg.no_speech_prob)
+            avg_logprob = float(seg.avg_logprob)
+        except (AttributeError, TypeError, ValueError):
+            return {"status": "inconclusive", "reason": "segment_confidence_missing"}
+        if not (math.isfinite(no_speech) and math.isfinite(avg_logprob)):
+            return {"status": "inconclusive", "reason": "segment_confidence_nonfinite"}
+        accepted = bool(no_speech <= no_speech_floor and avg_logprob >= logprob_floor)
+        confidence_rows.append({
+            "no_speech_prob": round(no_speech, 6),
+            "avg_logprob": round(avg_logprob, 6),
+            "accepted": accepted,
+        })
+        if accepted:
+            credible.append(seg)
+        else:
+            rejected_confidence = True
+
+    # A low-confidence segment is not evidence that the authored phrase was absent.  The phrase
+    # may be inside exactly the segment the decoder marked uncertain, so caching that observation
+    # as a conclusive negative would incorrectly turn a real quote into a paraphrase.  Keep the
+    # independent pass fail-closed: any uncertain decoded segment makes this request inconclusive.
+    if rejected_confidence:
+        return {
+            "status": "inconclusive",
+            "reason": "segment_confidence_below_floor",
+            "sample_rate_hz": rate,
+            "decode_window": [round(lo, 3), round(hi, 3)],
+            "segment_confidence": confidence_rows,
+        }
+
+    relative = _timed_words(credible, lo=0.0, hi=hi - lo)
+    absolute = sorted(
+        [[round(lo + a, 3), round(lo + b, 3), str(word)]
+         for a, b, word in relative],
+        key=lambda row: (row[0], row[1]))
+    if not absolute:
+        return {
+            "status": "inconclusive",
+            "reason": "timed_words_absent",
+            "sample_rate_hz": rate,
+            "decode_window": [round(lo, 3), round(hi, 3)],
+            "segment_confidence": confidence_rows,
+        }
+    return {
+        "status": "ok",
+        "reason": "",
+        "sample_rate_hz": rate,
+        "decode_window": [round(lo, 3), round(hi, 3)],
+        "timed_words": absolute,
+        "segment_confidence": confidence_rows,
+    }
+
+
 def _assign_transcript(shots: list[Shot], words: list[tuple[float, float, str]]) -> None:
     """Attach to each shot the words whose midpoint falls inside it.
 
@@ -645,6 +836,241 @@ def load_words(proj: ClipProject, source_id: str) -> list[tuple[float, float, st
     return _load_words_result(proj, source_id)[1]
 
 
+def _quote_retrieval_path(proj: ClipProject, source_id: str) -> Path:
+    return Path(proj.index_dir) / f"{source_id}.quote_retrieval.json"
+
+
+def _source_content_fingerprint(path) -> str:
+    try:
+        from .verify import _file_fingerprint
+        return str(_file_fingerprint(path) or "")
+    except Exception:
+        return ""
+
+
+def _quote_retrieval_prompt_chunks(
+        proj, cfg: ClipConfig, *, entries=None, fallback=None, model=None) -> tuple[list[str], str]:
+    """Partition authored lines into prompts the installed decoder will actually receive.
+
+    `_transcribe_with_vocabulary` intentionally drops whole suffix entries at the context limit.
+    Retrieval absence is only meaningful when every authored line was delivered, so repeat that
+    exact bounding policy until the full ordered quote list is covered.
+    """
+    authored = list(entries if entries is not None else _project_authored_quotes(
+        proj, (getattr(proj, "meta", {}) or {}).get("analysis") or {}))
+    if not authored:
+        return [], ""
+    try:
+        model = model or _whisper(cfg)
+        hotwords = _project_asr_hotwords(proj, fallback=fallback)
+        duplicated = bool(_model_supports_hotwords(model) and hotwords)
+        chunks: list[str] = []
+        remaining = list(authored)
+        while remaining:
+            bounded = _bound_asr_vocabulary(
+                model, _asr_hotwords(remaining), duplicated=duplicated)
+            if not bounded:
+                return [], "authored_quote_exceeds_decoder_context"
+            delivered = [entry.strip() for entry in bounded.split(", ") if entry.strip()]
+            if not delivered or delivered != remaining[:len(delivered)]:
+                return [], "authored_quote_chunk_boundary_unverifiable"
+            chunks.append(bounded)
+            remaining = remaining[len(delivered):]
+        return chunks, ""
+    except Exception as exc:
+        return [], f"authored_quote_chunking_error:{type(exc).__name__}"
+
+
+def _normalized_retrieval_words(words) -> list[list] | None:
+    rows = []
+    try:
+        for start, end, text in words:
+            start, end, text = float(start), float(end), str(text)
+            if (not math.isfinite(start) or not math.isfinite(end)
+                    or start < 0.0 or end <= start or not text.strip()):
+                return None
+            rows.append([round(start, 3), round(end, 3), text])
+    except Exception:
+        return None
+    return rows
+
+
+def _save_quote_retrieval_streams(
+        proj: ClipProject, source: SourceVideo, cfg: ClipConfig, streams: list[dict], *,
+        fallback=None) -> bool:
+    """Atomically persist independently-scanned prompt chunks and delivered quote coverage."""
+    source_id = str(getattr(source, "id", "") or "")
+    source_path = str(getattr(source, "local_path", "") or "")
+    source_fingerprint = _source_content_fingerprint(source_path)
+    if not source_id or source_fingerprint in ("", "missing", "unreadable"):
+        return False
+    normalized_streams = []
+    for stream in streams or []:
+        if not isinstance(stream, dict):
+            return False
+        covered = [_asr_vocabulary_entry(value)
+                   for value in (stream.get("covered_authored_quotes") or [])]
+        if not covered or any(not value for value in covered):
+            return False
+        prompt = str(stream.get("prompt", "") or "")
+        if prompt != _asr_hotwords(covered):
+            return False
+        rows = _normalized_retrieval_words(stream.get("words") or [])
+        if rows is None:
+            return False
+        normalized_streams.append({
+            "prompt": prompt,
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "covered_authored_quotes": covered,
+            "words": rows,
+        })
+    payload = {
+        "schema_version": QUOTE_RETRIEVAL_SCHEMA,
+        "source_id": source_id,
+        "source_content_fingerprint": source_fingerprint,
+        "retrieval_fingerprint": _quote_retrieval_fingerprint(
+            proj, cfg, fallback=fallback),
+        "evidence_role": "retrieval_candidates_only_requires_unprompted_confirmation",
+        "streams": normalized_streams,
+    }
+    path = _quote_retrieval_path(proj, source_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # A portal retry and a manual repair can overlap briefly.  Keep each atomic writer's staging
+    # name unique so one valid sidecar cannot delete or replace another writer's temporary bytes.
+    tmp = path.with_name(path.name + f".{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        return False
+    finally:
+        tmp.unlink(missing_ok=True)
+    return True
+
+
+def _save_quote_retrieval_words(
+        proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
+        words: list[tuple[float, float, str]], *, fallback=None) -> bool:
+    """Compatibility helper for tests/single-chunk callers; refuses silently truncated prompts."""
+    expected = _project_authored_quotes(
+        proj, (getattr(proj, "meta", {}) or {}).get("analysis") or {})
+    class _ConservativeSingleChunkModel:
+        # Whisper's decoder context is 448. With no tokenizer, `_bound_asr_vocabulary` uses UTF-8
+        # bytes as a conservative token upper bound, so a one-chunk result cannot hide truncation.
+        max_length = 448
+        hf_tokenizer = None
+
+        @staticmethod
+        def transcribe(_path, **_kwargs):
+            return iter(()), None
+
+    chunks, _reason = _quote_retrieval_prompt_chunks(
+        proj, cfg, entries=expected, fallback=fallback,
+        model=_ConservativeSingleChunkModel())
+    if len(chunks) != 1:
+        return False
+    return _save_quote_retrieval_streams(proj, source, cfg, [{
+        "prompt": chunks[0],
+        "covered_authored_quotes": expected,
+        "words": words,
+    }], fallback=fallback)
+
+
+def _load_quote_retrieval_streams_result(
+        proj: ClipProject, source: SourceVideo | str, cfg: ClipConfig, *, fallback=None,
+        require_complete: bool = True) -> tuple[bool, list[dict], str, bool]:
+    """Validate retrieval chunks, source bytes, generation, and per-quote delivered coverage."""
+    if isinstance(source, str):
+        source = proj.source(source)
+    if source is None:
+        return False, [], "source_missing", False
+    source_id = str(getattr(source, "id", "") or "")
+    try:
+        raw = json.loads(_quote_retrieval_path(proj, source_id).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False, [], "quote_retrieval_missing", False
+    except Exception:
+        return False, [], "quote_retrieval_unreadable", False
+    if not isinstance(raw, dict) or raw.get("schema_version") != QUOTE_RETRIEVAL_SCHEMA:
+        return False, [], "quote_retrieval_schema_invalid", False
+    if str(raw.get("source_id", "") or "") != source_id:
+        return False, [], "quote_retrieval_source_id_mismatch", False
+    expected_retrieval = _quote_retrieval_fingerprint(proj, cfg, fallback=fallback)
+    if str(raw.get("retrieval_fingerprint", "") or "") != expected_retrieval:
+        return False, [], "quote_retrieval_fingerprint_mismatch", False
+    source_fingerprint = _source_content_fingerprint(
+        getattr(source, "local_path", "") or "")
+    if (source_fingerprint in ("", "missing", "unreadable")
+            or source_fingerprint != str(raw.get("source_content_fingerprint", "") or "")):
+        return False, [], "quote_retrieval_source_content_mismatch", False
+    if raw.get("evidence_role") != \
+            "retrieval_candidates_only_requires_unprompted_confirmation":
+        return False, [], "quote_retrieval_role_invalid", False
+    payload = raw.get("streams")
+    if not isinstance(payload, list):
+        return False, [], "quote_retrieval_streams_invalid", False
+    expected = _project_authored_quotes(
+        proj, (getattr(proj, "meta", {}) or {}).get("analysis") or {})
+    streams: list[dict] = []
+    coverage: list[str] = []
+    for stream in payload:
+        if not isinstance(stream, dict):
+            return False, [], "quote_retrieval_stream_invalid", False
+        covered = [_asr_vocabulary_entry(value)
+                   for value in (stream.get("covered_authored_quotes") or [])]
+        prompt = str(stream.get("prompt", "") or "")
+        if (not covered or prompt != _asr_hotwords(covered)
+                or str(stream.get("prompt_sha256", "") or "")
+                != hashlib.sha256(prompt.encode("utf-8")).hexdigest()):
+            return False, [], "quote_retrieval_prompt_coverage_invalid", False
+        rows = _normalized_retrieval_words(stream.get("words") or [])
+        if rows is None:
+            return False, [], "quote_retrieval_words_invalid", False
+        coverage.extend(covered)
+        streams.append({
+            "prompt": prompt,
+            "covered_authored_quotes": covered,
+            "words": [(float(a), float(b), str(text)) for a, b, text in rows],
+        })
+    if coverage != expected[:len(coverage)] or len(coverage) > len(expected):
+        return False, [], "quote_retrieval_coverage_order_invalid", False
+    complete = coverage == expected
+    if require_complete and not complete:
+        return False, streams, "quote_retrieval_coverage_incomplete", False
+    return True, streams, "", complete
+
+
+def _load_quote_retrieval_words_result(
+        proj: ClipProject, source: SourceVideo | str, cfg: ClipConfig, *, fallback=None) \
+        -> tuple[bool, list[tuple[float, float, str]], str]:
+    """Compatibility flattened view; proof paths must scan chunk streams independently."""
+    valid, streams, reason, _complete = _load_quote_retrieval_streams_result(
+        proj, source, cfg, fallback=fallback, require_complete=True)
+    return valid, [word for stream in streams for word in stream["words"]], reason
+
+
+def load_quote_retrieval_words(
+        proj: ClipProject, source: SourceVideo | str, cfg: ClipConfig, *, fallback=None) \
+        -> list[tuple[float, float, str]]:
+    return _load_quote_retrieval_words_result(
+        proj, source, cfg, fallback=fallback)[1]
+
+
+def quote_retrieval_source_eligible(source: SourceVideo, shots: list[Shot]) -> bool:
+    """Use the same trusted-show-audio boundary as whole-pool quote classification."""
+    title = str(getattr(source, "title", "") or "")
+    try:
+        from .build import _breakout_src_ok, _ESSAYISH_RX
+        from .discover import _REACTION_TITLE
+        if _ESSAYISH_RX.search(title) or _REACTION_TITLE.search(title):
+            return False
+        return bool(shots and _breakout_src_ok(source, shots))
+    except Exception:
+        # Eligibility uncertainty cannot certify whole-pool absence. The relevance contract records
+        # it as incomplete; indexing likewise refuses to pretend no retrieval artifact is needed.
+        return True
+
+
 def asr_pool_cache_audit(proj, cfg: ClipConfig, sources=None) -> dict:
     """Cheap artifact check used before Resume trusts match and downstream checkpoints."""
     expected = asr_semantic_fingerprint(proj, cfg)
@@ -706,10 +1132,21 @@ def asr_pool_cache_audit(proj, cfg: ClipConfig, sources=None) -> dict:
             continue
         if str(meta.get("asr_prompt_fingerprint", "") or "") != expected:
             invalid.append({"source_id": sid, "reason": "asr_prompt_fingerprint_mismatch"})
+            continue
+        if (_project_authored_retrieval_prompt(proj)
+                and quote_retrieval_source_eligible(source, shots)):
+            retrieval_ok, _retrieval_streams, retrieval_reason, retrieval_complete = \
+                _load_quote_retrieval_streams_result(
+                    proj, source, cfg, require_complete=True)
+            if not retrieval_ok or not retrieval_complete:
+                invalid.append({"source_id": sid, "reason": retrieval_reason})
     for sid in sorted(set(selected_shots) - seen):
         invalid.append({"source_id": sid, "reason": "selected_source_not_in_usable_pool"})
     return {
         "expected_asr_prompt_fingerprint": expected,
+        "expected_quote_retrieval_fingerprint": (
+            _quote_retrieval_fingerprint(proj, cfg)
+            if _project_authored_retrieval_prompt(proj) else ""),
         "source_count": len(seen),
         "current_count": len(seen) - len(invalid),
         "invalid": invalid,
@@ -731,7 +1168,8 @@ def _tok_close(a: str, b: str, thresh: float = 0.8) -> bool:
 
 
 def find_quote_span(words, quote: str, *, min_ratio: float = 0.72,
-                    window_slack: int = 3, max_interword_gap: float = 4.0):
+                    window_slack: int = 3, max_interword_gap: float = 4.0,
+                    all_matches: bool = False):
     """Locate `quote` in a source's word stream. -> (start_s, end_s, ratio) or None.
 
     Aligns the quote against a sliding window of the word stream and scores the WHOLE PHRASE. A
@@ -751,7 +1189,7 @@ def find_quote_span(words, quote: str, *, min_ratio: float = 0.72,
     because a real dramatic pause must remain typed as verbatim.  The phrase floor is unchanged."""
     qt = [t for t in (_norm_tok(w) for w in re.findall(r"[\w']+", quote or "")) if t]
     if len(qt) < 2 or not words:
-        return None
+        return [] if all_matches else None
     # A high score made solely from function words is not phrase proof.  Measured false positive:
     # quote "He was a monster" matched ASR "He was a fighter" at 0.857 because the slack window
     # was allowed to stop after the common prefix "he was a", omitting the only identifying word.
@@ -761,15 +1199,20 @@ def find_quote_span(words, quote: str, *, min_ratio: float = 0.72,
     st = [(_norm_tok(w[2]), w[0], w[1]) for w in words]
     st = [x for x in st if x[0]]
     if not st:
-        return None
+        return [] if all_matches else None
     n = len(qt)
     best = None
     gapped_best = None
     best_raw_ratio = None
     gapped_best_raw_ratio = None
+    occurrences: list[tuple[float, float, float]] = []
     for i in range(len(st)):
         if not _tok_close(st[i][0], qt[0]) and not any(_tok_close(st[i][0], q) for q in qt[:2]):
             continue                      # cheap anchor: only start where the head plausibly begins
+        local_best = None
+        local_gapped_best = None
+        local_best_raw_ratio = None
+        local_gapped_raw_ratio = None
         for L in range(max(2, n - window_slack), min(len(st) - i, n + window_slack) + 1):
             span_words = st[i:i + L]
             # Prefer a compact local utterance over an apparent phrase assembled across a long
@@ -816,6 +1259,34 @@ def find_quote_span(words, quote: str, *, min_ratio: float = 0.72,
                 else:
                     best = target
                     best_raw_ratio = ratio
+            local_target = local_gapped_best if gapped else local_best
+            local_raw = local_gapped_raw_ratio if gapped else local_best_raw_ratio
+            local_tighter = bool(
+                local_target is not None and local_raw is not None
+                and abs(float(ratio) - float(local_raw)) <= 1e-12
+                and (float(candidate_end) - float(candidate_start))
+                < (float(local_target[1]) - float(local_target[0])))
+            if ratio >= min_ratio and (
+                    local_target is None or ratio > float(local_raw) or local_tighter):
+                local_target = (
+                    candidate_start, candidate_end, round(min(1.0, ratio), 3))
+                if gapped:
+                    local_gapped_best = local_target
+                    local_gapped_raw_ratio = ratio
+                else:
+                    local_best = local_target
+                    local_best_raw_ratio = ratio
+        local = local_best or local_gapped_best
+        if local is not None:
+            occurrences.append(local)
+    if all_matches:
+        # One best alignment per plausible starting word preserves repeated occurrences, including
+        # the measured case where a tight prompted hallucination outranks a nearby real line. Exact
+        # tuple de-dup removes only identical windows; overlapping/nested windows stay independent
+        # retrieval candidates and each must face narrow unprompted confirmation.
+        unique = list({(round(float(row[0]), 3), round(float(row[1]), 3),
+                        round(float(row[2]), 3)) for row in occurrences})
+        return sorted(unique, key=lambda row: (-row[2], row[1] - row[0], row[0]))
     return best or gapped_best
 
 
@@ -832,7 +1303,7 @@ def purge_source_index(proj, sid: str) -> None:
     import shutil
     try:
         for suf in (".shots.json", ".embeds.npy", ".embeds.manifest.json",
-                    ".words.json", ".index.meta.json"):
+                    ".words.json", ".quote_retrieval.json", ".index.meta.json"):
             (proj.index_dir / f"{sid}{suf}").unlink(missing_ok=True)
         d = proj.index_dir / sid
         if d.is_dir():
@@ -1374,6 +1845,7 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
         proj, fallback=roster)
     asr_fingerprint = _asr_prompt_fingerprint(
         cfg, asr_hotwords, asr_initial_prompt, asr_legacy_initial_prompt)
+    authored_retrieval_prompt = _project_authored_retrieval_prompt(proj)
     # capabilities this call wants — a cache built WITHOUT them (e.g. by the manual pipeline,
     # roster-less) must not satisfy an auto-mode call that needs Face-ID/OCR signals. "Wanted"
     # includes availability, else a missing OCR lib would force a futile re-index every run.
@@ -1400,26 +1872,101 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
         words_cache_valid, old_words = _load_words_result(proj, source.id)
         if want_caps["words"] and not words_cache_valid:
             have_caps["words"] = False           # meta alone cannot certify missing/corrupt words
+        try:
+            cached_shots = load_shots(proj, source.id)
+        except Exception:
+            cached_shots = []
+        retrieval_required = bool(
+            authored_retrieval_prompt
+            and quote_retrieval_source_eligible(source, cached_shots))
+        retrieval_valid = True
+        retrieval_preserved = False
+        old_fingerprint = str(have_caps.get("asr_prompt_fingerprint", "") or "")
+        if retrieval_required:
+            retrieval_valid, _retrieval_streams, _retrieval_reason, retrieval_complete = \
+                _load_quote_retrieval_streams_result(
+                    proj, source, cfg, fallback=roster, require_complete=True)
+            retrieval_valid = bool(retrieval_valid and retrieval_complete)
+            # Rev7's general stream was authored-prompted. Salvage those already-paid bytes as a
+            # retrieval-only sidecar before rev8 replaces `.words.json` with clean general ASR.
+            if (not retrieval_valid and words_cache_valid
+                    and have_caps.get("words") is True
+                    and not have_caps.get("asr_refresh_in_progress")
+                    and old_fingerprint == _legacy_rev7_general_fingerprint(
+                        proj, cfg, fallback=roster)):
+                try:
+                    retrieval_model = _whisper(cfg)
+                    retrieval_chunks, _chunk_reason = _quote_retrieval_prompt_chunks(
+                        proj, cfg, fallback=roster, model=retrieval_model)
+                    # Rev7's supported-decoder path used the same first bounded quote prompt plus
+                    # proper-name hotwords. On legacy decoders the combined fallback prompt was
+                    # different, so those bytes cannot be relabelled as a v2 chunk.
+                    if retrieval_chunks and _model_supports_hotwords(retrieval_model):
+                        first_prompt = retrieval_chunks[0]
+                        first_covered = [entry.strip() for entry in first_prompt.split(", ")
+                                         if entry.strip()]
+                        retrieval_preserved = _save_quote_retrieval_streams(
+                            proj, source, cfg, [{
+                                "prompt": first_prompt,
+                                "covered_authored_quotes": first_covered,
+                                "words": old_words,
+                            }], fallback=roster)
+                        if retrieval_preserved:
+                            retrieval_valid, _streams, _reason, _complete = \
+                                _load_quote_retrieval_streams_result(
+                                    proj, source, cfg, fallback=roster,
+                                    require_complete=True)
+                            log(f"index: {source.id} preserved rev7 prompted words as "
+                                f"retrieval-only chunk coverage={len(first_covered)}/"
+                                f"{len(_project_authored_quotes(proj, (proj.meta or {}).get('analysis') or {}))}")
+                except Exception:
+                    retrieval_preserved = False
+            want_caps["quote_retrieval"] = True
+            have_caps["quote_retrieval"] = retrieval_valid
         missing = [k for k, v in want_caps.items() if v and not have_caps.get(k)]
         if str(have_caps.get("asr_prompt_fingerprint", "") or "") != asr_fingerprint:
             missing.append("asr_prompt")
+        missing = list(dict.fromkeys(missing))
         if missing:
             # A changed model/vocabulary/options dependency invalidates only ASR-derived files.
             # Refresh those transactionally and preserve every expensive visual artifact.
-            if (set(missing).issubset({"words", "asr_prompt"})
+            if (set(missing).issubset({"words", "asr_prompt", "quote_retrieval"})
                     and source.status == SOURCE_OK and source.local_path):
-                refreshed = refresh_source_words(
-                    proj, source, cfg, progress=progress, hotwords=asr_hotwords,
-                    initial_prompt=asr_initial_prompt,
-                    legacy_initial_prompt=asr_legacy_initial_prompt)
-                if refreshed:
-                    log(f"index: {source.id} ASR cache upgraded for current model/vocabulary "
-                        f"({len(refreshed)} shots; visual index preserved)")
-                    return refreshed
-                state = ("corrupt/missing" if not words_cache_valid else
-                         ("non-empty" if old_words else "silent"))
-                raise RuntimeError(
-                    f"ASR cache upgrade failed for {source.id}; {state} cache preserved")
+                refreshed = cached_shots
+                if "words" in missing or "asr_prompt" in missing:
+                    refreshed = refresh_source_words(
+                        proj, source, cfg, progress=progress, hotwords=asr_hotwords,
+                        initial_prompt=asr_initial_prompt,
+                        legacy_initial_prompt=asr_legacy_initial_prompt,
+                        allow_empty=bool(
+                            retrieval_preserved and old_fingerprint
+                            == _legacy_rev7_general_fingerprint(
+                                proj, cfg, fallback=roster)),
+                        trusted_replaced_fingerprint=old_fingerprint)
+                    if not refreshed:
+                        state = ("corrupt/missing" if not words_cache_valid else
+                                 ("non-empty" if old_words else "silent"))
+                        raise RuntimeError(
+                            f"ASR cache upgrade failed for {source.id}; {state} cache preserved")
+                retrieval_needed_after_refresh = bool(
+                    authored_retrieval_prompt
+                    and quote_retrieval_source_eligible(source, refreshed))
+                if retrieval_needed_after_refresh:
+                    (retrieval_valid, _retrieval_streams, _retrieval_reason,
+                     retrieval_complete) = _load_quote_retrieval_streams_result(
+                        proj, source, cfg, fallback=roster, require_complete=True)
+                    retrieval_valid = bool(retrieval_valid and retrieval_complete)
+                if ("quote_retrieval" in missing or retrieval_needed_after_refresh) \
+                        and not retrieval_valid:
+                    retrieval_valid = refresh_source_quote_retrieval(
+                        proj, source, cfg, progress=progress, fallback=roster)
+                    if not retrieval_valid:
+                        raise RuntimeError(
+                            f"authored quote retrieval refresh failed for {source.id}; "
+                            "whole-pool quote absence was not certified")
+                log(f"index: {source.id} ASR caches upgraded "
+                    f"({len(refreshed)} shots; visual index preserved)")
+                return refreshed
             log(f"index: {source.id} re-indexing (cache lacks {'+'.join(missing)})")
         else:
             try:
@@ -1626,6 +2173,17 @@ def index_source(proj: ClipProject, source: SourceVideo, cfg: ClipConfig,
         index_meta["asr_prompt_fingerprint"] = asr_fingerprint
     _mtmp.write_text(json.dumps(index_meta), encoding="utf-8")
     _mtmp.replace(meta_file)
+    if (authored_retrieval_prompt
+            and quote_retrieval_source_eligible(source, shots)):
+        retrieval_valid, _retrieval_streams, _retrieval_reason, retrieval_complete = \
+            _load_quote_retrieval_streams_result(
+                proj, source, cfg, fallback=roster, require_complete=True)
+        retrieval_valid = bool(retrieval_valid and retrieval_complete)
+        if not retrieval_valid:
+            retrieval_valid = refresh_source_quote_retrieval(
+                proj, source, cfg, progress=progress, fallback=roster)
+        if not retrieval_valid:
+            log(f"index: ⚠ {source.id} quote retrieval incomplete; match checkpoint will block")
     log(f"index: {source.id} done — {len(shots)} shots, {len(embeds)} embeds, clip={use_clip}")
     return shots
 
@@ -1634,7 +2192,8 @@ def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig
                          *, progress=None, hotwords: Optional[str] = None,
                          initial_prompt: Optional[str] = None,
                          legacy_initial_prompt: Optional[str] = None,
-                         allow_empty: bool = False) -> list[Shot]:
+                         allow_empty: bool = False,
+                         trusted_replaced_fingerprint: Optional[str] = None) -> list[Shot]:
     """Refresh one source's ASR words and shot transcripts without rebuilding visual indexes.
 
     This is the safe repair path for an otherwise-valid cached source whose transcript is known to
@@ -1671,7 +2230,26 @@ def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig
         if progress:
             progress(f"index: ⚠ {source.id} word refresh failed technically; cache preserved")
         return []
-    if not words and (not old_valid or bool(old_words)):
+    known_prompted_migration = False
+    if allow_empty:
+        try:
+            old_meta = json.loads((Path(proj.index_dir)
+                                   / f"{source.id}.index.meta.json").read_text(
+                                       encoding="utf-8"))
+            retrieval_ok, preserved_streams, _preserved_reason, _complete = \
+                _load_quote_retrieval_streams_result(
+                    proj, source, cfg, require_complete=False)
+            preserved_words = (preserved_streams[0].get("words") or []) \
+                if preserved_streams else []
+            known_prompted_migration = bool(
+                isinstance(old_meta, dict)
+                and str(old_meta.get("asr_prompt_fingerprint", "") or "")
+                == str(trusted_replaced_fingerprint or "")
+                and len(str(trusted_replaced_fingerprint or "")) == 64
+                and retrieval_ok and preserved_words == old_words)
+        except Exception:
+            known_prompted_migration = False
+    if not words and (not old_valid or bool(old_words)) and not known_prompted_migration:
         # A successful no-word decode is trustworthy only when it confirms an already-valid silent
         # cache. It must never erase prior speech or turn malformed JSON into certified silence.
         if progress:
@@ -1679,8 +2257,9 @@ def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig
             progress(f"index: ⚠ {source.id} silent refresh conflicts with {state} cache; "
                      "cache preserved")
         return []
-    # ``allow_empty`` remains accepted for API compatibility, but callers cannot override the
-    # evidence check above. Clear old per-shot text before assigning the newly proven stream.
+    # Empty replacement is authorized only for the exact rev7→rev8 split above, after the prompted
+    # bytes were preserved as retrieval-only candidates. Ordinary callers still cannot erase prior
+    # speech by passing a permissive flag. Clear old per-shot text before assigning the clean stream.
     for shot in shots:
         shot.transcript = ""
     _assign_transcript(shots, words)
@@ -1767,6 +2346,71 @@ def refresh_source_words(proj: ClipProject, source: SourceVideo, cfg: ClipConfig
     if progress:
         progress(f"index: {source.id} refreshed {len(words)} words across {len(shots)} shots")
     return shots
+
+
+def refresh_source_quote_retrieval(
+        proj: ClipProject, source: SourceVideo, cfg: ClipConfig, *, progress=None,
+        fallback=None) -> bool:
+    """Build only the separate authored-prompt retrieval stream; never touch general words."""
+    if source.status != SOURCE_OK or not source.local_path:
+        return False
+    expected = _project_authored_quotes(
+        proj, (getattr(proj, "meta", {}) or {}).get("analysis") or {})
+    if not expected:
+        return True
+    hotwords = _project_asr_hotwords(proj, fallback=fallback)
+    partial_ok, streams, _partial_reason, complete = \
+        _load_quote_retrieval_streams_result(
+            proj, source, cfg, fallback=fallback, require_complete=False)
+    if not partial_ok:
+        streams, complete = [], False
+    if complete:
+        return True
+    covered_count = sum(len(stream.get("covered_authored_quotes") or [])
+                        for stream in streams)
+    remaining = expected[covered_count:]
+    chunks, chunk_reason = _quote_retrieval_prompt_chunks(
+        proj, cfg, entries=remaining, fallback=fallback)
+    if not chunks:
+        if progress:
+            progress(f"index: ⚠ {source.id} authored quote retrieval prompt chunking failed "
+                     f"({chunk_reason or 'no_chunks'})")
+        return False
+    new_streams = list(streams)
+    decoded_words = 0
+    for chunk_index, prompt in enumerate(chunks, start=len(streams)):
+        covered = [entry.strip() for entry in prompt.split(", ") if entry.strip()]
+        succeeded, words = _transcribe_words_result(
+            Path(source.local_path), cfg, duration=source.duration, hotwords=hotwords,
+            initial_prompt=prompt, legacy_initial_prompt=prompt)
+        if not succeeded:
+            if progress:
+                progress(f"index: ⚠ {source.id} authored quote retrieval ASR failed "
+                         f"on chunk {chunk_index + 1}/{len(streams) + len(chunks)}")
+            return False
+        decoded_words += len(words)
+        new_streams.append({
+            "prompt": prompt,
+            "covered_authored_quotes": covered,
+            "words": words,
+        })
+    if not _save_quote_retrieval_streams(
+            proj, source, cfg, new_streams, fallback=fallback):
+        if progress:
+            progress(f"index: ⚠ {source.id} authored quote retrieval cache write failed")
+        return False
+    valid, _saved_streams, reason, complete = _load_quote_retrieval_streams_result(
+        proj, source, cfg, fallback=fallback, require_complete=True)
+    if not valid or not complete:
+        if progress:
+            progress(f"index: ⚠ {source.id} authored quote retrieval coverage invalid "
+                     f"({reason})")
+        return False
+    if progress:
+        progress(f"index: {source.id} authored retrieval chunks={len(new_streams)} "
+                 f"new_candidate_words={decoded_words} coverage={len(expected)}/{len(expected)} "
+                 "(not evidence until unprompted confirmation)")
+    return True
 
 
 def index_all(proj: ClipProject, cfg: ClipConfig, *, references=None, faceid=None, roster=None,

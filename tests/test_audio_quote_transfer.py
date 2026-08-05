@@ -23,6 +23,35 @@ from vidlore.clipstudio.models import (
 
 
 QUOTE = "He's choking!"
+CONFIRMATION_ARTIFACT_KEY = "a" * 64
+
+
+def _confirmation(proj, *, source_id="dirty"):
+    decoder = R._quote_confirmation_decoder_fingerprint(load_clip_config())
+    return {
+        "schema_version": R.QUOTE_CONFIRMATION_SCHEMA,
+        "algorithm": R.QUOTE_CONFIRMATION_ALGORITHM,
+        "status": "confirmed",
+        "artifact_key": CONFIRMATION_ARTIFACT_KEY,
+        "decoder_fingerprint": decoder,
+        "prompted_span": [1.0, 2.0, 1.0],
+        "confirmed_span": [1.0, 2.0, 1.0],
+        "timed_asr_ratio": 1.0,
+        "match_method": "exact_contiguous_timed_asr+unprompted_confirmation",
+        "source_id": source_id,
+    }
+
+
+def _confirmed_revalidation(proj, src, _quote, _span, _cfg, **_kwargs):
+    return _confirmation(proj, source_id=src.id)
+
+
+@pytest.fixture(autouse=True)
+def _independent_quote_confirmation(monkeypatch):
+    """Fixture media are byte sentinels; keep the independent proof explicit in every path."""
+    monkeypatch.setattr(
+        R, "_confirm_prompted_quote_span_unprompted",
+        _confirmed_revalidation)
 
 
 def _stamp(proj, sid):
@@ -85,21 +114,24 @@ def _project(tmp_path):
 
 
 def _contract(proj):
+    confirmation = _confirmation(proj)
+    match = {
+        "source_id": "dirty", "source_title": "dirty",
+        "timed_asr_span": [1.0, 2.0], "timed_asr_ratio": 1.0,
+        "prompted_asr_span": [1.0, 2.0, 1.0],
+        "unprompted_confirmation": confirmation,
+    }
     return {
         "authored_quote": QUOTE,
         "branch": "verbatim",
         "verbatim_required": True,
         "requires_exact_contiguous_match": True,
+        "confirmation_decoder_fingerprint_expected":
+            confirmation["decoder_fingerprint"],
         "asr_prompt_fingerprint_expected": IX.asr_semantic_fingerprint(
             proj, load_clip_config()),
-        "pool_match": {
-            "source_id": "dirty", "source_title": "dirty",
-            "timed_asr_span": [1.0, 2.0], "timed_asr_ratio": 1.0,
-        },
-        "pool_matches": [{
-            "source_id": "dirty", "source_title": "dirty",
-            "timed_asr_span": [1.0, 2.0], "timed_asr_ratio": 1.0,
-        }],
+        "pool_match": dict(match),
+        "pool_matches": [dict(match)],
     }
 
 
@@ -126,7 +158,11 @@ def _evidence(proj, *, alignment=None):
         authored_quote=QUOTE, reference_source_id="dirty",
         reference_source_content_fingerprint=V._file_fingerprint(
             proj.source("dirty").local_path),
-        reference_asr_ratio=1.0, target_source_id="clean",
+        reference_asr_ratio=1.0,
+        reference_quote_confirmation_artifact_key=CONFIRMATION_ARTIFACT_KEY,
+        reference_quote_confirmation_decoder_fingerprint=
+            R._quote_confirmation_decoder_fingerprint(load_clip_config()),
+        target_source_id="clean",
         target_source_content_fingerprint=V._file_fingerprint(
             proj.source("clean").local_path),
         target_selected_window=[3.5, 5.5], alignment=alignment or _alignment())
@@ -245,6 +281,23 @@ def test_transfer_evidence_can_only_rebind_its_selected_window_with_fresh_finger
     assert A.rebind_transfer_evidence_window(fabricated, [3.6, 5.5]) == {}
 
 
+def test_preconfirmation_transfer_records_and_malformed_confirmation_keys_fail_closed(tmp_path):
+    proj, _seg, _sel = _project(tmp_path)
+    current = _evidence(proj)
+
+    legacy = copy.deepcopy(current)
+    legacy["schema_version"] = 2
+    legacy.pop("reference_quote_confirmation_artifact_key")
+    legacy.pop("reference_quote_confirmation_decoder_fingerprint")
+    assert A.transfer_evidence_shape_reason(legacy) == "evidence_schema_mismatch"
+
+    malformed = copy.deepcopy(current)
+    malformed["reference_quote_confirmation_artifact_key"] = "not-a-sha256"
+    malformed["binding_fingerprint"] = A.evidence_binding_fingerprint(malformed)
+    assert A.transfer_evidence_shape_reason(malformed) == \
+        "reference_quote_confirmation_artifact_key_malformed"
+
+
 def test_ledger_preserves_valid_transfer_proof_outside_numeric_signals(tmp_path):
     proj, seg, sel = _project(tmp_path)
     sel.in_point, sel.out_point, sel.shot_index = 3.5, 5.5, 1
@@ -337,6 +390,8 @@ def test_quote_recovery_transfers_sd_reference_only_into_existing_hd_bench(tmp_p
                 else {"width": 1920, "height": 1080})
 
     with mock.patch.object(R, "_quote_pool_branches", return_value={0: contract}), \
+            mock.patch.object(R, "_confirm_prompted_quote_span_unprompted",
+                              side_effect=_confirmed_revalidation), \
             mock.patch("vidlore.clipstudio.ingest.probe", side_effect=dimensions), \
             mock.patch.object(A, "transfer_quote_spans", return_value=[_alignment()]):
         built, audit = O._quote_window_recovery_selections(
@@ -359,6 +414,30 @@ def test_quote_recovery_transfers_sd_reference_only_into_existing_hd_bench(tmp_p
     assert audit["beats"][0]["audio_transfer_target_source_cap"] == 12
 
 
+def test_quote_recovery_rejects_a_legacy_prompt_only_pcm_reference(tmp_path):
+    proj, seg, _old = _project(tmp_path)
+    contract = _contract(proj)
+    contract["pool_match"].pop("unprompted_confirmation")
+    contract["pool_matches"][0].pop("unprompted_confirmation")
+
+    def dimensions(path):
+        return ({"width": 640, "height": 360} if path.name == "dirty_sd.mp4"
+                else {"width": 1920, "height": 1080})
+
+    with mock.patch.object(R, "_quote_pool_branches", return_value={0: contract}), \
+            mock.patch("vidlore.clipstudio.ingest.probe", side_effect=dimensions), \
+            mock.patch.object(A, "transfer_quote_spans", return_value=[]):
+        built, audit = O._quote_window_recovery_selections(
+            proj, [seg], ClipConfig(), {0})
+
+    assert built == {}
+    assert audit["beats"][0]["audio_transfer_reference_count"] == 0
+    assert audit["beats"][0]["audio_transfer_reference_rejections"] == [{
+        "source_id": "dirty",
+        "reason": "unprompted_confirmation_absent_or_not_confirmed",
+    }]
+
+
 def test_short_quote_fuzzy_only_target_still_reaches_strict_pcm_transfer(tmp_path):
     proj, seg, _old = _project(tmp_path)
     # Fuzzy phrase retrieval can assemble these two quote tokens across an unrelated word, but the
@@ -375,6 +454,8 @@ def test_short_quote_fuzzy_only_target_still_reaches_strict_pcm_transfer(tmp_pat
                 else {"width": 1920, "height": 1080})
 
     with mock.patch.object(R, "_quote_pool_branches", return_value={0: _contract(proj)}), \
+            mock.patch.object(R, "_confirm_prompted_quote_span_unprompted",
+                              side_effect=_confirmed_revalidation), \
             mock.patch("vidlore.clipstudio.ingest.probe", side_effect=dimensions), \
             mock.patch.object(A, "transfer_quote_spans", return_value=[_alignment()]):
         built, audit = O._quote_window_recovery_selections(
@@ -502,6 +583,8 @@ def test_direct_asr_duplicates_are_filtered_before_audio_target_cap(tmp_path):
     contract["pool_matches"] = [{
         "source_id": sid, "source_title": sid,
         "timed_asr_span": [1.0, 2.0], "timed_asr_ratio": 1.0,
+        "prompted_asr_span": [1.0, 2.0, 1.0],
+        "unprompted_confirmation": _confirmation(proj, source_id=sid),
     } for sid in direct_ids]
     contract["pool_match_count"] = len(direct_ids)
 
@@ -514,6 +597,8 @@ def test_direct_asr_duplicates_are_filtered_before_audio_target_cap(tmp_path):
         return [_alignment() for _reference in references]
 
     with mock.patch.object(R, "_quote_pool_branches", return_value={0: contract}), \
+            mock.patch.object(R, "_confirm_prompted_quote_span_unprompted",
+                              side_effect=_confirmed_revalidation), \
             mock.patch("vidlore.clipstudio.ingest.probe", side_effect=dimensions), \
             mock.patch.object(A, "transfer_quote_spans", side_effect=batch):
         built, audit = O._quote_window_recovery_selections(

@@ -51,7 +51,8 @@ def test_transcribe_words_recovers_vad_dropped_eof_dialogue(monkeypatch, tmp_pat
     assert model.calls[1]["clip_timestamps"] == [279.336, 309.336]
 
 
-def test_transcribe_threads_roster_hotwords_to_primary_and_rescue(monkeypatch, tmp_path):
+def test_transcribe_threads_name_hotwords_without_initial_prompt_to_primary_and_rescue(
+        monkeypatch, tmp_path):
     model = _TailDroppingModel()
     monkeypatch.setattr(IX, "_whisper", lambda _cfg: model)
 
@@ -61,10 +62,8 @@ def test_transcribe_threads_roster_hotwords_to_primary_and_rescue(monkeypatch, t
 
     assert model.calls[0]["hotwords"] == "Cersei Lannister Olenna Tyrell"
     assert model.calls[1]["hotwords"] == "Cersei Lannister Olenna Tyrell"
-    assert model.calls[0]["initial_prompt"] == (
-        "Cast, character names, and quoted dialogue: Cersei Lannister Olenna Tyrell")
-    assert model.calls[1]["initial_prompt"] == (
-        "Cast, character names, and quoted dialogue: Cersei Lannister Olenna Tyrell")
+    assert "initial_prompt" not in model.calls[0]
+    assert "initial_prompt" not in model.calls[1]
 
 
 def test_old_faster_whisper_signature_uses_initial_prompt_without_hotwords(monkeypatch, tmp_path):
@@ -129,7 +128,7 @@ def test_old_faster_whisper_large_roster_keeps_priority_prefix_inside_half_conte
     assert len(prompt_tokens) <= model.max_length // 2 - 1
 
 
-def test_old_faster_whisper_keeps_dialogue_ahead_of_large_actor_roster(tmp_path):
+def test_old_faster_whisper_retrieval_keeps_dialogue_ahead_of_large_actor_roster(tmp_path):
     class Encoding:
         def __init__(self, ids):
             self.ids = ids
@@ -164,8 +163,8 @@ def test_old_faster_whisper_keeps_dialogue_ahead_of_large_actor_roster(tmp_path)
     IX._transcribe_with_vocabulary(
         model, tmp_path / "s.mp4",
         hotwords=IX._project_asr_hotwords(proj),
-        initial_prompt=IX._project_asr_initial_prompt(proj),
-        legacy_initial_prompt=IX._project_asr_legacy_initial_prompt(proj),
+        initial_prompt=IX._project_authored_retrieval_prompt(proj),
+        legacy_initial_prompt=IX._project_quote_retrieval_legacy_prompt(proj),
     )
 
     assert model.prompt.startswith(
@@ -183,7 +182,7 @@ def test_asr_cache_identity_changes_with_model_options_and_vocabulary():
     assert fp != IX._asr_prompt_fingerprint(other_model, "Cersei Olenna")
 
 
-def test_project_asr_prompt_includes_dialogue_but_hotwords_remain_names_only():
+def test_project_general_asr_excludes_dialogue_and_retrieval_prompt_keeps_it_separate():
     proj = NS(
         meta={"analysis": {
             "characters": [{"name": "Tywin Lannister"}],
@@ -201,9 +200,10 @@ def test_project_asr_prompt_includes_dialogue_but_hotwords_remain_names_only():
         ],
     )
 
-    vocabulary = IX._project_asr_initial_prompt(proj)
+    retrieval_vocabulary = IX._project_authored_retrieval_prompt(proj)
 
-    assert vocabulary.split(", ") == [
+    assert IX._project_asr_initial_prompt(proj) == ""
+    assert retrieval_vocabulary.split(", ") == [
         "You shot me.",
         "You're no son of mine.",
         "I am your son. I have always been your son.",
@@ -212,7 +212,7 @@ def test_project_asr_prompt_includes_dialogue_but_hotwords_remain_names_only():
     assert IX._project_asr_hotwords(proj) == "Tywin Lannister, Charles Dance"
 
 
-def test_authored_quote_changes_project_asr_semantic_fingerprint():
+def test_authored_quote_changes_retrieval_fingerprint_not_general_asr_fingerprint():
     cfg = NS(whisper_model="base", whisper_compute="int8")
     proj = NS(
         meta={"analysis": {
@@ -221,28 +221,30 @@ def test_authored_quote_changes_project_asr_semantic_fingerprint():
         }},
         segments=[NS(quote="You shot me.")],
     )
-    baseline = IX.asr_semantic_fingerprint(proj, cfg)
+    general_baseline = IX.asr_semantic_fingerprint(proj, cfg)
+    retrieval_baseline = IX._quote_retrieval_fingerprint(proj, cfg)
 
     proj.segments[0].quote = "I am your son. I have always been your son."
 
-    assert IX.asr_semantic_fingerprint(proj, cfg) != baseline
+    assert IX.asr_semantic_fingerprint(proj, cfg) == general_baseline
+    assert IX._quote_retrieval_fingerprint(proj, cfg) != retrieval_baseline
 
 
-def test_audited_softening_keeps_original_quote_prompt_identity_stable():
+def test_audited_softening_keeps_original_retrieval_prompt_identity_stable():
     cfg = NS(whisper_model="base", whisper_compute="int8")
     quote = "Kill his men."
     proj = NS(
         meta={"analysis": {"characters": [], "actors": []}},
         segments=[NS(quote=quote)],
     )
-    baseline = IX.asr_semantic_fingerprint(proj, cfg)
+    baseline = IX._quote_retrieval_fingerprint(proj, cfg)
 
     proj.segments[0].quote = ""
     proj.meta["selection_relevance_gap_softening"] = {"beats": [{
         "original": {"quote": quote},
     }]}
 
-    assert IX.asr_semantic_fingerprint(proj, cfg) == baseline
+    assert IX._quote_retrieval_fingerprint(proj, cfg) == baseline
 
 
 def test_equal_length_quotes_keep_order_when_first_moves_to_softening_provenance():
@@ -252,7 +254,7 @@ def test_equal_length_quotes_keep_order_when_first_moves_to_softening_provenance
         meta={"analysis": {"characters": [], "actors": []}},
         segments=[NS(index=0, quote=first), NS(index=1, quote=second)],
     )
-    baseline = IX._project_asr_initial_prompt(proj)
+    baseline = IX._project_authored_retrieval_prompt(proj)
 
     proj.segments[0].quote = ""
     proj.meta["selection_relevance_gap_softening"] = {"beats": [{
@@ -260,7 +262,7 @@ def test_equal_length_quotes_keep_order_when_first_moves_to_softening_provenance
         "original": {"quote": first},
     }]}
 
-    assert IX._project_asr_initial_prompt(proj) == baseline
+    assert IX._project_authored_retrieval_prompt(proj) == baseline
     assert baseline.split(", ") == [first, second]
 
 
@@ -285,7 +287,7 @@ def test_bounded_project_prompt_keeps_compact_quotes_deterministically():
         }},
         segments=[NS(quote=f"Line {i}") for i in range(40)],
     )
-    requested = IX._project_asr_initial_prompt(proj)
+    requested = IX._project_authored_retrieval_prompt(proj)
 
     first = IX._bound_asr_vocabulary(model, requested, duplicated=True)
     second = IX._bound_asr_vocabulary(model, requested, duplicated=True)
@@ -297,7 +299,7 @@ def test_bounded_project_prompt_keeps_compact_quotes_deterministically():
         "Priority Character One, Priority Character Two")
 
 
-def test_sentence_dialogue_is_context_only_never_faster_whisper_hotword_bias(tmp_path):
+def test_authored_dialogue_is_retrieval_prompt_only_never_hotword_bias(tmp_path):
     class Model:
         max_length = 448
         hf_tokenizer = None
@@ -320,6 +322,120 @@ def test_sentence_dialogue_is_context_only_never_faster_whisper_hotword_bias(tmp
     assert "You're no son of mine." in model.kwargs["initial_prompt"]
     assert "I am your son." in model.kwargs["initial_prompt"]
     assert "son of mine" not in model.kwargs["hotwords"]
+
+
+def test_general_decode_never_receives_authored_dialogue_but_retrieval_decode_does(
+        tmp_path):
+    class Model:
+        max_length = 448
+        hf_tokenizer = None
+
+        def __init__(self):
+            self.kwargs = None
+
+        def transcribe(self, _path, **kwargs):
+            self.kwargs = kwargs
+            return iter([]), NS()
+
+    quote = "You're no son of mine."
+    proj = NS(
+        meta={"analysis": {
+            "characters": [{"name": "Tywin Lannister"}],
+            "actors": ["Charles Dance"],
+        }},
+        segments=[NS(index=0, quote=quote)],
+    )
+    names = IX._project_asr_hotwords(proj)
+
+    general = Model()
+    IX._transcribe_with_vocabulary(
+        general, tmp_path / "general.mp4", hotwords=names,
+        initial_prompt=IX._project_asr_initial_prompt(proj),
+        legacy_initial_prompt=IX._project_asr_legacy_initial_prompt(proj))
+
+    assert general.kwargs["hotwords"] == names
+    assert "initial_prompt" not in general.kwargs
+    assert quote not in " ".join(str(value) for value in general.kwargs.values())
+
+    retrieval = Model()
+    IX._transcribe_with_vocabulary(
+        retrieval, tmp_path / "retrieval.mp4", hotwords=names,
+        initial_prompt=IX._project_authored_retrieval_prompt(proj),
+        legacy_initial_prompt=IX._project_quote_retrieval_legacy_prompt(proj))
+
+    assert retrieval.kwargs["hotwords"] == names
+    assert quote in retrieval.kwargs["initial_prompt"]
+    assert quote not in retrieval.kwargs["hotwords"]
+
+
+def test_saturated_retrieval_prompt_chunks_cover_every_authored_line_and_incomplete_fails(
+        monkeypatch, tmp_path):
+    from vidlore.clipstudio.models import ClipProject, SourceVideo
+
+    class Encoding:
+        def __init__(self, ids):
+            self.ids = ids
+
+    class Tokenizer:
+        def encode(self, text, add_special_tokens=False):
+            del add_special_tokens
+            return Encoding(list(range(len(text.split()))))
+
+    class Model:
+        max_length = 48
+        hf_tokenizer = Tokenizer()
+
+        def transcribe(self, _path, **_kwargs):
+            return iter([]), NS()
+
+    proj = ClipProject(name="chunked", root=str(tmp_path))
+    proj.ensure_dirs()
+    media = tmp_path / "source.mp4"
+    media.write_bytes(b"source-bytes")
+    source = SourceVideo(
+        id="s", url="u", title="Game of Thrones scene", permission="owner",
+        status=IX.SOURCE_OK, local_path=str(media), duration=30.0)
+    proj.sources = [source]
+    proj.meta["analysis"] = {
+        "characters": [{"name": "Tywin Lannister"}], "actors": ["Charles Dance"]}
+    proj.segments = [NS(index=i, quote=f"Authored line number {i}.") for i in range(30)]
+    cfg = NS(whisper_model="base", whisper_compute="int8")
+    model = Model()
+    monkeypatch.setattr(IX, "_whisper", lambda _cfg: model)
+    delivered = []
+
+    def decode(_path, _cfg, *, initial_prompt="", **_kwargs):
+        delivered.append(initial_prompt)
+        i = len(delivered)
+        return True, [(float(i), float(i) + .1, f"chunk{i}")]
+
+    monkeypatch.setattr(IX, "_transcribe_words_result", decode)
+
+    assert IX.refresh_source_quote_retrieval(proj, source, cfg)
+    expected = IX._project_authored_quotes(proj, proj.meta["analysis"])
+    actual = [entry for prompt in delivered for entry in prompt.split(", ")]
+    assert len(delivered) > 1
+    assert actual == expected
+
+    valid, streams, reason, complete = IX._load_quote_retrieval_streams_result(
+        proj, source, cfg, require_complete=True)
+    assert valid and complete and reason == ""
+    assert [entry for stream in streams for entry in stream["covered_authored_quotes"]] \
+        == expected
+
+    sidecar = IX._quote_retrieval_path(proj, source.id)
+    payload = json.loads(sidecar.read_text())
+    removed = payload["streams"].pop()
+    sidecar.write_text(json.dumps(payload))
+    valid, _streams, reason, complete = IX._load_quote_retrieval_streams_result(
+        proj, source, cfg, require_complete=True)
+    assert not valid and not complete
+    assert reason == "quote_retrieval_coverage_incomplete"
+
+    prior_decode_count = len(delivered)
+    assert IX.refresh_source_quote_retrieval(proj, source, cfg)
+    assert len(delivered) == prior_decode_count + 1
+    assert delivered[-1] == removed["prompt"]
 
 
 def test_whisper_model_cache_is_bound_to_every_constructor_input(monkeypatch):
@@ -381,7 +497,8 @@ def test_index_cache_prompt_mismatch_refreshes_only_asr(monkeypatch, tmp_path):
 
     assert out == [shot]
     assert seen["hotwords"] == "Cersei Lannister, Lena Headey"
-    assert seen["initial_prompt"] == "Cersei Lannister, Lena Headey"
+    assert seen["initial_prompt"] == ""
+    assert seen["legacy_initial_prompt"] == "Cersei Lannister, Lena Headey"
 
 
 def test_vocabulary_is_bounded_by_real_token_count_and_keeps_complete_priority_names(tmp_path):
@@ -410,16 +527,13 @@ def test_vocabulary_is_bounded_by_real_token_count_and_keeps_complete_priority_n
     IX._transcribe_with_vocabulary(model, tmp_path / "s.mp4", hotwords=names)
 
     effective = model.kwargs["hotwords"]
-    assert effective == model.kwargs["initial_prompt"].removeprefix(
-        "Cast, character names, and quoted dialogue: ")
+    assert "initial_prompt" not in model.kwargs
     assert effective.startswith("Character Name0, Character Name1")
     assert "Character Name29" not in effective
     assert not effective.endswith("Character")
-    initial_n = len(model.hf_tokenizer.encode(
-        " " + model.kwargs["initial_prompt"], add_special_tokens=False).ids)
     hotword_n = len(model.hf_tokenizer.encode(
         " " + effective, add_special_tokens=False).ids)
-    assert initial_n + hotword_n + IX._ASR_PROMPT_RESERVE_TOKENS <= model.max_length
+    assert hotword_n + IX._ASR_PROMPT_RESERVE_TOKENS <= model.max_length
 
 
 def test_eof_rescue_rejects_single_word_outro_hallucination():

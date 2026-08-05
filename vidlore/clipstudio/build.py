@@ -1476,12 +1476,22 @@ def _combine_opening_hook(segments):
     return None
 
 
-def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
+def _select_breakouts(proj, segments, total: float, work: Path, log, cfg=None) -> list:
     """Pick the 1-3 most NATURAL breakout moments: beats whose narration QUOTES a line, located
     by searching the line in every source's own ASR — the breakout plays the SHOT where the line
     is actually spoken (independent of which clip the matcher picked for the beat)."""
     import re as _re9
     from . import index as _index
+    from .relevance_contract import (
+        _confirm_prompted_quote_span_unprompted as _confirm_quote9,
+        _quote_confirmation_summary as _quote_confirmation_summary9,
+        _quote_requires_exact_contiguous_match as _quote_exact_required9,
+        _prompted_quote_candidate_spans as _quote_candidate_spans9,
+        QUOTE_RETRIEVAL_MAX_OCCURRENCES_PER_STREAM as _quote_occurrence_bound9,
+    )
+    if cfg is None:
+        from .config import load_clip_config as _load_clip_config9
+        cfg = _load_clip_config9()
 
     # PERSISTENT BREAKOUT AUDIT (work/breakout_audit.json): the [BREAKOUT-*] lines only reach the
     # live progress stream, which portal/CLI runs discard — after the render there was no way to
@@ -1594,11 +1604,21 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         log(f"build: breakout HD gate — {_bk_lowres_excluded} source(s) excluded; "
             f"{len(srcs)} native-HD source(s) eligible")
     shots_of = {}
+    quote_retrieval_words_of = {}
     for s in srcs:
         try:
             shots_of[s.id] = _index.load_shots(proj, s.id)
         except Exception:
             shots_of[s.id] = []
+        try:
+            _retrieval_ok9, _retrieval_streams9, _retrieval_reason9, _retrieval_complete9 = \
+                _index._load_quote_retrieval_streams_result(
+                    proj, s, cfg, require_complete=True)
+        except Exception:
+            _retrieval_ok9, _retrieval_streams9, _retrieval_complete9 = False, [], False
+        quote_retrieval_words_of[s.id] = (
+            [stream["words"] for stream in _retrieval_streams9]
+            if _retrieval_ok9 and _retrieval_complete9 else [])
     ok_audio = {s.id for s in srcs if _breakout_src_ok(s, shots_of.get(s.id) or [])}
     _src_excluded = len(srcs) - len(ok_audio)
     if _src_excluded:
@@ -1661,6 +1681,50 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     # true type; it is NOT the same as `_verbatim_strong` (which is merely Face-ID-bypass eligibility),
     # so downstream coverage thresholds must key on THIS, not on bypass membership.
     _cand_origin = {}
+    # Prompted ASR is retrieval only.  A quote candidate receives NONE of the verbatim privileges
+    # below until a second, narrow decoder run on physically extracted audio (with no prompt or
+    # hotwords) confirms that exact hit.  Keep the confirmed span candidate-specific: a beat may
+    # have several authored/anchor lines, and recomputing ``seg.quote`` at extraction used to anchor
+    # a winning correction/anchor candidate to a different line.
+    _quote_confirmation_by_candidate: dict = {}
+    _quote_confirmation_attempts: list = []
+
+    def _quote_candidate_key9(seg_idx, src, shot, quote):
+        return (int(seg_idx), str(src.id), round(float(shot.start), 1),
+                " ".join(_rw(quote)))
+
+    def _confirm_quote_hit9(src, quote, prompted_span, *, exact_required):
+        try:
+            evidence = _confirm_quote9(
+                proj, src, quote, prompted_span, cfg,
+                exact_contiguous_required=bool(exact_required))
+        except Exception as exc:                         # optional breakout: uncertainty rejects
+            evidence = {"status": "inconclusive",
+                        "reason": f"confirmation_error:{type(exc).__name__}"}
+        summary = _quote_confirmation_summary9(evidence)
+        _quote_confirmation_attempts.append({
+            "source_id": str(getattr(src, "id", "") or ""),
+            "quote": str(quote or "")[:240],
+            "prompted_span": [round(float(prompted_span[0]), 3),
+                               round(float(prompted_span[1]), 3),
+                               round(float(prompted_span[2]), 3)],
+            "confirmation": summary,
+        })
+        return evidence, summary
+
+    def _quote_confirmation_counts9():
+        return {
+            "attempted": len(_quote_confirmation_attempts),
+            "confirmed": sum(
+                1 for row in _quote_confirmation_attempts
+                if (row.get("confirmation") or {}).get("status") == "confirmed"),
+            "rejected": sum(
+                1 for row in _quote_confirmation_attempts
+                if (row.get("confirmation") or {}).get("status") == "rejected"),
+            "inconclusive": sum(
+                1 for row in _quote_confirmation_attempts
+                if (row.get("confirmation") or {}).get("status") == "inconclusive"),
+        }
     # STRONG-VERBATIM set: (seg_idx, src_id, round(start,1)) for matches where 4+ CONSECUTIVE scripted
     # words are spoken verbatim in the footage's own ASR. The exact scripted line located inside the
     # footage's audio is a STRONGER scene-identity proof than a face — a wrong scene almost never
@@ -1672,9 +1736,15 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
     _verbatim_strong = set()
     _verbatim_first = None        # (seg_idx, key) of the EARLIEST verbatim quote = cold-open hook
     def _locate_quote9(_q):
-        """Locate a scripted quote in the downloaded footage. Returns (score, source, shot, run)
-        or None. Pure lookup — the caller does the candidate bookkeeping (_admit_quote9)."""
+        """Retrieve then independently confirm a scripted quote in downloaded footage.
+
+        Returns ``(score, source, shot, run, confirmed_span, confirmation_summary)`` or None.
+        The persisted, vocabulary-prompted word stream only proposes locations; it cannot prove
+        its own prompt-derived phrase.  Every returned candidate has therefore survived the
+        separate unprompted narrow-audio decoder.
+        """
         qw = _rw(_q)[:8]
+        _exact_required = _quote_exact_required9(_q, index_module=_index)
         best = None
         for s in srcs:
             if s.id not in ok_audio:
@@ -1686,35 +1756,88 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
             #   "Maester. Perhaps | a messence of nightshade to help him | sleep."  (4 shots + garble)
             # The second produced NO candidate at all — the video's promised payoff, never even
             # considered. The word stream is continuous, so cuts and garble stop mattering.
-            _span = None
             try:
-                _span = _index.find_quote_span(_index.load_words(proj, s.id), _q)
+                _general_words9 = _index.load_words(proj, s.id)
             except Exception:
-                _span = None
-            if _span:
-                _qs, _qe, _ratio = _span
-                _sh = next((x for x in shots_of.get(s.id, [])
-                            if float(x.start) <= _qs < float(x.end)), None)
-                if _sh is not None and not _texty9(_sh):
-                    # scale the phrase ratio onto the same run-length currency the per-shot path
-                    # scores in, so the two paths remain comparable
-                    _run = max(3, int(round(_ratio * len(qw))))
-                    score = _run + 3 + (2 if (getattr(s, "extra", None) or {}).get("anchor_verified")
-                                        else 0)
-                    if best is None or score > best[0]:
-                        best = (score, s, _sh, _run)
-                    continue                           # word stream is strictly better evidence
+                _general_words9 = []
+            _seen_spans9 = set()
+            _confirmed_stream_hit9 = False
+            _candidate_streams9 = [("general_names_only_asr", _general_words9)]
+            _candidate_streams9.extend(
+                (f"authored_prompt_retrieval_chunk_{chunk_index}", chunk_words)
+                for chunk_index, chunk_words in enumerate(
+                    quote_retrieval_words_of.get(s.id) or []))
+            for _stream_kind9, _words9 in _candidate_streams9:
+                try:
+                    _spans9 = _quote_candidate_spans9(
+                        _words9, _q, exact_contiguous_required=_exact_required,
+                        index_module=_index)
+                except Exception:
+                    _spans9 = []
+                # Optional breakouts do not need to exhaust an unbounded hallucination storm. The
+                # strict whole-pool publication contract separately marks a truncated source
+                # indeterminate; here the safe result is simply no breakout from untried hints.
+                for _span in _spans9[:_quote_occurrence_bound9]:
+                    _span_key9 = tuple(round(float(value), 3) for value in _span)
+                    if _span_key9 in _seen_spans9:
+                        continue
+                    _seen_spans9.add(_span_key9)
+                    _confirmation, _summary = _confirm_quote_hit9(
+                        s, _q, _span, exact_required=_exact_required)
+                    _summary = dict(_summary or {})
+                    _summary["retrieval_stream"] = _stream_kind9
+                    _confirmed_span = (_confirmation.get("confirmed_span")
+                                       if _confirmation.get("status") == "confirmed" else None)
+                    if _confirmed_span:
+                        _cqs, _cqe, _cratio = (float(_confirmed_span[0]),
+                                                float(_confirmed_span[1]),
+                                                float(_confirmed_span[2]))
+                        _sh = next((x for x in shots_of.get(s.id, [])
+                                    if float(x.start) <= _cqs < float(x.end)), None)
+                    else:
+                        _sh = None
+                    if _sh is not None and not _texty9(_sh):
+                        _run = max(3, int(round(_cratio * len(qw))))
+                        score = _run + 3 + (
+                            2 if (getattr(s, "extra", None) or {}).get("anchor_verified") else 0)
+                        if best is None or score > best[0]:
+                            best = (score, s, _sh, _run,
+                                    (_cqs, _cqe, _cratio), _summary)
+                        _confirmed_stream_hit9 = True
+            if _confirmed_stream_hit9:
+                continue                           # continuous word stream is better evidence
             for sh in shots_of.get(s.id, []):
                 if _texty9(sh):
                     continue                           # burned-in text never airs
                 run = _quote_run_in(qw, _rw(getattr(sh, "transcript", "")))
                 if run >= 3:
+                    # Shot transcripts are derived from the same prompted word stream, so even this
+                    # fallback is only another retrieval hint.  It may become a quote candidate only
+                    # if the independent decoder finds the full phrase near this shot.
+                    _hint = (float(sh.start), float(sh.end),
+                             min(1.0, float(run) / max(1, len(qw))))
+                    _confirmation, _summary = _confirm_quote_hit9(
+                        s, _q, _hint, exact_required=_exact_required)
+                    _confirmed_span = (_confirmation.get("confirmed_span")
+                                       if _confirmation.get("status") == "confirmed" else None)
+                    if not _confirmed_span:
+                        continue
+                    _cqs, _cqe, _cratio = (float(_confirmed_span[0]),
+                                            float(_confirmed_span[1]),
+                                            float(_confirmed_span[2]))
+                    _confirmed_sh = next(
+                        (x for x in shots_of.get(s.id, [])
+                         if float(x.start) <= _cqs < float(x.end)), None)
+                    if _confirmed_sh is None or _texty9(_confirmed_sh):
+                        continue
+                    _confirmed_run = max(3, int(round(_cratio * len(qw))))
                     # +3: a verbatim script quote located in the footage's own ASR is the
                     # strongest naturalness signal — it must outrank mined evidence lines
-                    score = run + 3 + (2 if (getattr(s, "extra", None) or {}).get("anchor_verified")
-                                       else 0)
+                    score = _confirmed_run + 3 + (
+                        2 if (getattr(s, "extra", None) or {}).get("anchor_verified") else 0)
                     if best is None or score > best[0]:
-                        best = (score, s, sh, run)
+                        best = (score, s, _confirmed_sh, _confirmed_run,
+                                (_cqs, _cqe, _cratio), _summary)
         return best
 
     def _admit_quote9(seg, _q, best):
@@ -1722,6 +1845,13 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         cands.append((best[0], seg.index, best[1], best[2], _q))
         _k = (seg.index, best[1].id, round(float(best[2].start), 1))
         _cand_origin[_k] = "verbatim_quote"        # created from a scripted quote
+        _quote_confirmation_by_candidate[
+            _quote_candidate_key9(seg.index, best[1], best[2], _q)] = {
+                "confirmed_span": [round(float(best[4][0]), 3),
+                                   round(float(best[4][1]), 3),
+                                   round(float(best[4][2]), 3)],
+                "confirmation": dict(best[5] or {}),
+            }
         # Face-ID BYPASS requires a STRONG verbatim match (>=4 words, >=70% coverage, a content
         # word) — a bare 3-4-word generic prefix used to steal the gate and air a DIFFERENT line.
         if _verbatim_bypass_ok(_rw(_q)[:8], best[3]):
@@ -1783,6 +1913,14 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                 f"corrective re-ask recovered {_nfix9}")
         except Exception as _e9q:                          # noqa: BLE001
             log(f"build: quote correction skipped ({str(_e9q)[:80]})")
+    _quote_confirm_counts9 = _quote_confirmation_counts9()
+    if _quote_confirm_counts9["attempted"]:
+        log("[BREAKOUT-QUOTE-CONFIRM] "
+            f"attempted={_quote_confirm_counts9['attempted']} "
+            f"confirmed={_quote_confirm_counts9['confirmed']} "
+            f"rejected={_quote_confirm_counts9['rejected']} "
+            f"inconclusive={_quote_confirm_counts9['inconclusive']} "
+            "(prompted ASR is retrieval-only)")
     # COLD-OPEN HOOK: the EARLIEST verbatim quote in the opening stretch is the hook — air the real
     # scene of the opening quoted line right at the start. It is still Face-ID-exempt ONLY when it is
     # itself a STRONG verbatim match (same bar as any other bypass) — a weak 3-word opening prefix no
@@ -1958,6 +2096,25 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                 _cand_origin.setdefault((c[1], c[2].id, round(float(c[3].start), 1)), "evidence_mined")
     if not cands:
         log("build: no breakout — no spoken line relates to the narration (natural skip)")
+        # A no-breakout result is still an auditable decision.  In particular, preserve whether
+        # prompted quote hits were independently rejected or the confirmation decoder was merely
+        # inconclusive; those states must never collapse into a silent "no candidates".
+        try:
+            import json as _json9_empty
+            work.mkdir(parents=True, exist_ok=True)
+            (work / "breakout_audit.json").write_text(_json9_empty.dumps({
+                "candidates": 0,
+                "rejected_counts": dict(_rej),
+                "pre_filtered_essay_or_foreign_sources": _src_excluded,
+                "pre_filtered_low_resolution_sources": _bk_lowres_excluded,
+                "accepted": [],
+                "quote_confirmation_counts": _quote_confirmation_counts9(),
+                "quote_confirmation_attempts": _quote_confirmation_attempts,
+                "admission_verdicts": {},
+                "log_lines": _audit_lines,
+            }, indent=1), encoding="utf-8")
+        except Exception:
+            pass
         return []
     # COLD-OPEN: scene 0 is normally the title overlay, but the OPENING verbatim quote (the hook,
     # e.g. "Seize him. Cut his throat.") is allowed to air at scene 0 — KEEP a scene-0 candidate only
@@ -2251,13 +2408,15 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         # Anchor on the quote's own audio span instead (word-level ASR, so shot boundaries are
         # irrelevant) and size the window to CONTAIN the whole line.
         _bk_start, _bk_min = float(sh.start), 0.0
-        _qtext = (getattr(_seg_by_idx.get(idx), "quote", "") or "").strip()
-        _span = None
-        if _qtext:
-            try:
-                _span = _index.find_quote_span(_index.load_words(proj, src.id), _qtext)
-            except Exception:
-                _span = None
+        _candidate_origin9 = _cand_origin.get(
+            (idx, src.id, round(float(sh.start), 1)), "evidence_mined")
+        _qtext = str(_q or "").strip()
+        _confirmation_record9 = _quote_confirmation_by_candidate.get(
+            _quote_candidate_key9(idx, src, sh, _q), {})
+        _confirmation_summary9 = dict(
+            _confirmation_record9.get("confirmation") or {})
+        _span = (_confirmation_record9.get("confirmed_span")
+                 if _candidate_origin9 == "verbatim_quote" else None)
         if _span:
             _qs, _qe, _qr = _span
             _bk_start = max(0.0, _qs - _BK_LEAD_S)
@@ -2267,17 +2426,18 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                 f"[{_bk_start:.2f}→{_bk_start + _bk_min:.2f}] (shot starts {float(sh.start):.2f}, "
                 f"phrase match {_qr})")
         elif _qtext:
-            # The beat PROMISED a line and the chosen source does not speak it. Until now this fell
-            # through in total silence — no log, no counter — and the mined window served the quoted
-            # beat as if nothing had happened. That silence is why job benjen_v2 could air a Cersei
-            # conversation under Benjen's own "They drove a dragonglass dagger into my heart": the
-            # quote locates in ZERO of its 102 word streams, and nothing said so. The admission gate
-            # below now refuses these, but the CAUSE has to be visible in the log of every render —
-            # "the line this beat promised is in no footage we have" is a script/footage gap the
-            # owner can act on, not a mystery.
-            log(f"build: breakout scene {idx} — the beat's promised line is NOT spoken in "
-                f"{(src.title or src.id)[:44]!r} ({_qtext[:60]!r}); the window is evidence-mined, "
-                f"so it must earn its place on relevance alone")
+            if _candidate_origin9 == "verbatim_quote":
+                # Defensive invariant: admission marks a candidate verbatim only after
+                # confirmation. Never silently downgrade such a bookkeeping mismatch.
+                log(f"build: breakout scene {idx} — confirmed-quote span missing from candidate "
+                    f"provenance; line is NOT spoken in independently confirmed evidence; "
+                    f"refusing verbatim privileges")
+                continue
+            # Evidence-mined dialogue remains eligible only as ordinary semantic evidence.  Say
+            # explicitly that it is NOT spoken in an independently confirmed authored-quote path;
+            # it gets no quote anchor, promise hint, cold-open, identity or luma privilege.
+            log(f"build: breakout scene {idx} — candidate line is NOT spoken in independently "
+                f"confirmed authored-quote evidence; treating it as evidence-mined only")
         _bk_quality = {}
         _native_dim = _bk_native_dims.get(src.id, {})
         real = _extract_breakout(src.local_path, _bk_start, dur, v, a,
@@ -2350,7 +2510,7 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                 beat_subject=(f"{getattr(_sg9, 'required_kind', '')}: "
                               f"{getattr(_sg9, 'required_entity', '')}"
                               if getattr(_sg9, "required_entity", "") else ""),
-                promised_quote=_qtext,
+                promised_quote=(_qtext if _span else ""),
                 quote_authored=bool(_span),
                 # ADMIT_CHECK=0 → identification only (the old dialogue-vs-narration behaviour)
                 relevance_required=_relevance_on)
@@ -2358,9 +2518,10 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
             # build.log to learn WHICH window was refused has already lost the evidence
             _bk_admit_verdicts[idx] = {"ok": _dlg_ok, "why": _dlg_why,
                                        "quote_anchored": bool(_span), "verdicts": _verdicts9,
+                                       "unprompted_quote_confirmation": _confirmation_summary9,
                                        "source": (src.title or src.id)[:120],
                                        "beat_text": _beat_txt9[:300],
-                                       "promised_quote": (_qtext or "")[:200],
+                                       "promised_quote": (_qtext if _span else "")[:200],
                                        "aired_text": (_wtxt or "")[:400]}
             if not _dlg_ok:
                 _rej["off_topic"] += 1
@@ -2432,8 +2593,7 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
         # the SAME strong floor (no `not _is_cold` exemption — it is the most prominent breakout);
         # evidence_mined standalone dialogue → >=50% (its semantic relevance to the beat is established
         # by the mining overlap + commentary gate). A 25% one-word coincidence is never enough.
-        _origin = _cand_origin.get((idx, src.id, round(float(sh.start), 1)),
-                                   "verbatim_quote" if _is_cold else "evidence_mined")
+        _origin = _candidate_origin9
         _is_verbatim_type = (_origin == "verbatim_quote") or _is_cold
         _cand_type = "verbatim" if _is_verbatim_type else "mined"
         _mincov = (_cfg_fbk("VIDLORE_CLIPSTUDIO_BREAKOUT_MIN_COVERAGE_VERBATIM", 0.70) if _is_verbatim_type
@@ -2474,6 +2634,7 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
                             "source_t": round(float(_bk_start), 1), "line": _q[:160],
                             "shot_t": round(float(sh.start), 1),
                             "quote_anchored": bool(_span),
+                            "unprompted_quote_confirmation": _confirmation_summary9,
                             "aired_transcript": _aired_tx[:300],
                             "line_coverage": round(_cov, 2),
                             "candidate_type": _cand_type,
@@ -2497,6 +2658,8 @@ def _select_breakouts(proj, segments, total: float, work: Path, log) -> list:
             "pre_filtered_essay_or_foreign_sources": _src_excluded,
             "pre_filtered_low_resolution_sources": _bk_lowres_excluded,
             "accepted": [e["_audit"] for e in out],
+            "quote_confirmation_counts": _quote_confirmation_counts9(),
+            "quote_confirmation_attempts": _quote_confirmation_attempts,
             # every admission verdict, kept or rejected — so "why did THAT breakout air?" is
             # answerable offline, without re-calling the judge
             "admission_verdicts": {str(k): v for k, v in _bk_admit_verdicts.items()},
@@ -7437,7 +7600,8 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     _breakout_entries: list = []
     if os.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUTS", "1").strip() not in ("0", "false", "no"):
         try:
-            _bks = _select_breakouts(proj, segments, getattr(narration, "total", 0.0), work, log)
+            _bks = _select_breakouts(
+                proj, segments, getattr(narration, "total", 0.0), work, log, cfg=cfg)
         except Exception as e:                            # noqa: BLE001
             log(f"build: breakout selection skipped ({str(e)[:80]})")
             _bks = []

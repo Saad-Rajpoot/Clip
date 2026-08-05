@@ -19,7 +19,7 @@ from pathlib import Path
 import subprocess
 
 
-AUDIO_QUOTE_TRANSFER_SCHEMA = 2
+AUDIO_QUOTE_TRANSFER_SCHEMA = 3
 AUDIO_QUOTE_TRANSFER_ALGORITHM = "pcm-pearson-ncc-fft-v2"
 AUDIO_QUOTE_TRANSFER_SIGNAL = "quote_audio_transfer_evidence"
 AUDIO_QUOTE_TRANSFER_SAMPLE_RATE = 4000
@@ -36,6 +36,11 @@ def _finite_float(value) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _sha256_hex(value: str) -> bool:
+    text = str(value or "")
+    return len(text) == 64 and all(char in "0123456789abcdef" for char in text)
 
 
 def _span(value) -> tuple[float, float] | None:
@@ -307,10 +312,19 @@ def evidence_binding_fingerprint(evidence: dict) -> str:
 
 def make_transfer_evidence(*, authored_quote: str, reference_source_id: str,
                            reference_source_content_fingerprint: str,
-                           reference_asr_ratio: float, target_source_id: str,
+                           reference_asr_ratio: float,
+                           reference_quote_confirmation_artifact_key: str,
+                           reference_quote_confirmation_decoder_fingerprint: str,
+                           target_source_id: str,
                            target_source_content_fingerprint: str,
                            target_selected_window, alignment: dict) -> dict:
-    """Create the immutable JSON record consumed by the relevance contract."""
+    """Create the immutable JSON record consumed by the relevance contract.
+
+    The PCM template is only authoritative when its reference quote survived the independent,
+    unprompted narrow decode.  Bind both that immutable artifact's key and the decoder generation
+    into this record: an old prompt-derived span must not remain useful after confirmation policy or
+    decoder semantics change.
+    """
     selected = _span(target_selected_window)
     ref_span = _span((alignment or {}).get("reference_quote_span"))
     ref_extract = _span((alignment or {}).get("reference_extract_window"))
@@ -320,9 +334,14 @@ def make_transfer_evidence(*, authored_quote: str, reference_source_id: str,
     runner_up = _finite_float((alignment or {}).get("runner_up_correlation"))
     margin = _finite_float((alignment or {}).get("uniqueness_margin"))
     ratio = _finite_float(reference_asr_ratio)
+    confirmation_key = str(reference_quote_confirmation_artifact_key or "").strip().lower()
+    confirmation_decoder = str(
+        reference_quote_confirmation_decoder_fingerprint or "").strip().lower()
     if (not str(authored_quote or "").strip() or not reference_source_id or not target_source_id
             or reference_source_id == target_source_id
             or not reference_source_content_fingerprint
+            or not _sha256_hex(confirmation_key)
+            or not _sha256_hex(confirmation_decoder)
             or not target_source_content_fingerprint or selected is None or ref_span is None
             or ref_extract is None or target_span is None or target_search is None
             or None in (correlation, runner_up, margin, ratio)
@@ -343,6 +362,8 @@ def make_transfer_evidence(*, authored_quote: str, reference_source_id: str,
         "reference_quote_span": [round(ref_span[0], 6), round(ref_span[1], 6)],
         "reference_extract_window": [round(ref_extract[0], 6), round(ref_extract[1], 6)],
         "reference_asr_ratio": round(float(ratio), 6),
+        "reference_quote_confirmation_artifact_key": confirmation_key,
+        "reference_quote_confirmation_decoder_fingerprint": confirmation_decoder,
         "target_source_id": str(target_source_id),
         "target_source_content_fingerprint": str(target_source_content_fingerprint),
         "target_quote_span": [round(target_span[0], 6), round(target_span[1], 6)],
@@ -394,9 +415,17 @@ def transfer_evidence_shape_reason(evidence: dict) -> str:
     for name in (
             "authored_quote", "authored_quote_sha256", "reference_source_id",
             "reference_source_content_fingerprint", "target_source_id",
-            "target_source_content_fingerprint", "binding_fingerprint"):
+            "target_source_content_fingerprint", "binding_fingerprint",
+            "reference_quote_confirmation_artifact_key",
+            "reference_quote_confirmation_decoder_fingerprint"):
         if not str(evidence.get(name, "") or "").strip():
             return f"{name}_missing"
+    for name in (
+            "reference_quote_confirmation_artifact_key",
+            "reference_quote_confirmation_decoder_fingerprint"):
+        value = str(evidence.get(name, "") or "")
+        if not _sha256_hex(value):
+            return f"{name}_malformed"
     if evidence.get("reference_source_id") == evidence.get("target_source_id"):
         return "reference_and_target_source_identical"
     for name in (

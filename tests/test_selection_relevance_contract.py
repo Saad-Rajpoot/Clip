@@ -1,8 +1,11 @@
 """Fail-closed pre-render semantic contract for resume/rerender/verify-disabled paths."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import inspect
+import hashlib
 import json
+import threading
 
 import pytest
 
@@ -23,6 +26,36 @@ GOOD = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _explicit_rev8_unprompted_confirmation(monkeypatch):
+    """Byte-sentinel media cannot be decoded; model independent confirmation explicitly."""
+    def confirmed(proj, src, quote, prompted_span, cfg, *, exact_contiguous_required):
+        span = [round(float(prompted_span[0]), 3), round(float(prompted_span[1]), 3),
+                round(float(prompted_span[2]), 3)]
+        key = hashlib.sha256(json.dumps({
+            "source_id": str(getattr(src, "id", "") or ""),
+            "quote": str(quote or ""),
+            "prompted_span": span,
+            "exact": bool(exact_contiguous_required),
+        }, sort_keys=True).encode()).hexdigest()
+        return {
+            "schema_version": R.QUOTE_CONFIRMATION_SCHEMA,
+            "algorithm": R.QUOTE_CONFIRMATION_ALGORITHM,
+            "status": "confirmed",
+            "artifact_key": key,
+            "decoder_fingerprint": R._quote_confirmation_decoder_fingerprint(cfg),
+            "prompted_span": span,
+            "confirmed_span": span,
+            "timed_asr_ratio": span[2],
+            "match_method": ("exact_contiguous_timed_asr+unprompted_confirmation"
+                             if exact_contiguous_required else
+                             "fuzzy_phrase_timed_asr+unprompted_confirmation"),
+            "result_content_sha256": "c" * 64,
+        }
+
+    monkeypatch.setattr(R, "_confirm_prompted_quote_span_unprompted", confirmed)
+
+
 def _stamp_current_asr_provenance(proj, sid):
     meta = {
         "schema": IX.INDEX_SCHEMA,
@@ -30,6 +63,14 @@ def _stamp_current_asr_provenance(proj, sid):
         "asr_prompt_fingerprint": IX.asr_semantic_fingerprint(proj, load_clip_config()),
     }
     (proj.index_dir / f"{sid}.index.meta.json").write_text(json.dumps(meta))
+
+
+def _write_rev8_words(proj, sid, words):
+    """Persist both clean general ASR and the separately prompted retrieval sidecar."""
+    rows = [(float(row[0]), float(row[1]), str(row[2])) for row in words]
+    (proj.index_dir / f"{sid}.words.json").write_text(json.dumps(rows))
+    assert IX._save_quote_retrieval_words(
+        proj, proj.source(sid), load_clip_config(), rows)
 
 
 def _fixture(tmp_path, *, policy=P.EXACT, verifier=None, text="Jaime rides Ned down.",
@@ -59,6 +100,7 @@ def _fixture(tmp_path, *, policy=P.EXACT, verifier=None, text="Jaime rides Ned d
         is_specific=P.verify_strict(seg), multiframe=True, faceid_names=[],
         era=V._project_beat_era(proj, seg), must_see=P.deictic_target(seg))
     proj.selections = [sel]
+    proj.segments = [seg]
     return proj, seg, sel
 
 
@@ -77,7 +119,7 @@ def _add_indexed_source(proj, root, sid, *, title, words, transcripts=None):
             source_id=sid, index=i, start=float(i), end=float(i + 1),
             keyframe_path=str(frame), transcript=transcript).to_dict())
     proj.shots_path(sid).write_text(json.dumps(rows))
-    (proj.index_dir / f"{sid}.words.json").write_text(json.dumps(words))
+    _write_rev8_words(proj, sid, words)
     _stamp_current_asr_provenance(proj, sid)
 
 
@@ -97,6 +139,50 @@ def _strict_still_meta(still, *, source="source-frame", exact=True, evidence=Non
         "exact_still_verified": bool(exact),
         "exact_still_verifier": (ev if exact else {}),
     }
+
+
+def test_confirmation_artifact_binds_result_bytes_and_rejects_any_uncertain_segment(tmp_path):
+    quote = "Real words."
+    proj, _seg, _sel = _fixture(tmp_path, quote=quote)
+    cfg = load_clip_config()
+    binding, reason = R._quote_confirmation_binding(
+        proj, proj.source("s1"), quote, [0.2, 0.7, 1.0], cfg,
+        exact_contiguous_required=True)
+    assert reason == "" and binding is not None
+    artifact = {
+        "schema_version": R.QUOTE_CONFIRMATION_SCHEMA,
+        "algorithm": R.QUOTE_CONFIRMATION_ALGORITHM,
+        "binding": binding,
+        "status": "confirmed",
+        "reason": "",
+        "decoder_fingerprint": binding["decoder_fingerprint"],
+        "decode_window": binding["decode_window"],
+        "prompted_span": binding["prompted_span"],
+        "timed_words": [[0.2, 0.4, "Real"], [0.4, 0.7, "words"]],
+        "segment_confidence": [{
+            "no_speech_prob": 0.05, "avg_logprob": -0.1, "accepted": True,
+        }],
+        "confirmed_span": [0.2, 0.7, 1.0],
+        "timed_asr_ratio": 1.0,
+        "match_method": "exact_contiguous_timed_asr+unprompted_confirmation",
+    }
+    artifact["result_content_sha256"] = R._quote_confirmation_result_sha256(artifact)
+    path = tmp_path / "confirmation.json"
+    path.write_text(json.dumps(artifact))
+    assert R._validated_quote_confirmation_artifact(path, binding) is not None
+
+    mutated = json.loads(json.dumps(artifact))
+    mutated["reason"] = "changed under the same input binding"
+    path.write_text(json.dumps(mutated))
+    assert R._validated_quote_confirmation_artifact(path, binding) is None
+
+    uncertain = json.loads(json.dumps(artifact))
+    uncertain["segment_confidence"][0].update({
+        "no_speech_prob": 0.9, "accepted": False,
+    })
+    uncertain["result_content_sha256"] = R._quote_confirmation_result_sha256(uncertain)
+    path.write_text(json.dumps(uncertain))
+    assert R._validated_quote_confirmation_artifact(path, binding) is None
 
 
 def test_exact_positive_selection_passes_and_generic_negative_is_untouched(tmp_path):
@@ -206,12 +292,12 @@ def test_exact_authored_quote_requires_strong_timed_asr_at_selected_window(tmp_p
         tmp_path, text=f'"{quote}" That single line is the whole confession.', quote=quote,
         entity="Olenna Tyrell", signals={"dialogue": 0.965, "moment_lock": 0.965})
     # Timed source ASR independently proves the authored words occur inside the aired trim.
-    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+    _write_rev8_words(proj, "s1", [
         [0.20, 0.35, "You"], [0.35, 0.50, "don't"], [0.50, 0.65, "think"],
         [0.65, 0.80, "I'd"], [0.80, 0.95, "let"], [0.95, 1.10, "you"],
         [1.10, 1.22, "marry"], [1.22, 1.34, "that"], [1.34, 1.50, "beast"],
         [1.50, 1.62, "do"], [1.62, 1.74, "you"],
-    ]))
+    ])
     audit = R.evaluate_selection_relevance(proj, [seg])
     assert audit["status"] == "pass"
     assert audit["checked"][0]["quote_evidence"]["dialogue_signal"] == 0.965
@@ -226,10 +312,10 @@ def test_exact_authored_quote_requires_strong_timed_asr_at_selected_window(tmp_p
 
     # A phrase elsewhere in the same source is not evidence for this selected trim.
     sel.signals["dialogue"] = 0.965
-    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+    _write_rev8_words(proj, "s1", [
         [10.0 + i * .1, 10.1 + i * .1, w]
         for i, w in enumerate("You don't think I'd let you marry that beast do you".split())
-    ]))
+    ])
     assert "exact_quote_timed_asr_outside_selected_window" in _block_reasons(proj, seg)
 
 
@@ -238,12 +324,12 @@ def _containment_quote_fixture(tmp_path):
     proj, seg, sel = _fixture(
         tmp_path, text=f'"{quote}" That single line is the whole confession.', quote=quote,
         entity="Olenna Tyrell", signals={"dialogue": 0.965, "moment_lock": 0.965})
-    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+    _write_rev8_words(proj, "s1", [
         [0.20, 0.35, "You"], [0.35, 0.50, "don't"], [0.50, 0.65, "think"],
         [0.65, 0.80, "I'd"], [0.80, 0.95, "let"], [0.95, 1.10, "you"],
         [1.10, 1.22, "marry"], [1.22, 1.34, "that"], [1.34, 1.50, "beast"],
         [1.50, 1.62, "do"], [1.62, 1.74, "you"],
-    ]))
+    ])
     contract = R._quote_pool_branches(proj, [seg])[0]
     assert contract["branch"] == "verbatim"
     return proj, seg, sel, contract
@@ -263,11 +349,10 @@ def test_quote_span_must_be_contained_not_merely_near_or_touching(
 
     assert ok is False
     assert reason == "exact_quote_timed_asr_outside_selected_window"
-    assert detail["timed_asr_span"] == [0.2, 1.74]
-    assert detail["selected_window"] == list(selected_window)
-    assert detail["window_gap_sec"] == old_interval_gap
-    assert detail["window_tolerance_sec"] == R.QUOTE_WINDOW_TOLERANCE_SEC
-    assert detail["start_containment_margin_sec"] < 0.0
+    assert detail["unprompted_confirmation_attempts"][0]["confirmed_span"] == [0.2, 1.74, 1.0]
+    assert list(selected_window) == [sel.in_point, sel.out_point]
+    assert old_interval_gap == pytest.approx(
+        max(0.0, sel.in_point - 1.74, 0.2 - sel.out_point))
 
 
 def test_quote_span_fully_inside_tolerated_window_boundary_passes(tmp_path):
@@ -293,9 +378,9 @@ def test_character_policy_quote_still_gets_complete_pool_branch(tmp_path):
         text="She makes the identification three separate times.", quote=quote,
         entity="Varys, Petyr Baelish, Tyrion Lannister", kind="montage")
     words = "Chaos isn't a pit Chaos is a ladder".split()
-    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+    _write_rev8_words(proj, "s1", [
         [0.1 + i * .1, 0.2 + i * .1, word] for i, word in enumerate(words)
-    ]))
+    ])
 
     audit = R.evaluate_selection_relevance(proj, [seg])
 
@@ -310,9 +395,9 @@ def test_pool_absent_quote_is_paraphrase_and_skips_only_verbatim_floor(tmp_path)
     quote = "Who does this belong to?"
     proj, seg, _sel = _fixture(
         tmp_path, text=quote, quote=quote, signals={"dialogue": 0.0})
-    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+    _write_rev8_words(proj, "s1", [
         [0.1, 0.2, "A"], [0.2, 0.3, "different"], [0.3, 0.4, "line"],
-    ]))
+    ])
     audit = R.evaluate_selection_relevance(proj, [seg])
     assert audit["status"] == "pass", "ordinary positive semantic evidence still decides the beat"
     ev = audit["checked"][0]["quote_evidence"]
@@ -321,13 +406,43 @@ def test_pool_absent_quote_is_paraphrase_and_skips_only_verbatim_floor(tmp_path)
     assert ev["dialogue_signal"] == 0.0
 
 
+def test_quote_locator_exception_is_indeterminate_never_paraphrase(tmp_path, monkeypatch):
+    quote = "I did warn you not to trust me."
+    proj, seg, _sel = _fixture(
+        tmp_path, text="The betrayal lands.", quote=quote, signals={"dialogue": 0.0})
+    _write_rev8_words(proj, "s1", [
+        [0.1, 0.2, "unrelated"], [0.2, 0.3, "selected"], [0.3, 0.4, "audio"],
+    ])
+
+    def locator_crashed(*_args, **_kwargs):
+        raise RuntimeError("synthetic locator failure")
+
+    monkeypatch.setattr(R, "_prompted_quote_candidate_spans", locator_crashed)
+    contract = R._quote_pool_branches(proj, [seg])[0]
+    audit = R.evaluate_selection_relevance(proj, [seg])
+
+    assert contract["branch"] == "indeterminate"
+    assert contract["branch_reason"] == "quote_locator_error"
+    assert contract["verbatim_required"] is True
+    assert contract["quote_locator_error_count"] == 2  # clean-general + retrieval sidecar
+    assert {row["retrieval_stream"] for row in contract["quote_locator_errors"]} == {
+        "general_names_only_asr", "authored_prompt_retrieval_chunk_0",
+    }
+    assert all(row["reason"] == "quote_locator_error:RuntimeError"
+               for row in contract["quote_locator_errors"])
+    assert audit["quote_branch_counts"] == {
+        "verbatim": 0, "paraphrase": 0, "indeterminate": 1}
+    assert "exact_quote_pool_classification_indeterminate" in \
+        audit["blockers"][0]["reasons"]
+
+
 def test_quote_found_elsewhere_in_eligible_pool_retains_verbatim_floor(tmp_path):
     quote = "I did warn you not to trust me."
     proj, seg, _sel = _fixture(
         tmp_path, text="The betrayal lands.", quote=quote, signals={"dialogue": 0.0})
-    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+    _write_rev8_words(proj, "s1", [
         [0.1, 0.2, "unrelated"], [0.2, 0.3, "selected"], [0.3, 0.4, "audio"],
-    ]))
+    ])
     words = [[2.0 + i * .1, 2.1 + i * .1, w]
              for i, w in enumerate("I did warn you not to trust me".split())]
     _add_indexed_source(
@@ -361,9 +476,9 @@ def test_commentary_pool_hit_does_not_turn_a_paraphrase_into_verbatim(tmp_path):
     proj, seg, _sel = _fixture(
         tmp_path, text="That name is Tyrion Lannister.", quote=quote,
         signals={"dialogue": 0.0})
-    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+    _write_rev8_words(proj, "s1", [
         [0.1, 0.2, "unrelated"], [0.2, 0.3, "selected"], [0.3, 0.4, "audio"],
-    ]))
+    ])
     words = [[2.0 + i * .1, 2.1 + i * .1, w]
              for i, w in enumerate("It belongs to Tyrion Lannister".split())]
     rich = ["the narrator keeps explaining this story every single second"] * 8
@@ -387,7 +502,7 @@ def test_pool_quote_scan_rejects_one_name_function_word_false_match(tmp_path):
     # evidence must still keep this paraphrase from becoming a verbatim promise.
     words = [[i * .1, (i + 1) * .1, w] for i, w in enumerate(
         "Lord Edward Stark is here in named Protector of the Realm".split())]
-    (proj.index_dir / "s1.words.json").write_text(json.dumps(words))
+    _write_rev8_words(proj, "s1", words)
     assert R._quote_pool_branches(proj, [seg])[0]["branch"] == "paraphrase"
 
 
@@ -409,7 +524,7 @@ def test_short_common_quote_fuzzy_overlap_cannot_create_verbatim_contract(
     proj, seg, _sel = _fixture(
         tmp_path, text="The writer paraphrases the recognition.", quote=quote,
         signals={"dialogue": 0.0})
-    (proj.index_dir / "s1.words.json").write_text(json.dumps(words))
+    _write_rev8_words(proj, "s1", words)
 
     contract = R._quote_pool_branches(proj, [seg])[0]
     assert IX.find_quote_span(words, quote, min_ratio=R.QUOTE_DIALOGUE_FLOOR) is not None
@@ -420,7 +535,8 @@ def test_short_common_quote_fuzzy_overlap_cannot_create_verbatim_contract(
     assert contract["branch_reason"] == (
         "short_common_quote_fuzzy_only_no_exact_contiguous_timed_asr_match")
     assert contract["pool_match"] is None
-    assert contract["rejected_fuzzy_pool_match_count"] == 1
+    # The same false overlap is observed independently in clean-general and retrieval streams.
+    assert contract["rejected_fuzzy_pool_match_count"] == 2
     assert contract["rejected_fuzzy_pool_match"]["rejected_reason"] == (
         "short_common_quote_requires_exact_contiguous_match")
     audit = R.evaluate_selection_relevance(proj, [seg])
@@ -438,16 +554,17 @@ def test_genuine_exact_short_quote_retains_verbatim_floor_and_exact_audit(
     proj, seg, _sel = _fixture(
         tmp_path, text="Shae speaks the real short line.", quote=quote,
         signals={"dialogue": 0.0})
-    (proj.index_dir / "s1.words.json").write_text(json.dumps(words))
+    _write_rev8_words(proj, "s1", words)
 
     audit = R.evaluate_selection_relevance(proj, [seg])
     entry = audit["blockers"][0]
     evidence = entry["quote_evidence"]
     assert evidence["branch"] == "verbatim"
     assert evidence["branch_reason"] == (
-        "short_common_quote_exact_contiguous_timed_asr_match")
+        "short_common_quote_exact_contiguous_timed_asr_unprompted_confirmed")
     assert evidence["verbatim_required"] is True
-    assert evidence["pool_match"]["match_method"] == "exact_contiguous_timed_asr"
+    assert evidence["pool_match"]["match_method"] == (
+        "exact_contiguous_timed_asr+unprompted_confirmation")
     assert evidence["pool_match"]["timed_asr_ratio"] == 1.0
     assert evidence["rejected_fuzzy_pool_match_count"] == 0
     assert "exact_quote_dialogue_signal_below_floor" in entry["reasons"]
@@ -461,7 +578,7 @@ def test_short_quote_selected_window_cannot_reuse_fuzzy_overlap(tmp_path):
     # The selected source has only the measured fuzzy/non-contiguous false positive.
     selected_words = [[0.2, 0.3, "you"], [0.4, 0.5, "your"],
                       [0.5, 0.7, "brother"]]
-    (proj.index_dir / "s1.words.json").write_text(json.dumps(selected_words))
+    _write_rev8_words(proj, "s1", selected_words)
     exact_words = [[2.0, 2.2, "It's"], [2.2, 2.4, "you"]]
     _add_indexed_source(
         proj, tmp_path, "s2", title="Game of Thrones exact dialogue", words=exact_words)
@@ -473,7 +590,7 @@ def test_short_quote_selected_window_cannot_reuse_fuzzy_overlap(tmp_path):
         proj, sel, seg, quote_contract=contract)
     assert ok is False
     assert reason == "exact_quote_timed_asr_span_absent"
-    assert detail["quote_location_method"] == "exact_contiguous_timed_asr"
+    assert detail["quote_location_method"] == "exact_contiguous_timed_asr_candidates"
 
 
 def test_pool_scan_types_hotword_repaired_real_quote_without_lowering_floor(tmp_path):
@@ -483,7 +600,7 @@ def test_pool_scan_types_hotword_repaired_real_quote_without_lowering_floor(tmp_
         signals={"dialogue": 0.77})
     words = [[i * .1, (i + 1) * .1, w] for i, w in enumerate(
         "Tell Cersei I wanted to know he was me".split())]
-    (proj.index_dir / "s1.words.json").write_text(json.dumps(words))
+    _write_rev8_words(proj, "s1", words)
 
     entry = R.evaluate_selection_relevance(proj, [seg])["blockers"][0]
     ev = entry["quote_evidence"]
@@ -506,9 +623,9 @@ def test_stale_or_missing_pool_asr_provenance_is_indeterminate(
         tmp_path, text="Baelish explains his philosophy.", quote=quote,
         signals={"dialogue": 1.0})
     words = "Chaos isn't a pit Chaos is a ladder".split()
-    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+    _write_rev8_words(proj, "s1", [
         [0.1 + i * .1, 0.2 + i * .1, word] for i, word in enumerate(words)
-    ]))
+    ])
     meta_path = proj.index_dir / "s1.index.meta.json"
     if metadata is None:
         meta_path.unlink()
@@ -539,9 +656,9 @@ def test_project_asr_identity_change_invalidates_previously_current_pool_cache(t
         tmp_path, text="Olenna confesses before dying.", quote=quote,
         signals={"dialogue": 1.0})
     words = "Tell Cersei I want her to know it was me".split()
-    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+    _write_rev8_words(proj, "s1", [
         [0.1 + i * .1, 0.2 + i * .1, word] for i, word in enumerate(words)
-    ]))
+    ])
     old_fingerprint = json.loads(
         (proj.index_dir / "s1.index.meta.json").read_text())["asr_prompt_fingerprint"]
     proj.meta["analysis"]["characters"] = [{"name": "Cersei Lannister"}]
@@ -579,9 +696,9 @@ def test_missing_corrupt_or_empty_shots_make_quote_typing_indeterminate(
         tmp_path, text="Baelish explains his philosophy.", quote=quote,
         signals={"dialogue": 1.0})
     words = "Chaos isn't a pit Chaos is a ladder".split()
-    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+    _write_rev8_words(proj, "s1", [
         [0.1 + i * .1, 0.2 + i * .1, word] for i, word in enumerate(words)
-    ]))
+    ])
     shots_path = proj.shots_path("s1")
     if shots_payload is None:
         shots_path.unlink()
@@ -606,10 +723,10 @@ def test_title_rejected_commentary_needs_no_shot_cache_to_be_excluded(tmp_path):
         text="Baelish explains his philosophy.", quote=quote,
         signals={"dialogue": 1.0})
     proj.shots_path("s1").unlink()
-    (proj.index_dir / "s1.words.json").write_text(json.dumps([
+    _write_rev8_words(proj, "s1", [
         [0.1 + i * .1, 0.2 + i * .1, word]
         for i, word in enumerate("Chaos isn't a pit Chaos is a ladder".split())
-    ]))
+    ])
     _add_indexed_source(
         proj, tmp_path, "clean", title="Game of Thrones scene",
         words=[[0.0, 0.2, "unrelated"]])
@@ -629,7 +746,7 @@ def test_verbatim_pool_hit_cannot_let_stale_selected_asr_pass(tmp_path):
         signals={"dialogue": 1.0})
     matching = [[0.1 + i * .1, 0.2 + i * .1, word]
                 for i, word in enumerate("I did warn you not to trust me".split())]
-    (proj.index_dir / "s1.words.json").write_text(json.dumps(matching))
+    _write_rev8_words(proj, "s1", matching)
     stale = json.loads((proj.index_dir / "s1.index.meta.json").read_text())
     stale["asr_prompt_fingerprint"] = "stale-selected-source"
     (proj.index_dir / "s1.index.meta.json").write_text(json.dumps(stale))
@@ -968,7 +1085,7 @@ def test_audit_is_atomic_and_block_is_nonretryable(tmp_path):
     result = R.assert_selection_relevance(good, [gseg], dest)
     assert result["status"] == "pass"
     assert json.loads(dest.read_text())["status"] == "pass"
-    assert not dest.with_suffix(".json.tmp").exists()
+    assert not list(dest.parent.glob(f"{dest.name}*.tmp"))
 
     bad, bseg, _ = _fixture(
         tmp_path / "bad", verifier={**GOOD, "specific_enough": False})
@@ -978,7 +1095,28 @@ def test_audit_is_atomic_and_block_is_nonretryable(tmp_path):
     assert exc.value.kind == "selection_relevance"
     persisted = json.loads(bdest.read_text())
     assert persisted["status"] == "blocked" and persisted["blocked_count"] == 1
-    assert not bdest.with_suffix(".json.tmp").exists()
+    assert not list(bdest.parent.glob(f"{bdest.name}*.tmp"))
+
+
+def test_concurrent_audit_writers_own_distinct_atomic_temp_files(tmp_path, monkeypatch):
+    dest = tmp_path / R.AUDIT_FILENAME
+    barrier = threading.Barrier(2)
+    original_write_text = R.Path.write_text
+
+    def synchronized_write(path, *args, **kwargs):
+        result = original_write_text(path, *args, **kwargs)
+        if path.name.startswith(dest.name) and path.name.endswith(".tmp"):
+            barrier.wait(timeout=5.0)
+        return result
+
+    monkeypatch.setattr(R.Path, "write_text", synchronized_write)
+    audits = [{"writer": "first"}, {"writer": "second"}]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        paths = list(pool.map(lambda audit: R.write_selection_relevance_audit(dest, audit), audits))
+
+    assert paths == [dest, dest]
+    assert json.loads(dest.read_text()) in audits
+    assert not list(dest.parent.glob(f"{dest.name}*.tmp"))
 
 
 def test_build_wires_contract_before_caption_narration_or_breakouts():

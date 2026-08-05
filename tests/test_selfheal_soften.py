@@ -142,6 +142,35 @@ def _valid_keep(**patch):
     return verdict
 
 
+def _bind_current_quote_retrieval_review(proj, seg, words, *, cfg=None):
+    """Make a quoted fixture satisfy the separate retrieval-generation precondition."""
+    active_cfg = cfg or load_clip_config()
+    assert IX._save_quote_retrieval_words(proj, proj.sources[0], active_cfg, words)
+    proj.meta["selection_relevance_gap_review"] = S.make_selection_relevance_gap_review(
+        proj, [seg], [seg.index], method="actual_frame_and_pool_audit", cfg=active_cfg)
+
+
+def _patch_confirmed_quote(monkeypatch, proj, seg, *, cfg=None):
+    from vidlore.clipstudio import relevance_contract as R
+
+    decoder = R._quote_confirmation_decoder_fingerprint(cfg or load_clip_config())
+    key = hashlib.sha256(f"{seg.index}\x1f{seg.quote}".encode()).hexdigest()
+
+    def confirmed(_proj, _src, _quote, prompted_span, _cfg, **_kwargs):
+        return {
+            "schema_version": R.QUOTE_CONFIRMATION_SCHEMA,
+            "algorithm": R.QUOTE_CONFIRMATION_ALGORITHM,
+            "status": "confirmed", "artifact_key": key,
+            "decoder_fingerprint": decoder,
+            "prompted_span": list(prompted_span),
+            "confirmed_span": list(prompted_span),
+            "timed_asr_ratio": float(prompted_span[2]),
+            "match_method": "fuzzy_phrase_timed_asr+unprompted_confirmation",
+        }
+
+    monkeypatch.setattr(R, "_confirm_prompted_quote_span_unprompted", confirmed)
+
+
 def test_an_unreachable_exact_beat_is_softened_to_the_right_subject():
     seg = Seg()
     assert P.policy_of(seg) == P.EXACT
@@ -919,6 +948,7 @@ def test_phase1_uses_active_custom_asr_cfg_for_quote_typing(monkeypatch, tmp_pat
     proj, seg, _sel = _phase1_evidence_fixture(
         tmp_path, quote="The essayist paraphrases this moment.", words=words,
         cfg=custom_cfg)
+    _bind_current_quote_retrieval_review(proj, seg, words, cfg=custom_cfg)
     assert IX.asr_semantic_fingerprint(proj, custom_cfg) != \
         IX.asr_semantic_fingerprint(
             proj, ClipConfig(whisper_model="base", whisper_compute="int8"))
@@ -981,7 +1011,7 @@ def _bind_completed_exhaustion(proj, seg, *, source="actual-frame-pool-audit.jso
 def _bind_native_hd_gap_exhaustion(monkeypatch, proj, seg, *,
                                    source="native-hd-gap-audit.json",
                                    dimensions=(640, 360)):
-    """Bind the schema-3 shape used when exact quote footage exists only in native SD."""
+    """Bind the schema-4 shape used when exact quote footage exists only in native SD."""
     from vidlore.clipstudio import quality_contract as Q
     from vidlore.clipstudio import relevance_contract as R
 
@@ -991,6 +1021,31 @@ def _bind_native_hd_gap_exhaustion(monkeypatch, proj, seg, *,
     proj.meta["auto_rejected_reasons"] = {src.id: "sub_native_hd"}
     current_dimensions = {"width": dimensions[0], "height": dimensions[1]}
     monkeypatch.setattr(Q, "probe_native_video_info", lambda _path: dict(current_dimensions))
+
+    # Fixture media are intentionally tiny byte sentinels, not decodable videos.  Supply the
+    # independent confirmation result this test is about and retain the patch for every runtime
+    # revalidation performed after the evidence artifact is bound.
+    confirmation_key = hashlib.sha256(
+        f"{src.id}\x1f{seg.quote}".encode("utf-8")).hexdigest()
+    confirmation_decoder = R._quote_confirmation_decoder_fingerprint(load_clip_config())
+
+    def confirmed(_proj, _src, _quote, prompted_span, _cfg, **_kwargs):
+        return {
+            "schema_version": R.QUOTE_CONFIRMATION_SCHEMA,
+            "algorithm": R.QUOTE_CONFIRMATION_ALGORITHM,
+            "status": "confirmed",
+            "artifact_key": confirmation_key,
+            "decoder_fingerprint": confirmation_decoder,
+            "prompted_span": list(prompted_span),
+            "confirmed_span": list(prompted_span),
+            "timed_asr_ratio": float(prompted_span[2]),
+            "match_method": "exact_contiguous_timed_asr+unprompted_confirmation",
+        }
+
+    monkeypatch.setattr(R, "_confirm_prompted_quote_span_unprompted", confirmed)
+    general_words = IX.load_words(proj, src.id)
+    assert IX._save_quote_retrieval_words(
+        proj, src, load_clip_config(), general_words)
     contract = R._quote_pool_branches(proj, [seg])[seg.index]
     assert contract["branch"] == "verbatim"
     matches = list(contract.get("pool_matches") or [contract["pool_match"]])
@@ -1020,6 +1075,10 @@ def _bind_native_hd_gap_exhaustion(monkeypatch, proj, seg, *,
             "actual_frame_target_verified": True,
             "timed_asr_span": match["timed_asr_span"],
             "timed_asr_ratio": match["timed_asr_ratio"],
+            "quote_confirmation_artifact_key":
+                match["unprompted_confirmation"]["artifact_key"],
+            "quote_confirmation_decoder_fingerprint":
+                match["unprompted_confirmation"]["decoder_fingerprint"],
         }],
     }
     evidence.write_text(json.dumps({
@@ -1407,10 +1466,10 @@ def test_completed_exhaustion_cannot_soften_a_verbatim_quote(tmp_path):
 
     ok, why = S._phase1_reviewed_exhaustion_authorization(proj, seg)
 
-    assert ok is False and why == "phase1_verbatim_quote_promise"
+    assert ok is False and why == "gap_review_quote_retrieval_binding_missing_or_incomplete"
 
 
-def test_schema3_native_hd_gap_can_surrender_only_its_bound_verbatim_quote(
+def test_schema4_native_hd_gap_can_surrender_only_its_bound_verbatim_quote(
         monkeypatch, tmp_path):
     from vidlore.clipstudio import relevance_contract as R
 
@@ -1464,6 +1523,80 @@ def test_schema3_native_hd_gap_can_surrender_only_its_bound_verbatim_quote(
         hashlib.sha256(evidence.read_bytes()).hexdigest()
 
 
+def test_legacy_schema3_native_gap_evidence_is_not_reinterpreted_after_confirmation(
+        monkeypatch, tmp_path):
+    quote = "Kill his men."
+    words = [[0.1 + i * .2, 0.2 + i * .2, word]
+             for i, word in enumerate("Kill his men".split())]
+    proj, seg, _sel = _phase1_evidence_fixture(
+        tmp_path, index=48, quote=quote, words=words)
+    evidence, _dimensions = _bind_native_hd_gap_exhaustion(monkeypatch, proj, seg)
+    artifact = json.loads(evidence.read_text())
+    artifact["schema_version"] = 3
+    evidence.write_text(json.dumps(artifact, sort_keys=True))
+
+    validated, reason = S._strict_acquisition_evidence(
+        proj, [seg], [seg.index], source=str(evidence))
+
+    assert validated is None
+    assert reason == "strict_acquisition_evidence_schema_not_2_or_4"
+
+
+def test_native_gap_quote_surrender_invalidates_when_confirmation_artifact_changes(
+        monkeypatch, tmp_path):
+    from vidlore.clipstudio import relevance_contract as R
+
+    quote = "Kill his men."
+    words = [[0.1 + i * .2, 0.2 + i * .2, word]
+             for i, word in enumerate("Kill his men".split())]
+    proj, seg, _sel = _phase1_evidence_fixture(
+        tmp_path, index=48, quote=quote, words=words)
+    _evidence, _dimensions = _bind_native_hd_gap_exhaustion(monkeypatch, proj, seg)
+    old_confirmation = R._confirm_prompted_quote_span_unprompted
+
+    def changed_confirmation(*args, **kwargs):
+        result = dict(old_confirmation(*args, **kwargs))
+        result["artifact_key"] = "b" * 64
+        return result
+
+    monkeypatch.setattr(R, "_confirm_prompted_quote_span_unprompted", changed_confirmation)
+    details, reason = S._phase1_reviewed_exhaustion_details(proj, seg)
+
+    assert details is None
+    assert reason == "strict_acquisition_native_gap_quote_confirmation_artifact_changed"
+
+
+@pytest.mark.parametrize(("field", "reason"), [
+    ("retrieval_truncated_stream_count",
+     "strict_acquisition_native_gap_retrieval_scan_truncated"),
+    ("unprompted_confirmation_inconclusive_count",
+     "strict_acquisition_native_gap_confirmation_inconclusive"),
+])
+def test_native_gap_quote_surrender_requires_every_candidate_stream_conclusive(
+        monkeypatch, tmp_path, field, reason):
+    """One confirmed SD hit cannot hide a possible unscanned or unjudged HD occurrence."""
+    from vidlore.clipstudio import relevance_contract as R
+
+    quote = "Kill his men."
+    words = [[0.1 + i * .2, 0.2 + i * .2, word]
+             for i, word in enumerate("Kill his men".split())]
+    proj, seg, _sel = _phase1_evidence_fixture(
+        tmp_path, index=48, quote=quote, words=words)
+    _bind_native_hd_gap_exhaustion(monkeypatch, proj, seg)
+    complete_branches = R._quote_pool_branches
+
+    def incomplete_branches(*args, **kwargs):
+        branches = complete_branches(*args, **kwargs)
+        branches[seg.index][field] = 1
+        return branches
+
+    monkeypatch.setattr(R, "_quote_pool_branches", incomplete_branches)
+    details, denial = S._phase1_reviewed_exhaustion_details(proj, seg)
+
+    assert details is None
+    assert denial == reason
+
+
 @pytest.mark.parametrize("stale_kind", ["evidence_hash", "source_became_hd"])
 def test_active_native_gap_softening_restores_quote_when_objective_proof_stales(
         monkeypatch, tmp_path, stale_kind):
@@ -1513,7 +1646,7 @@ def test_active_native_gap_softening_restores_quote_when_objective_proof_stales(
     assert post["status"] == "blocked" and post["blocked_count"] == 1
 
 
-def test_one_schema3_artifact_binds_total_absence_and_native_hd_absence_together(
+def test_one_schema4_artifact_binds_total_absence_and_native_hd_absence_together(
         monkeypatch, tmp_path):
     quote = "Kill his men."
     words = [[0.1 + i * .2, 0.2 + i * .2, word]
@@ -1563,7 +1696,7 @@ def test_one_schema3_artifact_binds_total_absence_and_native_hd_absence_together
     "changed", ["hd", "unprobeable", "reject_reason", "reject_membership"],
     ids=["became-hd", "probe-failed", "wrong-reject-reason", "not-currently-rejected"],
 )
-def test_schema3_native_gap_fails_closed_when_objective_sd_proof_changes(
+def test_schema4_native_gap_fails_closed_when_objective_sd_proof_changes(
         monkeypatch, tmp_path, changed):
     from vidlore.clipstudio import quality_contract as Q
 
@@ -1593,7 +1726,7 @@ def test_schema3_native_gap_fails_closed_when_objective_sd_proof_changes(
     }[changed] in why
 
 
-def test_schema3_native_gap_denies_quote_surrender_when_an_hd_source_has_unknown_asr(
+def test_schema4_native_gap_denies_quote_surrender_when_an_hd_source_has_unknown_asr(
         monkeypatch, tmp_path):
     quote = "Kill his men."
     words = [[0.1 + i * .2, 0.2 + i * .2, word]
@@ -1621,7 +1754,7 @@ def test_schema3_native_gap_denies_quote_surrender_when_an_hd_source_has_unknown
     assert proj.meta.get("selection_relevance_gap_review") == prior_review
 
 
-def test_character_softening_preserves_quote_without_schema3_authorization():
+def test_character_softening_preserves_quote_without_schema4_authorization():
     quote = "Kill his men."
     ordinary = Seg(quote=quote, required_kind="character", required_entity="Jaime Lannister")
     assert S._soften_to_character(ordinary, lambda _m: None) is True
@@ -1775,12 +1908,14 @@ def test_phase1_bound_review_cannot_soften_a_verbatim_quote(monkeypatch, tmp_pat
     ]
     proj, seg, _sel = _phase1_evidence_fixture(
         tmp_path, quote=quote, words=words)
+    _patch_confirmed_quote(monkeypatch, proj, seg)
+    _bind_current_quote_retrieval_review(proj, seg, words)
 
     resolved, called, lines = _run_phase1_authorization(monkeypatch, proj, seg)
 
     assert resolved == 0 and called == []
     assert P.policy_of(seg) == P.EXACT
-    assert any("phase1_verbatim_quote_promise" in line for line in lines)
+    assert any("current_quote_branch_not_conclusive_paraphrase" in line for line in lines)
 
 
 def test_phase1_bound_review_cannot_soften_an_indeterminate_quote(monkeypatch, tmp_path):
@@ -1792,7 +1927,8 @@ def test_phase1_bound_review_cannot_soften_an_indeterminate_quote(monkeypatch, t
 
     assert resolved == 0 and called == []
     assert P.policy_of(seg) == P.EXACT
-    assert any("phase1_quote_pool_classification_indeterminate" in line for line in lines)
+    assert any("gap_review_quote_retrieval_binding_missing_or_incomplete" in line
+               for line in lines)
 
 
 def test_phase1_bound_review_cannot_soften_a_technical_verifier_fault(monkeypatch, tmp_path):
@@ -1824,6 +1960,8 @@ def test_phase1_bound_paraphrase_with_pure_content_negative_can_still_soften(
     proj, seg, _sel = _phase1_evidence_fixture(
         tmp_path, quote="The essayist's paraphrase is not spoken dialogue.",
         words=[[0.1, 0.2, "completely"], [0.3, 0.4, "unrelated"]])
+    _bind_current_quote_retrieval_review(
+        proj, seg, [[0.1, 0.2, "completely"], [0.3, 0.4, "unrelated"]])
 
     resolved, called, lines = _run_phase1_authorization(monkeypatch, proj, seg)
 
@@ -1834,6 +1972,132 @@ def test_phase1_bound_paraphrase_with_pure_content_negative_can_still_soften(
     assert restored["restored"] == [] and restored["unchanged"] == [seg.index]
     assert P.policy_of(seg) == P.ABSTRACT and seg.quote == ""
     assert not any("specificity softening DENIED" in line for line in lines)
+
+
+def test_gap_review_paraphrase_binding_includes_confirmation_generation(
+        monkeypatch, tmp_path):
+    from vidlore.clipstudio import relevance_contract as R
+
+    words = [[0.1, 0.2, "completely"], [0.3, 0.4, "unrelated"]]
+    proj, seg, _sel = _phase1_evidence_fixture(
+        tmp_path, quote="The essayist's paraphrase is not spoken dialogue.", words=words)
+    _bind_current_quote_retrieval_review(proj, seg, words)
+    stored = proj.meta["selection_relevance_gap_review"]["quote_branch_bindings"][
+        str(seg.index)]
+    assert len(stored["confirmation_generation_fingerprint"]) == 64
+    current_branches = R._quote_pool_branches
+
+    def changed_confirmation_generation(*args, **kwargs):
+        branches = current_branches(*args, **kwargs)
+        branches[seg.index]["confirmation_decoder_fingerprint_expected"] = "b" * 64
+        return branches
+
+    monkeypatch.setattr(R, "_quote_pool_branches", changed_confirmation_generation)
+    ok, reason = S._phase1_softening_authorization(proj, seg)
+
+    assert ok is False
+    assert reason == "stale_gap_review_quote_confirmation_generation"
+
+
+@pytest.mark.parametrize(
+    "changed", ["artifact", "result", "result_hash", "becomes_verbatim"])
+def test_active_paraphrase_softening_restores_when_confirmation_binding_changes(
+        monkeypatch, tmp_path, changed):
+    """Sidecars alone cannot keep an old paraphrase decision alive after confirmation changes."""
+    from vidlore.clipstudio import relevance_contract as R
+
+    quote = "Chaos isn't a pit. Chaos is a ladder."
+    words = [[0.1 + i * .1, 0.2 + i * .1, word]
+             for i, word in enumerate("Chaos isn't a pit Chaos is a ladder".split())]
+    proj, seg, _sel = _phase1_evidence_fixture(
+        tmp_path, quote=quote, words=words)
+    decoder = R._quote_confirmation_decoder_fingerprint(load_clip_config())
+    state = {
+        "status": "rejected", "reason": "unprompted_phrase_not_found_near_hint",
+        "artifact_key": "a" * 64,
+        "result_content_sha256": "c" * 64,
+    }
+
+    def confirmation(_proj, _src, _quote, prompted_span, _cfg, **_kwargs):
+        result = {
+            "schema_version": R.QUOTE_CONFIRMATION_SCHEMA,
+            "algorithm": R.QUOTE_CONFIRMATION_ALGORITHM,
+            "status": state["status"],
+            "reason": state["reason"],
+            "artifact_key": state["artifact_key"],
+            "result_content_sha256": state["result_content_sha256"],
+            "decoder_fingerprint": decoder,
+            "prompted_span": list(prompted_span),
+            "match_method": "exact_contiguous_timed_asr+unprompted_confirmation",
+        }
+        if state["status"] == "confirmed":
+            result["confirmed_span"] = list(prompted_span)
+            result["timed_asr_ratio"] = float(prompted_span[2])
+        return result
+
+    monkeypatch.setattr(R, "_confirm_prompted_quote_span_unprompted", confirmation)
+    _bind_current_quote_retrieval_review(proj, seg, words)
+    sidecar = proj.index_dir / "show.quote_retrieval.json"
+    sidecar_before = hashlib.sha256(sidecar.read_bytes()).hexdigest()
+    resolved, called, _lines = _run_phase1_authorization(monkeypatch, proj, seg)
+    assert resolved == 1 and called == [seg.index] and seg.quote == ""
+    row = next(row for row in proj.meta["selection_relevance_gap_softening"]["beats"]
+               if row["segment_index"] == seg.index)
+    assert row["quote_branch_binding"]["branch"] == "paraphrase"
+    assert row["quote_branch_binding"]["confirmation_artifact_keys"] == ["a" * 64]
+
+    if changed == "artifact":
+        state["artifact_key"] = "b" * 64
+    elif changed == "result":
+        state["reason"] = "same_branch_but_new_independent_result"
+    elif changed == "result_hash":
+        # The semantic status/span can stay identical while the persisted decoder bytes change.
+        # Active softening must bind the independently validated result content, not merely the
+        # input/cache key, or stale evidence could survive an artifact rewrite.
+        state["result_content_sha256"] = "d" * 64
+    else:
+        state.update(status="confirmed", reason="")
+
+    restored = S.restore_stale_selection_relevance_softenings(proj, [seg])
+
+    assert hashlib.sha256(sidecar.read_bytes()).hexdigest() == sidecar_before
+    assert restored["restored"] == [seg.index]
+    assert seg.visual_policy == P.EXACT and seg.quote == quote
+    row = next(row for row in proj.meta["selection_relevance_gap_softening"]["beats"]
+               if row["segment_index"] == seg.index)
+    expected_reason = ("current_quote_branch_not_paraphrase"
+                       if changed == "becomes_verbatim" else "quote_branch_binding_changed")
+    assert row["restore_reason"] == expected_reason
+
+
+@pytest.mark.parametrize("changed", ["sidecar", "prompt_generation"])
+def test_active_paraphrase_softening_restores_when_quote_retrieval_binding_changes(
+        monkeypatch, tmp_path, changed):
+    words = [[0.1, 0.2, "completely"], [0.3, 0.4, "unrelated"]]
+    proj, seg, _sel = _phase1_evidence_fixture(
+        tmp_path, quote="The essayist's paraphrase is not spoken dialogue.", words=words)
+    _bind_current_quote_retrieval_review(proj, seg, words)
+    resolved, called, _lines = _run_phase1_authorization(monkeypatch, proj, seg)
+    assert resolved == 1 and called == [seg.index] and seg.quote == ""
+
+    if changed == "sidecar":
+        sidecar = proj.index_dir / "show.quote_retrieval.json"
+        sidecar.write_text(sidecar.read_text() + "\n")
+    else:
+        proj.segments.append(ScriptSegment(
+            index=999, text="Another authored beat", quote="A newly authored retrieval hint.",
+            expected_visual="another moment", scene_query="another moment",
+            visual_policy=P.EXACT, is_specific_claim=True))
+
+    restored = S.restore_stale_selection_relevance_softenings(proj, [seg])
+
+    assert restored["restored"] == [seg.index]
+    assert seg.visual_policy == P.EXACT
+    assert seg.quote == "The essayist's paraphrase is not spoken dialogue."
+    row = next(row for row in proj.meta["selection_relevance_gap_softening"]["beats"]
+               if row["segment_index"] == seg.index)
+    assert row["status"] == "restored_evidence_stale"
+    assert "quote_retrieval_" in row["restore_reason"]
 
 
 @pytest.mark.parametrize("relevance_class,downgraded", [

@@ -188,6 +188,7 @@ def _breakout_fixture(*, quote, asr, seg0_text, llm_reply=None, face_ids=(),
                       work_dir=None, probed_width=1920, probed_height=1080):
     from vidlore.clipstudio import build as B
     from vidlore.clipstudio import llm as L
+    from vidlore.clipstudio import relevance_contract as R
     import vidlore.clipstudio.index as _idxmod
 
     Path("/tmp/x.mp4").write_bytes(b"x")
@@ -218,7 +219,8 @@ def _breakout_fixture(*, quote, asr, seg0_text, llm_reply=None, face_ids=(),
 
     _orig_ls = _idxmod.load_shots
     _orig = (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
-             B._asr_wav_words, B._probe_breakout_native_dimensions, L.complete)
+             B._asr_wav_words, B._probe_breakout_native_dimensions, L.complete,
+             R._confirm_prompted_quote_span_unprompted)
     _idxmod.load_shots = lambda p, sid: shots
     # The fixture's /tmp/x.mp4 is intentionally a one-byte stand-in. Breakout admission now probes
     # the actual source bytes and fails unknown dimensions closed, so give every pre-existing gate
@@ -231,6 +233,23 @@ def _breakout_fixture(*, quote, asr, seg0_text, llm_reply=None, face_ids=(),
     _airtx = aired if aired is not None else asr
     B._asr_wav_words = lambda p: (_airtx.split(), _airtx, 5.0)
     L.complete = _fake_complete
+
+    def _confirmed_quote(_proj, _src, _quote, prompted_span, cfg, **_kwargs):
+        return {
+            "schema_version": R.QUOTE_CONFIRMATION_SCHEMA,
+            "algorithm": R.QUOTE_CONFIRMATION_ALGORITHM,
+            "status": "confirmed",
+            "artifact_key": "a" * 64,
+            "decoder_fingerprint": R._quote_confirmation_decoder_fingerprint(cfg),
+            "prompted_span": list(prompted_span),
+            "confirmed_span": list(prompted_span),
+            "timed_asr_ratio": float(prompted_span[2]),
+            "match_method": "fuzzy_phrase_timed_asr+unprompted_confirmation",
+        }
+
+    # The fixture's one-byte media cannot be decoded. Keep the new acoustic proof explicit so each
+    # test still isolates its intended gate (correction, luma, native HD, or era).
+    R._confirm_prompted_quote_span_unprompted = _confirmed_quote
     logs = []
     # These fixtures isolate ONE gate each (luma / era / quote-correction). The semantic
     # dialogue-vs-narration check is a separate LLM gate with its own dedicated test
@@ -246,7 +265,8 @@ def _breakout_fixture(*, quote, asr, seg0_text, llm_reply=None, face_ids=(),
     finally:
         _idxmod.load_shots = _orig_ls
         (B._extract_breakout, B._breakout_window_luma, B._frame_has_burned_text,
-         B._asr_wav_words, B._probe_breakout_native_dimensions, L.complete) = _orig
+         B._asr_wav_words, B._probe_breakout_native_dimensions, L.complete,
+         R._confirm_prompted_quote_span_unprompted) = _orig
         for k, v in saved.items():
             (os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v))
     return out, "\n".join(logs), llm_calls
