@@ -7,7 +7,10 @@ make the tail independently observable and are shared by both callers.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import os
 import re
 import subprocess
 import tempfile
@@ -75,10 +78,83 @@ def _dedupe_overlaps(words: list[tuple[str, float, float, float]]) -> list[tuple
     return clean
 
 
+# CONTENT-ADDRESSED TRANSCRIPT CACHE
+#
+# This function is the expensive half of breakout selection: every candidate window is decoded into
+# 3-5 overlapping chunks and each chunk is put through Whisper. A breakout pass over ~25 quotes
+# across ~41 sources therefore re-transcribes the same audio many times over — the same source
+# window is reached again by a different quote, by the next build pass after self-heal, and by every
+# resume — and the stage was measured taking hours, which is why breakouts were switched off for an
+# emergency render. Nothing about that work is a judgement; it is the same bytes producing the same
+# words.
+#
+# The cache is keyed on the AUDIO'S OWN BYTES, never on a path or an mtime: a wav rewritten in place
+# with different content gets a different key, and a cached entry whose stored digest no longer
+# matches the file is discarded rather than trusted. The key also carries the ASR model identity,
+# the windowing parameters and a schema version, because any of those changes the words. Written
+# atomically via a temp file and os.replace, so an interrupted run leaves either the old entry or
+# the new one and never a half-written transcript.
+#
+# This is a pure memo of a deterministic computation. It cannot approve anything: every gate that
+# consumed a fresh transcript consumes the cached one identically.
+_ASR_CACHE_SCHEMA = 3
+# hit/miss counters for the audit trail — reset by callers that want a per-stage figure
+_ASR_CACHE_STATS = {"hit": 0, "miss": 0}
+
+
+def _wav_digest(wav: Path) -> str:
+    h = hashlib.sha256()
+    with open(wav, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _asr_cache_key(digest: str, model, window: float, overlap: float) -> dict:
+    """Every input that can change the returned words — and nothing that cannot."""
+    name = getattr(model, "model_size_or_path", None) or getattr(model, "model_path", None) \
+        or type(model).__name__
+    return {"schema": _ASR_CACHE_SCHEMA, "sha256": digest, "model": str(name),
+            "window": round(float(window), 4), "overlap": round(float(overlap), 4)}
+
+
+def _asr_cache_read(path: Path, key: dict):
+    try:
+        blob = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:                                    # noqa: BLE001 — unreadable == absent
+        return None
+    if not isinstance(blob, dict) or blob.get("key") != key:
+        return None                                      # any input changed → recompute
+    words = blob.get("words")
+    if not isinstance(words, list):
+        return None
+    try:
+        return [(str(w[0]), float(w[1]), float(w[2]), float(w[3])) for w in words]
+    except Exception:                                    # noqa: BLE001 — corrupt payload
+        return None
+
+
+def _asr_cache_write(path: Path, key: dict, words: list) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp.write_text(json.dumps({"key": key, "words": [list(w) for w in words]}),
+                       encoding="utf-8")
+        os.replace(tmp, path)                            # atomic: old entry or new, never partial
+    except Exception:                                    # noqa: BLE001 — caching must never fail
+        try:                                            # the transcription it is memoising
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def transcribe_breakout_words(wav_path, *, model=None, duration: float | None = None,
-                              window: float = 3.8, overlap: float = 0.6) \
+                              window: float = 3.8, overlap: float = 0.6,
+                              cache: bool = True) \
         -> list[tuple[str, float, float, float]]:
-    """Transcribe a Breakout in overlapping windows with clip-relative times."""
+    """Transcribe a Breakout in overlapping windows with clip-relative times.
+
+    Memoised on the audio's content digest (see the note above). `cache=False` forces a fresh
+    transcription, which is what the cache's own regression tests use to produce a control."""
     wav = Path(wav_path)
     if model is None:
         from faster_whisper import WhisperModel
@@ -90,6 +166,18 @@ def transcribe_breakout_words(wav_path, *, model=None, duration: float | None = 
         return []
     window = max(1.5, float(window))
     overlap = min(max(0.2, float(overlap)), window * 0.45)
+    _key = _cache_path = None
+    if cache:
+        try:
+            _key = _asr_cache_key(_wav_digest(wav), model, window, overlap)
+            _cache_path = wav.with_suffix(wav.suffix + ".asr.json")
+            _hit = _asr_cache_read(_cache_path, _key)
+            if _hit is not None:
+                _ASR_CACHE_STATS["hit"] += 1
+                return _hit
+            _ASR_CACHE_STATS["miss"] += 1
+        except Exception:                                # noqa: BLE001 — a cache fault must never
+            _key = _cache_path = None                    # cost a transcript; fall through and work
     step = window - overlap
     starts = [0.0]
     while starts[-1] + window < duration - 0.05:
@@ -119,7 +207,10 @@ def transcribe_breakout_words(wav_path, *, model=None, duration: float | None = 
                     observed.append((text, offset + start, min(duration, offset + end), prob))
             except Exception:
                 continue
-    return _dedupe_overlaps(observed)
+    _out = _dedupe_overlaps(observed)
+    if _key is not None and _cache_path is not None:
+        _asr_cache_write(_cache_path, _key, _out)
+    return _out
 
 
 def speech_seconds(words: list[tuple[str, float, float, float]]) -> float:
