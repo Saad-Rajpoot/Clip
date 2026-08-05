@@ -5298,7 +5298,18 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
                 _assert_sr_preflight(
                     proj, segs, proj.output_dir / "selection_relevance_audit.json", cfg=cfg)
             except RuntimeError as _semantic_block:
-                _recover_selection_relevance_or_raise(_semantic_block)
+                try:
+                    _recover_selection_relevance_or_raise(_semantic_block)
+                except RuntimeError as _semantic_final:
+                    _review_mode = _os.environ.get(
+                        "VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE", "block").strip().lower() == "warn"
+                    if (_review_mode
+                            and getattr(_semantic_final, "kind", "") == "selection_relevance"):
+                        log("⚠ semantic preflight (mode=warn, REVIEW BUILD — not for publication) "
+                            f"— {_semantic_final} Continuing only because review mode was explicitly "
+                            "requested; the delivered filename will be marked REVIEW_DRAFT.")
+                    else:
+                        raise
         finally:
             # Recovery may rematch/re-cut even when the strict re-assertion still blocks. Keep the
             # terminal failure's ledger/review aligned with that final persisted state.

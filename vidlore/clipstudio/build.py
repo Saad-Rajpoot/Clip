@@ -7404,8 +7404,20 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # The audit is atomic and the gate never ranks or mutates footage; generic/abstract filler is
     # deliberately outside its strict scope.
     from .relevance_contract import assert_selection_relevance as _assert_selection_relevance
-    _assert_selection_relevance(
-        proj, segments, proj.output_dir / "selection_relevance_audit.json", cfg=cfg)
+    try:
+        _assert_selection_relevance(
+            proj, segments, proj.output_dir / "selection_relevance_audit.json", cfg=cfg)
+    except RuntimeError as _semantic_preflight_error:
+        _review_mode = os.environ.get(
+            "VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE", "block").strip().lower() == "warn"
+        if (_review_mode
+                and getattr(_semantic_preflight_error, "kind", "") == "selection_relevance"):
+            _review_draft.append(f"selection relevance: {_semantic_preflight_error}")
+            log("build: ⚠ SEMANTIC PREFLIGHT (mode=warn, REVIEW BUILD — not for publication) — "
+                f"{_semantic_preflight_error} Continuing only because review mode was explicitly "
+                "requested; the delivered filename will be marked REVIEW_DRAFT.")
+        else:
+            raise
 
     # IMAGE PUBLICATION PREFLIGHT — index keyframes are intentionally 512px CLIP thumbnails. A
     # source-frame still must therefore be materialized from its indexed owner at native pixels

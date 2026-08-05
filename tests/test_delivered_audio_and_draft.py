@@ -113,12 +113,12 @@ class TestTheGateWiring(unittest.TestCase):
 
 class TestReviewDraftsAreMarked(unittest.TestCase):
     def test_every_warn_gate_records_a_reason(self):
-        """Three gates now mark a draft, each seeing something the others cannot: the early
-        footage gate, the authoritative post-assembly gate, and — added 2026-08-02 — a total HD
+        """Four gates now mark a draft, each seeing something the others cannot: semantic
+        relevance, the early footage gate, the authoritative post-assembly gate, and a total HD
         collapse, which no per-beat check can see because every beat is correct and merely 360p
         (measured: a 12-minute render shipped as final with hd_path_ok 0/72)."""
         src = (SRC / "clipstudio" / "build.py").read_text()
-        self.assertEqual(src.count("_review_draft.append("), 3,
+        self.assertEqual(src.count("_review_draft.append("), 4,
                          "each independent warn gate must record its own reason")
         self.assertIn("_review_draft.append(_msg_hd)", src)
 
