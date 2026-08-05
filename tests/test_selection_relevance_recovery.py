@@ -1617,6 +1617,41 @@ def test_preflight_rejects_malformed_current_cursor_before_work_or_rebind(
     rebind.assert_not_called()
 
 
+def test_preflight_retries_well_formed_older_contract_cursor_as_stale(tmp_path):
+    """A contract schema bump invalidates old exhaustion instead of deadlocking Resume."""
+    from vidlore.clipstudio import relevance_contract as R
+
+    bad = {**GOOD, "verdict": "replace", "matches_narration": False,
+           "specific_enough": False, "correct_subject_visible": False}
+    proj, segs, _sel = _fixture(tmp_path, bad)
+    audit = R.evaluate_selection_relevance(proj, segs)
+    _write_persisted_semantic_cursor(
+        proj, segs, audit, deferred=[], completed=[0])
+    proj.meta["selection_relevance_recovery"]["schema_version"] = R.SCHEMA_VERSION - 1
+    proj.save()
+    calls = []
+    rebound = []
+
+    def recover_current_page():
+        calls.append(True)
+        current = R.evaluate_selection_relevance(proj, segs)
+        # Production starts a fresh receipt when the contract schema changes; this helper normally
+        # advances the previous generation, so remove the intentionally stale fixture marker.
+        proj.meta.pop("selection_relevance_recovery", None)
+        _write_persisted_semantic_cursor(
+            proj, segs, current, deferred=[], completed=[0])
+        return current
+
+    result = O._drain_semantic_recovery_pages(
+        proj, segs, recover_current_page, initial_audit=audit,
+        rebind_page=lambda: rebound.append(True), log=lambda _m: None)
+
+    assert result["blocked_count"] == 1
+    assert calls == [True]
+    assert rebound == [True]
+    assert proj.meta["selection_relevance_recovery"]["schema_version"] == R.SCHEMA_VERSION
+
+
 def test_falsey_present_pagination_receipt_is_not_re_adopted_as_legacy(tmp_path):
     """Only an absent receipt means old schema-9; a present partial receipt is corruption."""
     from vidlore.clipstudio import relevance_contract as R

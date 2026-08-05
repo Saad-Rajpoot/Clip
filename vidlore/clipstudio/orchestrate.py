@@ -4250,6 +4250,8 @@ def _advance_semantic_pagination_receipt(previous_marker, marker: dict) -> dict:
 def _semantic_recovery_cursor(proj, segs, audit: dict, *, allow_absent: bool,
                               allow_stale: bool, adopt_legacy: bool) -> dict:
     """Classify and validate a persisted cursor against the exact current semantic facts."""
+    from . import relevance_contract as _R_cursor
+
     if not isinstance(audit, dict):
         raise PipelineError("semantic recovery page returned no current relevance audit")
     all_blockers = list(audit.get("blockers") or [])
@@ -4272,6 +4274,20 @@ def _semantic_recovery_cursor(proj, segs, audit: dict, *, allow_absent: bool,
             return {"status": "absent", "deferred": [], "audit": content_audit}
         raise PipelineError("semantic recovery page did not persist its cursor")
     marker = meta["selection_relevance_recovery"]
+    # A relevance-contract schema bump deliberately invalidates every old exhaustion decision.
+    # During the initial preflight walk, a complete positive older schema is stale state: run a
+    # fresh bounded page and replace it with a current cursor.  Missing/falsey/malformed schemas,
+    # future schemas, and every post-page validation remain hard technical failures; they cannot
+    # reset a finite recovery budget or authorize publication.
+    current_schema = int(_R_cursor.SCHEMA_VERSION)
+    marker_schema = marker.get("schema_version") if isinstance(marker, dict) else None
+    if (allow_stale and isinstance(marker_schema, int)
+            and not isinstance(marker_schema, bool)
+            and 0 < marker_schema < current_schema):
+        structural_marker = dict(marker)
+        structural_marker["schema_version"] = current_schema
+        _semantic_recovery_marker_fields(structural_marker)
+        return {"status": "stale", "deferred": [], "audit": content_audit}
     fields = _semantic_recovery_marker_fields(marker)
     current_pool = _semantic_recovery_pool_fingerprint(proj)
     current_content = _selection_relevance_retry_fingerprint(proj, segs, content_audit)
