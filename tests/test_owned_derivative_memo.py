@@ -140,3 +140,45 @@ def test_a_corrupted_memo_is_detected_and_rebuilt(tmp_path):
     except Exception:
         got = None
     assert got != _key_of()
+
+
+# ------------------------------------------------------------------ the output is an input too
+#
+# MEASURED LATENT DEFECT of this memo's first version. Matching every input and finding a file of
+# the right duration at `dest` does NOT prove the file is the one the memo wrote: the caption-dodge
+# sweep calls `_crop_clip_corner`, which ends in `out.replace(src)` on exactly this path — the
+# derivative is rewritten IN PLACE after the entry is recorded. build.py's own dark-sweep comment
+# already notes this ("_crop_clip_corner rewrites the clip file in place"). The key would still
+# match and the duration would still pass, so the next build pass would be handed a
+# caption-dodge-cropped clip as the plain derivative: a crop applied twice, or applied where none
+# was asked for.
+def test_a_hit_re_derives_the_digest_of_the_file_on_disk():
+    assert '_blob.get("out_sha256") == _sha256_file(dest)' in FIT
+
+
+def test_the_entry_records_what_it_actually_wrote():
+    assert '"out_sha256": _sha256_file(dest)' in FIT
+
+
+def test_the_output_digest_is_checked_before_the_hit_is_taken():
+    i_check = FIT.index('_blob.get("out_sha256")')
+    i_hit = FIT.index('_FIT_MEMO_STATS["hit"]')
+    assert i_check < i_hit
+
+
+def test_the_schema_was_raised_so_old_entries_cannot_be_trusted():
+    """Entries written before the digest existed carry no out_sha256 and must not be honoured."""
+    assert B._FIT_MEMO_SCHEMA >= 2
+
+
+def test_an_entry_without_an_output_digest_is_a_miss():
+    key = {"schema": B._FIT_MEMO_SCHEMA, "clip_sha256": "a", "need": 1.0,
+           "crop": "", "zoom": 1.0, "frame_exact": True}
+    old_entry = {"key": key}                       # what version 1 wrote
+    assert old_entry.get("out_sha256") != "whatever-is-on-disk"
+
+
+def test_identity_is_content_not_path_or_mtime():
+    src = inspect.getsource(B._sha256_file)
+    assert "sha256" in src
+    assert "st_mtime" not in src and "st_size" not in src

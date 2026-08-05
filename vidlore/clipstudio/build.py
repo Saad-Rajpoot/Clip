@@ -3228,7 +3228,17 @@ def _split_clip_sequential(clip: Path, lens: list, out_dir: Path, idx: int,
 
 
 # schema for the owned-derivative memo — bump when this function's output could change
-_FIT_MEMO_SCHEMA = 1
+def _sha256_file(path) -> str:
+    """Content identity of a produced artifact — never its path, size or mtime."""
+    import hashlib as _hl_s
+    _h = _hl_s.sha256()
+    with open(path, "rb") as _fh:
+        for _blk in iter(lambda: _fh.read(1 << 20), b""):
+            _h.update(_blk)
+    return _h.hexdigest()
+
+
+_FIT_MEMO_SCHEMA = 2      # 2: the entry also records the digest of the file it wrote
 _FIT_MEMO_STATS = {"hit": 0, "miss": 0}
 
 
@@ -3272,8 +3282,18 @@ def _fit_verified_selection_clip(clip: Path, dest: Path, duration: float,
         _key = {"schema": _FIT_MEMO_SCHEMA, "clip_sha256": _h.hexdigest(),
                 "need": round(need, 4), "crop": str(crop_filter or ""),
                 "zoom": round(float(zoom_to), 6), "frame_exact": bool(frame_exact)}
+        # THE OUTPUT IS AN INPUT TO ITS OWN VALIDITY. Matching every input and finding a file of the
+        # right duration at `dest` is not proof that the file is the one this memo wrote:
+        # `_crop_clip_corner` does `out.replace(src)` on exactly this path during the caption-dodge
+        # sweep, so the derivative can be rewritten IN PLACE after the entry is recorded. The key
+        # would still match, the duration would still pass, and the memo would hand back a
+        # caption-dodge-cropped clip as the plain derivative — applying a crop twice, or applying
+        # one where none was asked for. So the entry also records the digest of what it wrote, and
+        # a hit re-derives that digest from disk.
+        _blob = _js_fit.loads(_memo.read_text(encoding="utf-8"))
         if dest.exists() and dest.stat().st_size > 0 \
-                and _js_fit.loads(_memo.read_text(encoding="utf-8")).get("key") == _key \
+                and _blob.get("key") == _key \
+                and _blob.get("out_sha256") == _sha256_file(dest) \
                 and _ffprobe_duration(dest) + (2.0 / 30.0) >= need:
             _FIT_MEMO_STATS["hit"] += 1
             return dest
@@ -3334,7 +3354,8 @@ def _fit_verified_selection_clip(clip: Path, dest: Path, duration: float,
         import os as _os_w
         _tmp = _memo.with_suffix(_memo.suffix + ".tmp")
         try:
-            _tmp.write_text(_js_w.dumps({"key": _key}), encoding="utf-8")
+            _tmp.write_text(_js_w.dumps({"key": _key, "out_sha256": _sha256_file(dest)}),
+                        encoding="utf-8")
             _os_w.replace(_tmp, _memo)                   # atomic: old entry or new, never partial
         except Exception:                                # noqa: BLE001 — the memo is an
             try:                                         # optimisation and must never fail the
