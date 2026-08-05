@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 from pathlib import Path
 
 from . import policy as _policy
@@ -27,10 +28,14 @@ from .verify import (
 # v9 also requires a claimed source-title cast-warning resolution to identify the expected
 # co-character in its pixel evidence.  Old audits accepted a bare boolean even when the verdict's
 # own reason named nobody expected, so cached semantic recovery must not inherit that false proof.
-SCHEMA_VERSION = 9
+# v10 makes short/common quote typing fail closed: fuzzy or non-contiguous token overlap can no
+# longer turn an analyzer paraphrase into a hard promise of verbatim show dialogue.
+SCHEMA_VERSION = 10
 AUDIT_FILENAME = "selection_relevance_audit.json"
 QUOTE_DIALOGUE_FLOOR = 0.78
 QUOTE_WINDOW_TOLERANCE_SEC = 0.75
+SHORT_QUOTE_EXACT_MAX_TOKENS = 3
+SHORT_QUOTE_MAX_INTERWORD_GAP_SEC = 1.0
 
 # A lenient verifier is allowed to say that the selected bytes are usable context while also
 # recording that they do not prove the authored exact moment.  That is a completed CONTENT
@@ -318,6 +323,74 @@ def _source_asr_provenance(proj, source_id: str, expected_fingerprint: str) \
     return True, actual, ""
 
 
+def _normalized_quote_tokens(value: str, *, index_module=None) -> list[str]:
+    """Return deterministic lexical tokens for exact short-quote evidence.
+
+    Curly and straight apostrophes are formatting variants, but apostrophe presence is lexical:
+    ``we'll`` must never be collapsed into ``well``.  Token boundaries are equally strict, so
+    ``it's for you`` cannot prove ``it's you``.
+    """
+    if index_module is None:
+        from . import index as index_module
+    tokens = []
+    for raw in re.findall(r"[\w]+(?:['’][\w]+)*", str(value or "")):
+        token = str(index_module._norm_tok(raw.replace("’", "'")) or "")
+        if token:
+            tokens.append(token)
+    return tokens
+
+
+def _quote_requires_exact_contiguous_match(quote: str, *, index_module=None) -> bool:
+    """Whether fuzzy phrase overlap is too ambiguous to type a quote as verbatim.
+
+    Two/three-word lines are common enough that a high SequenceMatcher score is not identity
+    evidence.  Longer dialogue retains the existing ASR-garble tolerance; measured real lines such
+    as ``I will be your champion`` need it for minor ASR errors.
+    """
+    if index_module is None:
+        from . import index as index_module
+    tokens = _normalized_quote_tokens(quote, index_module=index_module)
+    return len(tokens) <= SHORT_QUOTE_EXACT_MAX_TOKENS
+
+
+def _exact_contiguous_quote_span(words, quote: str, *, index_module=None):
+    """Locate an exact normalized adjacent-token phrase in timed ASR.
+
+    This is deliberately stricter than ``index.find_quote_span`` and is used only where a short or
+    common authored phrase would otherwise be easy to assemble from unrelated words.  Among exact
+    duplicates, prefer the tightest temporal occurrence, then the earliest.
+    """
+    if index_module is None:
+        from . import index as index_module
+    wanted = _normalized_quote_tokens(quote, index_module=index_module)
+    if len(wanted) < 2 or not words:
+        return None
+    stream = []
+    for row in words:
+        try:
+            start, end, raw = float(row[0]), float(row[1]), str(row[2])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if not (end >= start >= 0.0):
+            continue
+        for token in _normalized_quote_tokens(raw, index_module=index_module):
+            stream.append((token, start, end))
+    size = len(wanted)
+    best = None
+    for offset in range(0, len(stream) - size + 1):
+        window = stream[offset:offset + size]
+        if [row[0] for row in window] != wanted:
+            continue
+        if any(float(right[1]) - float(left[2]) > SHORT_QUOTE_MAX_INTERWORD_GAP_SEC
+               for left, right in zip(window, window[1:])):
+            continue
+        candidate = (float(window[0][1]), float(window[-1][2]), 1.0)
+        key = (candidate[1] - candidate[0], candidate[0])
+        if best is None or key < best[0]:
+            best = (key, candidate)
+    return best[1] if best is not None else None
+
+
 def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
     """Classify authored strict-beat quotes against the complete usable dialogue index.
 
@@ -433,10 +506,27 @@ def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
         if branch is None:
             best = None
             matches: list[dict] = []
+            fuzzy_only_best = None
+            fuzzy_only_count = 0
+            exact_contiguous_required = _quote_requires_exact_contiguous_match(
+                quote, index_module=_index)
             for src, words in streams:
                 try:
-                    span = _index.find_quote_span(
-                        words, quote, min_ratio=QUOTE_DIALOGUE_FLOOR)
+                    if exact_contiguous_required:
+                        span = _exact_contiguous_quote_span(
+                            words, quote, index_module=_index)
+                        if span is None:
+                            fuzzy_only = _index.find_quote_span(
+                                words, quote, min_ratio=QUOTE_DIALOGUE_FLOOR)
+                            if fuzzy_only:
+                                fuzzy_only_count += 1
+                                if (fuzzy_only_best is None
+                                        or float(fuzzy_only[2])
+                                        > float(fuzzy_only_best[1][2])):
+                                    fuzzy_only_best = (src, fuzzy_only)
+                    else:
+                        span = _index.find_quote_span(
+                            words, quote, min_ratio=QUOTE_DIALOGUE_FLOOR)
                 except Exception:
                     span = None
                 if span:
@@ -446,6 +536,9 @@ def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
                         "timed_asr_span": [
                             round(float(span[0]), 3), round(float(span[1]), 3)],
                         "timed_asr_ratio": round(float(span[2]), 3),
+                        "match_method": ("exact_contiguous_timed_asr"
+                                         if exact_contiguous_required
+                                         else "fuzzy_phrase_timed_asr"),
                     }
                     matches.append(match)
                     # Preserve the historical ``pool_match`` choice exactly: first source at the
@@ -456,10 +549,22 @@ def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
                         best = (src, span)
             if best is not None:
                 kind = "verbatim"
+                branch_reason = ("short_common_quote_exact_contiguous_timed_asr_match"
+                                 if exact_contiguous_required
+                                 else "distinctive_quote_fuzzy_phrase_timed_asr_match")
             elif invalid_provenance or not streams:
                 kind = "indeterminate"
+                branch_reason = "usable_dialogue_pool_incomplete"
             else:
                 kind = "paraphrase"
+                if exact_contiguous_required and fuzzy_only_count:
+                    branch_reason = (
+                        "short_common_quote_fuzzy_only_no_exact_contiguous_timed_asr_match")
+                elif exact_contiguous_required:
+                    branch_reason = (
+                        "short_common_quote_no_exact_contiguous_timed_asr_match")
+                else:
+                    branch_reason = "no_qualifying_timed_asr_phrase_match"
             match = None
             if best is not None:
                 src, span = best
@@ -468,11 +573,30 @@ def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
                     "source_title": str(getattr(src, "title", "") or ""),
                     "timed_asr_span": [round(float(span[0]), 3), round(float(span[1]), 3)],
                     "timed_asr_ratio": round(float(span[2]), 3),
+                    "match_method": ("exact_contiguous_timed_asr"
+                                     if exact_contiguous_required
+                                     else "fuzzy_phrase_timed_asr"),
+                }
+            fuzzy_only_match = None
+            if fuzzy_only_best is not None:
+                fuzzy_src, fuzzy_span = fuzzy_only_best
+                fuzzy_only_match = {
+                    "source_id": str(getattr(fuzzy_src, "id", "") or ""),
+                    "source_title": str(getattr(fuzzy_src, "title", "") or ""),
+                    "timed_asr_span": [
+                        round(float(fuzzy_span[0]), 3), round(float(fuzzy_span[1]), 3)],
+                    "timed_asr_ratio": round(float(fuzzy_span[2]), 3),
+                    "rejected_reason": "short_common_quote_requires_exact_contiguous_match",
                 }
             branch = {
                 "authored_quote": quote,
                 "branch": kind,
+                "branch_reason": branch_reason,
                 "verbatim_required": kind != "paraphrase",
+                "quote_match_policy": ("exact_contiguous_short_common"
+                                       if exact_contiguous_required
+                                       else "fuzzy_distinctive_phrase"),
+                "requires_exact_contiguous_match": exact_contiguous_required,
                 "scan_ratio_floor": QUOTE_DIALOGUE_FLOOR,
                 "selected_window_ratio_floor": QUOTE_DIALOGUE_FLOOR,
                 "pool_sources_indexed": indexed,
@@ -482,6 +606,8 @@ def _quote_pool_branches(proj, segments, *, cfg=None) -> dict[int, dict]:
                 "asr_provenance_invalid_source_count": len(invalid_provenance),
                 "asr_provenance_invalid_sources": invalid_provenance,
                 "pool_match": match,
+                "rejected_fuzzy_pool_match_count": fuzzy_only_count,
+                "rejected_fuzzy_pool_match": fuzzy_only_match,
                 # Complete, source-deduplicated whole-pool location evidence.  This does not alter
                 # quote typing or ranking.  A bounded scoped recovery rung may try these exact
                 # windows before buying another URL; every candidate still faces native-HD,
@@ -749,7 +875,16 @@ def exact_quote_dialogue_evidence(proj, sel, seg, *, quote_contract=None) \
     try:
         from . import index as _index
         words = _index.load_words(proj, source_id)
-        span = _index.find_quote_span(words, quote, min_ratio=QUOTE_DIALOGUE_FLOOR)
+        exact_contiguous_required = bool(detail.get(
+            "requires_exact_contiguous_match",
+            _quote_requires_exact_contiguous_match(quote, index_module=_index)))
+        if exact_contiguous_required:
+            span = _exact_contiguous_quote_span(words, quote, index_module=_index)
+            detail["quote_location_method"] = "exact_contiguous_timed_asr"
+        else:
+            span = _index.find_quote_span(
+                words, quote, min_ratio=QUOTE_DIALOGUE_FLOOR)
+            detail["quote_location_method"] = "fuzzy_phrase_timed_asr"
     except Exception:
         span = None
     if not span:

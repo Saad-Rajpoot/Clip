@@ -339,6 +339,22 @@ def test_quote_found_elsewhere_in_eligible_pool_retains_verbatim_floor(tmp_path)
     assert entry["quote_evidence"]["pool_match"]["source_id"] == "s2"
 
 
+def test_action_shot_intent_cannot_waive_real_quote_window_floor(tmp_path):
+    quote = "I did warn you not to trust me."
+    proj, seg, _sel = _fixture(
+        tmp_path, text="The betrayal happens.", quote=quote,
+        signals={"dialogue": 0.0})
+    seg.shot_intent = "action"
+    words = [[2.0 + i * .1, 2.1 + i * .1, word]
+             for i, word in enumerate(quote.rstrip(".").split())]
+    _add_indexed_source(
+        proj, tmp_path, "s2", title="Game of Thrones betrayal scene", words=words)
+
+    audit = R.evaluate_selection_relevance(proj, [seg])
+    assert audit["quote_branch_counts"]["verbatim"] == 1
+    assert "exact_quote_dialogue_signal_below_floor" in audit["blockers"][0]["reasons"]
+
+
 def test_commentary_pool_hit_does_not_turn_a_paraphrase_into_verbatim(tmp_path):
     """Beat-8 regression: wall-to-wall Season-7 News narration fuzzy-matched the authored hint."""
     quote = "It belongs to Tyrion Lannister."
@@ -373,6 +389,91 @@ def test_pool_quote_scan_rejects_one_name_function_word_false_match(tmp_path):
         "Lord Edward Stark is here in named Protector of the Realm".split())]
     (proj.index_dir / "s1.words.json").write_text(json.dumps(words))
     assert R._quote_pool_branches(proj, [seg])[0]["branch"] == "paraphrase"
+
+
+@pytest.mark.parametrize(("quote", "words"), [
+    # Measured beat-134 failure: the fuzzy locator paired the exact token ``you`` with the
+    # near-match ``your`` across unrelated dialogue and reported a perfect phrase ratio.
+    ("It's you.", [[41.11, 41.35, "you"], [43.67, 44.03, "your"],
+                   [44.03, 44.31, "brother"]]),
+    # Adjacent words are still not an exact phrase when an intervening token changes the meaning.
+    ("It's you.", [[1.0, 1.2, "It's"], [1.2, 1.4, "for"], [1.4, 1.6, "you"]]),
+    # Separate utterances cannot be assembled into one exact short line.
+    ("It's you.", [[0.1, 0.2, "It's"], [3.9, 4.0, "you"]]),
+    # Apostrophe loss changes the word; ``well`` cannot exactly prove ``we'll``.
+    ("We'll win.", [[0.1, 0.2, "well"], [0.2, 0.3, "win"]]),
+    ("It's you.", [[0.1, 0.2, "its"], [0.2, 0.3, "you"]]),
+])
+def test_short_common_quote_fuzzy_overlap_cannot_create_verbatim_contract(
+        tmp_path, quote, words):
+    proj, seg, _sel = _fixture(
+        tmp_path, text="The writer paraphrases the recognition.", quote=quote,
+        signals={"dialogue": 0.0})
+    (proj.index_dir / "s1.words.json").write_text(json.dumps(words))
+
+    contract = R._quote_pool_branches(proj, [seg])[0]
+    assert IX.find_quote_span(words, quote, min_ratio=R.QUOTE_DIALOGUE_FLOOR) is not None
+    assert contract["branch"] == "paraphrase"
+    assert contract["verbatim_required"] is False
+    assert contract["quote_match_policy"] == "exact_contiguous_short_common"
+    assert contract["requires_exact_contiguous_match"] is True
+    assert contract["branch_reason"] == (
+        "short_common_quote_fuzzy_only_no_exact_contiguous_timed_asr_match")
+    assert contract["pool_match"] is None
+    assert contract["rejected_fuzzy_pool_match_count"] == 1
+    assert contract["rejected_fuzzy_pool_match"]["rejected_reason"] == (
+        "short_common_quote_requires_exact_contiguous_match")
+    audit = R.evaluate_selection_relevance(proj, [seg])
+    assert audit["status"] == "pass"
+    assert audit["quote_branch_counts"] == {
+        "verbatim": 0, "paraphrase": 1, "indeterminate": 0}
+
+
+@pytest.mark.parametrize(("quote", "words"), [
+    ("My lion.", [[0.4, 0.6, "My"], [0.6, 0.9, "lion"]]),
+    ("It’s you.", [[0.4, 0.6, "It's"], [0.6, 0.9, "you"]]),
+])
+def test_genuine_exact_short_quote_retains_verbatim_floor_and_exact_audit(
+        tmp_path, quote, words):
+    proj, seg, _sel = _fixture(
+        tmp_path, text="Shae speaks the real short line.", quote=quote,
+        signals={"dialogue": 0.0})
+    (proj.index_dir / "s1.words.json").write_text(json.dumps(words))
+
+    audit = R.evaluate_selection_relevance(proj, [seg])
+    entry = audit["blockers"][0]
+    evidence = entry["quote_evidence"]
+    assert evidence["branch"] == "verbatim"
+    assert evidence["branch_reason"] == (
+        "short_common_quote_exact_contiguous_timed_asr_match")
+    assert evidence["verbatim_required"] is True
+    assert evidence["pool_match"]["match_method"] == "exact_contiguous_timed_asr"
+    assert evidence["pool_match"]["timed_asr_ratio"] == 1.0
+    assert evidence["rejected_fuzzy_pool_match_count"] == 0
+    assert "exact_quote_dialogue_signal_below_floor" in entry["reasons"]
+
+
+def test_short_quote_selected_window_cannot_reuse_fuzzy_overlap(tmp_path):
+    quote = "It's you."
+    proj, seg, sel = _fixture(
+        tmp_path, text="A real exact copy elsewhere types the quote.", quote=quote,
+        signals={"dialogue": 1.0})
+    # The selected source has only the measured fuzzy/non-contiguous false positive.
+    selected_words = [[0.2, 0.3, "you"], [0.4, 0.5, "your"],
+                      [0.5, 0.7, "brother"]]
+    (proj.index_dir / "s1.words.json").write_text(json.dumps(selected_words))
+    exact_words = [[2.0, 2.2, "It's"], [2.2, 2.4, "you"]]
+    _add_indexed_source(
+        proj, tmp_path, "s2", title="Game of Thrones exact dialogue", words=exact_words)
+
+    contract = R._quote_pool_branches(proj, [seg])[0]
+    assert contract["branch"] == "verbatim"
+    assert contract["pool_match"]["source_id"] == "s2"
+    ok, reason, detail = R.exact_quote_dialogue_evidence(
+        proj, sel, seg, quote_contract=contract)
+    assert ok is False
+    assert reason == "exact_quote_timed_asr_span_absent"
+    assert detail["quote_location_method"] == "exact_contiguous_timed_asr"
 
 
 def test_pool_scan_types_hotword_repaired_real_quote_without_lowering_floor(tmp_path):

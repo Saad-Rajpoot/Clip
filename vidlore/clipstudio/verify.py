@@ -1569,7 +1569,8 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
                                           exclude=None, beat_era: str = "",
                                           cap: int = 12, radius: int = 6,
                                           source_cap: int = 4,
-                                          allow_indexed_pool_sources: bool = False):
+                                          allow_indexed_pool_sources: bool = False,
+                                          whole_source_probe: bool = False):
     """Return a small strict-repair pool around already-ranked, scene-affine seeds.
 
     Match deliberately keeps only a few shots per source in ``alternates``/``deep_alternates``.
@@ -1596,16 +1597,24 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
     sat below match's source-diversity/deep-bench cut.  It does not change normal matching, enlarge
     ``cap``, or approve pixels: every candidate still faces the unchanged strict vision, Window-QC,
     reuse, materialization, and final publication contracts.
+
+    ``whole_source_probe`` is the final, still-bounded action locator for that same scoped lane.
+    It inspects at most five hard-eligible, CLIP-ranked shots from the strongest native-HD source
+    bound to the beat's anchor episode, and only outside every retained local/deep/timed region.
+    The caller invokes it only after the ordinary neighborhood failed and sends its candidates
+    through the exact same strict vision, Window-QC, reuse and materialization transaction.
     """
     from .models import ClipCandidate
 
     try:
-        cap = max(0, min(24, int(cap)))
+        cap = max(0, min(5 if whole_source_probe else 24, int(cap)))
         radius = max(1, min(12, int(radius)))
         source_cap = max(1, min(8, int(source_cap)))
     except (TypeError, ValueError):
         return []
     if cap <= 0:
+        return []
+    if whole_source_probe and not allow_indexed_pool_sources:
         return []
 
     try:
@@ -2363,6 +2372,147 @@ def _strict_scene_neighborhood_candidates(sel, seg, proj, get_shot, cfg, *,
     deep_region_ranked: dict[int, list] = {}
     timed_region_ranked: dict[int, list] = {}
     retained_normal_ranked = []
+
+    # SCOPED WHOLE-SOURCE ACTION PROBE.  A silent visual climax can sit many edits away from every
+    # retained matcher seed even though the correct full-scene upload is already indexed.  Timed
+    # transcript reserves cannot locate such an action, and widening the ordinary +/-radius would
+    # spend calls throughout long compilations.  The publication-recovery lane may therefore make
+    # one final five-shot probe inside the strongest native-HD source whose explicit episode agrees
+    # with the beat's anchor.  Candidate regions must be disjoint from every normal, supported-deep,
+    # and timed-text seed; this is new evidence, not a second look at the local rung.  Local CLIP
+    # ranks only the five questions.  It never approves a frame: the caller still applies the same
+    # strict vision, Window-QC, reuse and materialization transaction.
+    if whole_source_probe:
+        if anchor_episode is None:
+            return []
+        try:
+            from .quality_contract import native_video_ok as _native_probe_ok
+            from .quality_contract import probe_native_video_info as _probe_native_source
+        except Exception:
+            return []
+
+        probe_source_rows = []
+        for source_row in all_affine_sources:
+            sid = source_row[3]
+            if sid not in anchor_episode_sources:
+                continue
+            try:
+                source_obj = proj.source(sid)
+                if source_obj is None or not _native_probe_ok(_probe_native_source(
+                        str(getattr(source_obj, "local_path", "") or ""))):
+                    continue
+            except Exception:
+                continue
+            probe_source_rows.append(source_row)
+        if not probe_source_rows:
+            return []
+
+        # The selected source is direct matcher evidence and is preferable when its literal anchor
+        # affinity is competitive.  This avoids letting a high-CLIP trailer/official excerpt whose
+        # title names the episode displace the already-selected full-scene upload (the measured
+        # excerpt cut to an end card immediately before the fatal action).  One scene-token weight
+        # is the same competitiveness margin used by the ordinary deep-region chooser above.
+        strongest_probe_row = max(
+            probe_source_rows, key=lambda row: (int(row[5]), -int(row[2]), row[3]))
+        selected_sid = str(getattr(sel, "source_id", "") or "")
+        selected_probe_row = next(
+            (row for row in probe_source_rows if row[3] == selected_sid), None)
+        probe_source_row = (
+            selected_probe_row
+            if (selected_probe_row is not None
+                and int(selected_probe_row[5]) >= int(strongest_probe_row[5]) - 5)
+            else strongest_probe_row)
+
+        _seed_tier, _neg_aff, _seed_order, sid, seeds, affinity = probe_source_row
+        source_shots = shots_cache.get(sid, [])
+        if not source_shots:
+            return []
+        disjoint_anchors = [int(seed) for seed in seeds]
+        supported_region = supported_deep_regions.get(sid)
+        if supported_region is not None:
+            try:
+                disjoint_anchors.append(int(supported_region[1]))
+            except (TypeError, ValueError):
+                pass
+        timed_region = timed_regions.get(sid)
+        if timed_region is not None:
+            try:
+                disjoint_anchors.append(int(timed_region["anchor"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+        if not disjoint_anchors:
+            return []
+
+        probe_rows = []
+        for sh in source_shots:
+            try:
+                shot_index = int(getattr(sh, "index", -1))
+            except (TypeError, ValueError):
+                continue
+            key = (sid, shot_index)
+            if (shot_index < 0 or key in excluded
+                    or min(abs(shot_index - anchor) for anchor in disjoint_anchors) <= radius
+                    or not _hard_shot_eligible(sid, sh, source_shots)):
+                continue
+            kf = str(getattr(sh, "keyframe_path", "") or "")
+            try:
+                rel = _IF_n._shot_relevance(
+                    sh, Path(kf), query, embeds_of=_embeds_of, rel_memo=rel_memo)
+                rel = float(rel)
+            except Exception:
+                continue
+            if rel < 0.0:
+                continue
+            if sid not in moment_cache:
+                try:
+                    moment_cache[sid] = _M_n.locate_beat_moment(proj, sid, seg)
+                except Exception:
+                    moment_cache[sid] = None
+            moment = moment_cache.get(sid)
+            try:
+                in_point, out_point = _M_n._trim_window(sh, seg, cfg, moment)
+            except Exception:
+                in_point, out_point = float(sh.start), float(sh.end)
+            try:
+                dialogue = float(_M_n._dialogue_match(
+                    seg, getattr(sh, "transcript", "") or "",
+                    quote_branch=_M_n._effective_matcher_quote_branch(seg, proj=proj)))
+            except Exception:
+                dialogue = 0.0
+            try:
+                moment_lock = float(_M_n._moment_proximity(sh, moment)) if moment else 0.0
+            except Exception:
+                moment_lock = 0.0
+            dialogue = max(dialogue, moment_lock)
+            signals = {
+                "strict_scene_neighborhood": True,
+                "strict_whole_source_probe": True,
+                "scene_affinity": int(affinity),
+                "visual_relevance": round(rel, 4),
+                "dialogue": round(dialogue, 3),
+                "quality": round(float(getattr(sh, "quality", 0.0) or 0.0), 3),
+            }
+            if sid in strict_pool_sources:
+                signals["strict_indexed_pool_source"] = True
+                branch = str(strict_pool_sources[sid]["branch"])
+                signals[f"strict_indexed_pool_{branch}"] = 1.0
+                signals["source_metadata_match_count"] = int(
+                    strict_pool_sources[sid]["match_count"])
+            if moment and moment_lock > 0.0:
+                signals["moment_lock"] = round(moment_lock, 3)
+                try:
+                    signals["moment_ratio"] = round(float(moment[2]), 3)
+                except Exception:
+                    pass
+            candidate = ClipCandidate(
+                segment_index=int(getattr(sel, "segment_index", -1)), source_id=sid,
+                shot_index=shot_index, score=round(max(0.0, min(1.0, rel)), 4),
+                in_point=round(float(in_point), 3), out_point=round(float(out_point), 3),
+                signals=signals)
+            probe_rows.append(((-rel, shot_index), candidate))
+        probe_rows.sort(key=lambda row: row[0])
+        return [candidate for _rank, candidate in probe_rows[:cap]]
+
     for source_rank, (_seed_tier, _neg_aff, _seed_order, sid, seeds, affinity) \
             in enumerate(affine_sources):
         shots = shots_cache.get(sid, [])
@@ -3831,7 +3981,13 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
             _neighborhood_on = _os_ms.environ.get(
                 "VIDLORE_CLIPSTUDIO_STRICT_NEIGHBORHOOD", "1").strip() \
                 not in ("0", "false", "no", "")
-            if not swapped and _exact and _neighborhood_on:
+            _character_pool_subject_miss = bool(
+                strict_pool_recovery
+                and _policy.policy_of(seg) == _policy.CHARACTER
+                and str(getattr(seg, "required_entity", "") or "").strip()
+                and (v.get("correct_subject_visible") is False
+                     or v.get("wrong_subject_visible") is True))
+            if not swapped and (_exact or _character_pool_subject_miss) and _neighborhood_on:
                 try:
                     _n_cap = max(0, min(24, int(_os_ms.environ.get(
                         "VIDLORE_CLIPSTUDIO_STRICT_NEIGHBORHOOD_CANDS", "12") or 12)))
@@ -3852,13 +4008,48 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     log(f"verify: seg{sel.segment_index} strict scene-neighborhood unavailable "
                         f"({type(_n_exc).__name__})")
                 if _npool:
-                    log(f"verify: seg{sel.segment_index} strict scene-neighborhood — trying "
+                    _neighborhood_kind = ("subject" if _character_pool_subject_miss
+                                          and not _exact else "scene")
+                    log(f"verify: seg{sel.segment_index} strict {_neighborhood_kind}-neighborhood "
+                        "— trying "
                         f"{len(_npool)} unseen candidate(s) within ±{_n_radius} shots")
                     if _try_promote(downgrade=False, pool=_npool,
                                     label="strict_scene_neighborhood",
                                     attempt_cap=_n_cap):
-                        log(f"verify: seg{sel.segment_index} rescued by strict scene-neighborhood "
-                            "— exact scene found, no contextual downgrade")
+                        if _exact:
+                            log(f"verify: seg{sel.segment_index} rescued by strict "
+                                "scene-neighborhood — exact scene found, no contextual downgrade")
+                        else:
+                            log(f"verify: seg{sel.segment_index} rescued by strict "
+                                "subject-neighborhood — required subject confirmed")
+                if _promotion_materialization_error["detail"]:
+                    continue
+
+            # A concrete silent action may be much farther than +/-6 edits from every retained
+            # seed even when the selected upload is the correct full scene.  Only the scoped
+            # publication-recovery lane may spend this final five-call probe, and only after the
+            # local rung above failed.  Candidate generation is confined to one native-HD source
+            # bound to the beat's anchor episode; `_try_promote` keeps every acceptance gate shared.
+            _whole_action_probe = bool(
+                not swapped and _exact and strict_pool_recovery and _neighborhood_on
+                and str(getattr(seg, "shot_intent", "") or "").strip().lower() == "action")
+            if _whole_action_probe:
+                try:
+                    _action_pool = _strict_scene_neighborhood_candidates(
+                        sel, seg, proj, get_shot, cfg, exclude=strict_tried,
+                        beat_era=_era_of(seg), cap=5, radius=_n_radius, source_cap=1,
+                        allow_indexed_pool_sources=True, whole_source_probe=True)
+                except Exception as _action_exc:         # fail closed; publication gate still blocks
+                    _action_pool = []
+                    log(f"verify: seg{sel.segment_index} strict whole-source action probe "
+                        f"unavailable ({type(_action_exc).__name__})")
+                if _action_pool:
+                    log(f"verify: seg{sel.segment_index} strict whole-source action probe — "
+                        f"trying {len(_action_pool)} unseen disjoint candidate(s)")
+                    if _try_promote(downgrade=False, pool=_action_pool,
+                                    label="strict_scene_neighborhood", attempt_cap=5):
+                        log(f"verify: seg{sel.segment_index} rescued by strict whole-source "
+                            "action probe — exact action found")
                 if _promotion_materialization_error["detail"]:
                     continue
 

@@ -2860,6 +2860,24 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
             broad_recovered: set[int] = set()
             try:
                 match_segments(proj, segs, cfg, analysis=analysis, progress=None)
+                # The global matcher must see every beat to preserve its diversity constraints, but
+                # this transaction can commit only ``unresolved``.  Restore every unscoped snapshot
+                # row BEFORE scoped verification so verify's reuse ledger describes the prospective
+                # committed project.  Otherwise temporary matcher churn on beats that are about to
+                # be rolled back can consume a shot's reuse cap and hide a strict-passing recovery.
+                # This is in-memory reconciliation only; `_commit_scoped_recovery` remains the sole
+                # metadata/clip commit authority.
+                _scope_set = set(unresolved)
+                _global_rematch = {s.segment_index: s for s in proj.selections}
+                proj.selections = [
+                    (_global_rematch[idx] if idx in _scope_set and idx in _global_rematch
+                     else _copy.deepcopy(current_snapshot[idx]))
+                    for idx in sorted(current_snapshot)
+                ]
+                proj.selections.extend(
+                    _global_rematch[idx]
+                    for idx in sorted(_scope_set - set(current_snapshot))
+                    if idx in _global_rematch)
                 _pool_verify_result = _run_scoped_verify(set(unresolved))
                 _pool_verify_error = _verifier_summary_error(_pool_verify_result)
                 if _pool_verify_error:

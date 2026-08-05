@@ -2116,11 +2116,20 @@ def test_scoped_recovery_reuses_current_pool_before_demanding_a_new_url(tmp_path
         path.write_bytes(f"clip:{sel.source_id}".encode())
         return path
 
+    def scoped_verify(_proj, *_args, **_kwargs):
+        prospective = {selection.segment_index: selection.source_id
+                       for selection in _proj.selections}
+        assert prospective == {
+            0: "dedicated_quote_source",
+            1: old_other.source_id,
+        }, "unscoped rematch churn must not contaminate the scoped verifier reuse ledger"
+        return dict(VERIFY_OK)
+
     strict_clear = {"blockers": [], "blocked_count": 0, "status": "pass"}
     with mock.patch.object(O, "match_segments", side_effect=rematch) as matcher, \
             mock.patch("vidlore.clipstudio.cut.cut_selection", side_effect=cut_one) as cutter, \
             mock.patch("vidlore.clipstudio.verify.verify_and_repair",
-                       return_value=dict(VERIFY_OK)) as verify, \
+                       side_effect=scoped_verify) as verify, \
             mock.patch("vidlore.clipstudio.relevance_contract.evaluate_selection_relevance",
                        return_value=strict_clear), \
             mock.patch("vidlore.clipstudio.discover.discover_sources") as discover:
