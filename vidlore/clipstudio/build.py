@@ -3200,7 +3200,8 @@ def _split_clip_sequential(clip: Path, lens: list, out_dir: Path, idx: int,
 
 
 def _fit_verified_selection_clip(clip: Path, dest: Path, duration: float,
-                                 *, crop_filter: str = "", zoom_to: float = 1.055) -> Optional[Path]:
+                                 *, crop_filter: str = "", zoom_to: float = 1.055,
+                                 frame_exact: bool = False) -> Optional[Path]:
     """Make a time-safe 1080p derivative of *the verified cut clip only*.
 
     The old build reopened the long source and selected another ``beat_window`` (or a mechanical
@@ -3224,9 +3225,15 @@ def _fit_verified_selection_clip(clip: Path, dest: Path, duration: float,
     # stable, in-window 88% sample used by the lineage bank and hold that frame instead.  The held
     # pixels therefore remain both inside the verified window and visually provable against it.
     # A generous pad plus an exact output frame count avoids stream looping.
+    # A FRAME-EXACT clip (cut.cut_contract == "halfopen_v1") cannot contain the frame at `out` —
+    # cut.py filtered it out on the frame's own decoded timestamp — so its true final frame is
+    # verified in-window and may be held for the whole pad. Nothing is discarded.
+    # Anything NOT certified keeps the conservative stop: container/frame rounding may have left
+    # the first frame of the following shot at the tail, and cloning it would freeze the wrong
+    # character for most of the beat (measured: 126 of 174 output frames on one scene).
     clip_duration = _ffprobe_duration(clip)
     vf = []
-    if clip_duration > 0 and need > clip_duration + (2.0 / 30.0):
+    if clip_duration > 0 and need > clip_duration + (2.0 / 30.0) and not frame_exact:
         safe_end = min(max(1.0 / 30.0, clip_duration - (2.0 / 30.0)),
                        max(1.0 / 30.0, clip_duration * 0.88))
         vf.extend([f"trim=end={safe_end:.3f}", "setpts=PTS-STARTPTS"])
@@ -8309,9 +8316,11 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         # source-window lineage canary.  Keep this ownership derivative spatially neutral; the
         # watermark crop above remains allowed and the renderer supplies the visible motion once.
         _owned_zoom = 1.0
+        from .cut import _CUT_CONTRACT as _CUTC
         _owned = _fit_verified_selection_clip(
             _selected_clip, _owned_full, sum(_owned_lens),
-            crop_filter=_owned_crop, zoom_to=_owned_zoom)
+            crop_filter=_owned_crop, zoom_to=_owned_zoom,
+            frame_exact=(getattr(sel, "cut_contract", "") == _CUTC))
         if _owned is None or not _lineage_derive(
                 _owned, _selected_clip,
                 selection_source_compare_filter=_owned_crop):

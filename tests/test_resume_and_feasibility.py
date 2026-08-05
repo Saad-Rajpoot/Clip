@@ -284,6 +284,10 @@ def test_cut_resume_reuses_existing_clip_without_reencoding():
         open(src_file, "wb").write(b"\x00" * 32)
         p.sources = [SourceVideo(id="srcA", url="local:x", local_path=src_file, duration=60.0)]
         sel = _sel(0, "srcA")
+        # A clip may only be inherited if it was cut under the CURRENT boundary contract. The
+        # fitter decides whether it may clone the final frame from that marker, so inheriting an
+        # uncertified clip would silently restore the boundary-frame freeze.
+        sel.cut_contract = CUT._CUT_CONTRACT
         existing = p.clips_dir / "seg_000.mp4"
         existing.write_bytes(b"already-cut-clip")
         CUT.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(
@@ -293,6 +297,19 @@ def test_cut_resume_reuses_existing_clip_without_reencoding():
         assert str(out) == str(existing), "resume must return the existing clip"
         assert existing.read_bytes() == b"already-cut-clip", "the existing clip must be untouched"
         assert called["ffmpeg"] == 0
+
+        # ...and an UNCERTIFIED clip must be re-cut rather than inherited.
+        stale = _sel(1, "srcA")
+        (p.clips_dir / "seg_001.mp4").write_bytes(b"cut-before-the-contract")
+        ran = {"n": 0}
+
+        def _count(*a, **k):
+            ran["n"] += 1
+            raise RuntimeError("re-cut attempted")     # no real source to encode in this fixture
+
+        CUT.subprocess.run = _count
+        CUT.cut_selection(p, stale, cfg, resume=True)
+        assert ran["n"] > 0, "an uncertified clip must NOT be inherited on resume"
     finally:
         CUT.subprocess.run = orig_run
         shutil.rmtree(tmp, ignore_errors=True)

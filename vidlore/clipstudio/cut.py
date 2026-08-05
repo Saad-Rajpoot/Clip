@@ -106,6 +106,26 @@ def legibility_filter(src_path, start: float, dur: float) -> tuple:
             f"legibility grade gamma={g} (YAVG {yavg:.1f}, spread {spread:.1f})")
 
 
+# FRAME-EXACT HALF-OPEN CUTTING — the selection owns [in, out), never the frame AT `out`.
+#
+# `-t <dur>` is a DURATION bound, and ffmpeg resolves it against decoded frame timestamps with
+# rounding, so a cut can legitimately end up holding one frame from the shot that starts at `out`.
+# Measured on job ee93371e41 scene 170: the cut carried 49 frames — 48 Varys frames plus the first
+# frame of the following Oberyn shot. Downstream, `_fit_verified_selection_clip` clones the final
+# decoded frame to fill a longer narration beat, so that single foreign frame became 126 of 174
+# output frames (72.4%, ~4.2s) of the wrong character.
+#
+# The blanket answer was to stop cloning at 88% of the clip and hold that frame instead. It stops
+# the leak and costs real motion on every padded beat: 48.30s of verified footage on that job.
+#
+# The right answer is to make the contaminating frame not exist. `select='lt(t,dur)'` filters on
+# each frame's own decoded timestamp, which is exactly the half-open test, and it is indifferent to
+# frame rate, VFR, container time base and seek behaviour — no fps arithmetic to round wrong.
+# Clips carrying this marker are certified frame-exact, so the fitter may hold their true final
+# frame; anything without it keeps the conservative behaviour.
+_CUT_CONTRACT = "halfopen_v1"
+
+
 def cut_selection(proj: ClipProject, sel: ClipSelection, cfg: ClipConfig,
                   *, resume: bool = False) -> Optional[Path]:
     """Trim one selection to clips/seg_NNN.mp4. Returns the path or None."""
@@ -118,9 +138,13 @@ def cut_selection(proj: ClipProject, sel: ClipSelection, cfg: ClipConfig,
     # The output path is deterministic (keyed on segment_index) and the selection is unchanged (the
     # resume checkpoint only skips cut when match's signature still matches), so the existing clip IS
     # this selection's clip. A zero-byte/absent file falls through to a normal re-encode.
+    # A clip cut before the half-open contract may still hold the frame at `out`, and the fitter
+    # trusts the marker to decide whether it may clone the final frame. Re-cut rather than inherit
+    # an uncertified clip — the alternative is a silent 72%-of-the-beat freeze on the wrong shot.
     if resume:
         _existing = proj.clips_dir / f"seg_{sel.segment_index:03d}.mp4"
-        if _existing.exists() and _existing.stat().st_size > 0:
+        if _existing.exists() and _existing.stat().st_size > 0 \
+                and getattr(sel, "cut_contract", "") == _CUT_CONTRACT:
             return _existing
     in_p = max(0.0, sel.in_point)
     dur = max(cfg.min_clip_sec, sel.out_point - sel.in_point)
@@ -159,11 +183,31 @@ def cut_selection(proj: ClipProject, sel: ClipSelection, cfg: ClipConfig,
         sel.legibility_grade = _note
     except Exception:                                  # noqa: BLE001 — an older model has no slot
         pass
+    # `-ss` before `-i` makes the first output frame the one at `in_p`, so a frame's own `t` is its
+    # offset INTO the selection — `lt(t, dur)` is therefore the exact half-open [in, out) test.
+    # It runs ahead of any grade so the dropped frame is never graded, encoded or measured.
+    # `-t` stays as a coarse decode bound; `fps_mode=passthrough` stops vsync re-manufacturing the
+    # frame the select just removed.
+    # THE THRESHOLD MUST BE IN SOURCE TIME. `-ss` lands on the first frame at or after the request,
+    # so a seek-relative `t` is measured from the LANDING, not from `in_p`. Measured on scene 170:
+    # in_p 87.879 is not a frame boundary, the decoder lands ~21ms late, and a seek-relative bound
+    # therefore reaches ~21ms PAST `out` — straight back onto the first frame of the next shot.
+    # `-copyts` keeps each frame's own SOURCE timestamp, so `lt(t, out)` is the authorized window
+    # stated in the only clock that cannot drift. `setpts=PTS-STARTPTS` then rebases for output.
+    #
+    # TRUNCATE, never round, when writing it: "%.6f" % 1.4666666 is 1.466667 — a threshold LARGER
+    # than the authorized out-time, which re-admits the very frame this filter exists to remove.
+    # Flooring to nanoseconds keeps the bound at or below `out`, and 1ns sits orders of magnitude
+    # below any real frame spacing, so no in-window frame is ever lost to it.
+    _out_abs = math.floor(max(0.0, in_p + dur) * 1e9) / 1e9
+    _chain = [f"select='lt(t\\,{_out_abs:.9f})'", "setpts=PTS-STARTPTS"]
+    if _vf:
+        _chain.append(_vf)
     cmd = [
         ffmpeg_exe(), "-y",
-        "-ss", f"{in_p:.3f}", "-i", str(src.local_path),
-        "-t", f"{dur:.3f}", "-an",
-        *(["-vf", _vf] if _vf else []),
+        "-copyts", "-ss", f"{in_p:.3f}", "-i", str(src.local_path),
+        "-t", f"{dur:.3f}", "-an", "-fps_mode", "passthrough",
+        "-vf", ",".join(_chain),
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-pix_fmt", "yuv420p", "-movflags", "+faststart",
         str(out),
@@ -173,6 +217,10 @@ def cut_selection(proj: ClipProject, sel: ClipSelection, cfg: ClipConfig,
     except Exception:
         return None
     if p.returncode == 0 and out.exists() and out.stat().st_size > 0:
+        try:
+            sel.cut_contract = _CUT_CONTRACT     # certifies [in, out) — the fitter reads this
+        except Exception:                        # noqa: BLE001 — an older model has no slot
+            pass
         return out
     return None
 

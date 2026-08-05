@@ -111,7 +111,10 @@ def test_the_cut_applies_the_filter_and_records_it():
     import inspect
     src = inspect.getsource(C.cut_selection)
     assert "legibility_filter" in src
-    assert '*(["-vf", _vf] if _vf else [])' in src, "the grade must reach the cut command"
+    # the cut now always carries a -vf chain (the half-open boundary select leads it), so the grade
+    # is appended to that chain rather than being the whole filter argument
+    assert "_chain.append(_vf)" in src, "the grade must reach the cut command"
+    assert '"-vf", ",".join(_chain)' in src
     assert "sel.legibility_grade = _note" in src, "a graded beat must say so in the project file"
 
 

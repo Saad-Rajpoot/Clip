@@ -244,6 +244,10 @@ class ClipSelection:
     # LEGIBILITY GRADE (cut.py): "" when the window aired as shot, else a note naming the gamma and
     # the measured luma it was lifted from. Presentation only — it never changes which footage runs.
     legibility_grade: str = ""
+    # CUT CONTRACT (cut.py): names the boundary guarantee this clip was cut under. "halfopen_v1"
+    # certifies the clip holds [in, out) exactly and cannot contain the frame at `out`, which is
+    # what lets the fitter clone its true final frame instead of stopping short of it.
+    cut_contract: str = ""
 
     @property
     def duration(self) -> float:
