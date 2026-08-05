@@ -35,6 +35,19 @@ def test_lock_is_unconditional_and_exits_before_legacy_reselector():
     assert "gbeat += k\n        continue" in block
 
 
+def test_owned_derivative_holds_a_safe_in_window_frame_without_double_zoom():
+    fit_start = BUILD.index("def _fit_verified_selection_clip(")
+    fit_end = BUILD.index("# ── BREAKOUT ARTIFACT COMPOSITION", fit_start)
+    fit = BUILD[fit_start:fit_end]
+    block = _lock_block()
+
+    assert "clip_duration * 0.69" in fit
+    assert 'vf.extend([f"trim=end={safe_end:.3f}", "setpts=PTS-STARTPTS"])' in fit
+    assert fit.index("trim=end=") < fit.index("tpad=stop_mode=clone")
+    assert "_owned_zoom = 1.0" in block
+    assert "1.12 if pos < _hook_n" not in block
+
+
 def test_both_manifest_and_decoded_canary_are_mandatory():
     assert "_assert_scene_lineage(" in BUILD
     call = BUILD[BUILD.index("result = assemble("):]
@@ -50,4 +63,3 @@ def test_cross_scene_repair_inherits_real_donor_owner():
     manifest = BUILD[BUILD.index("# FINAL BUILD-SIDE LINEAGE MANIFEST"):]
     assert '"owner_beat": None' in manifest
     assert '"root_owner_beat": _root_l.get("owner_beat")' in manifest
-

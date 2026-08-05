@@ -3217,10 +3217,19 @@ def _fit_verified_selection_clip(clip: Path, dest: Path, duration: float,
     need = max(0.6, float(duration))
     if not clip.exists() or clip.stat().st_size <= 0:
         return None
-    # tpad is applied *after* the selection-only motion/normalisation chain.  Its cloned frames
-    # are still decoded pixels from this root.  A generous pad plus an exact output frame count
-    # avoids stream looping and prevents the encoder from reading beyond the verified clip.
+    # tpad is applied *after* the selection-only motion/normalisation chain.  When a short cut has
+    # to fill a longer narration beat, do not clone its final decoded frame: container/frame
+    # rounding can expose the first frame *after* the declared selection (and a shot ending on a
+    # reverse cut would then freeze the wrong character for most of the beat).  Stop at the same
+    # stable, in-window 69% sample used by the lineage bank and hold that frame instead.  The held
+    # pixels therefore remain both inside the verified window and visually provable against it.
+    # A generous pad plus an exact output frame count avoids stream looping.
+    clip_duration = _ffprobe_duration(clip)
     vf = []
+    if clip_duration > 0 and need > clip_duration + (2.0 / 30.0):
+        safe_end = min(max(1.0 / 30.0, clip_duration - (2.0 / 30.0)),
+                       max(1.0 / 30.0, clip_duration * 0.69))
+        vf.extend([f"trim=end={safe_end:.3f}", "setpts=PTS-STARTPTS"])
     if crop_filter:
         vf.append(crop_filter)
     vf.append(_ken_burns_filter(need, zoom_to=zoom_to))
@@ -8288,7 +8297,11 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         _owned_full = proj.clips_dir / f"beat_{seg.index:03d}_owned.mp4"
         _owned_crop = (_watermark_crop_filter(wm_corners[sel.source_id])
                        if sel.source_id in wm_corners else "")
-        _owned_zoom = 1.12 if pos < _hook_n else (1.10 if pos in hold_pos else 1.055)
+        # assemble() adds the final editorial camera drift.  A second pre-zoom here both crops the
+        # selected picture twice and can make an otherwise correct derivative fail the independent
+        # source-window lineage canary.  Keep this ownership derivative spatially neutral; the
+        # watermark crop above remains allowed and the renderer supplies the visible motion once.
+        _owned_zoom = 1.0
         _owned = _fit_verified_selection_clip(
             _selected_clip, _owned_full, sum(_owned_lens),
             crop_filter=_owned_crop, zoom_to=_owned_zoom)
