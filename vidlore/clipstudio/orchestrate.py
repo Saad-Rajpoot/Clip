@@ -1531,6 +1531,20 @@ def _quote_window_recovery_selections(proj, segs, cfg, scope, *, quote_pool_cach
         candidate_shots: dict[tuple, object] = {}
         seen_sources: set[str] = set()
 
+        def _target_quote_span(words):
+            """Use the same branch-specific locator that typed the whole-pool quote.
+
+            A fuzzy/non-contiguous short phrase is explicitly *not* verbatim evidence.  Treating
+            it as a direct target hit here prevented the stronger cross-copy PCM locator from ever
+            running (measured beat 5: ``You``/``shot`` and a much later ``me``).
+            """
+            quote = str(getattr(seg, "quote", "") or "")
+            if bool(branch.get("requires_exact_contiguous_match")):
+                return _rel_quote._exact_contiguous_quote_span(
+                    words, quote, index_module=_index_quote)
+            return _index_quote.find_quote_span(
+                words, quote, min_ratio=float(_rel_quote.QUOTE_DIALOGUE_FLOOR))
+
         def _candidate_from_span(sid: str, q0: float, q1: float, ratio: float,
                                  row: dict, *, transfer_context: dict | None = None) -> bool:
             """Apply the unchanged HD/window gates to one ASR or PCM-located phrase."""
@@ -1722,9 +1736,7 @@ def _quote_window_recovery_selections(proj, segs, cfg, scope, *, quote_pool_cach
                     try:
                         target_words = _index_quote.load_words(proj, target_sid)
                         target_words_cache[target_sid] = target_words
-                        target_asr_span = _index_quote.find_quote_span(
-                            target_words, str(getattr(seg, "quote", "") or ""),
-                            min_ratio=float(_rel_quote.QUOTE_DIALOGUE_FLOOR))
+                        target_asr_span = _target_quote_span(target_words)
                     except Exception:
                         target_asr_span = None
                     if target_asr_span:
@@ -1810,9 +1822,7 @@ def _quote_window_recovery_selections(proj, segs, cfg, scope, *, quote_pool_cach
                 target_words = target_words_cache.get(target_sid)
                 if target_words is None:
                     target_words = _index_quote.load_words(proj, target_sid)
-                target_asr_span = _index_quote.find_quote_span(
-                    target_words, str(getattr(seg, "quote", "") or ""),
-                    min_ratio=float(_rel_quote.QUOTE_DIALOGUE_FLOOR))
+                target_asr_span = _target_quote_span(target_words)
             except Exception:
                 target_asr_span = None
             if target_asr_span:

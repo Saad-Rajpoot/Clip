@@ -131,6 +131,38 @@ def test_normal_character_verification_does_not_open_indexed_pool_neighborhood(
     assert (sel.source_id, sel.shot_index) == ("wrong", 0)
 
 
+def test_scoped_recovery_exhausts_bounded_matcher_head_before_network(
+        tmp_path, monkeypatch):
+    proj, seg, sel, get_shot = _repair_fixture(tmp_path, policy="exact_scene")
+    # Production keeps a bounded six-source head, while ordinary verification intentionally asks
+    # only three for latency.  The real ee93371e41 miss was a strict-passing frame at head rank 6.
+    sel.alternates = [
+        _candidate(0, "wrong", 1),
+        _candidate(0, "wrong", 2),
+        _candidate(0, "wrong", 0),
+        _candidate(0, "wrong", 1),
+        _candidate(0, "wrong", 2),
+        _candidate(0, "target", 1),
+    ]
+
+    monkeypatch.setattr(V, "_strict_scene_neighborhood_candidates", lambda *_a, **_k: [])
+    monkeypatch.setattr(V, "_shot_lookup", lambda _proj: get_shot)
+    monkeypatch.setattr(V, "verify_frame", _vision_verdict)
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", "1")
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_VERIFY_ACTION_SHEET", "0")
+    monkeypatch.setenv("VIDLORE_CLIPSTUDIO_WINDOW_QC", "0")
+
+    summary = V.verify_and_repair(
+        proj, [seg], ClipConfig(), NS(anthropic_model="m", anthropic_key="k"),
+        max_replacements=3, materialize_promotions=False, persist_project=False,
+        strict_pool_recovery=True)
+
+    assert summary["replaced"] == 1
+    assert (sel.source_id, sel.shot_index) == ("target", 1)
+    assert sel.verifier["verdict"] == "keep"
+    assert not sel.verifier.get("downgraded")
+
+
 def test_exact_action_uses_five_call_whole_source_probe_after_local_miss(
         tmp_path, monkeypatch):
     proj, seg, sel, get_shot = _repair_fixture(

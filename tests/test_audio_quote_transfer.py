@@ -86,6 +86,7 @@ def _contract(proj):
         "authored_quote": QUOTE,
         "branch": "verbatim",
         "verbatim_required": True,
+        "requires_exact_contiguous_match": True,
         "asr_prompt_fingerprint_expected": IX.asr_semantic_fingerprint(
             proj, load_clip_config()),
         "pool_match": {
@@ -353,6 +354,35 @@ def test_quote_recovery_transfers_sd_reference_only_into_existing_hd_bench(tmp_p
     assert row["quote_location_method"] == "cross_copy_pcm"
     assert audit["beats"][0]["candidate_bench_cap"] == 12
     assert audit["beats"][0]["audio_transfer_target_source_cap"] == 12
+
+
+def test_short_quote_fuzzy_only_target_still_reaches_strict_pcm_transfer(tmp_path):
+    proj, seg, _old = _project(tmp_path)
+    # Fuzzy phrase retrieval can assemble these two quote tokens across an unrelated word, but the
+    # v10 short-quote contract correctly refuses to call that verbatim timed ASR.
+    (proj.index_dir / "clean.words.json").write_text(json.dumps([
+        [1.0, 1.3, "He's"], [1.3, 1.5, "unrelated"], [1.5, 1.8, "choking"],
+    ]))
+    assert IX.find_quote_span(IX.load_words(proj, "clean"), QUOTE,
+                              min_ratio=R.QUOTE_DIALOGUE_FLOOR)
+    assert R._exact_contiguous_quote_span(IX.load_words(proj, "clean"), QUOTE) is None
+
+    def dimensions(path):
+        return ({"width": 640, "height": 360} if path.name == "dirty_sd.mp4"
+                else {"width": 1920, "height": 1080})
+
+    with mock.patch.object(R, "_quote_pool_branches", return_value={0: _contract(proj)}), \
+            mock.patch("vidlore.clipstudio.ingest.probe", side_effect=dimensions), \
+            mock.patch.object(A, "transfer_quote_spans", return_value=[_alignment()]):
+        built, audit = O._quote_window_recovery_selections(
+            proj, [seg], ClipConfig(), {0})
+
+    assert built[0].source_id == "clean"
+    beat = audit["beats"][0]
+    assert "clean" not in beat["audio_transfer_direct_asr_duplicates_filtered"]
+    assert not any(row.get("source_id") == "clean" and
+                   row.get("reason") == "target_already_has_timed_asr_quote"
+                   for row in beat["audio_transfer_pre_cap_excluded"])
 
 
 def test_quote_locked_verifier_skips_out_of_phrase_neighbor_and_rebinds_contained_one(

@@ -3962,7 +3962,22 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     return True
                 return False
 
-            _try_promote(downgrade=False)     # ORIGINAL strict/normal promotion (unchanged behavior)
+            # The ordinary pass deliberately stops after ``max_replacements`` candidates to keep
+            # full-project verification bounded.  A scoped publication-recovery pass is different:
+            # it is already operating on a small page of proven blockers, before paying for new
+            # discovery, and match's bounded ``alternates`` may contain a strict-passing frame just
+            # below that latency cap.  Measured on portal job ee93371e41 beat 125, the sixth retained
+            # alternate was an unused native-HD, strict-verified Tywin trial reaction while the
+            # three-candidate pass settled on contextual footage and release-blocked.  Exhaust the
+            # existing bounded head only in this scoped lane (hard cap 12).  Every candidate still
+            # faces the unchanged strict vision, Window-QC, quote lock, reuse and materialization
+            # gates; normal verification and all acceptance thresholds are untouched.
+            _head_attempt_cap = max_replacements
+            if strict_pool_recovery:
+                _head_attempt_cap = max(
+                    max_replacements,
+                    min(12, len(getattr(sel, "alternates", None) or [])))
+            _try_promote(downgrade=False, attempt_cap=_head_attempt_cap)
             if _promotion_materialization_error["detail"]:
                 # A cut/rollback failure is infrastructure uncertainty, not evidence that the
                 # accepted alternate was semantically bad. Do not run contextual/filler rungs or

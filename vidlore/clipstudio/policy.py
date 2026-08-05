@@ -42,6 +42,25 @@ _ABSTRACT_RX = re.compile(
     r"the beginning of the end|and that'?s (why|how|exactly)|here'?s the (thing|truth|point)|"
     r"matters? (because|is)|the real (reason|question|tragedy))\b", re.I)
 
+# A very narrow contradiction guard for analyzer-authored metaphor storyboards.  Objective deixis
+# normally wins ("those ninety seconds" must show those seconds), but a persisted exact label is
+# internally impossible when every other field affirmatively describes the *continued existence of
+# an abstract quality* and explicitly requests a symbolic/non-literal image.  Both signals are
+# required; ``shot_intent=symbolic`` or missing entity/query fields alone are never enough.
+_SYMBOLIC_STORYBOARD_RX = re.compile(
+    r"\b(?:symbolic|visual metaphor|metaphorical|non[- ]literal|abstract image)\b", re.I)
+_METAPHORIC_CONTINUITY_RX = re.compile(
+    r"^\s*(?:(?:but|and|yet)\s+)?"
+    r"(?:(?:(?:[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,3})'s|his|her|their|the)\s+)?"
+    r"(?:power|influence|legacy|authority|control|memory|idea|impact|presence)\s+"
+    r"(?:"
+    r"(?:did|does|would|will)\s+not\s+(?:die|end|vanish|disappear)|"
+    r"(?:lives?|carries?|echoes?)\s+on|survives?|remains?|endures?|outlives?)\b"
+    r"(?:\s+(?:in|at|inside|within)\s+(?:that|this)\s+"
+    r"[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,2})?\s*[.!?]?\s*$",
+    re.I,
+)
+
 
 # DEIXIS — a pointing word bound to a scene noun ("at THAT TABLE", "in THOSE NINETY SECONDS",
 # "THERE IT IS"). The referent is the anchor scene, so the line is as specific as a named one even
@@ -165,6 +184,31 @@ def _has_concrete_specific_hook(seg) -> bool:
     ent = (getattr(seg, "required_entity", "") or "").strip()
     kind = (getattr(seg, "required_kind", "") or "").strip().lower()
     return bool(ent or kind in _KNOWN_KINDS - {""})
+
+
+def _explicit_unanchored_symbolic_metaphor(seg) -> bool:
+    """Resolve one affirmative analyzer contradiction without weakening ordinary deixis."""
+    persisted = str(getattr(seg, "visual_policy", "") or "").strip().lower()
+    if persisted not in {EXACT, ABSTRACT}:
+        return False
+    if str(getattr(seg, "shot_intent", "") or "").strip().lower() != "symbolic":
+        return False
+    if bool(getattr(seg, "is_specific_claim", False)):
+        return False
+    if any(str(getattr(seg, field, "") or "").strip() for field in (
+            "quote", "required_entity", "required_kind", "scene_query")):
+        return False
+    expected = str(getattr(seg, "expected_visual", "") or "")
+    text = str(getattr(seg, "text", "") or "")
+    # The storyboard must itself stay non-literal.  A symbolic prefix cannot erase its own concrete
+    # pointer (for example, "a symbolic image ... at that exact table"); in that case the analyzer
+    # has still promised a checkable place and the ordinary deictic contract must win.
+    if (_DEICTIC_RX.search(expected)
+            or re.search(r"\b(?:that|this|those|these|exact(?:ly)?|same|specific|actual)\b",
+                         expected, re.I)):
+        return False
+    return bool(_SYMBOLIC_STORYBOARD_RX.search(expected)
+                and _METAPHORIC_CONTINUITY_RX.fullmatch(text))
 
 
 def is_deictic(seg) -> bool:
@@ -301,6 +345,8 @@ def has_deictic_target(seg) -> bool:
 def classify(seg) -> str:
     """Heuristic policy from the signals the analyzer already produces. Deterministic — always works
     even with no LLM. The LLM's explicit `visual_policy` (when present + valid) takes precedence."""
+    if _explicit_unanchored_symbolic_metaphor(seg):
+        return ABSTRACT
     # deixis outranks every other signal, including the abstract heuristic below
     if is_deictic(seg) or _direct_concrete_visual(seg):
         return EXACT
@@ -328,6 +374,8 @@ def policy_of(seg) -> str:
     Deixis overrides the LLM label. The LLM sees one beat's words, not what they point AT, so it
     labels 'at that table' generic — and a generic label is a licence to air anything. The pointing
     word is objective evidence about the referent that outranks the model's guess."""
+    if _explicit_unanchored_symbolic_metaphor(seg):
+        return ABSTRACT
     if is_deictic(seg) or _direct_concrete_visual(seg):
         return EXACT
     p = (getattr(seg, "visual_policy", "") or "").strip().lower()
