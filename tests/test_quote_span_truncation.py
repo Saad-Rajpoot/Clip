@@ -15,8 +15,10 @@ The quote's last two tokens are simply not in that audio. Truncation bought the 
 pipeline then reported the line "located" in a source about an entirely different scene.
 
 I first read this as an impossible speech rate — 7 words in 0.80s — and that was WRONG. The span
-holds 5 ASR words in 0.90s, about 5.6 words/second, which is ordinary speech; the phantom rate came
-from counting quote tokens the window never contained. A rate floor would have been a number picked
+holds 5 ASR words, not 7, so the rate is 6.25 words/second: ordinary speech. (The 0.80s is the
+locator's own span [32.42, 33.22]; the confirmation decoder reports [32.32, 33.22] = 0.90s for the
+same utterance, a different 'I' onset.) The phantom rate came from counting quote tokens the window
+never contained. A rate floor would have been a number picked
 to fit one case. Measured over 3,149 located spans from 780 probes across 273 real ASR streams, no
 single statistic separates genuine spans from spurious ones: rate, coverage, span duration and
 phrase ratio all overlap heavily.
