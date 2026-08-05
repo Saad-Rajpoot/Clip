@@ -1279,6 +1279,12 @@ def _subject_terms(seg, char2actor: dict) -> set:
     return out
 
 
+# A title-only subject match orders BELOW an identity-corroborated one. Not zero — an uploader's
+# title is real, if weak, evidence — but it must never outrank a candidate the pipeline itself saw
+# the subject in. See _subject_affinity.
+_TITLE_ONLY_AFFINITY = 0.5
+
+
 def _subject_affinity(cand, terms: set, proj) -> float:
     """How strongly this candidate is associated with the wanted subject. ORDERING ONLY.
 
@@ -1289,18 +1295,33 @@ def _subject_affinity(cand, terms: set, proj) -> float:
     Two independent signals, so a mislabelled title alone cannot carry a candidate:
       * the source TITLE naming the subject (what a human uploader wrote about the clip)
       * the match-time face/identity signals on the candidate itself
+
+    That claim only holds when the second signal CAN fire. Measured on job ee93371e41 beat 134
+    (required_entity 'Shae'): the project roster holds 9 characters and Shae is not one of them, so
+    the identity arm is 0.0 on every candidate and the score collapses to the title arm alone —
+    scores were 1.0, 1.0, 1.0 and then a cliff to 0.0, and the three "1.0" candidates are, on real
+    frames, Tywin on the Iron Throne with no Shae in them. A title is not a frame, and a compilation
+    titled for a character contains long stretches without them.
+
+    So a title-only match is capped BELOW an identity-corroborated one. Ordering is unchanged
+    wherever both signals exist; where only the title speaks, it can still bring a candidate
+    forward — it simply cannot outrank a candidate the pipeline actually saw the subject in.
     """
     if not terms:
         return 0.0
     score = 0.0
     title = _project_source_title(proj, getattr(cand, "source_id", "") or "").lower()
+    title_hit = 0.0
     if title:
         hits = sum(1 for t in terms if t in title)
-        score += min(1.0, hits / max(1, min(2, len(terms))))
+        title_hit = min(1.0, hits / max(1, min(2, len(terms))))
     sig = getattr(cand, "signals", None) or {}
     ident = " ".join(str(x) for x in (
         sig.get("identity", ""), sig.get("face_ids", ""), sig.get("identities", ""))).lower()
-    if ident and any(t in ident for t in terms):
+    ident_hit = bool(ident and any(t in ident for t in terms))
+    # an uploader's title is weaker evidence than the pipeline's own look at the pixels
+    score += title_hit * (1.0 if ident_hit else _TITLE_ONLY_AFFINITY)
+    if ident_hit:
         score += 1.0
     score += 0.25 * float(sig.get("faceid", 0.0) or 0.0)
     return score
@@ -4663,7 +4684,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                 # Ordering ONLY, exactly like the look-miss rule above: `_try_promote` still applies
                 # the same strict bar to whatever it reaches, so this can change which candidate is
                 # examined first and can never admit one that would otherwise be refused.
-                if _bench and v.get("correct_subject_visible") is False:
+                _wrong_subject = v.get("correct_subject_visible") is False
+                if _bench and _wrong_subject:
                     _want = _subject_terms(seg, _char2actor)
                     if _want:
                         _bench.sort(key=lambda c: _subject_affinity(c, _want, proj), reverse=True)
@@ -4671,6 +4693,59 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     log(f"verify: seg{sel.segment_index} rescued from the deep bench "
                         f"({len(_bench)} extra candidate(s)) — exact scene found, no downgrade")
                     return True
+
+                # THE BENCH CANNOT HOLD WHAT RETRIEVAL COULD NOT SEE.
+                #
+                # The ordering above was measured on job ee93371e41 beat 134 and, on real frames,
+                # it does not fix that beat — because no ordering of that bench could. The bench is
+                # match's one-candidate-per-source ranking over the top CLIP-ranked sources, so a
+                # shot CLIP cannot retrieve is structurally absent from it. Beat 134 wants "Shae in
+                # his father's bed"; the shot that literally shows it sits at CLIP rank 563 of 4942
+                # for this beat's query, because it is a near-black night interior — the same
+                # retrieval blind spot measured twice before on low-contrast footage.
+                #
+                # So a wrong-subject failure now falls through to the bounded pools the pipeline
+                # already owns and which are built by scene affinity rather than by CLIP rank,
+                # BEFORE the beat is recorded as having no passing alternate. `_try_promote` runs
+                # with downgrade=False, i.e. the identical strict bar: this changes only what is
+                # EXAMINED, never what is admitted, and a beat with genuinely no right footage
+                # still blocks exactly as it did.
+                if _wrong_subject:
+                    # Venue first, deliberately. A wrong-subject failure means the SOURCE is wrong
+                    # about who is in it, and the neighbourhood pool searches around the current
+                    # pick's own scene seeds — the same neighbourhood that produced the wrong
+                    # person. The venue pool draws from anchor-affine sources instead. Measured on
+                    # beat 134: all 8 venue candidates come from the source that actually holds
+                    # "Shae in his father's bed"; none of the 12 neighbourhood candidates do.
+                    for _label, _mk in (
+                        ("venue", lambda: _venue_candidates(
+                            sel, seg, proj, get_shot, _era_of(seg))),
+                        ("scene-neighbourhood", lambda: _strict_scene_neighborhood_candidates(
+                            sel, seg, proj, get_shot, cfg, beat_era=_era_of(seg))),
+                    ):
+                        try:
+                            _pool = _mk() or []
+                        except Exception as _exc:        # noqa: BLE001 — fail closed, keep the ladder
+                            log(f"verify: seg{sel.segment_index} wrong-subject {_label} pool "
+                                f"unavailable ({type(_exc).__name__})")
+                            continue
+                        if not _pool:
+                            continue
+                        _seen_ids = {id(c) for c in _bench}
+                        _pool = [c for c in _pool if id(c) not in _seen_ids]
+                        if _wrong_subject:
+                            _want2 = _subject_terms(seg, _char2actor)
+                            if _want2:
+                                _pool.sort(key=lambda c: _subject_affinity(c, _want2, proj),
+                                           reverse=True)
+                        log(f"verify: seg{sel.segment_index} wrong subject on screen and the bench "
+                            f"had no answer — examining {len(_pool)} {_label} candidate(s) at the "
+                            f"same strict bar")
+                        if _try_promote(downgrade=False, pool=_pool,
+                                        label=f"wrong_subject_{_label}"):
+                            log(f"verify: seg{sel.segment_index} rescued from the {_label} pool — "
+                                f"required subject found, no downgrade")
+                            return True
                 return False
 
             # A beat that POINTS at something cannot be satisfied by "the right people are here".
