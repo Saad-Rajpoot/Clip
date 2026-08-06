@@ -228,5 +228,7 @@ def test_the_look_question_is_preserved_for_strict_replacements_only():
     wrapper = src[i:j]
     assert '_look_scope["on"] = not downgrade' in wrapper and "finally:" in wrapper, \
         "strict promotion must keep the look question; contextual promotion may soften it"
-    assert 'av.get("target_visible") is True' in src[i:], \
+    # the strict per-window decision now lives in `strict_window_verdict`, called from
+    # `_try_promote_inner` — one judge, so look for the invariant where it is defined
+    assert 'av.get("target_visible") is True' in inspect.getsource(V.strict_window_verdict), \
         "a malformed keep without affirmative target evidence must not stop strict search"

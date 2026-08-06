@@ -1327,6 +1327,91 @@ def _subject_affinity(cand, terms: set, proj) -> float:
     return score
 
 
+def strict_window_verdict(av, seg, alt, proj, cfg, char2actor, *, downgrade: bool,
+                          exact: bool, character: bool, must_see) -> dict:
+    """The accept/reject decision for ONE candidate window — the whole of it, in one place.
+
+    This logic used to live inside `_try_promote_inner`, unreachable from anywhere else. That is
+    why nothing could audit the pool the way the gate judges it: any external check had to
+    re-implement the bar, and a re-implementation that drifts is worse than no check at all.
+    `_try_promote_inner` now calls this; there is no second copy.
+
+    `av` is the vision verdict, or None for a transport error. A transport error is NOT a
+    judgement: it returns `status="incomplete"` and `accept=False`, and a caller counting
+    rejections must not count it as one. Same for any exception raised while judging.
+
+    Returns the decision plus everything needed to explain it: the verdict fields, the rejection
+    reason, the contradiction, the rung, and the window's identity.
+    """
+    ident = {
+        "source_id": str(getattr(alt, "source_id", "") or ""),
+        "shot_index": int(getattr(alt, "shot_index", -1) or -1),
+        "in_point": float(getattr(alt, "in_point", 0.0) or 0.0),
+        "out_point": float(getattr(alt, "out_point", 0.0) or 0.0),
+    }
+    if av is None:
+        return {"accept": False, "status": "incomplete", "reason": "verifier_transport_error",
+                "window": ident, "verdict": None}
+    try:
+        src = proj.source(ident["source_id"])
+        title = ((getattr(src, "title", "") or "") + " " + ident["source_id"])
+        conflict = _contradiction_reason(seg, av, title, char2actor)
+        if conflict:
+            av["contradicts_narration"] = True
+            av["contradiction_reason"] = conflict
+
+        if downgrade:
+            accept = _exact_contextual_ok(av, seg, title, char2actor)
+            reject = "" if accept else "contextual_bar_not_met"
+        else:
+            reject = ""
+            if exact:
+                reject = _strict_keep_rejection_reason(
+                    av, seg, title, char2actor, must_see=must_see)
+                if not reject:
+                    reaction = _exact_reaction_context_evidence(proj, alt, seg, cfg=cfg)
+                    if reaction.get("required"):
+                        av["exact_reaction_context"] = reaction
+                        if not reaction.get("passed"):
+                            reject = str(reaction.get("reason")
+                                         or "exact_reaction_context_unproven")
+            elif character:
+                reject = _character_keep_rejection_reason(
+                    av, seg, title, char2actor, must_see=must_see)
+            accept = (av.get("verdict") == "keep" and not conflict and not reject
+                      and (not exact or not must_see or av.get("target_visible") is True))
+            if not accept and not reject:
+                reject = ("contradicts_narration" if conflict else
+                          ("target_not_visible"
+                           if (exact and must_see and av.get("target_visible") is not True)
+                           else f"verdict_{av.get('verdict')}"))
+    except Exception as exc:                             # noqa: BLE001 — a fault is not a rejection
+        return {"accept": False, "status": "incomplete",
+                "reason": f"strict_judgement_error:{type(exc).__name__}",
+                "window": ident, "verdict": av.get("verdict") if isinstance(av, dict) else None}
+
+    return {
+        "accept": bool(accept),
+        "status": "judged",
+        "reason": "" if accept else str(reject or "rejected"),
+        "window": ident,
+        "verdict": av.get("verdict"),
+        "matches_narration": av.get("matches_narration"),
+        "correct_subject_visible": av.get("correct_subject_visible"),
+        "wrong_subject_visible": av.get("wrong_subject_visible"),
+        "specific_enough": av.get("specific_enough"),
+        "target_visible": av.get("target_visible"),
+        "contradiction_reason": av.get("contradiction_reason", ""),
+        "model": ((av.get("selection_evidence") or {}).get("model", "")
+                  if isinstance(av.get("selection_evidence"), dict) else ""),
+        "prompt_version": ((av.get("selection_evidence") or {}).get("prompt_version", "")
+                           if isinstance(av.get("selection_evidence"), dict) else ""),
+        "evidence": av.get("selection_evidence") or {},
+        "rung": "contextual" if downgrade else ("exact" if exact else
+                                                ("character" if character else "generic")),
+    }
+
+
 def _project_exact_cast_warning(proj, seg, source_id: str) -> str:
     """Compute the conditional strict-prompt warning from the canonical project roster."""
     return _source_title_exact_cast_conflict(
@@ -4356,36 +4441,11 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                               ("contextual" if downgrade else "strict_promote"))))
                     if av is None:
                         continue                        # transport error, NOT a judgment
-                    _asrc = proj.source(alt.source_id)
-                    _atitle = ((getattr(_asrc, "title", "") or "") + " " +
-                               (alt.source_id or ""))
-                    _aconflict = _contradiction_reason(seg, av, _atitle, _char2actor)
-                    if _aconflict:
-                        av["contradicts_narration"] = True
-                        av["contradiction_reason"] = _aconflict
-                    if downgrade:
-                        _accept = _exact_contextual_ok(av, seg, _atitle, _char2actor)
-                    else:
-                        _strict_reject = ""
-                        if _exact:
-                            _strict_reject = _strict_keep_rejection_reason(
-                                av, seg, _atitle, _char2actor, must_see=_alt_must_see)
-                            if not _strict_reject:
-                                _reaction_context = _exact_reaction_context_evidence(
-                                    proj, alt, seg, cfg=cfg)
-                                if _reaction_context.get("required"):
-                                    av["exact_reaction_context"] = _reaction_context
-                                    if not _reaction_context.get("passed"):
-                                        _strict_reject = str(
-                                            _reaction_context.get("reason")
-                                            or "exact_reaction_context_unproven")
-                        elif _character:
-                            _strict_reject = _character_keep_rejection_reason(
-                                av, seg, _atitle, _char2actor, must_see=_alt_must_see)
-                        _accept = (av.get("verdict") == "keep" and not _aconflict
-                                   and not _strict_reject
-                                   and (not _exact or not _alt_must_see
-                                        or av.get("target_visible") is True))
+                    # ONE judge, called from here and from anywhere that must judge identically.
+                    _decision = strict_window_verdict(
+                        av, seg, alt, proj, cfg, _char2actor, downgrade=downgrade,
+                        exact=_exact, character=_character, must_see=_alt_must_see)
+                    _accept = _decision["accept"]
                     if not _accept:
                         # an explicit non-keep judgment (av None = transport error, handled above)
                         failed_wins.append((alt.source_id, float(alt.in_point)))
