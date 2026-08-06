@@ -4153,10 +4153,43 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
         }
         _summary = (f"; verifier summary/error: {_scoped_verify_error}"
                     if _scoped_verify_error else "")
-        raise PipelineError(
-            "semantic scoped re-verification remained technically inconclusive for "
-            f"beat(s) {_technical_indices}: missing/schema evidence {_technical_reasons}"
-            f"{_summary}; independent content recovery was saved")
+        # A BACKEND THAT IS DOWN AND A FRAME THE BACKEND WON'T LOOK AT ARE NOT THE SAME THING.
+        #
+        # Measured on job 229233891e: 145 of 146 beats verified normally, and beat 36 alone came
+        # back with no verdict at all — every time, for hours. Diagnosed by hand: the vision probe
+        # passed, Gemini answered ordinary text, four other keyframes from the same job were judged
+        # fine, and the file itself was a clean 512x288 JPEG. Only that one image was refused, by
+        # Gemini and by the Claude fallback both. That is a fact about the picture, not a broken
+        # system — and treating it as a broken system threw away a 2h20m render at the last gate.
+        #
+        # An outage must still be fatal: during one, "no verdict" carries no information and
+        # accepting anything would ship unverified footage. So the two are told apart by asking the
+        # backend, right here, with the pipeline's own health probe. Healthy backend + a beat that
+        # will not resolve = an unjudgeable frame; the beat stays UNVERIFIED and the publication
+        # contract goes on blocking it exactly as before, which is the whole point — nothing is
+        # accepted, the render simply stops dying for it.
+        # Whether the backend is up is already answered by THIS pass: if other beats came back
+        # with real verdicts moments ago, the verifier worked. That evidence is free, deterministic
+        # and taken from the same backend, the same moment and the same kind of image — a live
+        # probe would be none of those, and it made the outcome depend on network state (three
+        # existing tests started passing or failing by suite ordering alone).
+        _judged = 0
+        for _row in (final.get("checked") or []):
+            if str(((_row.get("verifier") or {}) if isinstance(_row, dict) else {})
+                   .get("verdict") or ""):
+                _judged += 1
+        _healthy = _judged >= max(3, len(_technical_indices) * 3)
+        if not _healthy:
+            raise PipelineError(
+                "semantic scoped re-verification remained technically inconclusive for "
+                f"beat(s) {_technical_indices}: missing/schema evidence {_technical_reasons}"
+                f"{_summary}; only {_judged} beat(s) in this pass produced any verdict at all, so "
+                "the verifier itself is not proven healthy — refusing to read an outage as a "
+                "content result; independent content recovery was saved")
+        log(f"semantic-recovery: beat(s) {_technical_indices} could not be judged while "
+            f"{_judged} other beat(s) in the SAME pass were judged normally — treating their "
+            f"frames as unjudgeable, not the system as broken. They stay UNVERIFIED and the "
+            f"publication contract still blocks them: {_technical_reasons}{_summary}")
     return final
 
 
