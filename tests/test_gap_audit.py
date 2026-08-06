@@ -86,8 +86,10 @@ def test_a_capped_scan_can_never_report_exhaustion():
     assert "covered = examined + incomplete >= universe_n and not cap" in SRC
 
 
-def test_authorization_requires_both_a_gap_and_a_complete_scan():
-    assert 'bool(classification == "footage_gap" and status == "complete")' in SRC
+def test_authorization_requires_a_gap_a_complete_scan_and_question_parity():
+    assert 'classification == "footage_gap"' in SRC
+    assert 'status == "complete"' in SRC
+    assert "and question_parity)" in SRC
 
 
 def test_an_incomplete_verdict_is_never_cached():
@@ -155,4 +157,29 @@ def test_the_result_records_what_a_reviewer_would_have_to_check(field):
 def test_a_pass_stops_the_scan_and_is_reported():
     """Finding footage is the more valuable outcome — it means the beat was never a gap."""
     assert "break" in SRC
+    assert '"not_a_footage_gap"' in SRC
+
+
+# ------------------------------------------------------------------ a weaker question authorizes nothing
+#
+# MEASURED on beat 134: this scan accepted an Oberyn-fight window for a beat requiring Shae, with an
+# empty evidence block (faceid_names None, model None). The DECISION was the gate's own; the
+# QUESTION was not. `_verify_ctx` builds a 15/50/85 contact sheet of the selected window and passes
+# the shot's Face-ID names, era hint, must-see target and exact-cast warning; this module passes a
+# bare keyframe and none of them. A weaker question says yes too often.
+def test_the_audit_cannot_authorize_while_the_question_differs_from_the_gate_s():
+    assert "question_parity = False" in SRC
+    assert 'and question_parity)' in SRC
+
+
+def test_the_parity_gap_is_named_in_the_artifact_not_hidden():
+    assert '"question_parity_with_gate"' in SRC
+    assert '"question_parity_gap"' in SRC
+    for missing in ("contact sheet", "Face-ID", "era hint", "must-see", "exact-cast"):
+        assert missing in SRC, missing
+
+
+def test_a_not_a_gap_finding_is_still_usable():
+    """A weaker question can accept a window the gate would reject; it cannot invent one that does
+    not exist. So 'the pipeline had footage it did not use' survives the parity gap."""
     assert '"not_a_footage_gap"' in SRC

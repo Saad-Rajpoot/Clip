@@ -201,6 +201,23 @@ def exhaustive_gap_audit(proj, seg, cfg, eng, *, log=print, cap: int = 0,
         except Exception:                                 # noqa: BLE001 — ordering is optional
             pass
 
+    # QUESTION PARITY — the unresolved half, and the reason this cannot authorize anything yet.
+    #
+    # cb0dcaf made the DECISION callable, and this module uses it. But the pipeline does not ask
+    # `verify_frame` the bare question this module asks: `_verify_ctx` builds a 15/50/85 contact
+    # sheet of the SELECTED WINDOW rather than judging the shot's keyframe, and it passes the
+    # shot's Face-ID names, the beat's era hint, its deictic must-see target and the exact-cast
+    # warning. Withholding those asks a WEAKER question, and a weaker question says yes too often:
+    # measured on beat 134, this scan accepted an Oberyn-fight window for a beat that requires
+    # Shae, with an empty evidence block (faceid_names None, model None). Right conclusion, wrong
+    # window — which is luck, not a proof.
+    #
+    # An audit that cannot show it asked the IDENTICAL question has no business authorizing the
+    # loss of a beat's specificity, so it does not. Until the question construction is extracted
+    # the same way the decision was, `authorizes_softening` is pinned False and the reason is
+    # recorded in the artifact. A "not a footage gap" finding remains fully usable — it only ever
+    # says the pipeline had footage it did not use, and a weaker question cannot invent one.
+    question_parity = False
     cache = _VerdictCache(Path(getattr(proj, "index_dir", ".")) / "strict_window_verdicts.json")
     pol = contract["visual_policy"]
     exact, character = pol == "exact_scene", pol == "character_specific"
@@ -283,5 +300,11 @@ def exhaustive_gap_audit(proj, seg, cfg, eng, *, log=print, cap: int = 0,
         "verdict_cache": {"hit": cache.hit, "miss": cache.miss},
         # The claim, stated as what it is. Absence is only authorized by a COMPLETE scan of a
         # recorded universe in which every call answered and none passed.
-        "authorizes_softening": bool(classification == "footage_gap" and status == "complete"),
+        "question_parity_with_gate": question_parity,
+        "question_parity_gap": (
+            "" if question_parity else
+            "verify_frame is called without the selected-window contact sheet, Face-ID names, "
+            "era hint, must-see target or exact-cast warning that _verify_ctx supplies"),
+        "authorizes_softening": bool(
+            classification == "footage_gap" and status == "complete" and question_parity),
     }
