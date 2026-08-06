@@ -772,6 +772,91 @@ def transcribe_unprompted_window(
     }
 
 
+# Speech-capacity measurement. Deliberately generous on both axes: a frame counts as audible far
+# below anything a viewer could hear, so the measured capacity always OVER-states how much speech
+# a window could carry. Only an impossibility survives that bias.
+_SPEECH_CAPACITY_FRAME_SEC = 0.10
+_SPEECH_CAPACITY_FLOOR_DBFS = -60.0
+
+
+def measure_window_speech_capacity(
+        path: Path | str, start: float, end: float, *,
+        sample_rate: int = 16000,
+        frame_seconds: float = _SPEECH_CAPACITY_FRAME_SEC,
+        floor_dbfs: float = _SPEECH_CAPACITY_FLOOR_DBFS) -> dict:
+    """Measure how much of one physical window carries audio loud enough to be speech at all.
+
+    This is a waveform measurement, never a decoder opinion: it answers "could ANY phrase have been
+    spoken here", not "which words were spoken". The standing failure mode it exists for is a
+    PROMPTED decode regurgitating its own ``initial_prompt`` over a silent outro — confidence floors
+    alone can never settle that, because a silent segment is itself low-confidence, so the honest
+    fail-closed answer is "inconclusive" forever and the beat can never publish. Audible time is a
+    fact of the bytes: a window with less of it than a phrase physically needs cannot contain that
+    phrase under any prompt.
+
+    ``status=ok`` means the measurement itself is trustworthy; any extraction fault is
+    ``inconclusive`` so callers keep failing closed.
+    """
+    import numpy as np
+
+    try:
+        lo, hi = float(start), float(end)
+        rate = int(sample_rate)
+        frame = float(frame_seconds)
+        floor = float(floor_dbfs)
+    except (TypeError, ValueError):
+        return {"status": "inconclusive", "reason": "invalid_capacity_parameters"}
+    if (not math.isfinite(lo) or not math.isfinite(hi) or not hi > lo >= 0.0
+            or rate < 8000 or not math.isfinite(frame) or frame <= 0.0
+            or not math.isfinite(floor)):
+        return {"status": "inconclusive", "reason": "invalid_capacity_parameters"}
+
+    try:
+        from . import audio_align as _audio_window
+        pcm, decode_error = _audio_window._pcm_from_media(
+            path, lo, hi, sample_rate=rate)
+    except Exception as exc:
+        return {
+            "status": "inconclusive",
+            "reason": f"capacity_extract_error:{type(exc).__name__}",
+        }
+    if decode_error:
+        return {"status": "inconclusive", "reason": str(decode_error)}
+
+    samples = np.asarray(pcm, dtype=np.float64)
+    width = max(1, int(round(frame * rate)))
+    usable = (samples.size // width) * width
+    if usable < width:
+        return {"status": "inconclusive", "reason": "capacity_window_too_short"}
+    # Non-overlapping frames: every audible instant is counted exactly once, so `audible_seconds`
+    # is a true duration rather than an overlap-inflated one.
+    frames = samples[:usable].reshape(-1, width)
+    frame_rms = np.sqrt(np.mean(np.square(frames), axis=1))
+    if not np.isfinite(frame_rms).all():
+        return {"status": "inconclusive", "reason": "capacity_rms_nonfinite"}
+    audible = int(np.count_nonzero(frame_rms > (10.0 ** (floor / 20.0))))
+    overall_rms = float(np.sqrt(np.mean(np.square(samples))))
+    peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+
+    def _db(value: float) -> float:
+        return round(20.0 * math.log10(value), 3) if value > 0.0 else -999.0
+
+    return {
+        "status": "ok",
+        "reason": "",
+        "sample_rate_hz": rate,
+        "measured_window": [round(lo, 3), round(hi, 3)],
+        "frame_seconds": round(frame, 4),
+        "floor_dbfs": round(floor, 3),
+        "frame_count": int(frame_rms.size),
+        "audible_frame_count": audible,
+        "audible_seconds": round(audible * (width / float(rate)), 3),
+        "measured_seconds": round(usable / float(rate), 3),
+        "mean_rms_dbfs": _db(overall_rms),
+        "peak_dbfs": _db(peak),
+    }
+
+
 def _assign_transcript(shots: list[Shot], words: list[tuple[float, float, str]]) -> None:
     """Attach to each shot the words whose midpoint falls inside it.
 

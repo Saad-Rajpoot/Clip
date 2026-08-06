@@ -59,6 +59,14 @@ QUOTE_CONFIRMATION_MAX_NO_SPEECH = 0.60
 QUOTE_CONFIRMATION_MIN_AVG_LOGPROB = -1.0
 QUOTE_RETRIEVAL_MAX_OCCURRENCES_PER_STREAM = 32
 
+# Speaking-rate ceilings used ONLY to prove impossibility, never to judge a match. Human speech
+# tops out around 4 words/sec; auctioneer-grade delivery reaches ~8. Charging a phrase 8 words/sec
+# and 40 chars/sec therefore under-states the time it needs by a wide margin, so a window holding
+# less audible audio than that could not have carried the phrase however it was decoded.
+QUOTE_CAPACITY_MAX_WORDS_PER_SEC = 8.0
+QUOTE_CAPACITY_MAX_CHARS_PER_SEC = 40.0
+QUOTE_CAPACITY_MIN_PHRASE_SEC = 0.30
+
 # A lenient verifier is allowed to say that the selected bytes are usable context while also
 # recording that they do not prove the authored exact moment.  That is a completed CONTENT
 # judgment, not missing verifier evidence.  Keep the vocabulary here beside the publication
@@ -716,9 +724,26 @@ def _quote_confirmation_summary(evidence: dict) -> dict:
             "confirmed_span", "timed_asr_ratio", "match_method", "result_content_sha256",
             "decoder_used", "primary_model", "rescue_model", "primary_decode_status",
             "primary_decode_reason", "primary_phrase_matched", "rescue_attempted",
-            "rescue_decode_status", "rescue_decode_reason", "rescue_phrase_matched")
+            "rescue_decode_status", "rescue_decode_reason", "rescue_phrase_matched",
+            "speech_capacity", "required_speech_seconds")
         if key in evidence
     }
+
+
+def _phrase_minimum_speech_seconds(quote: str) -> float:
+    """Shortest time the authored phrase could possibly occupy when spoken.
+
+    Both rates are far above real delivery, so this is a floor no human utterance can duck under —
+    it exists to make an ABSENCE provable, never to time a match.
+    """
+    text = str(quote or "").strip()
+    if not text:
+        return QUOTE_CAPACITY_MIN_PHRASE_SEC
+    words = len(text.split())
+    letters = sum(1 for char in text if not char.isspace())
+    return max(QUOTE_CAPACITY_MIN_PHRASE_SEC,
+               words / QUOTE_CAPACITY_MAX_WORDS_PER_SEC,
+               letters / QUOTE_CAPACITY_MAX_CHARS_PER_SEC)
 
 
 def _confirm_prompted_quote_span_unprompted(
@@ -746,6 +771,42 @@ def _confirm_prompted_quote_span_unprompted(
         }
 
     from . import index as _index
+
+    # PHYSICAL IMPOSSIBILITY GATE — settle the one case the confidence floors structurally cannot.
+    # A prompted decode can regurgitate its own authored prompt over a silent outro; the unprompted
+    # pass then finds no words, and because a silent segment is itself low-confidence it can only
+    # answer "inconclusive". That answer is honest but permanent: the beat is blocked forever by a
+    # hallucination. Audible time is a property of the waveform, so when the window carries less of
+    # it than the phrase physically needs, the phrase demonstrably was not spoken there. This
+    # REJECTS on measured bytes; it can never confirm, and it never relaxes a floor. Any measurement
+    # fault falls through to the decode below and keeps failing closed.
+    required_speech_seconds = _phrase_minimum_speech_seconds(binding["authored_quote"])
+    capacity = _index.measure_window_speech_capacity(
+        getattr(src, "local_path", "") or "",
+        binding["decode_window"][0], binding["decode_window"][1],
+        sample_rate=QUOTE_CONFIRMATION_SAMPLE_RATE)
+    capacity_conclusive = False
+    if str(capacity.get("status", "") or "") == "ok":
+        try:
+            capacity_conclusive = (
+                float(capacity["audible_seconds"]) < required_speech_seconds)
+        except (KeyError, TypeError, ValueError):
+            capacity_conclusive = False
+    if capacity_conclusive:
+        return {
+            "schema_version": QUOTE_CONFIRMATION_SCHEMA,
+            "algorithm": QUOTE_CONFIRMATION_ALGORITHM,
+            "status": "rejected",
+            "reason": "unprompted_window_below_phrase_speech_capacity",
+            "artifact_key": binding["binding_fingerprint"],
+            "decoder_fingerprint": binding["decoder_fingerprint"],
+            "decode_window": binding["decode_window"],
+            "prompted_span": binding["prompted_span"],
+            "confirmed_span": None,
+            "match_method": "audible_speech_capacity_below_phrase_minimum",
+            "speech_capacity": capacity,
+            "required_speech_seconds": round(required_speech_seconds, 3),
+        }
 
     primary_model = str(getattr(cfg, "whisper_model", "") or "")
     rescue_model = ("" if primary_model == QUOTE_CONFIRMATION_RESCUE_MODEL
