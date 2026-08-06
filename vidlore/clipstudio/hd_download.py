@@ -99,6 +99,55 @@ def _cookie_args() -> list:
     return []
 
 
+# EXIT NODE ROTATION — the one thing cookies and a PO token cannot fix.
+#
+# Measured on job 229233891e: 42 of 42 YouTube sources fell back to 360p on a PO-token/403
+# rejection, and the pipeline's own two recovery sweeps recovered 0/42 across ~90 minutes. The
+# setup was not at fault — the POT server answered on 4416, yt-dlp was current, and the identical
+# command succeeded later unchanged. YouTube was rate-limiting THIS IP, and no amount of retrying
+# from the same address fixes that. The whole render then proceeds at 360p, which has already
+# shipped one 12-minute video entirely in SD.
+#
+# So the HD path can rotate exit nodes. Proxies come from VIDLORE_HD_PROXIES as
+# `host:port:user:pass` (or a full proxy URL) entries separated by commas or newlines. Each call
+# takes the next one, so a blocked node is not hammered and a retry lands somewhere else. Empty or
+# unset means direct — the previous behaviour exactly, unchanged.
+#
+# Measured against the exact video that failed, through the pipeline's own HD command: without
+# cookies 4 of 7 nodes returned 720p and 3 hit "Sign in to confirm you're not a bot"; WITH the
+# cookies this path already sends, all 7 returned 720p.
+_PROXY_ROTATION = [0]
+
+
+def _proxy_pool() -> list:
+    raw = os.environ.get("VIDLORE_HD_PROXIES", "")
+    out = []
+    for chunk in raw.replace("\n", ",").split(","):
+        item = chunk.strip()
+        if not item:
+            continue
+        if "://" in item:
+            out.append(item)
+            continue
+        bits = item.split(":")
+        if len(bits) == 4:                       # host:port:user:pass
+            host, port, user, pw = bits
+            out.append(f"http://{user}:{pw}@{host}:{port}")
+        elif len(bits) == 2:                     # host:port, no auth
+            out.append(f"http://{bits[0]}:{bits[1]}")
+    return out
+
+
+def _proxy_args() -> list:
+    """The next exit node in rotation, or [] for a direct connection."""
+    pool = _proxy_pool()
+    if not pool:
+        return []
+    idx = _PROXY_ROTATION[0] % len(pool)
+    _PROXY_ROTATION[0] = (_PROXY_ROTATION[0] + 1) % max(1, len(pool))
+    return ["--proxy", pool[idx]]
+
+
 def _remote_components() -> list:
     """`--remote-components ejs:github` — the JS-challenge solver script distribution.
 
@@ -554,7 +603,7 @@ def probe_max_height(url: str, *, max_height: int = 1080, timeout: int = 60) -> 
     # discovery then rated every 1080p upload as SD before a single byte was fetched.
     def _probe_cmd() -> list:
         return [
-            HD_PY, "-m", "yt_dlp", *_cookie_args(), *_remote_components(),
+            HD_PY, "-m", "yt_dlp", *_cookie_args(), *_proxy_args(), *_remote_components(),
             "--extractor-args", f"youtubepot-bgutilhttp:base_url=http://127.0.0.1:{POT_PORT}",
             "-f", f"bv*[height<={max_height}]/b[height<={max_height}]/bv*/b",
             "-S", _format_sort(max_height),
@@ -676,6 +725,7 @@ def download_hd(url: str, out_stem: str, *, max_height: int = 1080, ffmpeg_dir: 
         #  --retry-sleep     : exponential backoff on http errors instead of hammering.
         c = [
             HD_PY, "-m", "yt_dlp", "-4",
+            *_proxy_args(),
             *_remote_components(),
             "--sleep-requests", "0.75",
             "--retry-sleep", "http:exp=1:120",
