@@ -274,3 +274,79 @@ def test_srt_and_ass_share_the_schedule_and_build_preflights_breakouts():
     assert "_breakout_ass_preflight = _breakout_caption_ass(" in build
     assert 'kind="breakout_caption"' in build
     assert ".FAILED_BREAKOUT_CAPTION" in build
+
+
+# --- review-draft reporting -------------------------------------------------------------------
+# Job 0ca9dc4c2f finished all 152 scenes, passed every provenance gate, and was thrown away over
+# ONE cue of 245 reading 24.53 CPS against a 20.00 ceiling. The narration itself outran the ceiling
+# there: reading speed over a span is chars/duration, so no split or merge can lower it, and
+# _repair_fast_cues is right to refuse ("impossible speech stays a hard failure"). The footage,
+# unverified-exact and black-frame gates all already resolve exactly this tension in favour of
+# delivering a draft a human can watch; this one gate had no such path.
+
+def test_publication_stays_strict_by_default(tmp_path):
+    """The default is unchanged: a too-fast cue still destroys a publishable render."""
+    words = _words(["extraordinarily", "compressed", "caption"], [1.0, 1.05, 1.10], 0.04)
+    with pytest.raises(RuntimeError, match="caption readability gate"):
+        assert_caption_schedule(words, tmp_path / "audit.json")
+
+
+def test_review_draft_reports_an_unreadably_fast_cue_instead_of_losing_the_render(tmp_path):
+    words = _words(["extraordinarily", "compressed", "caption"], [1.0, 1.05, 1.10], 0.04)
+    audit = tmp_path / "caption_readability_audit.json"
+
+    schedule = assert_caption_schedule(words, audit, on_violation="report")
+
+    # The draft is delivered — with the finding recorded just as loudly as a hard failure would.
+    assert schedule and all(rec.get("words") for rec in schedule)
+    data = json.loads(audit.read_text())
+    assert data["passed"] is False
+    assert data["problem_count"] >= 1
+    assert any("CPS" in p["reason"] for p in data["problems"])
+    # Every spoken word still reaches the viewer; nothing was trimmed to manufacture a pass.
+    assert sum(len(rec["words"]) for rec in schedule) == len(words)
+
+
+@pytest.mark.parametrize("window", [[(2.0, 1.0)], [(1.0, 1.0)], [(0.0, float("inf"))]])
+def test_review_draft_never_reports_away_a_structurally_broken_schedule(tmp_path, window):
+    """Only 'too fast to read' is a judgment. A malformed schedule corrupts the subtitle files."""
+    words = _real_breakout_burst()
+    with pytest.raises(RuntimeError, match="invalid protected caption window"):
+        assert_caption_schedule(words, tmp_path / "audit.json",
+                                protected_windows=window, on_violation="report")
+
+
+def test_review_draft_still_fails_a_caption_sitting_on_protected_real_audio(tmp_path):
+    """A caption over a breakout's own dialogue is wrong output, not merely hard to read."""
+    words = _real_breakout_burst()
+    audit = tmp_path / "audit.json"
+    protected = [(1.30, 8.30)]
+    with pytest.raises(RuntimeError, match="caption readability gate"):
+        assert_caption_schedule(words, audit, protected_windows=protected,
+                                on_violation="report")
+    data = json.loads(audit.read_text())
+    assert any("protected real-audio" in p["reason"] for p in data["problems"])
+
+
+def test_the_approved_schedule_is_not_re_judged_more_strictly_than_it_was_approved(tmp_path):
+    """Every re-validation of an approved schedule must carry the verdict that approved it.
+
+    The burn and SRT writers re-check the schedule the gate already ruled on. Deciding it again
+    under the publication policy rejects the exact schedule the review draft was built around —
+    which is how job 0ca9dc4c2f died a second time on the same single 24.53 CPS cue, one layer
+    further down, after the render had already passed every provenance gate.
+    """
+    from vidlore.themes import theme
+
+    words = _words(["extraordinarily", "compressed", "caption"], [1.0, 1.05, 1.10], 0.04)
+    approved = assert_caption_schedule(words, tmp_path / "audit.json", on_violation="report")
+
+    # Publication still refuses it...
+    with pytest.raises(RuntimeError, match="not publication-safe"):
+        write_ass(words, tmp_path / "strict.ass", style=theme("history")["caption"],
+                  schedule=approved)
+
+    # ...and the review draft that approved it can still burn it.
+    out = write_ass(words, tmp_path / "review.ass", style=theme("history")["caption"],
+                    schedule=approved, on_violation="report")
+    assert out.exists() and out.stat().st_size > 0

@@ -16,6 +16,12 @@ from pathlib import Path
 
 _ORDINARY_KINDS = {"selection_video", "selection_derivative"}
 _SPECIAL_KINDS = {"verified_image", "breakout"}
+# The one sanctioned owner change. An editorial hold airs a DONOR beat's verified frame over a beat
+# whose own footage the verifier rejected — proven same-scene and duration-capped at construction,
+# and recorded in rejected_footage_audit.json. Without a kind of its own the contract could only
+# read that donation as a silent owner swap, so a render that used a hold died at the final gate
+# with the whole video already built.
+_HOLD_KINDS = {"scene_hold"}
 
 
 def selection_binding(original_beat: int, source_id: str, in_point: float,
@@ -58,7 +64,7 @@ def validate_scene_lineage(entries: list[dict]) -> list[dict]:
         def bad(reason: str) -> None:
             problems.append({**base, "reason": reason})
 
-        if kind not in (_ORDINARY_KINDS | _SPECIAL_KINDS):
+        if kind not in (_ORDINARY_KINDS | _SPECIAL_KINDS | _HOLD_KINDS):
             bad(f"unknown/untracked lineage kind {kind!r}")
             continue
         try:
@@ -67,7 +73,9 @@ def validate_scene_lineage(entries: list[dict]) -> list[dict]:
         except (TypeError, ValueError):
             bad("missing/non-integer original beat or root owner")
             continue
-        if owner != original:
+        # A hold's owner is its donor by construction; the hold rules below prove that donation
+        # was declared and sanctioned. Every other kind must own the beat it airs on.
+        if owner != original and kind not in _HOLD_KINDS:
             bad(f"root belongs to beat {owner}, not this beat {original}")
 
         path = str(rec.get("file") or "")
@@ -156,7 +164,34 @@ def validate_scene_lineage(entries: list[dict]) -> list[dict]:
         # separately verified candidate must first become the selection itself;
         # only then does it receive a new binding and become airable.
         via = str(rec.get("via") or "")
-        if via not in ("selection", "selection_derivative"):
+        if kind in _HOLD_KINDS:
+            # Only the OWNER identity is relaxed, and only against an explicit declaration. Every
+            # byte-level check below still applies unchanged: the frame must trace to the donor's
+            # own verified selection, so a hold can never smuggle in unverified footage.
+            if via != "editorial_hold":
+                bad(f"scene hold arrived via unsanctioned path {via!r}")
+            try:
+                donor = int(rec.get("hold_of_beat"))
+            except (TypeError, ValueError):
+                donor = None
+                bad("scene hold does not declare which beat's frame it froze")
+            if donor is not None and donor != owner:
+                bad(f"scene hold claims donor beat {donor} but its root owner is {owner}")
+            if donor is not None and donor == original:
+                bad("scene hold names itself as its own donor")
+            if str(rec.get("hold_kind") or "") not in (
+                    "editorial_hold", "editorial_hold_kenburns"):
+                bad(f"scene hold has unknown treatment {rec.get('hold_kind')!r}")
+            evidence = rec.get("hold_compat_evidence")
+            if not isinstance(evidence, dict) or not evidence:
+                bad("scene hold carries no same-scene compatibility evidence")
+            try:
+                held_seconds = float(rec.get("hold_duration_s"))
+                if not held_seconds > 0.0 or held_seconds == float("inf"):
+                    bad("scene hold duration is not a positive finite number")
+            except (TypeError, ValueError):
+                bad("scene hold duration is missing/malformed")
+        elif via not in ("selection", "selection_derivative"):
             bad(f"ordinary footage arrived via unverified path {via!r}")
         selected_sid = str(rec.get("selected_source_id") or "")
         actual_sid = str(rec.get("actual_source_id") or "")

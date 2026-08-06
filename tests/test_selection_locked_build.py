@@ -59,7 +59,12 @@ def test_cross_scene_repair_inherits_real_donor_owner():
     # Branding, darkness and rejected-footage repairs cannot relabel a donor as the current beat;
     # manifest construction compares this inherited owner with the expected selection owner.
     assert "_lineage_derive(_got, _donor)" in BUILD
-    assert "_lineage_derive(_got, _last_clean_r)" in BUILD
+    # The editorial hold still derives from the donor clip and keeps the donor's owner. It now also
+    # DECLARES the donation (job 0ca9dc4c2f built all 152 scenes, then died at the provenance gate
+    # because an undeclared but fully sanctioned hold is indistinguishable from a silent swap).
+    assert '_got, _last_clean_r, via="editorial_hold"' in BUILD
+    assert '"hold_of_beat": int(_last_clean_idx)' in BUILD
+    assert '"kind": "scene_hold"' in BUILD
     manifest = BUILD[BUILD.index("# FINAL BUILD-SIDE LINEAGE MANIFEST"):]
     assert '"owner_beat": None' in manifest
     assert '"root_owner_beat": _root_l.get("owner_beat")' in manifest

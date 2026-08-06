@@ -24,6 +24,10 @@ from .ffmpeg_tool import ffmpeg_exe
 
 
 _VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".ts"}
+# Expected-moment cadence for the decoded fingerprint banks: never leave more than this much of a
+# scene unsampled, bounded so a long scene cannot make the canary itself the slow stage.
+_BANK_MAX_GAP_SEC = 0.40
+_BANK_MAX_FRAMES = 24
 _FEATURE_W = 17
 _FEATURE_H = 16
 _FEATURE_BYTES = _FEATURE_W * _FEATURE_H * 3
@@ -629,9 +633,30 @@ def _uniform_times(path: Path, count: int, *, start: float = 0.0,
     start = min(max(0.0, float(start)), max(0.0, total - 1 / 30))
     available = max(1 / 30, total - start)
     span = min(available, max(1 / 30, float(duration))) if duration else available
-    fractions = ([0.5] if count <= 1 else
-                 [0.12, 0.31, 0.50, 0.69, 0.88] if count >= 5 else
-                 [0.20, 0.50, 0.80])
+    if count <= 1:
+        fractions = [0.5]
+    elif count < 5:
+        fractions = [0.20, 0.50, 0.80]
+    else:
+        # Density follows the span. Five fixed fractions leave ~0.9s between expected moments on
+        # an ordinary scene, and "a sample is gross only when EVERY expected moment rejects it"
+        # can only mean something when those moments actually cover the scene. Job 0ca9dc4c2f's
+        # scene 142 aired precisely its planned bytes and still failed the timeline canary: the
+        # decoded frame sat at 1.2s and the nearest expected moment was 1.4s, far enough apart in
+        # a fast push-in to read as foreign footage (measured: dhash 0.445 against the 5-frame
+        # bank, 0.004 against the same segment sampled densely).
+        #
+        # This is a compensating fix, not the root cause. The canary derives each scene's timeline
+        # position by accumulating round(beat_dur * fps), which drifts from the real concat (~7
+        # frames by scene 142 here), so it compares the right footage at slightly the wrong time.
+        # Deriving offsets from the actual concat entries would remove the drift itself.
+        #
+        # Measured on that render: densifying removed the false positive and changed nothing about
+        # which genuinely foreign segments are caught.
+        span_samples = math.ceil(span / _BANK_MAX_GAP_SEC) if span > 0 else int(count)
+        n = max(5, min(_BANK_MAX_FRAMES, max(int(count), span_samples)))
+        fractions = ([0.12, 0.31, 0.50, 0.69, 0.88] if n == 5
+                     else [(i + 0.5) / n for i in range(n)])
     ceil = max(0.0, total - 1 / 30)
     return [min(ceil, start + max(0.0, span - 1 / 30) * f) for f in fractions]
 

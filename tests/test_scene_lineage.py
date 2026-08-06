@@ -110,6 +110,79 @@ def test_verified_image_manifest_rejects_unproved_owner_or_quality(tmp_path, cha
     assert problems and any(needle in p["reason"] for p in problems)
 
 
+def _hold(tmp_path: Path, **kw):
+    """Beat 87's aired input: a Ken-Burns hold on beat 86's own verified frame.
+
+    Job 0ca9dc4c2f built the entire 152-scene video and then died here. The rejected-footage gate
+    had legitimately covered beat 87 — whose footage the verifier rejected — with beat 86's clean
+    same-scene frame (overlap 0.55, inside the freeze caps, recorded in
+    rejected_footage_audit.json). Because a hold had no lineage kind of its own it inherited beat
+    86's root wholesale, and the provenance gate read the sanctioned donation as a silent owner
+    swap. Two deliberate features, mutually unsatisfiable, at the last gate before assemble.
+    """
+    binding = selection_binding(86, "kings_landing", 144.411, 145.913,
+                                {"verdict": "keep", "status": "ok"})
+    source = _clip(tmp_path, "kings_landing.mp4")
+    out = {
+        "kind": "scene_hold",
+        "final_scene": 87,
+        "original_beat": 87,
+        "owner_beat": 86,
+        "clip": 0,
+        "file": _clip(tmp_path, "beat_087_0_hold.mp4"),
+        "via": "editorial_hold",
+        "hold_of_beat": 86,
+        "hold_kind": "editorial_hold_kenburns",
+        "hold_duration_s": 3.96,
+        "hold_compat_evidence": {"scene_overlap": 0.55,
+                                 "shared_tokens": ["dontos", "purple", "wedding"]},
+        "selected_source_id": "kings_landing",
+        "actual_source_id": "kings_landing",
+        "selection_source_path": source,
+        "selected_window": ["kings_landing", 144.411, 145.913],
+        "actual_window": ["kings_landing", 144.411, 145.913],
+        "selection_binding": binding,
+        "root_binding": binding,
+        "validated": True,
+    }
+    out.update(kw)
+    return out
+
+
+def test_declared_editorial_hold_on_a_donor_beat_passes(tmp_path):
+    assert validate_scene_lineage([_hold(tmp_path)]) == []
+
+
+@pytest.mark.parametrize("change,needle", [
+    # The owner relaxation is bought with an explicit declaration — never inferred.
+    ({"hold_of_beat": None}, "does not declare which beat"),
+    ({"hold_of_beat": 12}, "claims donor beat"),
+    ({"hold_of_beat": 87, "owner_beat": 87}, "names itself as its own donor"),
+    ({"via": "selection_derivative"}, "unsanctioned path"),
+    ({"hold_kind": "silent_swap"}, "unknown treatment"),
+    ({"hold_compat_evidence": {}}, "no same-scene compatibility evidence"),
+    ({"hold_duration_s": 0.0}, "positive finite"),
+    ({"hold_duration_s": None}, "missing/malformed"),
+    # And every byte-level rule still binds the donor's own verified selection.
+    ({"actual_source_id": "olenna"}, "source changed"),
+    ({"actual_window": ["kings_landing", 144.411, 99.0]}, "actual window"),
+    ({"root_binding": "other"}, "root binding"),
+    ({"validated": False}, "not validated"),
+])
+def test_a_hold_that_is_not_a_declared_sanctioned_hold_still_fails(tmp_path, change, needle):
+    problems = validate_scene_lineage([_hold(tmp_path, **change)])
+    assert problems and any(needle in p["reason"] for p in problems)
+
+
+def test_the_owner_relaxation_does_not_leak_to_ordinary_footage(tmp_path):
+    """Only a declared hold may air another beat's frame; a plain derivative may not."""
+    problems = validate_scene_lineage([
+        _ordinary(tmp_path, owner_beat=33, hold_of_beat=33,
+                  hold_kind="editorial_hold", hold_duration_s=2.0,
+                  hold_compat_evidence={"scene_overlap": 0.9})])
+    assert problems and any("root belongs" in p["reason"] for p in problems)
+
+
 def test_assertion_persists_failure_then_raises(tmp_path):
     audit = tmp_path / "scene_lineage.json"
     with pytest.raises(Exception, match="scene-lineage gate"):

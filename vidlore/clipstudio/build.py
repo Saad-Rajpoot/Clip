@@ -7813,12 +7813,18 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             _lineage_roots[_lineage_key(path)] = dict(root)
 
     def _lineage_derive(path, parent, *, via: str = "selection_derivative",
-                        selection_source_compare_filter: str = "") -> bool:
+                        selection_source_compare_filter: str = "",
+                        extra: dict | None = None) -> bool:
         """Register ``path`` as a derivative of ``parent``; unknown roots fail later, never infer."""
         inherited = _lineage_roots.get(_lineage_key(parent)) if parent else None
         if not inherited or not path:
             return False
         derived = {**inherited, "via": via}
+        if extra:
+            # Only a SANCTIONED derivative may add facts of its own (an editorial hold declaring
+            # whose frame it froze). The inherited root fields stay authoritative underneath, so a
+            # derivative can annotate its provenance but never rewrite it.
+            derived.update(extra)
         if selection_source_compare_filter:
             # This is not an exemption from decoded lineage comparison.  It tells the independent
             # canary to apply the exact build-authorized corner crop to the source-window bank too,
@@ -9031,7 +9037,22 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 _got = (_kenburns_hold(Path(_last_clean_r), _fr, _d) if _motion_hold
                         else _freeze_replace(Path(_last_clean_r), _fr, _d))
                 if _got:
-                    _lineage_derive(_got, _last_clean_r)
+                    # An editorial hold AIRS the donor beat's verified frame on this beat — that
+                    # owner change is the whole point of the feature, and it is separately proven
+                    # (same-scene compat + the freeze caps above) and audited in
+                    # rejected_footage_audit.json. Declare it as its own lineage kind so the
+                    # provenance contract can hold it to the hold rules instead of reading a
+                    # sanctioned donation as a silent owner swap and killing the finished render.
+                    _lineage_derive(
+                        _got, _last_clean_r, via="editorial_hold",
+                        extra={
+                            "kind": "scene_hold",
+                            "hold_of_beat": int(_last_clean_idx),
+                            "hold_kind": ("editorial_hold_kenburns" if _motion_hold
+                                          else "editorial_hold"),
+                            "hold_duration_s": round(float(_d), 3),
+                            "hold_compat_evidence": dict(_compat_ev or {}),
+                        })
                     clips[m] = Path(_got)
                     _rrep += 1
                     _rf_audit.append({"seg_index": _orig(seg.index), "final_index": seg.index,
@@ -9419,6 +9440,16 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         # fingerprint decoded encoded segments, then verify those beats remain in order after
         # concat/conform.  Construction metadata alone is not accepted as proof.
         scene_lineage={"entries": _scene_lineage},
+        # Same review-draft contract the footage / unverified-exact / black-frame gates already
+        # follow: a cue that only reads FASTER than the ceiling is reported in
+        # caption_readability_audit.json instead of throwing away the finished video. When the
+        # narration itself outruns the ceiling no regrouping can help — reading speed over a span
+        # is chars/duration, which splitting and merging leave unchanged. Publication ('block',
+        # the default) is untouched, and a structurally broken cue still fails in both modes.
+        caption_readability=(
+            "warn" if _os.environ.get(
+                "VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE", "block").strip().lower() == "warn"
+            else "block"),
     )
     result = Path(result)
     if cinematic:

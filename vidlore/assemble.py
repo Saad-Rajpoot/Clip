@@ -7495,7 +7495,8 @@ def _scene_video(
 
 
 def _srt(words: list[WordTiming], path: Path, *, protected_windows=None,
-         schedule: list[dict] | None = None) -> list[dict]:
+         schedule: list[dict] | None = None,
+         on_violation: str = "raise") -> list[dict]:
     from .captions import assert_caption_schedule, caption_schedule_problems
 
     def ts(t: float) -> str:
@@ -7511,7 +7512,7 @@ def _srt(words: list[WordTiming], path: Path, *, protected_windows=None,
     if schedule is None:
         schedule = assert_caption_schedule(
             words, path.with_name("caption_readability_audit.json"),
-            protected_windows=protected_windows)
+            protected_windows=protected_windows, on_violation=on_violation)
     else:
         flattened = [word for cue in schedule for word in (cue.get("words") or [])]
         if (len(flattened) != len(words)
@@ -7519,7 +7520,12 @@ def _srt(words: list[WordTiming], path: Path, *, protected_windows=None,
             raise RuntimeError("approved SRT schedule does not own this word stream")
         problems = caption_schedule_problems(schedule)
         if problems:
-            raise RuntimeError("approved SRT schedule is unsafe: " + problems[0]["reason"])
+            # Same schedule, same verdict: this branch re-checks what the gate already approved.
+            readability_only = all(
+                " CPS > " in str(p.get("reason") or "") for p in problems)
+            if not (str(on_violation or "raise") == "report" and readability_only):
+                raise RuntimeError(
+                    "approved SRT schedule is unsafe: " + problems[0]["reason"])
     lines = []
     for i, cue in enumerate(schedule, 1):
         lines += [str(i), f"{ts(cue['start'])} --> {ts(cue['end'])}", cue["text"], ""]
@@ -8525,15 +8531,21 @@ def assemble(
     breakout_windows: list | None = None,
     scene_lineage: object | None = None,
     lineage_expectations: object | None = None,
+    # "block" (default) keeps publication strict. "warn" is the review-draft contract: a cue that
+    # is only FASTER than the reading ceiling is reported in the audit instead of destroying the
+    # render. Structural cue faults stay fatal in both modes.
+    caption_readability: str = "block",
 ) -> Path:
     workdir.mkdir(parents=True, exist_ok=True)
     # Caption feasibility depends only on the final timed narration and trusted
     # breakout windows.  Fail here, before hundreds of scene encodes, and retain
     # this exact approved schedule for both SRT and burned ASS.
     words = narration.all_words()
+    _caption_violation = ("report" if str(caption_readability).strip().lower() == "warn"
+                          else "raise")
     _approved_caption_schedule = _srt(
         words, out_path.with_suffix(".srt"),
-        protected_windows=breakout_windows)
+        protected_windows=breakout_windows, on_violation=_caption_violation)
     # ASSEMBLY LINEAGE CONTRACT.  Generic engine callers remain unchanged
     # (None = disabled), but a caller that supplies provenance gets a strict,
     # fail-closed contract.  ``lineage_expectations`` is a compatibility alias
@@ -9726,7 +9738,7 @@ def assemble(
                     "reason": f"timeline lineage could not be checked: {_lineage_exc}",
                 }])
 
-    _srt(words, out_path.with_suffix(".srt"),
+    _srt(words, out_path.with_suffix(".srt"), on_violation=_caption_violation,
          protected_windows=breakout_windows,
          schedule=_approved_caption_schedule)
 
@@ -10100,7 +10112,8 @@ def assemble(
                 assert_caption_schedule(
                     words, workdir / "caption_burn_readability_audit.json",
                     protected_windows=breakout_windows,
-                    blocked_windows=_drop_wins)
+                    blocked_windows=_drop_wins,
+                    on_violation=_caption_violation)
                 raise
         if _drop_wins:
             def _under_card(w) -> bool:
@@ -10115,12 +10128,14 @@ def assemble(
             _burn_schedule = assert_caption_schedule(
                 cap_words, workdir / "caption_burn_readability_audit.json",
                 protected_windows=breakout_windows,
-                blocked_windows=_drop_wins)
+                blocked_windows=_drop_wins,
+                on_violation=_caption_violation)
         else:
             _burn_schedule = _approved_caption_schedule
         if cap_words:
             ass = write_ass(
                 cap_words, workdir / "captions.ass",
+                on_violation=_caption_violation,
                 style=theme["caption"],
                 # captions use `caption_accent` when set (a per-caption active-word colour that
                 # must NOT recolour title/graphic overlays or key-phrase stabs), else the accent.

@@ -669,12 +669,21 @@ def caption_schedule_problems(schedule: list[dict], *, hard_cps: float = 20.0,
 def assert_caption_schedule(words: list[WordTiming], audit_path: Path, *,
                             hard_cps: float = 20.0,
                             protected_windows=None,
-                            blocked_windows=None) -> list[dict]:
+                            blocked_windows=None,
+                            on_violation: str = "raise") -> list[dict]:
     """Persist and enforce the exact caption schedule used by both SRT and ASS.
 
     A subtitle file is a publication artifact, so an unwritable audit is itself a hard failure.
     The gate rejects zero/backwards word timing, overlapping/zero cues and text above the bounded
     reading-speed ceiling.  It never deletes or rewrites spoken words to manufacture a pass.
+
+    ``on_violation="report"`` is the review-draft contract, and it relaxes ONE finding: a cue whose
+    text is merely faster than the reading ceiling.  Such a cue is correct, watchable subtitling
+    that is simply harder to read than the standard allows, and when the narration itself outruns
+    the ceiling no regrouping can fix it (reading speed over a span is chars/duration, which no
+    split or merge changes).  Withholding a finished video over that is the same inconsistency the
+    black-frame and rejected-footage gates already resolve in favour of delivering the draft.
+    Structural faults stay fatal in every mode: they corrupt the subtitle files themselves.
     """
     problems = []
     try:
@@ -744,6 +753,12 @@ def assert_caption_schedule(words: list[WordTiming], audit_path: Path, *,
         except OSError:
             pass
     if problems:
+        # "Too fast to read comfortably" is a quality judgment about correct subtitles; anything
+        # else here (backwards/overlapping/zero-length cues, a caption sitting on a protected
+        # real-audio window) makes the artifact itself wrong and can never be reported away.
+        readability_only = all(" CPS > " in str(p.get("reason") or "") for p in problems)
+        if str(on_violation or "raise") == "report" and readability_only:
+            return schedule
         raise RuntimeError(
             f"caption readability gate: {len(problems)} invalid/too-fast cue issue(s); "
             f"first: {problems[0]['reason']}; see {audit_path.name}")
@@ -938,6 +953,7 @@ def write_ass(
     play_w: int = 1920,
     play_h: int = 1080,
     schedule: list[dict] | None = None,
+    on_violation: str = "raise",
 ) -> Path:
     """Kinetic captions. The word currently being spoken pops in the
     theme accent colour (bigger + bold). Words the LLM flagged as the
@@ -1088,9 +1104,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             raise RuntimeError("approved caption schedule text does not match its words")
         _schedule_problems = caption_schedule_problems(_schedule)
         if _schedule_problems:
-            raise RuntimeError(
-                "approved caption schedule is not publication-safe: "
-                + _schedule_problems[0]["reason"])
+            # This re-validates a schedule the gate ALREADY ruled on. Re-deciding it under a
+            # stricter policy than the one that approved it would reject the very schedule the
+            # review draft was built around, so the reading-speed finding carries its verdict here
+            # too. Structural faults still stop the burn in every mode.
+            _readability_only = all(
+                " CPS > " in str(p.get("reason") or "") for p in _schedule_problems)
+            if not (str(on_violation or "raise") == "report" and _readability_only):
+                raise RuntimeError(
+                    "approved caption schedule is not publication-safe: "
+                    + _schedule_problems[0]["reason"])
     cues = [r["words"] for r in _schedule]
     # NEXT-EVENT START, across cue boundaries. The aligner can hand back words whose spans OVERLAP
     # (measured on a delivered render: word 797 starts at 251.260 while word 796 still ends at

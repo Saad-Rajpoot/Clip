@@ -14,7 +14,11 @@ from vidlore.ffmpeg_tool import ffmpeg_exe
 from vidlore.footage import FootageItem
 from vidlore.scene_lineage_canary import (
     SceneLineageError,
+    _BANK_MAX_FRAMES,
+    _BANK_MAX_GAP_SEC,
+    _compare_bank,
     _sample_local_frames,
+    _uniform_times,
     bind_encode_plan,
     fail_audit,
     new_audit,
@@ -293,3 +297,74 @@ def test_audit_is_persisted_on_pass_and_before_failure(tmp_path):
     persisted = json.loads(audit_path.read_text())
     assert persisted["status"] == "failed"
     assert persisted["failures"][0]["reason"] == "swapped beat"
+
+
+# --- expected-moment cadence -------------------------------------------------------------------
+# Job 0ca9dc4c2f aired scene 142's exact planned bytes and still failed the timeline canary. The
+# bank held five fixed moments (~0.87s apart on that 4.6s scene); the decoded frame sat at 1.2s and
+# the nearest expected moment was 1.4s. Across a fast push-in that gap alone read as foreign
+# footage — dhash 0.445 against the sparse bank, 0.004 against the same segment sampled densely.
+
+class _FakeProbe:
+    """A duration for _uniform_times without decoding real media."""
+
+    def __init__(self, monkeypatch, seconds):
+        import vidlore.scene_lineage_canary as canary
+        monkeypatch.setattr(canary, "_probe_duration", lambda _p: float(seconds))
+
+
+def _gaps(times):
+    return [b - a for a, b in zip(times, times[1:])]
+
+
+def test_short_scene_keeps_the_historical_five_moments(monkeypatch, tmp_path):
+    _FakeProbe(monkeypatch, 1.8)
+    times = _uniform_times(tmp_path / "seg.mp4", 5)
+    assert len(times) == 5
+    # Unchanged fractions: a scene this short was never under-sampled.
+    assert times == pytest.approx([1.7667 * f for f in (0.12, 0.31, 0.50, 0.69, 0.88)], abs=1e-3)
+
+
+@pytest.mark.parametrize("seconds", [3.0, 4.6, 9.0, 30.0])
+def test_a_longer_scene_is_sampled_densely_enough_to_be_recognisable(
+        monkeypatch, tmp_path, seconds):
+    _FakeProbe(monkeypatch, seconds)
+    times = _uniform_times(tmp_path / "seg.mp4", 5)
+    assert len(times) <= _BANK_MAX_FRAMES
+    assert times == sorted(times)
+    assert all(0.0 <= t <= seconds for t in times)
+    if len(times) < _BANK_MAX_FRAMES:
+        assert max(_gaps(times)) <= _BANK_MAX_GAP_SEC + 1e-6
+    # The production shape: 4.6s left a 0.87s hole, which is what failed.
+    if seconds == 4.6:
+        assert len(times) >= 12 and max(_gaps(times)) < 0.45
+
+
+@pytest.mark.parametrize("count,expected", [(1, 1), (3, 3)])
+def test_coarse_callers_are_untouched(monkeypatch, tmp_path, count, expected):
+    _FakeProbe(monkeypatch, 12.0)
+    assert len(_uniform_times(tmp_path / "seg.mp4", count)) == expected
+
+
+def test_a_very_long_scene_cannot_make_the_canary_the_slow_stage(monkeypatch, tmp_path):
+    _FakeProbe(monkeypatch, 600.0)
+    assert len(_uniform_times(tmp_path / "seg.mp4", 5)) == _BANK_MAX_FRAMES
+
+
+def test_more_expected_moments_can_only_reduce_gross_flags():
+    """The property that fixes the false positive — and bounds what it can cost.
+
+    A sample is gross only when EVERY expected moment rejects it, so adding moments can never
+    turn an accepted frame into a rejected one. Densifying therefore cannot invent a new failure;
+    it can only stop a correct-but-unsampled moment from reading as a swap.
+    """
+    def feat(luma):
+        return {"dhash": "0" * 64, "mean_luma": luma, "luma_std": 10.0,
+                "mean_rgb": [luma, luma, luma]}
+
+    actual = [feat(90.0)]
+    sparse = [feat(10.0), feat(200.0)]
+    dense = sparse + [feat(88.0)]
+    assert _compare_bank(actual, sparse)["gross_mismatches"] >= \
+        _compare_bank(actual, dense)["gross_mismatches"]
+    assert _compare_bank(actual, dense)["passed"]
