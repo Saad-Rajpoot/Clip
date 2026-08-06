@@ -611,6 +611,33 @@ def _region_frames_recover(proj, seg, sel, src, eng_cfg, *, log=print, n: int = 
         return False
     kfdir = Path(proj.index_dir) / src.id / "keyframes"
     kfdir.mkdir(parents=True, exist_ok=True)
+    # THE FRAME'S OWNING SHOT IS KNOWN — RECORD IT.
+    #
+    # These frames are sampled at arbitrary timestamps, so they are not themselves detected shots,
+    # and this used to install them declaring `shot: -1`. The image-lineage gate then has to prove
+    # the still belongs to source X shot -1, which cannot exist, and it correctly refuses — killing
+    # a finished 146-beat render at the very last gate (job 229233891e, beat 108, frame
+    # selfheal_202.jpg).
+    #
+    # But a frame at time t is not unowned: it lies inside exactly one indexed shot, and that shot
+    # is on disk already. Resolving it turns an unprovable claim into a provable one, which is what
+    # the gate was asking for all along. If no shot contains t — an unindexed source — nothing is
+    # installed, because a still whose lineage cannot be established must not air.
+    try:
+        from .index import load_shots as _load_shots_sh
+        _shots = _load_shots_sh(proj, src.id) or []
+    except Exception:                                    # noqa: BLE001
+        _shots = []
+
+    def _owning_shot(_t: float) -> int:
+        for _sh in _shots or []:
+            try:
+                if float(getattr(_sh, "start", 0.0)) <= _t < float(getattr(_sh, "end", 0.0)):
+                    return int(getattr(_sh, "index", -1))
+            except (TypeError, ValueError):
+                continue
+        return -1
+
     cands = []
     for k in range(n):
         t = (k + 0.5) / n * dur
@@ -624,16 +651,18 @@ def _region_frames_recover(proj, seg, sel, src, eng_cfg, *, log=print, n: int = 
         if fp.exists():
             try:
                 arr = np.asarray(Image.open(fp).convert("L"), dtype="float32")
-                cands.append((float(arr.mean()), str(fp)))
+                cands.append((float(arr.mean()), str(fp), _owning_shot(t)))
             except Exception:                            # noqa: BLE001
                 continue
     cands.sort(reverse=True)
-    for luma, fp in cands[:4]:
+    for luma, fp, _shot in cands[:4]:
+        if _shot < 0:
+            continue                                     # unprovable lineage — never air it
         if _frame_text_dirty(fp):
             continue                                     # burned subs/meme text/watermark card
         v = _venue_verify(fp, seg, [], eng_cfg, proj=proj, cache=_venue_cache(proj))
         if isinstance(v, dict) and v.get("verdict") == "keep":
-            _install_still(sel, fp, src.id, -1, 0.8)
+            _install_still(sel, fp, src.id, _shot, 0.8)
             log(f"self-heal: beat {seg.index} — region-frame still installed from {src.id[:38]}")
             return True
     return False
