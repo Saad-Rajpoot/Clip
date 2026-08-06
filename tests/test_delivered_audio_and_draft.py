@@ -113,14 +113,20 @@ class TestTheGateWiring(unittest.TestCase):
 
 class TestReviewDraftsAreMarked(unittest.TestCase):
     def test_every_warn_gate_records_a_reason(self):
-        """Four gates now mark a draft, each seeing something the others cannot: semantic
-        relevance, the early footage gate, the authoritative post-assembly gate, and a total HD
-        collapse, which no per-beat check can see because every beat is correct and merely 360p
-        (measured: a 12-minute render shipped as final with hd_path_ok 0/72)."""
+        """Five gates now mark a draft, each seeing something the others cannot: semantic
+        relevance, the early footage gate, the authoritative post-assembly gate, a total HD
+        collapse (which no per-beat check can see because every beat is correct and merely 360p —
+        measured: a 12-minute render shipped as final with hd_path_ok 0/72), and a per-beat still
+        that could not be re-extracted at full resolution.
+
+        The fifth was added after job 0ca9dc4c2f died at five end-of-build gates in a row: the
+        still passes threw away a finished video over one beat's unusable still, while the footage,
+        unverified-exact and black-frame gates all already knew a review draft may be imperfect."""
         src = (SRC / "clipstudio" / "build.py").read_text()
-        self.assertEqual(src.count("_review_draft.append("), 4,
+        self.assertEqual(src.count("_review_draft.append("), 5,
                          "each independent warn gate must record its own reason")
         self.assertIn("_review_draft.append(_msg_hd)", src)
+        self.assertIn("image still beat", src)
 
     def test_the_file_is_renamed_and_the_new_path_returned(self):
         """The portal's download link follows res['output'], so the rename must reach the caller."""

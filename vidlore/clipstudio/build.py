@@ -1115,6 +1115,59 @@ def _verbatim_bypass_ok(qw: list, run: int) -> bool:
     return coverage >= 0.70 and has_content
 
 
+# A REVIEW DRAFT EXISTS TO BE SEEN. IT MUST NOT BE WITHHELD OVER ONE IMPERFECT BEAT.
+#
+# Job 0ca9dc4c2f died at five separate end-of-build gates in a row, each one throwing away a fully
+# rendered video. Four were bugs and were fixed. The fifth was not a bug at all — the caption
+# readability gate was simply never told that a review draft is allowed to be imperfect, while the
+# footage, unverified-exact and black-frame gates all already knew. Counting the rest afterwards
+# found the same omission in twelve more content-quality gates.
+#
+# So the distinction is made once, here, and it is NOT "how bad is it":
+#
+#   INTEGRITY — the artifact is wrong or unprovable. Wrong owner, broken lineage, a frame that
+#   changed under the verifier, a malformed binding. These say "this may not be our footage at
+#   all", and they stay fatal in BOTH modes. No draft is worth shipping footage we cannot place.
+#
+#   CONTENT QUALITY — the artifact is honestly ours and imperfect. A sub-HD still, an unresolved
+#   beat, a verdict we could not obtain. These are exactly what a human opens a draft to look at,
+#   and in review mode they are recorded and delivered instead of raised.
+#
+# Production ('block', the default) is unchanged: every one of these is still fail-closed.
+# Classification is by the GATE'S OWN NAME, not by keywords in its message. A first attempt
+# matched message text and mis-filed "verified still is 512x288; a real 1280x720 owner is
+# required" as an ownership fault because the word "owner" happened to appear in it. Gates name
+# themselves; that name is the stable fact.
+#
+# Only these say "the video is imperfect". Everything else — named or unnamed — is treated as an
+# integrity fault and stays fatal, so a gate added tomorrow fails closed until someone decides
+# otherwise on purpose.
+_DELIVERABLE_GATE_PREFIXES = (
+    "image native-resolution gate:",   # a still is below the native-HD floor
+    "image semantic gate:",            # a still's verdict is missing, stale or negative
+    "caption readability:",            # narration is faster than the reading ceiling
+)
+
+
+def review_draft_mode() -> bool:
+    """True when this render is a review draft rather than a publication candidate."""
+    import os as _os_rd
+    return _os_rd.environ.get("VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE", "block") \
+        .strip().lower() == "warn"
+
+
+def content_defect_is_deliverable(reason: str) -> bool:
+    """Can a review draft carry this defect, or must the render still fail?
+
+    Only a gate that has explicitly declared itself a content-quality gate may be forgiven, and
+    only in review mode. Anything else — including a gate nobody has classified yet — stays fatal.
+    """
+    if not review_draft_mode():
+        return False
+    text = str(reason or "").strip().lower()
+    return any(text.startswith(p) for p in _DELIVERABLE_GATE_PREFIXES)
+
+
 def _asr_wav_words(wav_path) -> tuple:
     """Re-ASR an EXTRACTED breakout audio clip → (ordered_words, joined_text, speech_seconds).
     This is the GROUND TRUTH of what a breakout actually says (post-loudnorm), unlike the source's
@@ -7584,7 +7637,27 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             })
             _persist_image_lineage_audit(
                 proj, _image_lineage_entries, _image_lineage_failures)
-            raise
+            if not content_defect_is_deliverable(_img_pf_exc):
+                raise
+            # Quality defect on ONE beat in a review draft: drop the still and let the beat air its
+            # moving selection, exactly as if no still had been proposed.
+            #
+            # This KNOWINGLY relaxes the rule stated at the aired-still site below — "a declared
+            # image is a semantic replacement for the moving selection... falling through would air
+            # the very moving clip this fallback replaced (often a verifier rejection)". That rule
+            # is right for PUBLICATION and is unchanged there. A review draft already airs
+            # verifier-rejected footage on the beats the footage gate warned about; refusing to
+            # deliver the same draft because one still could not be re-extracted at full
+            # resolution is the same inconsistency the black-frame gate note describes. The beat is
+            # named in the log, in _review_draft, and in image_lineage_audit.json — never silent.
+            log(f"build: \u26a0 REVIEW DRAFT — beat {_seg_img_pf.index} still unusable "
+                f"({_img_pf_exc}); dropping the still, the beat keeps its moving clip")
+            _review_draft.append(
+                f"image still beat {_seg_img_pf.index}: {_img_pf_exc}")
+            try:
+                _sel_img_pf.image_path = ""
+            except Exception:                            # noqa: BLE001
+                pass
     if _preflight_image_rescues:
         log(f"build: image preflight — {len(_preflight_image_rescues)} native still(s) "
             f"materialized; {_semantic_rematerialized} low-resolution semantic thumbnail(s) "
