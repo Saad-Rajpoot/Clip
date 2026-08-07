@@ -677,8 +677,11 @@ def _uniform_times(path: Path, count: int, *, start: float = 0.0,
     # sensitivity came from the repeats themselves. That version was discarded.
     ceil = max(0.0, total - 1 / 30)
     times = [min(ceil, start + max(0.0, span - 1 / 30) * f) for f in fractions]
-    _end = start + span - 0.01
-    if duration and _end < ceil:
+    # Stay a real margin clear of the FILE's end, not just of `ceil`. Measured: a window ending at
+    # 152.533s in a 152.6s source put this sample at 152.523s, which ffmpeg could not decode at all
+    # (bytes=0/816) and which failed the whole bind. `ceil` (total - 1/30) was not enough room.
+    _end = min(start + span - 0.01, max(0.0, total - 0.12))
+    if duration and _end > (times[-1] if times else start):
         # As close to the window's true end as the container allows. The 1/30 back-off used above
         # is a whole frame at 30fps and lands 0.02s short of the held frame on the measured case
         # (bank 189.74 vs held 189.76), which is enough to miss it entirely.

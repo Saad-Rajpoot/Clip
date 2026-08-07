@@ -34,8 +34,8 @@ SRC = inspect.getsource(C._uniform_times)
 
 
 def test_a_window_bank_includes_its_final_moment():
-    assert "if duration and _end < ceil:" in SRC
-    i = SRC.index("if duration and _end < ceil:")
+    assert "if duration and _end > (times[-1] if times else start):" in SRC
+    i = SRC.index("if duration and _end >")
     assert "times.append(" in SRC[i:i + 1400]
 
 
@@ -46,9 +46,9 @@ def test_the_final_sample_is_not_a_whole_frame_short():
 
 def test_a_full_file_bank_is_unchanged():
     """Only a WINDOW gets the extra moment; sampling a whole clip is untouched."""
-    i = SRC.index("if duration and _end < ceil:")
-    guard = SRC[:i]
-    assert "times = [" in guard
+    assert "if duration and" in SRC, "the extra moment is gated on a window being given"
+    i = SRC.index("if duration and")
+    assert "times = [" in SRC[:i], "the ordinary bank is built before, and unchanged"
 
 
 def test_nothing_is_removed_from_the_bank():
@@ -71,3 +71,15 @@ def test_the_measured_case_is_written_down():
 
 def test_times_stay_sorted_and_unique():
     assert "sorted(set(" in SRC
+
+
+def test_the_extra_sample_stays_clear_of_the_file_end():
+    """MEASURED REGRESSION of my own first attempt. A window ending at 152.533s in a 152.6s source
+    put the extra sample at 152.523s — ffmpeg decoded nothing there (bytes=0/816) and the whole
+    bind failed. `ceil` (total - 1/30) left too little room."""
+    assert "total - 0.12" in SRC
+
+
+def test_the_extra_sample_is_only_added_when_it_is_actually_later():
+    """Clamped back to an existing moment, it would add no evidence and only cost a decode."""
+    assert "_end > (times[-1] if times else start)" in SRC
