@@ -76,3 +76,37 @@ def test_the_measured_diagnosis_is_recorded_where_it_will_be_read():
     """The next person to see this must not re-derive it: re-sampling the window does not help."""
     assert "145 of 146" in BLOCK
     assert "four other keyframes" in BLOCK
+
+
+# ------------------------------------------------------------------ the other site that needed it
+#
+# e1e5802 fixed the scoped re-verification path. Job 229233891e then died at the recovery page with
+# `new_source_verifier_errored:1`: exactly one freshly acquired source could not be judged while the
+# rest of the same batch was judged normally. Same fact, same shape, different call site.
+NEW_SRC = inspect.getsource(O)
+J = NEW_SRC.index("SAME DISTINCTION AS e1e5802")
+NEW_BLOCK = NEW_SRC[J:J + 2200]
+
+
+def test_the_recovery_page_uses_the_same_evidence_test():
+    assert '_new_verify_result.get("errored")' in NEW_BLOCK
+    assert '_new_verify_result.get("verified")' in NEW_BLOCK
+
+
+def test_the_recovery_page_still_raises_on_a_real_outage():
+    assert 'raise RuntimeError(f"new_source_{_new_verify_error}")' in NEW_BLOCK
+
+
+def test_the_recovery_bar_matches_the_other_site():
+    """At least three real verdicts, and at least three per errored item."""
+    assert "_judged_ok >= max(3, _errored * 3)" in NEW_BLOCK
+
+
+def test_malformed_counts_fail_closed():
+    """Non-int or bool counts must not be read as proof the verifier worked."""
+    assert "isinstance(_errored, int) and not isinstance(_errored, bool)" in NEW_BLOCK
+    assert "isinstance(_judged_ok, int) and not isinstance(_judged_ok, bool)" in NEW_BLOCK
+
+
+def test_the_unjudged_source_authorizes_nothing():
+    assert "stay unresolved" in NEW_BLOCK

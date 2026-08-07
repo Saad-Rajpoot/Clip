@@ -3227,7 +3227,29 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
                 _os_vwr.environ.pop("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", None)
         _new_verify_error = _verifier_summary_error(_new_verify_result)
         if _new_verify_error:
-            raise RuntimeError(f"new_source_{_new_verify_error}")
+            # SAME DISTINCTION AS e1e5802, AT THE OTHER SITE THAT NEEDED IT.
+            #
+            # A batch with an error is not a content verdict — right, and unchanged for anything
+            # that would AUTHORIZE something. But it is not automatically a broken system either,
+            # and treating it as one killed job 229233891e on `new_source_verifier_errored:1`:
+            # exactly one freshly acquired source could not be judged, while the rest of the same
+            # batch was judged normally. That is a fact about that source's frames.
+            #
+            # So an outage still raises, and it is decided by evidence from THIS batch: if enough
+            # of it produced real verdicts, the verifier plainly worked. The unjudged source
+            # authorizes nothing — its beat stays unresolved and the publication contract keeps
+            # blocking it — the page simply stops being fatal.
+            _errored = _new_verify_result.get("errored") \
+                if isinstance(_new_verify_result, dict) else None
+            _judged_ok = _new_verify_result.get("verified") \
+                if isinstance(_new_verify_result, dict) else None
+            if not (isinstance(_errored, int) and not isinstance(_errored, bool)
+                    and isinstance(_judged_ok, int) and not isinstance(_judged_ok, bool)
+                    and _judged_ok >= max(3, _errored * 3)):
+                raise RuntimeError(f"new_source_{_new_verify_error}")
+            log(f"semantic-recovery: {_errored} newly acquired source(s) could not be judged while "
+                f"{_judged_ok} were judged normally in the SAME batch — their frames are treated as "
+                f"unjudgeable, not the verifier as broken; those beats stay unresolved")
 
         new_sel_by_idx = {s.segment_index: s for s in proj.selections}
         if _scope is not None:
