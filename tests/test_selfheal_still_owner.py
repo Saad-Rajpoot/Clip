@@ -26,18 +26,25 @@ from vidlore.clipstudio import selfheal as SH
 
 
 SRC = inspect.getsource(SH)
-I = SRC.index("THE FRAME'S OWNING SHOT IS KNOWN")
+I = SRC.index("USE THE SHOT'S OWN KEYFRAME")
 BLOCK = SRC[I:I + 3000]
 
 
-def test_the_owning_shot_is_resolved_from_the_frame_s_timestamp():
-    assert "def _owning_shot(" in BLOCK
-    assert 'getattr(_sh, "start"' in BLOCK and 'getattr(_sh, "end"' in BLOCK
+def test_candidates_are_the_shots_own_indexed_keyframes():
+    """Provable by construction: index.py extracts keyframes at the shot midpoint, which is
+    exactly what the image-lineage gate accepts without extra proof."""
+    assert 'getattr(_sh, "keyframe_path"' in BLOCK
+    assert "load_shots" in BLOCK
 
 
-def test_the_shot_must_actually_contain_the_frame_time():
-    """Not the nearest shot — the containing one. A neighbour's index is still a false claim."""
-    assert "<= _t <" in BLOCK
+def test_no_frame_is_minted_at_an_arbitrary_time():
+    """MEASURED TWICE. Extracting at an arbitrary t and declaring shot -1 killed the render; then
+    recording the real owning shot moved the same death to 'declared verified still does not match
+    indexed keyframe for ... shot 5', because such a frame is neither the keyframe nor a midpoint
+    re-extraction carrying native proof."""
+    code = "\n".join(l for l in BLOCK.splitlines() if not l.strip().startswith("#"))
+    assert "selfheal_" not in code, "no frame is minted at an arbitrary timestamp"
+    assert "-frames:v" not in code, "no ad-hoc extraction remains in this rung"
 
 
 def test_the_resolved_index_is_what_gets_recorded():
@@ -53,7 +60,7 @@ def test_an_unresolvable_frame_is_never_installed():
 
 
 def test_the_shot_is_carried_with_each_candidate_not_recomputed_later():
-    assert "cands.append((float(arr.mean()), str(fp), _owning_shot(t)))" in SRC
+    assert 'cands.append((float(arr.mean()), kf, int(getattr(_sh, "index", -1))))' in SRC
     assert "for luma, fp, _shot in cands[:4]:" in SRC
 
 
@@ -67,5 +74,6 @@ def test_the_other_install_site_already_recorded_a_real_shot():
     assert '_install_still(sel, sh.keyframe_path, sid, int(getattr(sh, "index", -1)), rel)' in SRC
 
 
-def test_the_measured_case_is_recorded_for_the_next_reader():
-    assert "selfheal_202.jpg" in BLOCK or "selfheal_202.jpg" in SRC[:I]
+def test_both_measured_failures_are_recorded_for_the_next_reader():
+    assert "selfheal_202.jpg" in BLOCK
+    assert "shot 5" in BLOCK
