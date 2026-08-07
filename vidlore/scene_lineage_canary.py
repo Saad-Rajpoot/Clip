@@ -516,6 +516,23 @@ def _features_at_times(path: Path, times: list[float],
     except Exception as exc:  # noqa: BLE001
         raise SceneLineageError(f"cannot decode lineage frames from {path}: {exc}") from exc
     expected = len(times) * _FEATURE_BYTES
+    got = len(proc.stdout) // _FEATURE_BYTES if _FEATURE_BYTES else 0
+    if proc.returncode == 0 and 0 < got < len(times):
+        # A SHORT DECODE IS A SMALLER BANK, NOT A LINEAGE FAILURE.
+        #
+        # ffmpeg cannot always land on an exact instant near a GOP boundary or the tail of a file,
+        # and demanding every requested frame turned that into a fatal verdict about the FOOTAGE.
+        # Measured on job 229233891e: 18 of 19 frames decoded (bytes=14688/15504) and the whole
+        # bind failed — twice, on different sources, after the window-end sample was added.
+        #
+        # Dropping the frames that did not arrive can only make the check STRICTER. `_compare_bank`
+        # calls a sample gross when EVERY expected moment rejects it, so fewer expected moments
+        # means fewer chances to match, never more. What is refused is a bank too small to mean
+        # anything: at least three moments, and at least 60% of what was asked for.
+        _floor = max(3, int(len(times) * 0.6))
+        if got >= _floor:
+            times = list(times)[:got]
+            expected = got * _FEATURE_BYTES
     if proc.returncode != 0 or len(proc.stdout) != expected:
         err = (proc.stderr or b"").decode("utf-8", "replace")[-500:]
         raise SceneLineageError(

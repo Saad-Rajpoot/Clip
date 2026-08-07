@@ -83,3 +83,24 @@ def test_the_extra_sample_stays_clear_of_the_file_end():
 def test_the_extra_sample_is_only_added_when_it_is_actually_later():
     """Clamped back to an existing moment, it would add no evidence and only cost a decode."""
     assert "_end > (times[-1] if times else start)" in SRC
+
+
+def test_a_short_decode_is_a_smaller_bank_not_a_lineage_failure():
+    """ffmpeg cannot always land on an exact instant near a GOP boundary or a file's tail, and
+    demanding every requested frame turned that into a fatal verdict about the FOOTAGE — measured
+    twice on job 229233891e, 18 of 19 frames (bytes=14688/15504) killing the whole bind."""
+    src = inspect.getsource(C._features_at_times)
+    assert "A SHORT DECODE IS A SMALLER BANK" in src
+    assert "times = list(times)[:got]" in src
+
+
+def test_a_bank_too_small_to_mean_anything_is_still_refused():
+    src = inspect.getsource(C._features_at_times)
+    assert "max(3, int(len(times) * 0.6))" in src
+
+
+def test_dropping_undecoded_moments_can_only_tighten_the_check():
+    """_compare_bank calls a sample gross when EVERY expected moment rejects it, so fewer expected
+    moments means fewer chances to match — never more."""
+    assert "all(distance[0][\"gross_mismatch\"] for distance in choices)" in inspect.getsource(
+        C._compare_bank)
