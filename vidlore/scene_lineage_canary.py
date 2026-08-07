@@ -657,8 +657,37 @@ def _uniform_times(path: Path, count: int, *, start: float = 0.0,
         n = max(5, min(_BANK_MAX_FRAMES, max(int(count), span_samples)))
         fractions = ([0.12, 0.31, 0.50, 0.69, 0.88] if n == 5
                      else [(i + 0.5) / n for i in range(n)])
+    # A HELD TAIL REPEATS THE WINDOW'S LAST FRAME — SO SAMPLE IT.
+    #
+    # Every fraction above stops at 0.88 of the span, so the window's final frame is never in the
+    # bank. That frame is exactly the one a hold repeats: when a beat needs more time than its
+    # window holds, the derivative plays the window and then freezes on its last frame. Sampling
+    # the derivative uniformly then returns that held image many times, none of which any expected
+    # moment can match, and a correct render fails.
+    #
+    # Measured on job 229233891e, which died at this gate with 4 violations. Beat 7: a 1.63s window
+    # filling 5.50s; the held frame's true source time is 189.76s and the bank's last sample was
+    # 189.54s. A fine scan of the source put that frame INSIDE the window (dhash 0.0117, colour
+    # 0.0041) — the hold was correct and the bank simply could not see it. Adding the final frame
+    # took all four scenes from gross 10/14, 16/19, 10/14, 10/14 to ZERO.
+    #
+    # This ADDS a moment; it removes none, so nothing that was caught before can now slip past. I
+    # first tried the other repair — collapsing the repeated samples — and the control measured it
+    # honestly: it fixed the false positive but halved foreign detection (4/7 -> 2/7), because that
+    # sensitivity came from the repeats themselves. That version was discarded.
     ceil = max(0.0, total - 1 / 30)
-    return [min(ceil, start + max(0.0, span - 1 / 30) * f) for f in fractions]
+    times = [min(ceil, start + max(0.0, span - 1 / 30) * f) for f in fractions]
+    _end = start + span - 0.01
+    if duration and _end < ceil:
+        # As close to the window's true end as the container allows. The 1/30 back-off used above
+        # is a whole frame at 30fps and lands 0.02s short of the held frame on the measured case
+        # (bank 189.74 vs held 189.76), which is enough to miss it entirely.
+        #
+        # Only for a window strictly INSIDE a longer source — the held-tail case. Asking for a
+        # frame at the very end of the file itself is how this first broke eight canary tests on
+        # short synthetic clips: the decoder returned one frame short and every bind failed.
+        times.append(max(start, _end))
+    return sorted(set(round(t, 3) for t in times))
 
 
 def verify_encoded_plan(encode_plan: list[dict]) -> tuple[list[dict], list[dict], dict]:
