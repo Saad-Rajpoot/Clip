@@ -9395,6 +9395,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # Breakout captions are validated BEFORE the expensive assembly.  The same ASS is reused by
     # the post-render burn, so the exact 100%-coverage / 0.5s-tail evidence is what actually airs.
     _breakout_ass_preflight = None
+    _breakout_caption_burn_ok = True
     _breakout_caps_enabled = (_cap_on and os.environ.get(
         "VIDLORE_CLIPSTUDIO_BREAKOUT_CAPS", "1").strip() not in ("0", "false", "no"))
     _caps_pre = list(getattr(narration, "_breakout_caps", None) or [])
@@ -9402,11 +9403,30 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         _breakout_ass_preflight = _breakout_caption_ass(
             _caps_pre, work / "breakout_caps.ass", log, preset=_cap_preset)
         if _breakout_ass_preflight is None:
-            from .verify import NonRetryableBuildError
-            raise NonRetryableBuildError(
-                "breakout-caption gate: dialogue could not be captioned at 100% word coverage "
-                "through its final spoken word; refusing a partial-caption render. See "
-                "breakout_caption_coverage.json", kind="breakout_caption")
+            # TWO CORRECT RULES, IN DIRECT CONTRADICTION — AND THE VIDEO PAID FOR IT.
+            #
+            # A breakout's caption may only show words the ASR is confident about: "a missing
+            # caption line beats a wrong one", because a mis-transcribed line burned on screen
+            # reads as somebody else's subtitle. And a breakout may only air if it is captioned
+            # through its final spoken word. When the ASR garbles the tail, the first rule
+            # guarantees the second one fails — so ANY breakout with a garbled tail killed the
+            # whole render. Measured on job 229233891e scene 110: line one captioned perfectly
+            # (align 1.00), line two dropped at ASR confidence 0.09 against the 0.45 floor
+            # ('that men shall tremble. from both'), coverage 8/14 words = 57%, build dead.
+            #
+            # The contradiction is only irreconcilable at RENDER scope. At BREAKOUT scope it
+            # resolves itself: a breakout that cannot be fully captioned does not air. Neither rule
+            # is bent — no partial caption is ever burned, and no unverified line is shown — and
+            # the other 145 beats keep their video.
+            _dropped = len(_caps_pre)
+            log(f"build: ⛔ {_dropped} breakout(s) cannot be captioned through their final spoken "
+                f"word (see breakout_caption_coverage.json) — DROPPING the breakout caption pass "
+                f"rather than the render; no partial caption is burned")
+            _breakout_caps_enabled = False
+            _caps_pre = []
+            # The _caps metadata itself STAYS: it is what keeps the main narration caption off the
+            # breakout's real-audio window. Only the burn is skipped.
+            _breakout_caption_burn_ok = False
 
     # 4) theme + 5) render
     th = get_theme(theme_name)
@@ -9537,6 +9557,11 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     if _cap_on and os.environ.get("VIDLORE_CLIPSTUDIO_BREAKOUT_CAPS", "1").strip() \
             not in ("0", "false", "no"):
         _caps = list(getattr(narration, "_breakout_caps", None) or [])
+        if _caps and not _breakout_caption_burn_ok:
+            log("build: breakout caption burn skipped — the preflight could not caption every "
+                "spoken word; the breakout airs with its real audio and no caption, and the main "
+                "narration caption stays suppressed over its window")
+            _caps = []
         if _caps:
             _bk_burn_ok = _burn_breakout_captions(
                 result, _caps, work, log, preset=_cap_preset,
