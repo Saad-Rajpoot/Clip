@@ -163,9 +163,8 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
                 # airing the gap beats loudly flagged. A vision-backend outage is NOT eligible (that
                 # needs billing/backend restore, so it stays a retryable failure). Env
                 # VIDLORE_CLIPSTUDIO_PORTAL_AUTO_REVIEW=0 disables.
-                from .verify import NonRetryableBuildError as _NRB2, VisionBackendError as _VBE2
-                if _auto_review and not review_mode and isinstance(_ce, _NRB2) \
-                        and not isinstance(_ce, _VBE2):
+                from .verify import is_content_stop as _is_content_stop
+                if _auto_review and not review_mode and _is_content_stop(_ce):
                     log("↻ FOOTAGE GAP → auto-building a REVIEW DRAFT (the missing-footage beats "
                         "air flagged, not for publication). Resuming from cached stages…")
                     os.environ["VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE"] = "warn"

@@ -409,6 +409,28 @@ class VisionBackendError(RuntimeError):
         self.kind = kind
 
 
+def is_content_stop(exc) -> bool:
+    """Whether a failure is the kind of CONTENT verdict a review draft may legitimately deliver.
+
+    Every driver that offers "…→ auto-build a REVIEW DRAFT instead" has to answer this question, and
+    each of them used to answer it alone, with `isinstance(exc, NonRetryableBuildError)`. That misses
+    the semantic-recovery pagination guard, which is every bit a content verdict — beats fail the
+    publication contract and the repair walk is out of pages — but is raised as a PipelineError by
+    machinery that lives in orchestrate, not verify. Job 0321078108 died on it after 6h20m with the
+    portal's auto-review sitting right there, ineligible.
+
+    So the test is by identity, not by class alone, and it lives in ONE place. Infrastructure is
+    never a content stop: a dead vision backend needs the backend back, not a draft.
+    """
+    if isinstance(exc, VisionBackendError):
+        return False
+    if isinstance(exc, NonRetryableBuildError):
+        return True
+    # A typed content stop raised by non-verify machinery. Deliberately only this kind: integrity
+    # kinds such as scene_lineage mean the artifact may not be ours and stay fatal in every mode.
+    return str(getattr(exc, "kind", "") or "") == "selection_relevance"
+
+
 def _file_fingerprint(path) -> str:
     """Content id for a file: a FULL sha256, memoized on disk against (size, mtime).
 

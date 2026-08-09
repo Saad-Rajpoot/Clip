@@ -140,9 +140,16 @@ def test_portal_auto_review_draft_on_footage_gap():
     assert "_do_render(resume=True)" in src, "the auto-review retry must RESUME (assembly only)"
     assert 'os.environ["VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE"] = "warn"' in src, \
         "the auto-review retry must flip to warn mode"
-    # eligibility: content gap yes, vision outage NO
-    assert "isinstance(_ce, _NRB2)" in src and "not isinstance(_ce, _VBE2)" in src, \
-        "auto-review must fire on a content gap but NOT on a vision outage"
+    # Eligibility: content gap yes, vision outage NO. Asserted through the shared predicate rather
+    # than an inlined isinstance pair — the portal and tools/resume_job.py each kept their own copy,
+    # and both copies missed the pagination guard (a PipelineError), which is why job 0321078108 got
+    # a bare fail instead of the draft this test exists to guarantee. The predicate's own behaviour
+    # is pinned in test_content_stop_predicate.py.
+    assert "is_content_stop" in src, "auto-review must use the shared content-stop predicate"
+    from vidlore.clipstudio.verify import (NonRetryableBuildError, VisionBackendError,
+                                           is_content_stop)
+    assert is_content_stop(NonRetryableBuildError("footage gap")) is True
+    assert is_content_stop(VisionBackendError("quota", kind="billing")) is False
     assert 'j["status"] = ("review_draft"' in src, "a delivered review draft gets its own status"
     assert "review_draft" in src and "REVIEW DRAFT" in src, "the UI must label the review draft"
 

@@ -73,7 +73,7 @@ def main() -> int:
             pass
 
     from vidlore.clipstudio.orchestrate import produce_auto
-    from vidlore.clipstudio.verify import NonRetryableBuildError, VisionBackendError
+    from vidlore.clipstudio.verify import is_content_stop
 
     def _render(**over):
         return produce_auto(
@@ -88,9 +88,9 @@ def main() -> int:
     try:
         res = _render()
     except Exception as e:                                   # noqa: BLE001
-        # AUTO REVIEW DRAFT on a content failure — mirrors the portal's _run_job fallback
-        if not review and isinstance(e, NonRetryableBuildError) \
-                and not isinstance(e, VisionBackendError):
+        # AUTO REVIEW DRAFT on a content failure — the SAME predicate the portal's _run_job uses,
+        # imported rather than restated so the two drivers cannot drift apart again.
+        if not review and is_content_stop(e):
             log("↻ FOOTAGE GAP → auto-building a REVIEW DRAFT (missing-footage beats air "
                 "flagged, not for publication). Resuming from cached stages…")
             os.environ["VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE"] = "warn"
