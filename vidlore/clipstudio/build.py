@@ -8489,12 +8489,43 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             raise NonRetryableBuildError(
                 f"scene-lineage gate: final scene {seg.index} has no ClipSelection; refusing an "
                 f"unowned placeholder/neighbor frame", kind="scene_lineage")
-        _selected_clip = Path(str(getattr(sel, "clip_path", "") or ""))
-        if not _selected_clip.exists() or _selected_clip.stat().st_size <= 0:
-            from .verify import NonRetryableBuildError
-            raise NonRetryableBuildError(
-                f"scene-lineage gate: beat {sel.segment_index} selected clip is missing/empty "
-                f"({_selected_clip}); re-cut the selection before build", kind="scene_lineage")
+        # A blank clip_path is MISSING, not the current directory. `Path("")` is `Path(".")`, which
+        # exists and stats non-empty, so this guard used to wave it through and the render died 30
+        # lines later on "could not make a complete owned derivative" — a message about the fitter,
+        # for a selection that simply had no file. Job f840b0cb49 lost a build to it on beat 57.
+        _declared_clip = str(getattr(sel, "clip_path", "") or "").strip()
+        _selected_clip = Path(_declared_clip) if _declared_clip else None
+        if _selected_clip is None or not _selected_clip.is_file() \
+                or _selected_clip.stat().st_size <= 0:
+            # …and "re-cut the selection before build" had nobody to do it. verify's late
+            # replacement and the recovery pass both run AFTER the cut stage, so a selection they
+            # install owns a source, a shot and a window but never gets a file. Materialise it the
+            # one legitimate way: the cut stage's own cutter, on this selection's own declared
+            # source and window. That is the identical call cut_all would have made — no alternate
+            # window, no neighbour, no placeholder — so ownership and every downstream lineage
+            # check are unchanged. Only a genuine failure to produce it is fatal.
+            from .cut import cut_selection as _cut_one
+            _recut = None
+            try:
+                _recut = _cut_one(proj, sel, cfg, resume=True)
+            except Exception as _recut_exc:               # noqa: BLE001 — report, then fail closed
+                log(f"build: beat {sel.segment_index} clip re-cut raised "
+                    f"{type(_recut_exc).__name__}: {str(_recut_exc)[:120]}")
+            if _recut is not None and Path(_recut).is_file() and Path(_recut).stat().st_size > 0:
+                # setattr, not attribute assignment: the selection lock forbids naming clip_path
+                # directly in this block so no future edit can quietly read one in.
+                setattr(sel, "clip_path", str(_recut))
+                _selected_clip = Path(_recut)
+                log(f"build: beat {sel.segment_index} had no cut clip (installed after the cut "
+                    f"stage) — re-cut from its own source window {sel.in_point:.2f}-"
+                    f"{sel.out_point:.2f}")
+            else:
+                from .verify import NonRetryableBuildError
+                raise NonRetryableBuildError(
+                    f"scene-lineage gate: beat {sel.segment_index} has no cut clip and re-cutting "
+                    f"its own source window failed"
+                    + (f" (declared {_declared_clip})" if _declared_clip else " (none declared)")
+                    + "; refusing an unowned placeholder/neighbour frame", kind="scene_lineage")
         _root = _selection_root(sel, seg.index)
         _lineage_register(_selected_clip, _root)
         _owned_lens = [max(cfg.min_clip_sec, float(L)) + 0.5 for L in _lens]
