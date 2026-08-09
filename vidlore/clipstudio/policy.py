@@ -85,6 +85,54 @@ _DEICTIC_RX = re.compile(
 # narration, entity and query supplied no retrievable scene at all.
 _REWATCH_RX = re.compile(r"\bwatch it again\b", re.I)
 
+# --- sponsor / call-to-action reads ---------------------------------------
+# "Grab my free ebook — link's in the description." That beat is not about the story at all, so
+# there IS no correct scene for it: exact matching burns discovery budget hunting footage that
+# cannot exist, and then release-blocks on exact_scene_missing. It is also the one beat the owner
+# always covers in the edit — a book/product card goes over the top of it. So it wants the cheapest
+# honest thing: any clean clip from the pool it can sit under. That is exactly FILLER.
+#
+# Precision matters more than recall here, because a false positive downgrades a REAL narrative
+# beat. So a platform phrase must be unambiguous on its own, and the acquisition form needs all
+# three of: an action verb, the thing being offered, and a first/second-person marker. "Jaime reads
+# the Book of Brothers" has the noun and nothing else; "you can see the fear in his eyes" has the
+# pronoun and no action verb; neither is a CTA.
+_CTA_PLATFORM_RX = re.compile(
+    r"(?:\blinks?\s+(?:is\s+|are\s+|'s\s+)?(?:in|below|down\s+below)\b"
+    r"|\blinked\s+(?:below|in\b)"
+    r"|\bin\s+the\s+(?:description|bio|comments)\b"
+    r"|\bdescription\s+box\b|\bpinned\s+comment\b|\bfirst\s+comment\b"
+    r"|\bhit\s+(?:the\s+)?(?:like|subscribe|bell)\b|\bsmash\s+(?:that|the)\s+like\b"
+    r"|\bring\s+the\s+bell\b|\bturn\s+on\s+notifications\b"
+    r"|\buse\s+(?:the\s+)?(?:code|promo\s+code|discount\s+code)\b)", re.I)
+_CTA_ACTION_RX = re.compile(
+    r"\b(?:grab|download|check\s+out|head\s+(?:over|to)|click|tap|visit|order|buy|purchase|"
+    r"pick\s+up|sign\s+up|subscribe|enroll|claim|snag|preorder|pre-order|"
+    r"support\s+(?:me|us|the\s+channel)|get\s+(?:your|my|our|a|the)\b)", re.I)
+_CTA_OFFER_RX = re.compile(
+    r"\b(?:e-?books?|books?|guides?|newsletters?|courses?|workshops?|webinars?|audiobooks?|"
+    r"patreon|membership|merch|discount|promo\s+code|coupon|free\s+pdf|freebie|"
+    r"channel|playlist|series|sponsor(?:ed|ship)?)\b", re.I)
+# A CTA speaks to the viewer or about the creator's own product; narration does neither.
+_CTA_PERSON_RX = re.compile(r"\b(?:you|your|you'?re|my|mine|our|ours|we'?ve\s+got)\b", re.I)
+
+
+def is_sponsor_cta(seg) -> bool:
+    """A promotional read to the viewer (ebook, link in the description, subscribe, sponsor).
+
+    ORTHOGONAL to what the line is *about* — it is checked before every other rule because a CTA can
+    borrow narrative-looking words ("this book", "that link") and get promoted to a scene demand it
+    can never satisfy.
+    """
+    text = str(getattr(seg, "text", "") or "")
+    if not text.strip():
+        return False
+    if _CTA_PLATFORM_RX.search(text):
+        return True
+    return bool(_CTA_ACTION_RX.search(text)
+                and _CTA_OFFER_RX.search(text)
+                and _CTA_PERSON_RX.search(text))
+
 
 # RHETORICAL CONNECTORS — transition/question lines whose only job is moving the argument along:
 # "And that raises the next obvious question." / "Where does it even come from?" / "the answer
@@ -345,6 +393,8 @@ def has_deictic_target(seg) -> bool:
 def classify(seg) -> str:
     """Heuristic policy from the signals the analyzer already produces. Deterministic — always works
     even with no LLM. The LLM's explicit `visual_policy` (when present + valid) takes precedence."""
+    if is_sponsor_cta(seg):
+        return FILLER
     if _explicit_unanchored_symbolic_metaphor(seg):
         return ABSTRACT
     # deixis outranks every other signal, including the abstract heuristic below
@@ -373,7 +423,12 @@ def policy_of(seg) -> str:
 
     Deixis overrides the LLM label. The LLM sees one beat's words, not what they point AT, so it
     labels 'at that table' generic — and a generic label is a licence to air anything. The pointing
-    word is objective evidence about the referent that outranks the model's guess."""
+    word is objective evidence about the referent that outranks the model's guess.
+
+    A sponsor/CTA read outranks even deixis: "grab that ebook" points at nothing in the story, so an
+    exact label on it is a demand no footage can meet."""
+    if is_sponsor_cta(seg):
+        return FILLER
     if _explicit_unanchored_symbolic_metaphor(seg):
         return ABSTRACT
     if is_deictic(seg) or _direct_concrete_visual(seg):
@@ -418,6 +473,10 @@ def finalize_beats(segs) -> dict:
             s.visual_policy = p
             s.breakout_candidate = is_breakout_candidate(s)
             tally[p] = tally.get(p, 0) + 1
+            # Counted separately (not a fifth policy) so the log says WHY those beats are filler —
+            # a silent downgrade of a real narrative beat would otherwise look identical.
+            if is_sponsor_cta(s):
+                tally["sponsor_cta"] = tally.get("sponsor_cta", 0) + 1
         except Exception:
             pass
     return tally
@@ -443,6 +502,10 @@ def is_abstract(seg) -> bool:   return policy_of(seg) == ABSTRACT
 
 
 def is_breakout_candidate(seg) -> bool:
+    # A sponsor read is never a breakout. Cutting to real show audio underneath "grab my ebook"
+    # would talk over the offer, and the analyzer happily quotes a CTA line like any other.
+    if is_sponsor_cta(seg):
+        return False
     return bool(getattr(seg, "breakout_candidate", False)) \
         or bool((getattr(seg, "quote", "") or "").strip())
 
