@@ -4494,18 +4494,32 @@ def _semantic_recovery_cursor(proj, segs, audit: dict, *, allow_absent: bool,
 
 
 def _pagination_terminal_error(cursor: dict):
+    """Exhaustion of the repair walk, typed as the CONTENT stop it actually is.
+
+    Both terminal reasons say the same thing: beats still fail the semantic publication contract
+    and this machinery has no move left. That is exactly the situation review mode exists for — yet
+    a bare PipelineError carries no `kind`, so the review escape in `_produce_auto` (which keys on
+    kind == "selection_relevance") let it through as if it were a plumbing fault and killed an
+    8-hour render that had a deliverable draft sitting one stage away. Tag it. Nothing softens:
+    strict mode still raises, the blocked beats stay blocked and audited, and the review build is
+    still named REVIEW_DRAFT. The neighbouring guards for a malformed/unrecognised receipt stay
+    untyped on purpose — those are technical faults and must fail hard in every mode.
+    """
     receipt = cursor.get("receipt") or {}
     reason = str(receipt.get("terminal_reason", "") or "")
     deferred = list(cursor.get("deferred") or [])
+    err = None
     if reason.startswith("no_progress:"):
-        return PipelineError(
+        err = PipelineError(
             "semantic recovery pagination made no forward progress: repeated current "
             f"deferred scope {deferred}")
-    if reason.startswith("finite_guard:"):
-        return PipelineError(
+    elif reason.startswith("finite_guard:"):
+        err = PipelineError(
             f"semantic recovery pagination reached its finite {receipt.get('max_pages')}-page "
             f"guard with current deferred scope {deferred}")
-    return None
+    if err is not None:
+        err.kind = "selection_relevance"
+    return err
 
 
 def _pending_semantic_recovery_page(proj, segs, audit: dict) \
