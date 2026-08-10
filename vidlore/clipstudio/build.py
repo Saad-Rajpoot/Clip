@@ -4261,9 +4261,21 @@ def _align_words_to_hyp(flat: list, hyp: list):
     n_anchor = sum(1 for t in times if t is not None)
     if n_anchor < max(8, int(0.45 * len(flat))):        # too little matched → unreliable
         return None
+    # How certain are we that these two streams are the SAME recording? The edge guards below ask
+    # that question locally, from two or three words, and a mis-heard proper name at position 0 can
+    # therefore veto an otherwise perfect alignment. MEASURED on job f840b0cb49: 2982 of 3088 script
+    # words (96.6%) anchored EXACTLY, the only unmatched word was the script's very first — "Varys",
+    # heard as "Various" — and the prefix guard scored it 0.667 against a 0.72 floor and returned
+    # None. The whole 20-minute video was then captioned from raw Whisper text, which spells Jon as
+    # "John" 31 times. One mis-heard word cost every caption in the file.
+    #
+    # Global agreement is evidence the edge cannot see. Two different recordings do not share 90%
+    # of their words in order; when they do, a short unmatched edge is a transcription error, not
+    # different content.
+    _overwhelming = n_anchor >= 0.90 * len(flat)
     anchors = [(i, t) for i, t in enumerate(times) if t is not None]
 
-    def _edge_has_lexical_evidence(script_edge, hyp_edge) -> bool:
+    def _edge_has_lexical_evidence(script_edge, hyp_edge, floor: float = 0.72) -> bool:
         """True only when every donated edge word is lexically supported by the other stream.
 
         Timing alone is not evidence that two edge phrases are the same speech.  The previous fix
@@ -4291,7 +4303,8 @@ def _align_words_to_hyp(flat: list, hyp: list):
         def _supported(token, others):
             if len(token) < 3:
                 return token in others
-            return max((_SM(None, token, other).ratio() for other in others), default=0.0) >= 0.72
+            return max((_SM(None, token, other).ratio() for other in others),
+                       default=0.0) >= floor
 
         return (all(_supported(token, heard) for token in authored)
                 and all(_supported(token, authored) for token in heard))
@@ -4329,7 +4342,19 @@ def _align_words_to_hyp(flat: list, hyp: list):
         if first_h is None or first_h <= 0:
             return None
         prefix = hyp[:first_h]
-        if not _edge_has_lexical_evidence(flat[:fi], prefix):
+        # The lexical test is never skipped — only its FLOOR moves. An earlier attempt bypassed the
+        # test outright when agreement was overwhelming and the prefix short; adversarial review
+        # executed that and showed it would place four entirely unrelated authored words over
+        # unrelated audio ("hey guys welcome back" heard, the authored opening burned over it) on
+        # any script long enough that four words are statistically invisible. Lowering the floor
+        # instead keeps every unrelated prefix out — an ad-libbed intro or a Whisper room-tone
+        # hallucination scores ~0.0 against the authored words — while admitting the mishearing
+        # this exists for: varys/various and aerys/aris both score 0.667.
+        #
+        # The TAIL guard keeps the strict floor on purpose: a short unmatched tail is how a
+        # truncated voiceover announces itself, and that must keep failing loudly.
+        _edge_floor = 0.60 if (_overwhelming and fi <= 4 and len(prefix) <= 4) else 0.72
+        if not _edge_has_lexical_evidence(flat[:fi], prefix, floor=_edge_floor):
             return None
         p0 = min(float(s) for _, s, _ in prefix)
         p1 = min(float(ft[0]), max(float(e) for _, _, e in prefix))
@@ -4355,11 +4380,45 @@ def _align_words_to_hyp(flat: list, hyp: list):
             continue
         gap = ib - ia
         t0, t1 = ta[1], tb[0]
-        stepv = (t1 - t0) / gap if t1 > t0 else 0.0
+        # An INTERIOR gap needs the same treatment the edges already got. When Whisper's timestamps
+        # touch or overlap — the previous anchor ending at or after the next one starts — this used
+        # to fall to stepv = 0 and hand every word in the gap a zero-duration (t, t) span. One such
+        # word out of three thousand then failed the all-positive validation and threw the entire
+        # alignment away, which is the very failure the edge-fill comment above describes; it was
+        # fixed for the edges and left here. MEASURED on job f840b0cb49: script word 2907 ("than")
+        # got (1097.98, 1097.98) and cost the file every one of its captions.
+        #
+        # Degenerate ASR timestamps are a transcription artifact, not evidence about content. The
+        # words ARE spoken between these two anchors, so give them an ordered, positive, sub-frame
+        # sequence rather than discarding a stream that matched 96% exactly.
+        span = t1 - t0
+        if span <= 0.0:
+            span = min(0.001 * gap, 0.05)
+        stepv = span / gap
         for k in range(1, gap):
             s = t0 + stepv * (k - 1)
             e = t0 + stepv * k
-            times[ia + k] = (s, max(s, e))
+            times[ia + k] = (s, e)
+    # Whisper itself emits zero-duration tokens — MEASURED: 3 of 3094 words on job f840b0cb49,
+    # including hyp[2909] 'than…' at 1097.98 → 1097.98. An exact anchor inherits that span verbatim,
+    # and the caller's all-positive validation then discards an alignment that matched 96.6% of the
+    # script exactly. A degenerate timestamp is a property of the transcriber, not evidence about
+    # the recording, so widen it by a hair rather than throw away every caption in the file. Only
+    # spans we actually assigned are repaired: a word with no time at all still has none, and still
+    # fails, because that IS missing evidence.
+    _EPS = 0.005                       # ~1/6 of a 30 fps frame: positive, and far too small to move
+    for _i, _t in enumerate(times):    # a caption cue or to break the monotonic start-time check
+        if _t is None:
+            continue
+        _s, _e = _t
+        if _e <= _s:
+            # Bounded by the next word's real start, so a widened cue-final word can never be given
+            # dwell the recording does not support and can never push a cue boundary past the
+            # following speech.
+            _nxt = next((times[_j][0] for _j in range(_i + 1, len(times))
+                         if times[_j] is not None), None)
+            _end = _s + _EPS if _nxt is None else min(_s + _EPS, max(_nxt, _s + 1e-4))
+            times[_i] = (_s, _end)
     return [t if t is not None else (0.0, 0.0) for t in times]
 
 
@@ -4417,6 +4476,14 @@ def _truncated_voiceover_tail_evidence(flat: list, hyp: list, total: float):
     }
 
 
+# Words a cast roster can accidentally contribute — "The Hound", "The Night King", "Ser Davos" —
+# and which must never become eligible for a fuzzy caption rewrite however a name is spelled.
+_CAPTION_STOPWORDS = frozenset("""
+the a an and or but for nor yet so of to in on at by with from as is are was were be been being
+his her its their our your my this that these those he she it they we you who whom whose not no
+""".split())
+
+
 def _restore_secure_script_tokens(narration, flat: list, log=None,
                                   protected_terms=None) -> int:
     """Correct high-confidence ASR spellings without rewriting what the recording says.
@@ -4472,10 +4539,34 @@ def _restore_secure_script_tokens(narration, flat: list, log=None,
                 elif authored_word.endswith(("'", "’")):
                     authored_word = authored_word[:-1]
                 authored_base = _norm(authored_word)
+                # Both floors are calibrated for GENERIC tokens, where similarity is the only
+                # evidence and horse/house (0.80) must not become a rewrite. For a token the roster
+                # independently identified as a proper name they are miscalibrated, and measurably
+                # so: Jon/John is min-length 3, and varys/various and aerys/aris both score 0.667.
+                # All three were refused, so "John" burned into 31 captions of one video.
+                #
+                # A roster name is NOT enough on its own to relax them. Review executed the naive
+                # version: "The Hound" and "The Night King" put the article "The" into the roster,
+                # and the script's lowercase "the" then overwrote genuinely spoken "they" (0.857),
+                # "then" (0.857), "there" (0.750) and "these" (0.750). So the relaxed tier also
+                # requires the token to be CAPITALISED AT THIS POSITION in the script — "Jon",
+                # "Varys", "Aerys" are; a mid-sentence "the", "will", "mark", "rose" never is —
+                # which is what makes the two tiers genuinely different rather than one dead branch.
+                _authored_raw = str(flat[i1 + off] or "").lstrip("\"'“‘([")
+                _named = ((authored_base in protected or a in protected)
+                          and _authored_raw[:1].isupper()
+                          and a not in _CAPTION_STOPWORDS)
+                _min_len = 3 if _named else 4
+                _floor = 0.60 if _named else 0.72
+                # A rostered name heard as ANOTHER rostered name is a swap, never a spelling
+                # repair — Tywin must not become Tyrion however similar they look. That rule is
+                # absolute and is why actor names are kept OUT of the roster entirely (below):
+                # putting "John Bradley" in it made "john" a rival and silently disabled the very
+                # Jon->John repair this change exists to perform. Fix the roster, not the rule.
                 if (a in protected or authored_base in protected) \
                         and (b not in protected or b == authored_base) \
-                        and min(len(a), len(b)) >= 4 \
-                        and _SM(None, a, b).ratio() >= 0.72:
+                        and min(len(a), len(b)) >= _min_len \
+                        and _SM(None, a, b).ratio() >= _floor:
                     rewrites.append((i1 + off, j1 + off))
 
     fixed = 0
@@ -7900,12 +7991,37 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                 for word in (getattr(scene, "narration", "") or "").split()
             ]
             _proper_caption_terms = set()
+            # Two sources, because per-beat entities alone missed the most-spoken name in the
+            # video: the cast roster the analyzer already built. Both are authored/derived data,
+            # never ASR.
+            _term_sources = [str(getattr(_seg_term, "required_entity", "") or "")
+                             for _seg_term in segments]
             for _seg_term in segments:
-                for _entity_term in ((getattr(_seg_term, "entities", None) or [])
-                                     + [getattr(_seg_term, "required_entity", "") or ""]):
-                    for _term_token in re.findall(r"[A-Za-z][A-Za-z'’-]*", str(_entity_term)):
-                        if len(_term_token) >= 4 and _term_token[:1].isupper():
-                            _proper_caption_terms.add(_term_token)
+                _term_sources.extend(str(x) for x in (getattr(_seg_term, "entities", None) or []))
+            try:
+                _an_roster = (proj.meta or {}).get("analysis") or {}
+                # CHARACTERS only. Actor names are real people who are credited, not narrated,
+                # and adding them made "John" (from "John Bradley") a rostered rival that blocked
+                # the Jon->John repair outright. The roster's job is to name what the script says.
+                _term_sources.extend(str(_c.get("name") or "")
+                                     for _c in (_an_roster.get("characters") or [])
+                                     if isinstance(_c, dict))
+            except Exception:                             # noqa: BLE001 — roster is a bonus
+                pass
+            for _entity_term in _term_sources:
+                for _term_token in re.findall(r"[A-Za-z][A-Za-z'’-]*", _entity_term):
+                    # >=3, not >=4. "Jon" is three letters, and Whisper writes it "John" — that one
+                    # exclusion accounted for 31 wrong captions in a single delivered video. Two
+                    # letters stays out: "Of"/"To" are not names and would only add noise.
+                    #
+                    # A roster entry is a PHRASE, so "The Hound" would otherwise contribute the
+                    # article. Measured: that let the script's "the" overwrite spoken "they"/"then"/
+                    # "there". Function words are dropped here, and the rewrite guard independently
+                    # requires the token to be capitalised where it is used, so neither alone is
+                    # load-bearing.
+                    if (len(_term_token) >= 3 and _term_token[:1].isupper()
+                            and _term_token.lower() not in _CAPTION_STOPWORDS):
+                        _proper_caption_terms.add(_term_token)
             _restore_secure_script_tokens(
                 narration, _script_caption_tokens, log,
                 protected_terms=_proper_caption_terms)

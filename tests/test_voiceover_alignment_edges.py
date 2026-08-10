@@ -55,7 +55,11 @@ def test_leading_token_fusion_donates_real_lexically_supported_prefix_span():
 
 
 def test_unrelated_positive_duration_edge_cannot_bypass_asr_fallback():
-    common = "eight exact anchor words prove the middle content matches well".split()
+    # x30. This invariant was asserted only at ten body words, and the prefix relaxation added
+    # later keys on a WHOLE-STREAM agreement ratio — so at ten words the relaxed path was never
+    # even reached and the test would have stayed green while production burned unrelated authored
+    # words over the opening of every caption track. Assert it where renders live.
+    common = "eight exact anchor words prove the middle content matches well".split() * 30
     assert _align_words_to_hyp(
         ["Authored", "opening"] + common,
         _hyp(["Different"] + common),
