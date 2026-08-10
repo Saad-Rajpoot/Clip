@@ -18,6 +18,7 @@ import inspect
 import math
 import os
 import re
+import threading
 import subprocess
 import uuid
 from difflib import SequenceMatcher
@@ -113,17 +114,29 @@ def _merge_short(scenes: list[tuple[float, float]], min_sec: float) -> list[tupl
 # Transcription (word-level)
 # ---------------------------------------------------------------------------
 
+_WHISPER_LOCK = threading.Lock()
+
+
 def _whisper(cfg: ClipConfig):
     threads = int(getattr(cfg, "whisper_cpu_threads", 0) or 0)
     key = (str(cfg.whisper_model), str(cfg.whisper_compute), max(0, threads))
-    if key not in _WHISPER:
+    if key in _WHISPER:
+        return _WHISPER[key]
+    # Locked, because the check-then-set was racy and the index prewarmer calls this from its own
+    # thread while the main index stage calls it from another. A lost race builds a SECOND model,
+    # and each one carries its own CTranslate2 replica worker plus a cpu_threads-wide pool —
+    # measured on this machine: a second cpu_threads=15 model takes the process from 47 threads to
+    # 77. The pool that aborted job 2e0d34d9b1 was exactly such a pool.
+    with _WHISPER_LOCK:
+        if key in _WHISPER:
+            return _WHISPER[key]
         from faster_whisper import WhisperModel
         # cpu_threads: 0 = ctranslate2 default; a positive value pins the ASR pass to that many
         # cores (auto-scaled from the machine in config) so a powerful box transcribes much faster.
         _WHISPER[key] = WhisperModel(cfg.whisper_model, device="cpu",
                                      compute_type=cfg.whisper_compute,
                                      cpu_threads=max(0, threads))
-    return _WHISPER[key]
+        return _WHISPER[key]
 
 
 def _asr_vocabulary_entry(value) -> str:

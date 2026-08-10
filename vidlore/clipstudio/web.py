@@ -130,7 +130,25 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
     except Exception:
         _log_fh = None
 
+    # WHO IS RUNNING THIS, on disk. The render lives in a daemon thread inside this process, so a
+    # native abort in a C++ library takes the portal, the render and the in-memory _JOBS registry
+    # down together — that happened, and the browser then showed "running" for six hours because
+    # nothing outside this process knew anything. The lock is held for the render's whole life so
+    # its release is the death certificate; the heartbeat ticks on its own thread so an hour-long
+    # silent stage is never mistaken for death.
+    from . import run_state as _rs
+    _run_lock = _rs.RunLock(project_dir)
+    _run_lock.acquire()
+    _rs.write(project_dir, jid, driver="portal", code_rev=_running_code_revision(),
+              extra={"review_mode": bool(review_mode), "resume": bool(resume)})
+    _heart = _rs.Heartbeat(project_dir).start()
+
     def log(m):
+        try:
+            if isinstance(m, str) and "/9 · " in m:
+                _rs.touch(project_dir, phase=m.strip())
+        except Exception:                                  # noqa: BLE001 — never break a render
+            pass
         with _LOCK:
             j = _JOBS.get(jid)
             _el = (time.time() - j['started']) if j is not None else 0.0
@@ -230,6 +248,8 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
             j["status"] = ("review_draft" if (j["ok"] and _became_review)
                            else "ok" if j["ok"] else "error")
             j["retryable"] = not j["ok"]
+        _heart.stop(status=j["status"], phase="finished")
+        _run_lock.release()
     except BaseException as e:                            # noqa: BLE001
         # BaseException: a stray SystemExit from a dependency dies silently in a thread —
         # the job would spin "running…" forever with done never set
@@ -424,10 +444,33 @@ def _job_page(jid: str) -> str:
 </div>"""
     script = """<script>
  var done=false;
+ var _misses=0;
  async function poll(){
    if(done)return;
    try{
-     const r=await fetch('/status/__JID__');const j=await r.json();
+     const r=await fetch('/status/__JID__');
+     if(!r.ok){
+       // A dead portal used to be indistinguishable from a slow one: the catch below swallowed
+       // everything and the bar span forever. 404 here means this portal genuinely does not know
+       // the job (restarted and the dir is gone, or aged out) — say so and stop pretending.
+       if(r.status===404){done=true;
+         document.getElementById('ph').textContent='this portal no longer knows this job (it was restarted, or the job aged out) ✗';
+         return;}
+       throw new Error('http '+r.status);
+     }
+     _misses=0;
+     const j=await r.json();
+     if(j.liveness==='died'){done=true;
+       document.getElementById('ph').textContent='the render process died ✗';
+       document.getElementById('log').textContent=(j.log||[]).join('\n');
+       document.getElementById('log').scrollTop=1e9;
+       document.getElementById('dl').innerHTML=
+         '<a class=dl href="#" onclick="return retryResume()">↻ Resume from where it died</a>'+
+         '<div class=brain>'+(j.error||'')+'</div>';
+       return;}
+     if(j.liveness==='unresponsive'){
+       document.getElementById('ph').textContent='(no heartbeat for 90s — the render may be wedged) '+(j.phase||'');
+     }
      document.getElementById('ph').textContent=j.phase||(j.done?(j.ok?(j.review_draft?'review draft ✓':'done ✓'):'failed ✗'):'running…');
      document.getElementById('log').textContent=(j.log||[]).join('\\n');
      document.getElementById('log').scrollTop=1e9;
@@ -464,7 +507,14 @@ def _job_page(jid: str) -> str:
          document.getElementById('dl').innerHTML=h;
        }
      }
-   }catch(e){}
+   }catch(e){
+     // Never silent again. Keep polling so a restarted portal recovers the page, but SAY that
+     // contact is lost — this is exactly the state that lied for six hours.
+     _misses++;
+     var ph=document.getElementById('ph');
+     if(_misses>=3){ph.textContent='the portal is not responding — this job may not be running (retrying…)';}
+     else if(_misses>0){ph.textContent='lost contact with the portal — retrying…';}
+   }
    setTimeout(poll, done?9999:2500);
  }
  async function _retry(mode){
@@ -682,9 +732,42 @@ def retry(jid):
 
 @app.route("/job/<jid>")
 def job(jid):
-    if jid not in _JOBS:
+    if jid not in _JOBS and _disk_job_view(jid) is None:
         abort(404)
     return _job_page(jid)
+
+
+def _disk_job_view(jid: str):
+    """What is knowable about a job with nothing in memory — after a portal restart, or after the
+    portal was killed mid-render by a native abort. Returns None when the job dir is not ours."""
+    from . import run_state as _rs
+    d = _ROOT / jid
+    if not (d / "output" / "run_state.json").is_file():
+        return None
+    doc = _rs.reconcile(d)
+    live = _rs.liveness(d, doc)
+    tail = []
+    try:
+        with open(d / "output" / "build.log", encoding="utf-8", errors="replace") as fh:
+            tail = [ln.rstrip("\n") for ln in fh.readlines()[-400:]
+                    if "Deprecated Feature" not in ln]
+    except Exception:                                      # noqa: BLE001
+        pass
+    dead = live == _rs.DIED
+    return {
+        "phase": doc.get("last_phase") or doc.get("phase") or "",
+        "log": tail, "liveness": live, "from_disk": True,
+        "done": dead or str(doc.get("status")) in ("ok", "error", "review_draft"),
+        "ok": str(doc.get("status")) in ("ok", "review_draft"),
+        "status": ("died" if dead else doc.get("status")),
+        "retryable": True,
+        "error": ("the render process died without reporting (a native crash in an imported "
+                  "library kills the process outright — no Python traceback is possible). "
+                  f"Last phase: {doc.get('last_phase') or doc.get('phase') or 'unknown'}. "
+                  "Press Resume: finished stages are cached and are not redone."
+                  if dead else None),
+        "summary": {}, "code_rev": doc.get("code_rev"), "driver": doc.get("driver"),
+    }
 
 
 @app.route("/status/<jid>")
@@ -692,11 +775,19 @@ def status(jid):
     with _LOCK:
         j = _JOBS.get(jid)
         if not j:
+            # NOT a 404. The registry is in memory only, so a portal that was restarted — or killed
+            # mid-render — used to answer 404 forever while the page's catch(e){} swallowed it and
+            # the user watched a dead job for six hours. Disk knows.
+            _v = _disk_job_view(jid)
+            if _v is not None:
+                return jsonify(_v)
             return jsonify({"error": "unknown job"}), 404
         # status/retryable are part of the contract: a caller deciding whether to re-run must not
         # have to pattern-match an error string to learn that a content verdict cannot be retried
-        return jsonify({k: j.get(k) for k in ("phase", "log", "done", "ok", "error", "summary",
-                                              "status", "retryable", "error_type")})
+        _out = {k: j.get(k) for k in ("phase", "log", "done", "ok", "error", "summary",
+                                      "status", "retryable", "error_type")}
+        _out["liveness"] = "running" if not j.get("done") else str(j.get("status") or "")
+        return jsonify(_out)
 
 
 @app.route("/download/<jid>")

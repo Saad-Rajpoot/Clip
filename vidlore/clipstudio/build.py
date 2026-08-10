@@ -7342,6 +7342,12 @@ def _breakout_caption_ass(caps: list, out_ass: Path, log=None, *, preset=None) -
     _coverage_failed = False
     try:
         m = WhisperModel("base", device="cpu", compute_type="int8")
+        # faster-whisper keeps no record of what it was asked to load, so breakout_asr stamps the
+        # spec on the object and its memo key reads it back. This site never did — so
+        # _model_identity() returned None, _ASR_CACHE_STATS['unidentified_model'] ticked, and EVERY
+        # breakout-caption transcription re-decoded from scratch, in production, on every render.
+        from .breakout_asr import _SPEC_ATTR as _SPEC_BK
+        setattr(m, _SPEC_BK, "base")
     except Exception:
         return None
     # The BK Style line comes from the selected preset (same design family as the narration
