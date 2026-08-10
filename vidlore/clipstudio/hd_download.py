@@ -718,7 +718,15 @@ def _merge_ffmpeg_dir(hint: str = "") -> str:
     cands = [shutil.which("ffmpeg"), "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg",
              os.path.expanduser("~/pinokio/bin/miniconda/bin/ffmpeg")]
     for c in cands:
-        if c and os.path.exists(c):
+        # The candidate existing is not the same as the DIRECTORY satisfying this function's one
+        # promise. Every other branch verifies `ffmpeg{_x}` is in the dir it returns; this one
+        # returned dirname(c) on trust, so on Windows a POSIX path that happens to resolve (a
+        # Cygwin/MSYS mount, a drive-relative path) handed yt-dlp a directory with no ffmpeg.exe
+        # in it — which is exactly the silent-skip-the-merge, HD-arrives-mute failure this whole
+        # function exists to prevent. The comment above already claimed those paths were skipped
+        # on Windows; nothing skipped them. Check the promise instead of assuming the platform.
+        if c and os.path.exists(c) and os.path.exists(
+                os.path.join(os.path.dirname(c), f"ffmpeg{_x}")):
             return os.path.dirname(c)
     # 4) last resort: link/copy the engine's (versioned) binary under the exact name in a cache dir
     try:
@@ -743,7 +751,11 @@ def _merge_ffmpeg_dir(hint: str = "") -> str:
                 return cache
     except Exception:                                       # noqa: BLE001
         pass
-    return hint
+    # Nothing satisfied the promise. Returning `hint` here handed back the very directory step 1
+    # already rejected for not containing `ffmpeg{_x}` — a confident answer that is wrong, which
+    # yt-dlp then uses to skip the merge and produce a mute file. "" is the honest answer: no
+    # --ffmpeg-location is passed and yt-dlp falls back to PATH, where it can at least look.
+    return ""
 
 
 def download_hd(url: str, out_stem: str, *, max_height: int = 1080, ffmpeg_dir: str = "",
