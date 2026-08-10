@@ -121,9 +121,15 @@ class TestReviewDraftsAreMarked(unittest.TestCase):
 
         The fifth was added after job 0ca9dc4c2f died at five end-of-build gates in a row: the
         still passes threw away a finished video over one beat's unusable still, while the footage,
-        unverified-exact and black-frame gates all already knew a review draft may be imperfect."""
+        unverified-exact and black-frame gates all already knew a review draft may be imperfect.
+
+        The sixth is the native-HD contract. Its call sat in no try block at all, so in review mode
+        it killed the build exactly as in production and the portal's auto-review resumed straight
+        back into it. Only its MEASURED sub-HD class is deliverable — an unprobeable file or an
+        unbound selection raises native_resolution_probe and stays fatal in both modes, because
+        "we could not measure it" is never content."""
         src = (SRC / "clipstudio" / "build.py").read_text()
-        self.assertEqual(src.count("_review_draft.append("), 5,
+        self.assertEqual(src.count("_review_draft.append("), 6,
                          "each independent warn gate must record its own reason")
         self.assertIn("_review_draft.append(_msg_hd)", src)
         self.assertIn("image still beat", src)

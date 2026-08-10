@@ -7852,7 +7852,33 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # to value relevance first, but build may only publish when every selected moving-video root is
     # at least 720p.  A verified full-resolution still has its own rescue/validation path below.
     from .quality_contract import assert_native_hd_selections as _assert_native_hd
-    _assert_native_hd(proj, proj.selections, proj.output_dir / "native_resolution_audit.json")
+    try:
+        _assert_native_hd(proj, proj.selections, proj.output_dir / "native_resolution_audit.json")
+    except Exception as _hd_exc:                          # noqa: BLE001 — re-raised unless content
+        # This call sat in no try block at all, so in REVIEW mode it killed the build exactly as it
+        # does in production — and the portal's auto-review then resumed straight back into it. The
+        # gate is unchanged; what changed is that a review draft may now carry the one failure class
+        # it was always meant to show a human: real bytes, really measured, really below the floor.
+        #
+        # Everything else still raises here, including this gate's own native_resolution_probe: an
+        # unmeasured selection is not imperfect footage, it is an unanswered question.
+        #
+        # This handler moves no threshold and swaps no selection, and native_resolution_audit.json
+        # — written before the raise — names every failing beat with its measured dimensions. But
+        # be exact about what the reviewer then receives: those beats DO reach the encode, and the
+        # ordinary picture chain lanczos-enlarges anything under 1280 wide onto the 1080p canvas
+        # (_upscale_filter, this file). So the draft airs upscaled SD. That is not a way to pass
+        # the gate — the gate failed, the file is renamed REVIEW_DRAFT and the audit says which
+        # beats — it is the only way to SHOW a human the beats that need better footage. In
+        # production nothing about this changes: the raise stands and no file is produced.
+        if not content_defect_is_deliverable(_hd_exc):
+            raise
+        # a distinct name: `_msg_hd` already belongs to the HD-collapse check later in this same
+        # function, and two gates quietly sharing one local is how a wrong message gets reported.
+        _msg_nhd = (f"native resolution: {_hd_exc} These beats air UPSCALED onto the 1080p canvas "
+                    f"— replace the footage before publishing.")
+        log(f"build: ⚠ REVIEW DRAFT (mode=warn — NOT for publication) — {_msg_nhd}")
+        _review_draft.append(_msg_nhd)
 
     # 3) MULTI-CLIP-PER-SCENE — supply ONE distinct clip per engine sub-beat so an energetic scene
     #    cuts between DIFFERENT relevant clips instead of looping one (the old loop bug). The beat
