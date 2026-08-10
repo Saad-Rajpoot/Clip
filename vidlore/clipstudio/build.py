@@ -1134,38 +1134,31 @@ def _verbatim_bypass_ok(qw: list, run: int) -> bool:
 #   and in review mode they are recorded and delivered instead of raised.
 #
 # Production ('block', the default) is unchanged: every one of these is still fail-closed.
-# Classification is by the GATE'S OWN NAME, not by keywords in its message. A first attempt
-# matched message text and mis-filed "verified still is 512x288; a real 1280x720 owner is
-# required" as an ownership fault because the word "owner" happened to appear in it. Gates name
-# themselves; that name is the stable fact.
 #
-# Only these say "the video is imperfect". Everything else — named or unnamed — is treated as an
-# integrity fault and stays fatal, so a gate added tomorrow fails closed until someone decides
-# otherwise on purpose.
-_DELIVERABLE_GATE_PREFIXES = (
-    "image native-resolution gate:",   # a still is below the native-HD floor
-    "image semantic gate:",            # a still's verdict is missing, stale or negative
-    "caption readability:",            # narration is faster than the reading ceiling
-)
+# The FIRST attempt classified by keywords in the message and mis-filed "verified still is 512x288;
+# a real 1280x720 owner is required" as an ownership fault because the word "owner" appeared in it.
+# The SECOND classified by the gate's own name PREFIX — better, but still prose. A message gets
+# reworded, f-string-interpolated, or concatenated from a sub-gate, and nothing notices: by the time
+# this was audited, "caption readability:" was a registered prefix that no gate raised any more.
+# Worse, prefixes cannot be ENUMERATED, so a gate that forgot to declare one looked exactly like a
+# gate that has none — and four portal renders died in a row, each on a different undeclared member
+# of the same family.
+#
+# So the classification now lives on the exception's `kind`, in release_policy.KIND_CLASS: one
+# machine field, one writer, greppable, and enumerable by tests/test_terminal_raise_census.py, which
+# refuses to let a new terminal raise skip its declaration. Anything undeclared is integrity.
+from .release_policy import review_draft_mode                              # noqa: E402  (re-export)
 
 
-def review_draft_mode() -> bool:
-    """True when this render is a review draft rather than a publication candidate."""
-    import os as _os_rd
-    return _os_rd.environ.get("VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE", "block") \
-        .strip().lower() == "warn"
-
-
-def content_defect_is_deliverable(reason: str) -> bool:
+def content_defect_is_deliverable(exc) -> bool:
     """Can a review draft carry this defect, or must the render still fail?
 
-    Only a gate that has explicitly declared itself a content-quality gate may be forgiven, and
-    only in review mode. Anything else — including a gate nobody has classified yet — stays fatal.
+    Takes the EXCEPTION, not its message. Only a gate that has declared itself a content gate in
+    release_policy.KIND_CLASS may be forgiven, and only in review mode. Anything else — including a
+    gate nobody has classified yet — stays fatal.
     """
-    if not review_draft_mode():
-        return False
-    text = str(reason or "").strip().lower()
-    return any(text.startswith(p) for p in _DELIVERABLE_GATE_PREFIXES)
+    from .release_policy import deliverable as _deliverable
+    return _deliverable(exc)
 
 
 def _asr_wav_words(wav_path) -> tuple:
@@ -3711,6 +3704,7 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
         # (a) fail closed — too few final frames decoded to trust anything
         if decoded < min_ok:
             problems.append({"breakout": line, "start": round(s, 2),
+                             "probe": True,   # measurement failed; not an editorial verdict
                              "reason": f"only {decoded}/{len(rels)} final frames decoded "
                                        f"(need >= {min_ok}) — cannot verify, failing closed",
                              "probe_errors": probe_errs})
@@ -3720,6 +3714,7 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
         valid_l = [x for x in lumas if x >= 0]
         if len(valid_l) < min_ok:
             problems.append({"breakout": line, "start": round(s, 2),
+                             "probe": True,   # measurement failed; not an editorial verdict
                              "reason": f"could not measure luma on the decoded final frames "
                                        f"({len(valid_l)}/{decoded}) — failing closed",
                              "probe_errors": probe_errs})
@@ -3733,6 +3728,7 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
         # (c) wrong footage — could not compare (fail closed) OR grossly different scene aired
         if not hams:
             problems.append({"breakout": line, "start": round(s, 2),
+                             "probe": True,   # measurement failed; not an editorial verdict
                              "reason": "could not verify final footage against the prepared breakout "
                                        "clip (source frame undecodable or too flat to match) — "
                                        "failing closed",
@@ -3771,6 +3767,7 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
             for c in (caps or []):
                 if float(c.get("dur", 0.0)) > 0.4:
                     problems.append({"breakout": (c.get("line", "") or "")[:44],
+                                     "probe": True,   # measurement failed; not an editorial verdict
                                      "start": round(float(c.get("start", 0.0)), 2),
                                      "reason": "breakout final-mix ASR unavailable (no Whisper) — "
                                                "UNVERIFIED (failing closed; set BREAKOUT_AUDIO_QA=0 "
@@ -3788,6 +3785,7 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
                     capture_output=True, timeout=60)
                 if _ext.returncode != 0 or not wav.exists() or wav.stat().st_size == 0:
                     problems.append({"breakout": line[:44], "start": round(s, 2),
+                                     "probe": True,   # measurement failed; not an editorial verdict
                                      "reason": "breakout audio could NOT be extracted from the final "
                                                "video for QA — UNVERIFIED (failing closed)"})
                     continue
@@ -3796,6 +3794,7 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
                 _mm = re.search(r"mean_volume:\s*(-?[\d.]+) dB", _vd)
                 if _mm is None:
                     problems.append({"breakout": line[:44], "start": round(s, 2),
+                                     "probe": True,   # measurement failed; not an editorial verdict
                                      "reason": "breakout audio loudness could NOT be measured — "
                                                "UNVERIFIED (failing closed)"})
                     continue
@@ -3843,6 +3842,7 @@ def _postrender_breakout_qa(result: Path, caps, work: Path, *, log=None) -> list
                         f"{('n/a' if ocov is None else f'{ocov:.0%}')}")
             except Exception:
                 problems.append({"breakout": line[:44], "start": round(s, 2),
+                                 "probe": True,   # measurement failed; not an editorial verdict
                                  "reason": "breakout audio QA probe raised an error — UNVERIFIED "
                                            "(failing closed)"})
             finally:
@@ -3931,9 +3931,31 @@ def _breakout_qa_gate(result: Path, caps, work: Path, *, log) -> Path:
         _quar = result                                     # rename failed; still refuse to publish
     log(f"build: ⛔ RELEASE-BLOCKED — {len(problems)} breakout(s) failed post-render QA; quarantined "
         f"the final video → {_quar.name} (NOT published). See breakout_qa_failures.json.")
-    raise RuntimeError(
+    # The failing video is quarantined either way — nothing here delivers audio over black. What the
+    # kind decides is whether the DRIVER may run the recovery this gate was built to feed:
+    # `_persist_breakout_qa_exclusions` has just written breakout_qa_exclude.json, and
+    # `_select_breakouts` reads exactly that file, so a resume re-composes WITHOUT the offending
+    # inserts and this same QA judges whatever airs instead. As a bare RuntimeError that recovery
+    # was unreachable — is_content_stop said "crash", the portal offered nothing, and an eight-hour
+    # render ended with no file over one bad four-second cutaway.
+    #
+    # Only per-breakout EDITORIAL verdicts earn it. If any problem is a probe that could not run
+    # (marked at the point of record, never re-read from its prose), the honest state is "we do not
+    # know what aired" and that stays fatal in every mode — dropping breakouts would be guessing.
+    from .verify import NonRetryableBuildError as _NRBE_bq
+    _unverified = [p for p in problems if isinstance(p, dict) and p.get("probe")]
+    if _unverified:
+        raise _NRBE_bq(
+            f"breakout post-render QA could not be completed for {len(_unverified)} of "
+            f"{len(problems)} breakout(s) — refusing to judge footage nobody could measure "
+            f"(quarantined at {_quar.name})", kind="breakout_qa_probe")
+    log(f"build: breakout QA verdicts are editorial — a resume will drop these "
+        f"{len(problems)} insert(s) via breakout_qa_exclude.json and re-compose. If this recurs "
+        f"across renders, suspect a composition regression, not the footage.")
+    raise _NRBE_bq(
         f"breakout post-render QA failed for {len(problems)} breakout(s) — refusing to publish a "
-        f"video that airs audio over black/wrong footage (quarantined at {_quar.name})")
+        f"video that airs audio over black/wrong footage (quarantined at {_quar.name})",
+        kind="breakout_qa")
 
 
 def _compose_breakouts(proj, segments, scenes, narration, bks, work, captions, *, log):
@@ -9258,9 +9280,13 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
             log(f"build: ⛔ RELEASE-BLOCKED — {_um}. An unverifiable beat is unresolved, not "
                 f"accepted; refusing to publish footage nobody could check.")
             from .verify import NonRetryableBuildError
+            # kind, so the portal's auto-review can see what the branch above already decided: in
+            # warn mode these beats ship flagged. Untyped, the driver read this as a crash and the
+            # render ended with no file at all — the exact defect release_policy exists to end.
             raise NonRetryableBuildError(
                 f"unverified-exact gate: {_um}. Restore the vision backend and re-verify — "
-                f"re-running with a dead verifier will only make this pass silently.")
+                f"re-running with a dead verifier will only make this pass silently.",
+                kind="unverified_exact")
 
     suppress_wins = []
     if _cap_on and _suppress_on:

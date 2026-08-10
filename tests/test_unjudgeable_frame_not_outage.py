@@ -28,7 +28,7 @@ from vidlore.clipstudio import orchestrate as O
 
 SRC = inspect.getsource(O._retry_selection_relevance)
 I = SRC.index("A BACKEND THAT IS DOWN AND A FRAME THE BACKEND WON'T LOOK AT")
-BLOCK = SRC[I:I + 3800]
+BLOCK = SRC[I:I + 5200]   # widened when the outage-vs-content typing comment landed
 
 
 def test_health_is_read_from_this_pass_not_from_a_live_probe():
@@ -43,7 +43,20 @@ def test_an_unhealthy_backend_is_still_fatal():
     """During an outage 'no verdict' means nothing, so it must not become a content result."""
     assert "if not _healthy:" in BLOCK
     i = BLOCK.index("if not _healthy:")
-    assert "raise PipelineError(" in BLOCK[i:i + 400]
+    tail = BLOCK[i:i + 2200]
+    assert "PipelineError(" in tail and "raise _inconclusive" in tail
+
+
+def test_a_total_outage_stays_infrastructure_not_a_deliverable_draft():
+    """Zero verdicts is positive outage evidence, so the error stays UNTYPED and no driver may
+    offer a review draft for it. Only a backend that demonstrably answered earns the content kind
+    — the render that died three times on this raise had answered."""
+    i = BLOCK.index("if not _healthy:")
+    tail = BLOCK[i:i + 2200]
+    assert "if _judged > 0:" in tail, "the outage guard on the content kind is gone"
+    j = tail.index("if _judged > 0:")
+    assert '_inconclusive.kind = "selection_relevance"' in tail[j:j + 200], \
+        "the kind must be attached ONLY inside the _judged > 0 guard"
 
 
 def test_an_unprobeable_backend_counts_as_unhealthy():
@@ -54,7 +67,7 @@ def test_an_unprobeable_backend_counts_as_unhealthy():
 
 
 def test_a_healthy_backend_does_not_raise():
-    i_raise = BLOCK.index("raise PipelineError(")
+    i_raise = BLOCK.index("raise _inconclusive")
     i_log = BLOCK.index("could not be judged while")
     assert i_raise < i_log, "the healthy path continues past the raise"
 
@@ -62,7 +75,7 @@ def test_a_healthy_backend_does_not_raise():
 def test_the_beat_is_still_unverified_and_still_blocks():
     """This is the whole safety argument: nothing is accepted, only the render survives."""
     assert "UNVERIFIED" in BLOCK
-    assert "publication contract still blocks" in BLOCK
+    assert "the beats stay UNVERIFIED" in BLOCK or "publication contract still blocks" in BLOCK
     for forbidden in ("verdict\" ] = \"keep\"", "approve", "accept_unverified"):
         assert forbidden not in BLOCK, forbidden
 

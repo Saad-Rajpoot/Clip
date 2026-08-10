@@ -4202,12 +4202,28 @@ def _retry_selection_relevance(proj, segs, cfg, analysis, eng, *, faceid_obj, re
                 _judged += 1
         _healthy = _judged >= max(3, len(_technical_indices) * 3)
         if not _healthy:
-            raise PipelineError(
+            _inconclusive = PipelineError(
                 "semantic scoped re-verification remained technically inconclusive for "
                 f"beat(s) {_technical_indices}: missing/schema evidence {_technical_reasons}"
                 f"{_summary}; only {_judged} beat(s) in this pass produced any verdict at all, so "
                 "the verifier itself is not proven healthy — refusing to read an outage as a "
                 "content result; independent content recovery was saved")
+            # Job 0ca9dc4c2f died here THREE times. The message, the audit rows and block-mode
+            # behaviour are unchanged; all that is added is the error's identity.
+            #
+            # The bar above asks for a health PROOF, and the absence of a proof is not proof of an
+            # outage. When this pass obtained NO verdict at all, that IS positive outage evidence
+            # and the error stays untyped — infrastructure, fatal in every mode, restore the
+            # backend and resume. But when the backend demonstrably answered and merely answered
+            # for too few beats to clear the ratio, the residual beats are the content fact "a
+            # verdict we could not obtain" — which this same pipeline already ships as a marked
+            # draft at the unverified-exact gate, and which the sibling arm of this very fork hands
+            # to assert_selection_relevance as a kind="selection_relevance" content stop. This arm
+            # was the one that killed the render instead. Nothing is accepted: the blockers stay in
+            # the audit, the beats stay UNVERIFIED, and block mode still raises.
+            if _judged > 0:
+                _inconclusive.kind = "selection_relevance"
+            raise _inconclusive
         log(f"semantic-recovery: beat(s) {_technical_indices} could not be judged while "
             f"{_judged} other beat(s) in the SAME pass were judged normally — treating their "
             f"frames as unjudgeable, not the system as broken. They stay UNVERIFIED and the "
@@ -5441,7 +5457,10 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
                     f"final render would release-block after ~20 min of wasted encoding). Add footage "
                     f"for these scenes or set RELEASE_BLOCK_MODE=warn for a review draft.")
                 from .verify import NonRetryableBuildError
-                raise NonRetryableBuildError(_pre)
+                # Typed for the same reason as the branch above it: warn mode already builds a
+                # draft here, so the driver must be able to recognise this as a content verdict and
+                # offer one. It is the SOUND subset of the rejected-footage gate, predicted early.
+                raise NonRetryableBuildError(_pre, kind="preassemble_feasibility")
 
     out = None
     if do_build:
@@ -5471,6 +5490,15 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
                     _n = _selfheal_b.heal_blocked_beats(
                         proj, segs, cfg, blocked=_idxs, policy=policy,
                         faceid_obj=faceid_obj, refs=refs, roster=roster, log=log)
+                except Exception as _he:          # noqa: BLE001 — see below; never BaseException
+                    # The repair pass is OPTIONAL (env SELFHEAL_BUILD_RETRY=0 turns it off), but an
+                    # exception escaping it REPLACED the render's verdict: a content stop the portal
+                    # would have delivered as a draft became whatever heal happened to raise, and
+                    # the job ended with no file. Keep the original verdict and its identity; the
+                    # heal fault rides along as __cause__ so it is diagnosable, and is shouted the
+                    # same way a dead stage is — a repair pass that cannot run is a BUG, not weather.
+                    _log_stage_skip("selfheal.in_build_retry", _he, log)
+                    raise _be from _he
                 finally:
                     _qc = _refresh_qc_without_masking_active_error()
                     if _qc is not None:

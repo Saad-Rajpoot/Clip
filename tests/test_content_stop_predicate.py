@@ -37,7 +37,15 @@ def test_the_pagination_guard_now_earns_a_review_draft():
 
 def test_a_content_verdict_still_earns_one():
     assert is_content_stop(NonRetryableBuildError("footage gap", kind="selection_relevance")) is True
-    assert is_content_stop(NonRetryableBuildError("held frame", kind="scene_lineage")) is True
+    assert is_content_stop(NonRetryableBuildError("sub-HD still", kind="native_resolution")) is True
+
+
+def test_an_integrity_build_error_does_not():
+    """This used to answer True for ANY NonRetryableBuildError, which bought a doomed twenty-minute
+    warn-mode resume straight back into the identical raise. A draft can never carry broken
+    lineage, so there is nothing to resume FOR."""
+    assert is_content_stop(NonRetryableBuildError("held frame", kind="scene_lineage")) is False
+    assert is_content_stop(NonRetryableBuildError("drift", kind="voiceover_alignment")) is False
 
 
 def test_infrastructure_never_earns_one():

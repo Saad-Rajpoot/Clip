@@ -421,14 +421,16 @@ def is_content_stop(exc) -> bool:
 
     So the test is by identity, not by class alone, and it lives in ONE place. Infrastructure is
     never a content stop: a dead vision backend needs the backend back, not a draft.
+
+    That place is now `release_policy.KIND_CLASS`, a table keyed on the exception's `kind`. This
+    used to answer True for ANY NonRetryableBuildError, which bought a doomed twenty-minute
+    warn-mode resume straight back into an identical scene_lineage or voiceover_alignment raise —
+    those are INTEGRITY and a draft can never carry them. Every terminal raise now declares itself,
+    tests/test_terminal_raise_census.py refuses to let a new one skip the declaration, and anything
+    undeclared is treated as integrity.
     """
-    if isinstance(exc, VisionBackendError):
-        return False
-    if isinstance(exc, NonRetryableBuildError):
-        return True
-    # A typed content stop raised by non-verify machinery. Deliberately only this kind: integrity
-    # kinds such as scene_lineage mean the artifact may not be ours and stay fatal in every mode.
-    return str(getattr(exc, "kind", "") or "") == "selection_relevance"
+    from . import release_policy as _rp
+    return _rp.is_content_verdict(exc)
 
 
 def _file_fingerprint(path) -> str:

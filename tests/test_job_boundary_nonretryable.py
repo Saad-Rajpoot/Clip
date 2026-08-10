@@ -148,8 +148,11 @@ def test_portal_auto_review_draft_on_footage_gap():
     assert "is_content_stop" in src, "auto-review must use the shared content-stop predicate"
     from vidlore.clipstudio.verify import (NonRetryableBuildError, VisionBackendError,
                                            is_content_stop)
-    assert is_content_stop(NonRetryableBuildError("footage gap")) is True
+    assert is_content_stop(NonRetryableBuildError("footage gap", kind="rejected_footage")) is True
     assert is_content_stop(VisionBackendError("quota", kind="billing")) is False
+    # …and a gate that declared nothing is integrity, not a free draft. Every terminal raise now
+    # declares itself; tests/test_terminal_raise_census.py refuses to let a new one skip it.
+    assert is_content_stop(NonRetryableBuildError("footage gap")) is False
     assert 'j["status"] = ("review_draft"' in src, "a delivered review draft gets its own status"
     assert "review_draft" in src and "REVIEW DRAFT" in src, "the UI must label the review draft"
 
