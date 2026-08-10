@@ -40,6 +40,21 @@ _LATIN_DANGLING = {
 _CAPTION_REPAIR_MAX_WORDS = 16
 _CAPTION_REPAIR_CPS_MARGIN = 0.05
 _CAPTION_PROTECTED_LEAD_MAX = 0.45
+# How far INSIDE a real-audio window a narration cue may begin and still count as following it.
+# A cue that starts a few milliseconds before the window ends is the same event as one that starts
+# just after — the narration resumes at the breakout's tail — and the scheduler has to be able to
+# say so, because the only alternative it has is a schedule that overlaps a protected window, which
+# the readability gate refuses (correctly: a caption must never sit on borrowed dialogue).
+#
+# MEASURED on job 03768be9ac: cue 181 began at 416.44 against a window ending 416.45. Ten
+# milliseconds — a third of one frame at 30fps — and the gate killed the render inside `assemble`
+# after five hours, with every clip already cut. `_protected_lead_start` had no candidate because
+# the window did not end at-or-before the cue, so no floor was recorded and the overlap stood.
+#
+# Deliberately one ASS centisecond plus a frame's grace, and no more. A cue that starts genuinely
+# inside a breakout still blocks: pushing it to the window end would desync the caption from the
+# word being spoken, and narration really running under borrowed dialogue is a content fault.
+_CAPTION_PROTECTED_EDGE_SLOP = 0.05
 
 
 def _normalize_caption_windows(raw_windows, *, label: str,
@@ -229,7 +244,11 @@ def _split_cues_at_blocked_windows(cues: list[list[WordTiming]],
 
 
 def _protected_lead_start(cue: list[WordTiming], protected_windows) -> float | None:
-    """Return a trusted real-audio window end immediately before ``cue``."""
+    """Return a trusted real-audio window end immediately before ``cue``.
+
+    "Before" allows `_CAPTION_PROTECTED_EDGE_SLOP` of overshoot: a cue whose first word lands a few
+    milliseconds inside the window still follows it, and recording the floor is what keeps the
+    quantised start off the protected span."""
     if not cue or not protected_windows:
         return None
     try:
@@ -242,7 +261,7 @@ def _protected_lead_start(cue: list[WordTiming], protected_windows) -> float | N
             end = float(raw[1])
         except (TypeError, ValueError, IndexError):
             continue
-        if (math.isfinite(end) and end <= first + 1e-3
+        if (math.isfinite(end) and end <= first + _CAPTION_PROTECTED_EDGE_SLOP
                 and first - end <= _CAPTION_PROTECTED_LEAD_MAX + 1e-3):
             candidates.append(end)
     return max(candidates) if candidates else None

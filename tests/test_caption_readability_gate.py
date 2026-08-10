@@ -350,3 +350,66 @@ def test_the_approved_schedule_is_not_re_judged_more_strictly_than_it_was_approv
     out = write_ass(words, tmp_path / "review.ass", style=theme("history")["caption"],
                     schedule=approved, on_violation="report")
     assert out.exists() and out.stat().st_size > 0
+
+
+# ---------------------------------------------------------------- protected-window edge (job 03768be9ac)
+def _protected_pair(first_word_start, window=(408.68, 416.45)):
+    """Cue 180/181 of the real render: narration, a real-audio breakout, narration again."""
+    before = [WordTiming("him.", 406.86, 407.30), WordTiming("He", 407.60, 407.90),
+              WordTiming("gave", 407.90, 408.20), WordTiming("her", 408.20, window[0])]
+    after = [WordTiming("the", first_word_start, first_word_start + 0.20),
+             WordTiming("iron", first_word_start + 0.20, first_word_start + 0.60),
+             WordTiming("coin,", first_word_start + 0.60, first_word_start + 1.10),
+             WordTiming("she", first_word_start + 1.40, first_word_start + 1.70),
+             WordTiming("could", first_word_start + 1.70, first_word_start + 2.10),
+             WordTiming("come.", first_word_start + 2.10, first_word_start + 2.80)]
+    return before + after, [list(window)]
+
+
+def _overlaps(schedule, window):
+    lo, hi = window
+    return [i for i, r in enumerate(schedule)
+            if float(r["start"]) < hi - 1e-6 and float(r["end"]) > lo + 1e-6]
+
+
+def test_a_cue_a_hair_inside_a_protected_window_is_pushed_off_it():
+    """10 ms — a third of a frame — killed a five-hour render inside assemble."""
+    words, protected = _protected_pair(416.44)
+    schedule = _caption_schedule(words, protected_windows=protected)
+    assert not _overlaps(schedule, protected[0]), \
+        [(r["start"], r["end"], r["text"]) for r in schedule]
+
+
+def test_that_push_lands_exactly_on_the_window_end(tmp_path):
+    words, protected = _protected_pair(416.44)
+    schedule = assert_caption_schedule(words, tmp_path / "cap.json",
+                                       protected_windows=protected)
+    started = [r for r in schedule if float(r["start"]) >= protected[0][1] - 1e-9]
+    assert started, "the narration cue must survive, just later"
+    assert min(float(r["start"]) for r in started) == pytest.approx(416.45, abs=0.005)
+
+
+def test_it_keeps_every_spoken_word(tmp_path):
+    words, protected = _protected_pair(416.44)
+    schedule = assert_caption_schedule(words, tmp_path / "cap.json",
+                                       protected_windows=protected)
+    assert [w.word for r in schedule for w in r["words"]] == [w.word for w in words]
+    assert all(float(r["end"]) > float(r["start"]) for r in schedule)
+
+
+def test_a_cue_that_starts_well_inside_the_window_still_blocks():
+    """Narration genuinely under borrowed dialogue is a content fault, not a rounding one —
+    shoving the caption to the window end would desync it from the word being spoken."""
+    words, protected = _protected_pair(414.00)
+    schedule = _caption_schedule(words, protected_windows=protected)
+    assert _overlaps(schedule, protected[0]), "must not be papered over"
+
+
+def test_a_cue_starting_after_the_window_is_unchanged():
+    words, protected = _protected_pair(416.60)
+    assert not _overlaps(_caption_schedule(words, protected_windows=protected), protected[0])
+
+
+def test_the_slop_is_bounded_to_one_frame_ish():
+    from vidlore.captions import _CAPTION_PROTECTED_EDGE_SLOP
+    assert 0.01 <= _CAPTION_PROTECTED_EDGE_SLOP <= 0.06

@@ -194,6 +194,7 @@ def _flag_supported(flag: str) -> bool:
     ok = True
     try:
         p = subprocess.run([HD_PY, "-m", "yt_dlp", "--help"],
+                           env=_env_with_runtimes(),   # ask the venv's yt-dlp, not a shadowed one
                            capture_output=True, text=True, timeout=60)
         out = (p.stdout or "") + (p.stderr or "")
         if out.strip():
@@ -298,11 +299,15 @@ def maybe_update_ytdlp(log=None, *, force: bool = False) -> bool:
             return False
         p = subprocess.run([HD_PY, "-m", "pip", "install", "-q", "-U",
                             "yt-dlp", "yt-dlp-ejs", "bgutil-ytdlp-pot-provider"],
-                           capture_output=True, text=True, timeout=240)
+                           env=_env_with_runtimes(), capture_output=True, text=True, timeout=240)
         marker.touch()
         if log:
             if p.returncode == 0:
+                # ...and report the version that will actually RUN. Inheriting PYTHONPATH here made
+                # this line confirm 2025.10.14 immediately after installing 2026.07.04, which read
+                # as "the update did nothing" and hid the shadowing for months.
                 v = subprocess.run([HD_PY, "-m", "yt_dlp", "--version"],
+                                   env=_env_with_runtimes(),
                                    capture_output=True, text=True, timeout=30)
                 log(f"hd: yt-dlp stack updated (now {(v.stdout or '').strip()})")
             else:
@@ -314,6 +319,31 @@ def maybe_update_ytdlp(log=None, *, force: bool = False) -> bool:
         return p.returncode == 0
     except Exception:                                    # noqa: BLE001
         return False
+
+
+_STACK_LOGGED = [False]
+
+
+def log_hd_stack(log=None) -> str:
+    """Record WHICH yt-dlp the HD path will actually run. Once per process; returns its version.
+
+    The version installed in .hdvenv is not evidence about the version that RUNS — a host
+    PYTHONPATH could shadow it, and for months one did (see _env_with_runtimes). That collapse is
+    reported per source as a 403/unavailable wave, so the build log described a network problem
+    and never once named the extractor. One line at the top of the download stage does: an
+    unexpected version here identifies the whole failure class immediately."""
+    if not HD_PY:
+        return ""
+    try:
+        v = subprocess.run([HD_PY, "-m", "yt_dlp", "--version"], env=_env_with_runtimes(),
+                           capture_output=True, text=True, timeout=30)
+        ver = (v.stdout or "").strip().splitlines()[-1] if (v.stdout or "").strip() else ""
+    except Exception:                                    # noqa: BLE001
+        return ""
+    if log and ver and not _STACK_LOGGED[0]:
+        _STACK_LOGGED[0] = True
+        log(f"hd: extractor yt-dlp {ver} via {HD_PY}")
+    return ver
 
 
 #  YouTube's SABR/PO-token rejection. It arrives dressed as unavailability — "This video is
@@ -564,7 +594,30 @@ def ensure_pot_server(progress=None) -> bool:
 
 
 def _env_with_runtimes() -> dict:
+    """The environment for every HD subprocess: the JS runtimes on PATH, and NO inherited
+    interpreter search path.
+
+    PYTHONPATH IS POISON HERE. `HD_PY` is a foreign interpreter (the 3.11 .hdvenv) launched from a
+    3.9 host, and PYTHONPATH is consulted BEFORE the venv's own site-packages — so any host entry
+    that ships a `yt_dlp` package silently wins over the venv's. The portal launcher exports
+    `PYTHONPATH="$DIR:$DIR/.clipstudio_libs"`, and .clipstudio_libs carries the engine's pinned
+    yt-dlp 2025.10.14 — the exact SABR-blind build this whole module exists to avoid. Every HD
+    subprocess therefore ran the 360p-only extractor no matter what was installed in .hdvenv.
+
+    MEASURED on job 03768be9ac (2026-08-07), one video, one command, only PYTHONPATH differing:
+    with the portal's value `-m yt_dlp --version` reported 2025.10.14 and extraction died with
+    "The page needs to be reloaded"; with it cleared, 2026.07.04 and 1080p. All 45 sources of that
+    render fell back to SD, and both 403 recovery sweeps recovered 0/43 across 2h10m of cooldown —
+    they re-ran the same shadowed extractor, so the retry could never have worked. It also fed
+    `_flag_supported` the WRONG yt-dlp's --help, which is how --remote-components got gated off.
+    Note this defect is invisible from the outside: it is reported as a 403/unavailable wave, i.e.
+    as if YouTube were blocking the machine, which sends you rotating exit nodes that cannot help.
+
+    PYTHONHOME goes too — on a foreign interpreter it relocates the stdlib and breaks the venv
+    outright. Neither is ever meant for a subprocess we launch by absolute interpreter path."""
     env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
     extra = os.pathsep.join(p for p in (str(Path(NODE_BIN).parent) if NODE_BIN else "",
                                         str(Path(DENO_BIN).parent) if DENO_BIN else "") if p)
     env["PATH"] = extra + os.pathsep + env.get("PATH", "") if extra else env.get("PATH", "")

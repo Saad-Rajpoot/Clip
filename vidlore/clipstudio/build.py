@@ -6931,6 +6931,102 @@ def _clip_too_dark(clip_path, floor: float = 50.0, min_dark_run: float = 0.8) ->
         _shutil.rmtree(_d, ignore_errors=True)
 
 
+def _clip_luma_profile(clip_path, stride: float = 0.5) -> list:
+    """Per-frame luma_hi of a CUT clip at the black gate's own stride. [] when unmeasurable.
+
+    Same crop and statistic as `_clip_too_dark` — this is that function's evidence, exposed, so a
+    caller can ask WHERE the darkness is instead of only whether it exists."""
+    import shutil as _shutil
+    import tempfile as _tempfile
+    _d = Path(_tempfile.mkdtemp(prefix="clipluma_"))
+    try:
+        subprocess.run([ffmpeg_exe(), "-y", "-loglevel", "error", "-i", str(clip_path),
+                        "-vf", f"crop=iw*0.9:ih*0.84:iw*0.05:ih*0.08,fps={1.0 / max(0.05, stride):g},"
+                               f"scale=320:-1",
+                        "-q:v", "5", str(_d / "f_%05d.jpg")], capture_output=True, timeout=90)
+        return [v for v in (_frame_luma_hi(f) for f in sorted(_d.glob("f_*.jpg"))) if v is not None]
+    except Exception:                              # noqa: BLE001 — unmeasurable, caller decides
+        return []
+    finally:
+        _shutil.rmtree(_d, ignore_errors=True)
+
+
+def _self_clean_repair(clip_path: Path, dest: Path, duration: float, *, floor: float = 50.0,
+                       stride: float = 0.5, min_legible_frac: float = 0.5,
+                       min_legible_sec: float = 1.0,
+                       max_hold_sec: float = 2.5) -> Optional[Path]:
+    """Repair a near-black clip from ITS OWN legible frames: air its longest legible run, then hold
+    that run's last frame for the remainder. Returns None when the clip has no such region.
+
+    WHY THIS EXISTS. A dark clip used to be freeze-replaced with the PREVIOUS beat's clip whenever
+    the beat had no second clip of its own. That donation is content from a different scene, and the
+    scene-lineage contract cannot represent it: an ordinary derivative must own the beat it airs on,
+    so the record came out as owner_beat=<donor>, original_beat=<this beat> and the gate killed the
+    render — measured on job 03768be9ac at 3h47m, with the whole 154-beat video already cut, for ONE
+    clip. The neighbour's frame was never publishable anyway; that is precisely the cross-scene
+    freeze the window-legibility work removed.
+
+    Measured on that clip: luma_hi ran 124,124,125,146,194,33,34 — legible for 2.5s of 3.5s, dark
+    only in the tail. The beat's own footage was the obvious donor all along.
+
+    Bounded on purpose. The legible run must be at least `min_legible_sec` long AND cover
+    `min_legible_frac` of the aired duration, and the frozen remainder may not exceed
+    `max_hold_sec` (the same ceiling the sanctioned editorial hold observes). A clip that is mostly
+    dark has a footage gap; it must reach the gates as unresolved, not be papered over with seconds
+    of frozen frame. The result is re-probed with `_clip_too_dark` and discarded unless it is
+    actually clean, so this can only ever hand back a legible clip."""
+    his = _clip_luma_profile(clip_path, stride=stride)
+    if not his:
+        return None
+    best_i0 = best_len = 0                          # longest run of consecutive legible samples
+    i = 0
+    while i < len(his):
+        if his[i] >= floor:
+            j = i
+            while j + 1 < len(his) and his[j + 1] >= floor:
+                j += 1
+            if (j - i + 1) > best_len:
+                best_i0, best_len = i, j - i + 1
+            i = j + 1
+        else:
+            i += 1
+    if best_len <= 0:
+        return None
+    keep_from = best_i0 * stride
+    keep_len = best_len * stride
+    aired = max(0.5, float(duration))
+    keep_len = min(keep_len, aired)
+    pad = aired - keep_len
+    if keep_len < min_legible_sec or keep_len < min_legible_frac * aired or pad > max_hold_sec:
+        return None
+    try:
+        # -ss/-t are INPUT options here on purpose: as output options `-t` would cap the encode at
+        # `keep_len` and silently discard the tpad extension, handing back a clip SHORTER than the
+        # beat it has to fill (measured: 2.5s returned for a 3.5s beat). The output -t then pins the
+        # exact aired length.
+        cmd = [ffmpeg_exe(), "-y", "-loglevel", "error",
+               "-ss", f"{keep_from:.3f}", "-t", f"{keep_len:.3f}", "-i", str(clip_path),
+               "-vf", "scale=1920:1080,setsar=1,fps=30"
+                      + (f",tpad=stop_mode=clone:stop_duration={pad + 0.2:.3f}" if pad > 0.02
+                         else ""),
+               "-t", f"{aired:.3f}",
+               "-an", "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+               "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(dest)]
+        p = subprocess.run(cmd, capture_output=True, timeout=180)
+        if p.returncode != 0 or not dest.exists() or dest.stat().st_size <= 0:
+            return None
+        if _clip_too_dark(dest, floor=floor):       # fail closed: never hand back a dark clip
+            dest.unlink(missing_ok=True)
+            return None
+        return dest
+    except Exception:                               # noqa: BLE001
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+
+
 def _final_video_black_gate(result: Path, work: Path, *, log) -> Path:
     """FAIL-CLOSED release gate against sustained NEAR-BLACK / unusable-dark footage in the finished
     video (distinct from the assemble black-repair, which only fills TRUE-black gaps). Samples every
@@ -8910,7 +9006,7 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # _clip_too_dark: a full-clip decode — measured 418s serial over 231 clips). The tested
     # set is FROZEN before each loop runs (each loop iterates a snapshot; its replacements
     # are never re-tested), so the verdicts are precomputed in a bounded thread pool and the
-    # UNCHANGED serial loops replay them — _last_clean ordering, freeze-replace decisions and
+    # UNCHANGED serial loops replay them — donor selection, freeze-replace decisions and
     # log lines are byte-identical to the serial pass. Verdicts are pure functions of the
     # clip file (+ fixed floor), so precomputation cannot change any outcome. A missing
     # verdict falls back to the direct call. VIDLORE_CLIPSTUDIO_QA_SWEEP_WORKERS=1 restores
@@ -8955,46 +9051,44 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
     # (the BRANDING sweep's probes now precompute in the same bounded pool as the dark sweep:
     # the per-thread-engine identity proof exists — _ocr_engine_tl builds instances with the
     # identical default config, canary-proven bit-identical output — and the serial walk below
-    # replays verdicts in its original order, so _last_clean/donor decisions are unchanged.)
+    # replays verdicts in its original order, so donor decisions are unchanged.)
     if _ocr_eng is not None and _os.environ.get("VIDLORE_CLIPSTUDIO_BRANDING_GATE", "1").strip() \
             not in ("0", "false", "no", ""):
         _brand_verdicts = _precompute_clip_verdicts(
             lambda sp: _clip_branding_text(Path(sp), _ocr_engine_tl(_ocr_eng)),
             _sweep_paths(), "branding")
         _blens = {segments[_p].index: list(_ls) for _p, _ls in _lens_by_pos.items()}
-        _last_clean = None
         _replaced = 0
         for seg in segments:
             if seg.index in _breakout_clip:               # breakouts are dialogue-verified already
-                clips0 = beat_clips.get(seg.index) or []
-                if clips0:
-                    _last_clean = clips0[-1]
                 continue
             clips = beat_clips.get(seg.index) or []
             _ls = _blens.get(seg.index) or []
-            # SAME-SCENE donor first (mirrors the near-black pass): freezing from _last_clean
-            # propagates the PREVIOUS scene's content across the cut. Probe the scene's own
-            # clips for a clean donor before reaching backwards.
+            # THE DONOR IS THIS BEAT'S OWN FOOTAGE, exactly as in the near-black pass below. Reaching
+            # back to the previous beat's clip propagates that scene's content across the cut, and
+            # the scene-lineage contract cannot record it: the derivative would name the DONOR's beat
+            # as its root and the final provenance gate would refuse the finished video. That is not
+            # theoretical — the identical fallback in the near-black pass killed job 03768be9ac after
+            # 3h47m, with all 154 beats cut. A beat whose every clip carries branding text now goes
+            # to the placeholder path, which release-blocks honestly as the footage gap it is.
             _brand_flags = [(_brand_verdicts[str(cp)] if str(cp) in _brand_verdicts
                              else _clip_branding_text(Path(cp), _ocr_eng)) for cp in clips]
             _own_ok = [cp for cp, _bf in zip(clips, _brand_flags) if not _bf]
             for m, cp in enumerate(list(clips)):
                 if _brand_flags[m]:
                     _d = (_ls[m] if m < len(_ls) and _ls[m] > 0 else 3.0) + 0.5
-                    _donor = _own_ok[0] if _own_ok else _last_clean
-                    if _donor is not None:
+                    if _own_ok:
                         _fr = proj.clips_dir / f"beat_{seg.index:03d}_{m}_nobrand.mp4"
-                        _got = _freeze_replace(Path(_donor), _fr, _d)
+                        _got = _freeze_replace(Path(_own_ok[0]), _fr, _d)
                         if _got:
-                            _lineage_derive(_got, _donor)
+                            _lineage_derive(_got, _own_ok[0])
                             clips[m] = Path(_got)
                             _replaced += 1
                             continue
-                    # no clean donor → drop to a black placeholder rather than air the card
+                    # no clean donor of its own → drop to a black placeholder rather than air the
+                    # card (and never a neighbour's frame, which the contract rejects anyway)
                     clips[m] = _placeholder_clip(proj, seg.index)
                     _replaced += 1
-                else:
-                    _last_clean = cp
             beat_clips[seg.index] = clips
             # keep the scene's lead FootageItem in sync if its first clip was replaced
             if clips:
@@ -9015,32 +9109,34 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
         _dlens = {segments[_p].index: list(_ls) for _p, _ls in _lens_by_pos.items()}
         _dark_verdicts = _precompute_clip_verdicts(
             lambda sp: _clip_too_dark(Path(sp), floor=_dfloor), _sweep_paths(), "dark")
-        _last_clean_d = None
         _drep = 0
         for seg in segments:
             if seg.index in _breakout_clip:
-                clips0 = beat_clips.get(seg.index) or []
-                if clips0:
-                    _last_clean_d = clips0[-1]
                 continue
             clips = beat_clips.get(seg.index) or []
             _ls = _dlens.get(seg.index) or []
-            # SAME-SCENE donor first: freezing from the PREVIOUS scene's clip propagates that
-            # scene's content across the cut (observed: a news-CGI frame from the neighbouring
-            # beat froze into a legit S05E08 beat, airing broadcast graphics over the wrong
-            # narration). A cross-scene donor stays the last resort and is logged as such.
-            # SYNTHESIZED clips (branding-pass _nobrand freezes, earlier _nodark freezes, black
-            # placeholders) are never donors AND never become _last_clean_d: a _nobrand freeze IS
-            # the previous scene's frame, so donating from it would silently re-create the exact
-            # cross-scene propagation this pass exists to stop — while logging "same-scene".
+            # THE DONOR IS ALWAYS THIS BEAT'S OWN FOOTAGE. Freezing from the PREVIOUS beat's clip
+            # propagates that scene's content across the cut (observed: a news-CGI frame from the
+            # neighbouring beat froze into a legit S05E08 beat, airing broadcast graphics over the
+            # wrong narration) — and the scene-lineage contract cannot even record it, because an
+            # ordinary derivative must own the beat it airs on. That cross-scene last resort
+            # therefore produced clips that were guaranteed to die at the final provenance gate:
+            # measured on job 03768be9ac, ONE such clip killed a 154-beat render 3h47m in, with the
+            # whole video already cut. It is gone. A beat with no clean clip of its own now tries
+            # `_self_clean_repair` (its own legible region, held across the dark part — same owner,
+            # same scene, publishable) and otherwise reaches the gates as the footage gap it is.
+            # SYNTHESIZED clips (branding-pass _nobrand freezes, earlier _nodark/_selfclean
+            # freezes, black placeholders) are never donors: a _nobrand freeze IS the previous
+            # scene's frame, so donating from it would silently re-create the very cross-scene
+            # propagation this pass exists to stop — while logging "same-scene".
             def _is_synth(_p):
                 _s = Path(_p).stem
                 # `_img` is a Ken-Burns STILL, not footage. The comment on the donor rule says the
                 # donor "must be REAL footage" but nothing checked it, so a beat could freeze onto
                 # an image that is itself already a held frame — on one render two adjacent beats
                 # then spent 10.7 consecutive seconds on a single web JPEG.
-                return ("_nobrand" in _s or "_nodark" in _s or "placeholder" in _s
-                        or _s.endswith("_img"))
+                return ("_nobrand" in _s or "_nodark" in _s or "_selfclean" in _s
+                        or "placeholder" in _s or _s.endswith("_img"))
             # (probe served from the staged-replay parallel precompute when available — the
             # verdict is a pure function of the clip file + fixed floor, so this changes
             # nothing about the donor selection below)
@@ -9050,28 +9146,37 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                           if not _dk and not _is_synth(cp)]
             for m, cp in enumerate(list(clips)):
                 if not _dark_flags[m]:
-                    if not _is_synth(cp):
-                        _last_clean_d = cp
                     continue
                 _d = (_ls[m] if m < len(_ls) and _ls[m] > 0 else 3.0) + 0.5
-                _donor = _own_clean[0] if _own_clean else _last_clean_d
-                if _donor is not None:
+                if _own_clean:
                     _fr = proj.clips_dir / f"beat_{seg.index:03d}_{m}_nodark.mp4"
-                    _got = _freeze_replace(Path(_donor), _fr, _d)
+                    _got = _freeze_replace(Path(_own_clean[0]), _fr, _d)
                     if _got:
-                        _lineage_derive(_got, _donor)
+                        _lineage_derive(_got, _own_clean[0])
                         clips[m] = Path(_got)
                         _drep += 1
                         log(f"build: unreadable-clip removal — scene {seg.index} clip {m} "
-                            f"near-black, freeze-replaced with a "
-                            f"{'same-scene' if _own_clean else 'PREVIOUS-scene'} clean frame"
-                            + ("" if _own_clean else
-                               " (cross-scene donor — content is the neighbour beat's)"))
+                            f"near-black, freeze-replaced with a same-scene clean frame")
                         continue
-                # no clean donor to freeze — leave it for the final black gate to BLOCK
-                # (never silently air dark; never substitute a black placeholder either)
-                log(f"build: ⚠ scene {seg.index} clip {m} near-black with no clean predecessor "
-                    f"— final black gate will block this render (footage gap needs rediscovery)")
+                # SELF-REPAIR: the dark part is usually a tail or head, not the whole clip. Air this
+                # beat's own longest legible run and hold its last frame across the rest — bounded,
+                # re-probed, and owned by this beat, so the provenance contract accepts it.
+                _sc = proj.clips_dir / f"beat_{seg.index:03d}_{m}_selfclean.mp4"
+                _got = _self_clean_repair(Path(cp), _sc, _d, floor=_dfloor,
+                                          max_hold_sec=_cfg_f(
+                                              "VIDLORE_CLIPSTUDIO_MAX_HOLD_SINGLE_SEC", 2.5))
+                if _got:
+                    _lineage_derive(_got, cp)       # parent = this beat's OWN clip → owner unchanged
+                    clips[m] = Path(_got)
+                    _drep += 1
+                    log(f"build: unreadable-clip removal — scene {seg.index} clip {m} near-black "
+                        f"in part, repaired from its OWN legible region (no cross-scene donor)")
+                    continue
+                # nothing legible in this beat's own footage — leave it for the final black gate to
+                # BLOCK (never silently air dark; never substitute a black placeholder either; and
+                # never a neighbour's frame, which the provenance contract rejects anyway)
+                log(f"build: ⚠ scene {seg.index} clip {m} near-black with no legible region of its "
+                    f"own — final black gate will block this render (footage gap needs rediscovery)")
             beat_clips[seg.index] = clips
             if clips:
                 for _fi in footage:

@@ -199,6 +199,10 @@ def download_candidates(proj: ClipProject, candidates: list[SourceCandidate], cf
         try:
             from . import hd_download as _hd_up
             _hd_up.maybe_update_ytdlp(log)
+            # ...and name the extractor that will actually run. The self-update only speaks on the
+            # weeks it fires, so most renders recorded nothing about the one component whose
+            # version decides whether HD is reachable at all.
+            _hd_up.log_hd_stack(log)
         except Exception:                                # noqa: BLE001
             pass
         with cf.ThreadPoolExecutor(max_workers=max(1, cfg.download_concurrency)) as ex:

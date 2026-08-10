@@ -55,10 +55,18 @@ def test_both_manifest_and_decoded_canary_are_mandatory():
     assert BUILD.index("_assert_scene_lineage(") < BUILD.index("result = assemble(")
 
 
-def test_cross_scene_repair_inherits_real_donor_owner():
+def test_repairs_inherit_their_real_donor_owner():
     # Branding, darkness and rejected-footage repairs cannot relabel a donor as the current beat;
-    # manifest construction compares this inherited owner with the expected selection owner.
-    assert "_lineage_derive(_got, _donor)" in BUILD
+    # manifest construction compares this inherited owner with the expected selection owner. Every
+    # repair therefore derives from the donor CLIP, and the owner comes along with it.
+    assert "_lineage_derive(_got, _own_ok[0])" in BUILD          # branding
+    assert "_lineage_derive(_got, _own_clean[0])" in BUILD       # darkness, own second clip
+    assert "_lineage_derive(_got, cp)" in BUILD                  # darkness, own legible region
+    # And the donor is now ALWAYS this beat's own footage, so that inherited owner is the current
+    # beat by construction rather than by relabelling. The cross-beat fallback these two passes used
+    # to share was unrepresentable in the contract and killed job 03768be9ac 3h47m in.
+    assert "else _last_clean" not in BUILD
+    assert "_last_clean_d" not in BUILD
     # The editorial hold still derives from the donor clip and keeps the donor's owner. It now also
     # DECLARES the donation (job 0ca9dc4c2f built all 152 scenes, then died at the provenance gate
     # because an undeclared but fully sanctioned hold is indistinguishable from a silent swap).

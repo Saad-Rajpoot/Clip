@@ -705,6 +705,10 @@ def _yt_search_candidates(queries: list[str], *, per_query: int = 6, log=print) 
                 [hd_py, "-m", "yt_dlp",
                  f"ytsearch{per_query}:{q}", "--flat-playlist", "--no-warnings",
                  "--print", "%(id)s\t%(duration)s\t%(title)s"],
+                # `hd_py` is a foreign interpreter, so an inherited PYTHONPATH would shadow its
+                # yt-dlp with the host's pinned copy — the one HD failure mode this venv exists to
+                # avoid. Every other HD_PY call site goes through this env; so does this one.
+                env=_hd._env_with_runtimes(),
                 capture_output=True, text=True, timeout=90)
             for line in (r.stdout or "").splitlines():
                 parts = line.split("\t")
