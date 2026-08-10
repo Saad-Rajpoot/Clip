@@ -67,6 +67,48 @@ def _evict_jobs():
 
 
 # ---------------------------------------------------------------------------
+def _running_code_revision() -> str:
+    """The commit this SERVER PROCESS is running, plus how stale it is against the checkout.
+
+    The portal is a long-lived process: it imports the package once and keeps that code until it is
+    restarted. Job 0321078108 burned 6h20m and died on a defect that had been fixed in the repo
+    three hours before it started — the portal had been up since two days earlier and nothing,
+    anywhere, said so. build.log recorded a render with no way to tell which code produced it.
+
+    Read once at import (the running code cannot change under us) and stamped on every render. The
+    checkout is re-read HERE, so a portal serving code the repo has moved past says so in the first
+    line of every render it starts, instead of failing eight hours later on an already-fixed bug.
+
+    Best-effort: no git, no repo, no problem — a log line may never break a render.
+    """
+    live = _read_code_revision()
+    if _CODE_REVISION == "unknown" or live == "unknown" or live == _CODE_REVISION:
+        return _CODE_REVISION
+    return (f"{_CODE_REVISION} ** STALE: the checkout is now {live}; this server process still "
+            f"runs the code it imported at startup — RESTART THE PORTAL to pick up fixes **")
+
+
+def _read_code_revision() -> str:
+    import subprocess
+    root = Path(__file__).resolve().parents[2]
+    try:
+        head = subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+                              capture_output=True, text=True, timeout=5)
+        if head.returncode != 0:
+            return "unknown"
+        rev = head.stdout.strip() or "unknown"
+        dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                               capture_output=True, text=True, timeout=10)
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            rev += "+dirty"
+        return rev
+    except Exception:                                     # noqa: BLE001 — never break a render
+        return "unknown"
+
+
+_CODE_REVISION = _read_code_revision()
+
+
 def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint: str,
              script_text: str, voiceover: str | None, max_sources: int, policy: str,
              theme: str, verify: bool, voice_provider: str = "", voice_preset: str = "",
@@ -83,7 +125,7 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
         _log_path.parent.mkdir(parents=True, exist_ok=True)
         _log_fh = open(_log_path, "a", encoding="utf-8")
         _log_fh.write(f"\n===== render start {time.strftime('%Y-%m-%d %H:%M:%S')} "
-                      f"job={jid} =====\n")
+                      f"job={jid} code={_running_code_revision()} =====\n")
         _log_fh.flush()
     except Exception:
         _log_fh = None
