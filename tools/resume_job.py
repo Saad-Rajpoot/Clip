@@ -56,6 +56,17 @@ def main() -> int:
     os.environ["VIDLORE_CLIPSTUDIO_RESUME_TRUST_CACHED"] = "1"
     os.environ["VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE"] = "warn" if review else "block"
 
+    # THE SAME on-disk run record the portal writes, and the SAME lock. Without this a CLI resume
+    # is invisible: an observer would find a stale `running` state from an earlier portal run, see
+    # the lock free because nobody took it, and report "died" while this render is very much alive.
+    # A false death is the worse failure — it sends an operator to kill work that is fine.
+    from vidlore.clipstudio import run_state as _rs
+    _run_lock = _rs.RunLock(proj_dir)
+    if not _run_lock.acquire():
+        print(f"another driver is already rendering {proj_dir.name} "
+              f"(run.lock is held) — refusing to run two writers on one project dir")
+        return 2
+
     log_path = proj_dir / "output" / "build.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     fh = open(log_path, "a", encoding="utf-8")
@@ -64,6 +75,11 @@ def main() -> int:
              f"job={proj_dir.name} review={review} =====\n")
 
     def log(m):
+        try:
+            if isinstance(m, str) and "/9 · " in m:
+                _rs.touch(proj_dir, phase=m.strip())
+        except Exception:                                 # noqa: BLE001 — never break a render
+            pass
         line = f"[{time.time() - t0:7.1f}s] {m}"
         print(line, flush=True)
         try:
@@ -71,6 +87,9 @@ def main() -> int:
             fh.flush()
         except Exception:
             pass
+
+    _rs.write(proj_dir, proj_dir.name, driver="resume", extra={"review_mode": bool(review)})
+    _heart = _rs.Heartbeat(proj_dir).start()
 
     from vidlore.clipstudio.orchestrate import produce_auto
     from vidlore.clipstudio.verify import is_content_stop
@@ -97,8 +116,12 @@ def main() -> int:
             res = _render()
         else:
             log(f"FATAL: {e}")
+            _heart.stop(status="error", phase="failed")
+            _run_lock.release()
             raise
     log(f"done → {res.get('output') if isinstance(res, dict) else res}")
+    _heart.stop(status="ok", phase="finished")
+    _run_lock.release()
     return 0
 
 

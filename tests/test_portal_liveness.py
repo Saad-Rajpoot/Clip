@@ -157,3 +157,31 @@ def test_the_page_stops_polling_silently():
     assert "}catch(e){}" not in src, "the silent catch is what hid the dead portal"
     assert "the portal is not responding" in src
     assert "the render process died" in src
+
+
+def test_both_drivers_record_state_and_hold_the_lock():
+    """The false-DEAD hole: if only the portal wrote state, a CLI resume of a job that had an older
+    portal run would be seen against that stale `running` record with the lock free — and reported
+    dead while the render was very much alive. Both drivers write, both lock."""
+    from pathlib import Path as _P
+    import inspect
+    from vidlore.clipstudio import web as W
+    portal = inspect.getsource(W._run_job)
+    resume = (_P(__file__).resolve().parents[1] / "tools" / "resume_job.py").read_text("utf-8")
+    for name, src in (("portal", portal), ("resume_job", resume)):
+        assert "RunLock(" in src and ".acquire()" in src, f"{name} does not hold the run lock"
+        assert "run_state" in src or "_rs.write(" in src, f"{name} does not record run state"
+        assert "Heartbeat(" in src, f"{name} has no heartbeat"
+
+
+def test_a_second_driver_on_one_project_dir_is_refused(tmp_path):
+    """Two writers on one job dir is a corruption path, so the lock also serialises drivers."""
+    first = RS.RunLock(tmp_path)
+    assert first.acquire()
+    try:
+        if not first.usable:
+            pytest.skip("flock is a no-op on this filesystem")
+        second = RS.RunLock(tmp_path)
+        assert second.acquire() is False
+    finally:
+        first.release()
