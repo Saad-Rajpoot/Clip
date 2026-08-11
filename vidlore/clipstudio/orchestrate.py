@@ -3068,6 +3068,24 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
     log(f"recovery: {len(unresolved)} unresolved beat(s) → bounded rediscovery {unresolved} "
         f"({len(_fresh)} never searched before)")
 
+    # A round is search → download → index → rematch → scoped reverify, and every one of those was
+    # passed progress=None. Measured on job 218acdfe10: fifteen rounds, 216 minutes, and 841-second
+    # stretches with NOT ONE line of log — indistinguishable from a wedged render, which is exactly
+    # what it was reported as. The rounds are buying real footage (16 beats recovered), so the
+    # answer is not to cut them; it is to stop making them invisible, and to make the next
+    # measurement of WHERE those 14 minutes go a matter of reading the log instead of guessing.
+    import time as _time_r
+    _t_round = _time_r.time()
+    _stage_t: dict = {}
+
+    def _rlog(stage: str):
+        _stage_t[stage] = _time_r.time()
+        return lambda m: log(f"recovery/{stage}: {m}")
+
+    def _rdone(stage: str) -> None:
+        log(f"recovery/{stage}: done in {_time_r.time() - _stage_t.get(stage, _t_round):.0f}s "
+            f"({_time_r.time() - _t_round:.0f}s into this round)")
+
     # Snapshot EVERY current selection; the final selection list is snapshot ∪ (recovered new picks).
     snapshot = {s.segment_index: _copy.deepcopy(s) for s in proj.selections}
     # Discovery's query builder consumes ``scene_query``/entity/keywords, while recovery eligibility
@@ -3106,8 +3124,9 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
         cfg_r = _dc.replace(cfg, discover_target=max(12, 3 * max_sources))
         have_urls = {(getattr(s, "url", "") or "").strip() for s in proj.sources if getattr(s, "url", "")}
         cands = discover_sources(
-            analysis, cfg_r, segments=unresolved_segs, progress=None,
+            analysis, cfg_r, segments=unresolved_segs, progress=_rlog("search"),
             extra_queries=_effective_queries, required_queries=_effective_queries) or []
+        _rdone("search")
         import re as _re_r
         _r_mv = {w for w in _re_r.findall(r"\w+", (getattr(analysis, "movie_title", "") or "").lower())
                  if len(w) > 2}
@@ -3158,11 +3177,13 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
         before_ok = {s.id for s in proj.sources if s.status == SOURCE_OK}
         try:
             download_candidates(
-                proj, new_cands, cfg_r, policy=policy, limit=len(new_cands), progress=None)
+                proj, new_cands, cfg_r, policy=policy, limit=len(new_cands),
+                progress=_rlog("download"))
         except Exception:
             _rollback_acquired_sources({s.id for s in proj.sources
                                         if s.id not in _source_ids_before})
             raise
+        _rdone("download")
         from .models import SOURCE_FAILED as _SOURCE_FAILED_RECOVERY
         _attempted_new = [s for s in proj.sources if s.id not in _source_ids_before]
         newly = [s for s in proj.sources if s.status == SOURCE_OK and s.id not in before_ok]
@@ -3196,7 +3217,7 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
         # from the snapshot anyway, so its verdict does not matter.
         try:
             _indexed = index_all(proj, cfg_r, references=refs, faceid=faceid_obj, roster=roster,
-                                 force=False, progress=None)
+                                 force=False, progress=_rlog("index"))
         except Exception:
             _rollback_acquired_sources({s.id for s in _attempted_new})
             raise
@@ -3210,7 +3231,10 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
             raise RuntimeError(
                 "targeted indexing produced no searchable shots for new source(s): "
                 + ", ".join(sorted(s.id for s in _unindexed_new)))
-        match_segments(proj, segs, cfg_r, analysis=analysis, progress=None)
+        _rdone("index")
+        _m_log = _rlog("rematch")
+        match_segments(proj, segs, cfg_r, analysis=analysis, progress=_m_log)
+        _rdone("rematch")
         from . import verify as _verify_r
         # same scoped 4-worker prefetch as the main verify stage (set + restore, never leaked)
         import os as _os_vwr
@@ -3220,11 +3244,13 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
         try:
             _new_verify_result = _verify_r.verify_and_repair(
                 proj, segs, cfg, eng, only_indices=set(unresolved),
-                progress=None, materialize_promotions=False, persist_project=False,
+                progress=_rlog("reverify"), materialize_promotions=False,
+                persist_project=False,
                 strict_pool_recovery=True)
         finally:
             if _vwr_unset:
                 _os_vwr.environ.pop("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", None)
+        _rdone("reverify")
         _new_verify_error = _verifier_summary_error(_new_verify_result)
         if _new_verify_error:
             # SAME DISTINCTION AS e1e5802, AT THE OTHER SITE THAT NEEDED IT.
