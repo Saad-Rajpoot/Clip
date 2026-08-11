@@ -38,6 +38,16 @@ def main() -> int:
     if not pj.exists():
         print(f"no project.json under {proj_dir}")
         return 2
+    # SAME environment contract as the portal, checked before any work. A resume that runs on a
+    # different native stack than the render it continues is not a resume — and the stack that
+    # aborted two renders was exactly the one a bare `python3 tools/resume_job.py` picks up.
+    from vidlore.clipstudio import runtime_env as _env
+    try:
+        env_line = _env.enforce(driver="resume_job")
+    except RuntimeError as ee:
+        print(f"\n✗ {ee}\n", file=sys.stderr)
+        return 2
+
     meta = json.loads(pj.read_text(encoding="utf-8")).get("meta", {})
     analysis = meta.get("analysis") or {}
     caps = meta.get("caption_settings") or {}
@@ -73,6 +83,7 @@ def main() -> int:
     t0 = time.time()
     fh.write(f"\n===== CLI resume start {time.strftime('%Y-%m-%d %H:%M:%S')} "
              f"job={proj_dir.name} review={review} =====\n")
+    fh.write(f"      env {env_line}\n")
 
     def log(m):
         try:

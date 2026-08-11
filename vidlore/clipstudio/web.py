@@ -126,6 +126,11 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
         _log_fh = open(_log_path, "a", encoding="utf-8")
         _log_fh.write(f"\n===== render start {time.strftime('%Y-%m-%d %H:%M:%S')} "
                       f"job={jid} code={_running_code_revision()} =====\n")
+        # WHICH NATIVE STACK. Two renders were killed by a CTranslate2 abort, and both were
+        # attributable only because run_state happened to record the library version. Put it in the
+        # log's first lines too — that is where an investigation starts.
+        from . import runtime_env as _env
+        _log_fh.write(f"      env {_env.summary()}\n")
         _log_fh.flush()
     except Exception:
         _log_fh = None
@@ -801,9 +806,22 @@ def download(jid):
 
 
 def main():
+    # BEFORE the port is even opened. A portal started as `python3 -m vidlore.clipstudio.web`
+    # instead of ./ClipStudio-Portal.command runs on whatever native stack the system interpreter
+    # has — that is how two renders came to run on ctranslate2 4.7.1 from a user site-packages while
+    # this project installs 4.8.0, and both died in its thread pool hours in. Refusing here costs a
+    # second; discovering it at stage 5 costs the render.
+    from . import runtime_env as _env
+    try:
+        _env_line = _env.enforce(driver="portal")
+    except RuntimeError as _ee:
+        import sys as _sys
+        print(f"\n✗ {_ee}\n", file=_sys.stderr, flush=True)
+        raise SystemExit(2)
     port = int(os.environ.get("VIDLORE_CLIPSTUDIO_PORT", "5151").strip() or 5151)
     host = os.environ.get("VIDLORE_CLIPSTUDIO_HOST", "127.0.0.1").strip()
     print(f"ClipStudio portal → http://{host}:{port}")
+    print(f"  env {_env_line}")
     app.run(host=host, port=port, threaded=True, debug=False)
 
 
