@@ -462,7 +462,7 @@ def _job_page(jid: str) -> str:
      const j=await r.json();
      if(j.liveness==='died'){done=true;
        document.getElementById('ph').textContent='the render process died ✗';
-       document.getElementById('log').textContent=(j.log||[]).join('\n');
+       document.getElementById('log').textContent=(j.log||[]).join('\\n');
        document.getElementById('log').scrollTop=1e9;
        document.getElementById('dl').innerHTML=
          '<a class=dl href="#" onclick="return retryResume()">↻ Resume from where it died</a>'+
