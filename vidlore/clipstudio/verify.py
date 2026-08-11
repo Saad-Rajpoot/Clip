@@ -3963,6 +3963,73 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     _warm(_warm_len, _len_todo)          # original shots: look scope ON
                 _save_verdict_cache(proj, _vcache)
 
+    def _warm_scene_neighborhood(pool, _seg_n, _exact_n) -> None:
+        """Ask the ±6-shot bench's twelve questions together; the serial walk then hits cache.
+
+        This rung could not be staged with the waves above — its candidate pool is derived INSIDE
+        the decision loop from `strict_tried`, which only exists once the earlier rungs have run.
+        So it stayed serial, and it is now the most expensive thing in a render: measured on job
+        218acdfe10, 65 benches, median 73s, forty of them over a minute — 68 minutes spent asking
+        twelve questions one after another at ~5s of network latency each, while the same stage's
+        prefetch answered 230 beats in 286s. The questions are independent; only the DECISION is
+        not, and the decision does not move.
+
+        Nothing here mutates anything: not strict_tried, not the reuse ledger, not failed_wins, not
+        a selection. Window-QC, the quote lock, the reuse cap, `strict_window_verdict` and the
+        breaker all still run in `_try_promote_inner`, in the same order, over the same candidates.
+        A warm the walk never reads is an unused cache entry — and the walk exhausts every
+        candidate in 47 of those 65 benches, so the waste is small and bounded. A warm that FAILS
+        is not cached, so that candidate is asked serially exactly as today.
+
+        The look scope is forced ON because `_try_promote(downgrade=False)` does the same: a strict
+        replacement must answer the named-target question, and warming with it off would key every
+        deictic candidate under a fingerprint the serial ask never looks up — paying twice.
+
+        VIDLORE_CLIPSTUDIO_VERIFY_PREFETCH_NEIGHBORHOOD=0 restores the fully-serial bench.
+        """
+        import os as _os_nb
+        if _pf_workers <= 1 or _breaker_open or not pool:
+            return
+        if _os_nb.environ.get("VIDLORE_CLIPSTUDIO_VERIFY_PREFETCH_NEIGHBORHOOD", "1") \
+                .strip().lower() in ("0", "false", "no"):
+            return
+        _jobs_n = []
+        for _alt_n in pool:
+            _ash_n = get_shot(getattr(_alt_n, "source_id", ""), getattr(_alt_n, "shot_index", -1))
+            if _ash_n is None:
+                continue
+            _jobs_n.append((_ash_n, (_alt_n.in_point, _alt_n.out_point)))
+        if len(_jobs_n) < 2:
+            return                                       # nothing to overlap
+        _prior_scope_n = _look_scope["on"]
+        _look_scope["on"] = True
+        _fail_n = 0
+        try:
+            import concurrent.futures as _cf_n
+            with _cf_n.ThreadPoolExecutor(max_workers=_pf_workers) as _ex_n:
+                _futs_n = [_ex_n.submit(_cached_verify_ctx, _a_n.keyframe_path, _a_n, _seg_n,
+                                        _exact_n, _a_n.face_ids or [], _w_n,
+                                        rung="strict_scene_neighborhood")
+                           for _a_n, _w_n in _jobs_n]
+                for _f_n in _futs_n:
+                    try:
+                        _v_n, _ = _f_n.result()
+                    except Exception:                    # noqa: BLE001 — transport, not judgment
+                        _v_n = None
+                    if _v_n is not None:
+                        _fail_n = 0
+                        continue
+                    _fail_n += 1
+                    if _fail_n >= VERIFIER_BREAKER_TRIP:
+                        for _g_n in _futs_n:
+                            _g_n.cancel()
+                        log("verify: neighborhood warm aborted — repeated transport failures; "
+                            "the serial walk (and its circuit breaker) takes over")
+                        break
+        finally:
+            _look_scope["on"] = _prior_scope_n
+        _save_verdict_cache(proj, _vcache)
+
     for sel in proj.selections:
         if _subset is not None and sel.segment_index not in _subset:
             continue                           # recovery pass: verify only the re-matched beats
@@ -4677,6 +4744,8 @@ def verify_and_repair(proj: ClipProject, segments: list[ScriptSegment], cfg: Cli
                     log(f"verify: seg{sel.segment_index} strict {_neighborhood_kind}-neighborhood "
                         "— trying "
                         f"{len(_npool)} unseen candidate(s) within ±{_n_radius} shots")
+                    # Ask them together, decide them one at a time (see _warm_scene_neighborhood).
+                    _warm_scene_neighborhood(_npool, seg, _exact)
                     if _try_promote(downgrade=False, pool=_npool,
                                     label="strict_scene_neighborhood",
                                     attempt_cap=_n_cap):

@@ -74,12 +74,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
 
-    # PRODUCTION DEFAULT: warm the verify verdict cache with the proven 4-worker prefetch pool
-    # (measured in production: 221 verdicts warmed in 108s; the serial decision loop, breaker and
-    # provider-fallback behavior are unchanged — see verify.py). setdefault: an explicit user env
-    # (including =1 to force the fully-serial path, as the breaker suites do) always wins.
+    # PRODUCTION DEFAULT: warm the verify verdict cache with the prefetch pool (the serial decision
+    # loop, breaker and provider-fallback behavior are unchanged — see verify.py). Width now scales
+    # with turbo: this pool waits on vision answers, so 4 workers left a ~5s call latency mostly
+    # unhidden. setdefault: an explicit user env (including =1 to force the fully-serial path, as
+    # the breaker suites do) always wins.
     import os as _os_vw
-    _os_vw.environ.setdefault("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", "4")
+    from .config import verify_prefetch_workers as _vpw
+    _os_vw.environ.setdefault("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", str(_vpw()))
     # OCR worker pool opt-in — cli.py is __main__-guarded, so spawn re-imports are safe
     # (unguarded driver scripts must not set this; see ocr.py)
     _os_vw.environ.setdefault("VIDLORE_CLIPSTUDIO_OCR_POOL_OK", "1")

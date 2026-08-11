@@ -62,7 +62,8 @@ def main() -> int:
     os.environ.setdefault("VIDLORE_CLIPSTUDIO_LLM_PROVIDER", "deepseek")
     os.environ.setdefault("VIDLORE_CLIPSTUDIO_DEEPSEEK_MODEL", "deepseek-v4-pro")
     os.environ.setdefault("VIDLORE_CLIPSTUDIO_MAX_CPU", "1")
-    os.environ.setdefault("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", "4")
+    from vidlore.clipstudio.config import verify_prefetch_workers as _vpw
+    os.environ.setdefault("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", str(_vpw()))
     os.environ["VIDLORE_CLIPSTUDIO_RESUME_TRUST_CACHED"] = "1"
     os.environ["VIDLORE_CLIPSTUDIO_RELEASE_BLOCK_MODE"] = "warn" if review else "block"
 

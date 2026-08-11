@@ -59,6 +59,23 @@ def _workers(name: str, normal: int, turbo: int) -> int:
     return max(1, pick)
 
 
+def verify_prefetch_workers() -> int:
+    """How many verdict warms the render drivers run at once.
+
+    This pool is API-bound, not CPU-bound: it waits on vision answers. Measured on job 218acdfe10
+    at 4 workers — 230 verdicts warmed in 286s, i.e. ~1.24s per beat against a ~5s per-call latency
+    — while the SERIAL ladder in the same stage spent 63.9s per beat across 64 escalation benches.
+    The pool is not the bottleneck; its width is.
+
+    Turbo (VIDLORE_CLIPSTUDIO_MAX_CPU, which the portal and both CLI drivers set) raises it to 12.
+    Overshooting degrades safely by design: a warm that fails is simply not cached, the serial loop
+    re-asks with its own retry and breaker, and a burst of failures aborts the prefetch early — so
+    the worst case is exactly today's behaviour. An explicit env value always wins, including =1
+    for the fully-serial path the breaker suites require.
+    """
+    return _workers("VIDLORE_CLIPSTUDIO_VERIFY_WORKERS", 4, 12)
+
+
 @dataclass
 class ClipConfig:
     # --- matching ---

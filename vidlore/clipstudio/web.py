@@ -194,7 +194,8 @@ def _run_job(jid: str, project_dir: Path, *, topic: str, title: str, movie_hint:
             # unchanged — verify.py). Symmetric per job like the knobs above; an operator's
             # process-start value (captured once at import) always wins, including =1 for the
             # fully-serial path.
-            os.environ["VIDLORE_CLIPSTUDIO_VERIFY_WORKERS"] = _VERIFY_WORKERS_START or "4"
+            from .config import verify_prefetch_workers as _vpw
+            os.environ["VIDLORE_CLIPSTUDIO_VERIFY_WORKERS"] = _VERIFY_WORKERS_START or str(_vpw())
             # OCR worker pool opt-in: web.py is a provably __main__-guarded entrypoint, so
             # multiprocessing spawn re-imports are safe here (see ocr.py — unguarded driver
             # scripts must NOT set this).

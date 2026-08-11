@@ -4692,12 +4692,20 @@ def produce_auto(project_dir, **kw) -> dict:
     if not _same_job:
         _llm_w.reset_usage()
     _LAST_ACCOUNTED[0] = str(project_dir)
+    # PREVENT the sleep the pipeline has only ever REPORTED. Job 218acdfe10's resume slept
+    # 17+17+17+17+50 minutes — 118 of 420 — every one inside verify, the stage that waits on remote
+    # vision answers and so looks perfectly idle to the OS. Held here rather than inside
+    # _produce_auto so that every exit path, raise included, releases it: the portal is a long-lived
+    # process and a leaked assertion would keep the machine awake long after the render ended.
+    from .keep_awake import KeepAwake as _KeepAwake
+    _awake = _KeepAwake().start(log=kw.get("progress"))
     _ok = False
     try:
         r = _produce_auto(project_dir, **kw)
         _ok = True
         return r
     finally:
+        _awake.stop()
         if not _ok:                                      # the success path records it itself
             _persist_cost(project_dir, partial=True, log=kw.get("progress"))
 
