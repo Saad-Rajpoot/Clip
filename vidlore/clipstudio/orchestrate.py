@@ -4736,6 +4736,46 @@ def produce_auto(project_dir, **kw) -> dict:
             _persist_cost(project_dir, partial=True, log=kw.get("progress"))
 
 
+def _log_time_breakdown(log, pm, slept_s: float = 0.0, top: int = 8) -> dict:
+    """Print where a render's wall-clock went, in the log, at the end of every render.
+
+    perf_report.json has carried per-stage durations all along, and nobody opens a JSON while
+    watching a render crawl — so "why is this taking so long" has been answered by hand-parsing
+    build.log three separate times, each one rediscovering the same two facts: an idle-slept
+    machine, and one rung asking its questions serially. Print it instead.
+
+    Strictly observational. The durations are the ones perf_metrics already recorded; the slept
+    seconds are the ones the sleep watcher already measured. It cannot move a decision or an output
+    byte, and it never raises: a report that breaks a render is worse than no report.
+
+    Returns the aggregated {stage: seconds} so callers (and tests) can assert on it.
+    """
+    rows: dict = {}
+    try:
+        pm.stage("done")                          # close the final open stage before reading
+        for r in (pm.snapshot() or {}).get("stages", []):
+            name = str(r.get("stage", "?"))
+            rows[name] = rows.get(name, 0.0) + float(r.get("dur_s", 0.0) or 0.0)
+        total = sum(rows.values())
+        if total <= 0:
+            return rows
+        log(f"time: where this render went — {total / 60:.0f} min of pipeline"
+            + (f", of which {slept_s / 60:.0f} min the machine was ASLEEP" if slept_s > 60 else ""))
+        for name, secs in sorted(rows.items(), key=lambda kv: -kv[1])[:top]:
+            if secs >= 1.0:
+                log(f"time:   {secs / 60:6.1f} min  {100 * secs / total:4.0f}%  {name}")
+        if slept_s > 60:
+            log("time:   that sleep is INSIDE those stages — a power assertion is held for the "
+                "length of a render (VIDLORE_CLIPSTUDIO_KEEP_AWAKE=0 disables it), so this line "
+                "should normally not appear at all")
+    except Exception as exc:                      # noqa: BLE001 — a report, never a gate
+        try:
+            log(f"time: breakdown unavailable ({type(exc).__name__})")
+        except Exception:                         # noqa: BLE001
+            pass
+    return rows
+
+
 def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = None,
                   script_text: Optional[str] = None, movie_hint: str = "",
                   policy: str = "block", max_sources: int = 6, cfg: Optional[ClipConfig] = None,
@@ -5549,6 +5589,14 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
                 raise
 
     _pm_stage.write_report(proj.output_dir / "perf_report.json")
+
+    # WHERE THE TIME WENT, in the log, every render. perf_report.json has carried per-stage
+    # durations all along and nobody reads a JSON while watching a render crawl — so "why is this
+    # taking so long" has been answered by hand-parsing build.log, three times now, each time
+    # rediscovering the same two facts (an idle-slept machine, and one serial rung). Print it.
+    # Strictly observational: durations already recorded by perf_metrics, plus the slept seconds
+    # the watcher above measured. Nothing here can influence a decision or an output byte.
+    _log_time_breakdown(log, _pm_stage, float(proj.meta.get("sleep_seconds", 0.0) or 0.0))
 
     # What this render actually spent. Hundreds of vision calls go into verify alone and none of it
     # used to be recorded, so cost was unanswerable and "run verify twice" was an unpriced decision.
