@@ -357,6 +357,10 @@ def gemini_available() -> bool:
     """Is Gemini USABLE here (creds + SDK)? — independent of which provider is PRIMARY, so Gemini can
     serve as a fallback. An AI-Studio API key OR a Vertex service account counts. Order lives in
     complete()."""
+    # A configured proxy is enough on its own: it speaks plain HTTP, so it works even where the
+    # google-genai SDK is not installed. The SDK path stays the fallback when creds exist.
+    if all(_gemini_proxy()):
+        return True
     if not (_gemini_api_key() or _gcp_cred()):
         return False
     try:
@@ -428,7 +432,100 @@ def _gemini_parts(content):
     return parts or [types.Part(text="")]
 
 
+# --- cheap Gemini proxy (OpenAI-compatible) ------------------------------------------------
+# ~95% of a render's API spend is gemini-flash VISION, so the per-token price of that one model
+# sets the cost of the whole product. A cheaper OpenAI-compatible reseller in front of the same
+# model is therefore worth having — but only if it can never become a NEW way for a render to die.
+# So it is strictly a fast path: the proxy is tried first, and ANY failure falls through to the
+# official Google SDK path below, loudly, once per process.
+def _gemini_proxy() -> tuple:
+    """(base_url, api_key) when a proxy is configured, else ("", "")."""
+    base = os.environ.get("VIDLORE_GEMINI_PROXY_BASE", "").strip().rstrip("/")
+    key = os.environ.get("VIDLORE_GEMINI_PROXY_KEY", "").strip()
+    return (base, key) if (base and key) else ("", "")
+
+
+def _openai_content(content):
+    """Anthropic-style content (str | text/image blocks) → OpenAI chat content."""
+    if isinstance(content, str):
+        return content
+    out = []
+    for b in (content if isinstance(content, list) else [content]):
+        if not isinstance(b, dict):
+            out.append({"type": "text", "text": str(b)})
+        elif b.get("type") == "text":
+            out.append({"type": "text", "text": b.get("text", "")})
+        elif b.get("type") == "image":
+            src = b.get("source", {}) or {}
+            data, mime = src.get("data", ""), src.get("media_type", "image/jpeg")
+            if data:
+                out.append({"type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{data}"}})
+    return out or ""
+
+
+def _gemini_proxy_complete(system, messages, max_tokens, model) -> str:
+    """One call through the OpenAI-compatible proxy. Raises on any problem — the caller falls back.
+
+    Deliberately strict about what counts as success: a 200 that carries no text is a FAILURE here,
+    not an empty answer handed to a verifier. A verifier that receives "" reads it as "no verdict",
+    which is how a whole render once got downgraded by an outage nobody noticed.
+    """
+    import json as _j
+    import urllib.request as _u
+    base, key = _gemini_proxy()
+    mdl = (model or "").strip()
+    if not mdl.lower().startswith("gemini"):
+        mdl = _gemini_model()
+    msgs = ([{"role": "system", "content": system}] if system else [])
+    for m in messages:
+        role = "assistant" if m.get("role") == "assistant" else "user"
+        msgs.append({"role": role, "content": _openai_content(m.get("content"))})
+    body = _j.dumps({"model": mdl, "messages": msgs,
+                     "max_tokens": int(max_tokens)}).encode("utf-8")
+    req = _u.Request(f"{base}/chat/completions", data=body,
+                     headers={"Authorization": f"Bearer {key}",
+                              "Content-Type": "application/json"})
+    try:
+        sec = float(os.environ.get("VIDLORE_GEMINI_TIMEOUT_SEC", "").strip() or 120.0)
+    except (TypeError, ValueError):
+        sec = 120.0
+    with _u.urlopen(req, timeout=max(5.0, sec)) as r:
+        d = _j.loads(r.read())
+    txt = ((d.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    if not str(txt).strip():
+        raise RuntimeError("gemini proxy returned an empty completion")
+    u = d.get("usage") or {}
+    # Booked against the SAME model key as the official path, deliberately, so a render's cost_report
+    # never silently drops to $0 for want of a price row — the failure mode this project has already
+    # been bitten by. Two honesty notes that belong in the code, not in someone's memory:
+    #   * the $ figure is then priced at GOOGLE's rate, so for proxy-served calls it is an UPPER
+    #     BOUND, not the invoice. The real bill is whatever the reseller charges.
+    #   * the proxy's OpenAI-compat layer counts image tokens differently from the native SDK
+    #     (measured on one identical 1080p frame: 1115 prompt tokens here vs 273 via google-genai),
+    #     so token totals are not comparable across the two paths either.
+    # The call counter below is what makes the split visible per render.
+    from . import perf_metrics as _pm_ok
+    _pm_ok.incr("llm.gemini_proxy.ok")
+    record_usage(mdl, prompt=int(u.get("prompt_tokens") or 0),
+                 completion=int(u.get("completion_tokens") or 0))
+    return str(txt)
+
+
 def _gemini_complete(system, messages, max_tokens, model) -> str:
+    _base, _key = _gemini_proxy()
+    if _base and _key:
+        try:
+            return _gemini_proxy_complete(system, messages, max_tokens, model)
+        except Exception as _pe:                      # noqa: BLE001 — never fatal, always audible
+            from . import perf_metrics as _pm_px
+            _pm_px.incr("llm.gemini_proxy.fallback")
+            if not globals().get("_PROXY_WARNED"):
+                globals()["_PROXY_WARNED"] = True
+                print(f"[clipstudio] ⚠ Gemini proxy unavailable "
+                      f"({type(_pe).__name__}: {str(_pe)[:120]}) — falling back to the official "
+                      f"Google endpoint for the rest of this run. Renders are unaffected; the "
+                      f"bill is higher.", flush=True)
     from google.genai import types
     cl = _gemini_client()
     contents = []
