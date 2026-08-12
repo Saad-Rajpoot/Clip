@@ -164,8 +164,46 @@ def test_the_fallback_is_loud_exactly_once(monkeypatch, capsys):
         with pytest.raises(RuntimeError):
             L._gemini_complete("", [{"role": "user", "content": "q"}], 20, "gemini-2.5-flash")
     out = capsys.readouterr().out
-    assert out.count("Gemini proxy unavailable") == 1, "warn once per process, not per call"
-    assert "the bill is higher" in out
+    assert out.count("Gemini proxy failed on this call") == 1, "warn once per process, not per call"
+    assert "retried on the NEXT call" in out
+
+
+def test_one_failure_does_not_abandon_the_proxy(monkeypatch, capsys):
+    """The warning used to say the run had switched to Google "for the rest of this run". It had
+    not — the fallback is per CALL. Measured on job 218acdfe10: one HTTP 500 printed that sentence
+    and the proxy then served 3567 of 4129 calls, so anyone pricing the render from that line
+    over-estimated the bill about six-fold. The behaviour was right; only the sentence was wrong.
+    This pins the behaviour so the sentence can never drift back."""
+    calls = {"n": 0}
+
+    def flaky(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("transient 500")
+        return _Resp(_ok_payload("SECOND"))
+
+    _patch_urlopen(monkeypatch, flaky)
+    monkeypatch.setattr(L, "_gemini_client",
+                        lambda: (_ for _ in ()).throw(RuntimeError("official")))
+    with pytest.raises(RuntimeError, match="official"):
+        L._gemini_complete("", [{"role": "user", "content": "q"}], 20, "gemini-2.5-flash")
+    assert L._gemini_complete("", [{"role": "user", "content": "q"}], 20,
+                              "gemini-2.5-flash") == "SECOND", \
+        "the proxy must be tried again on the next call"
+    assert calls["n"] == 2
+    assert "for the rest of this run" not in capsys.readouterr().out
+
+
+def test_the_render_reports_which_endpoint_actually_served_it():
+    """The cost estimate prices every call at Google rates, so a render mostly served by the proxy
+    is over-priced by that line unless the split is stated beside it."""
+    import inspect
+    from vidlore.clipstudio import orchestrate as O
+    src = inspect.getsource(O._produce_auto)
+    assert "llm.gemini_proxy.ok" in src and "llm.gemini_proxy.fallback" in src
+    assert "the real bill is lower" in src
+    assert src.index("llm.gemini_proxy.ok") < src.index("prices are configurable estimates"), \
+        "the split belongs next to the estimate it qualifies"
 
 
 def test_no_proxy_configured_leaves_the_official_path_untouched(monkeypatch):

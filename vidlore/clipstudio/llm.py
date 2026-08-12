@@ -522,10 +522,16 @@ def _gemini_complete(system, messages, max_tokens, model) -> str:
             _pm_px.incr("llm.gemini_proxy.fallback")
             if not globals().get("_PROXY_WARNED"):
                 globals()["_PROXY_WARNED"] = True
-                print(f"[clipstudio] ⚠ Gemini proxy unavailable "
-                      f"({type(_pe).__name__}: {str(_pe)[:120]}) — falling back to the official "
-                      f"Google endpoint for the rest of this run. Renders are unaffected; the "
-                      f"bill is higher.", flush=True)
+                # "for the rest of this run" is what this line USED to say, and it was false: the
+                # fallback is per CALL — the proxy is tried again on the very next one. Measured on
+                # job 218acdfe10, where a single HTTP 500 printed that sentence and the proxy then
+                # went on to serve 3567 of 4129 calls: an operator reading it would have priced the
+                # whole render at Google rates and over-estimated the bill roughly six-fold.
+                print(f"[clipstudio] ⚠ Gemini proxy failed on this call "
+                      f"({type(_pe).__name__}: {str(_pe)[:120]}) — answered by the official Google "
+                      f"endpoint instead. The proxy is retried on the NEXT call; this warning is "
+                      f"printed once. The real split is reported at the end of the render (and in "
+                      f"perf_report.json: llm.gemini_proxy.ok / .fallback).", flush=True)
     from google.genai import types
     cl = _gemini_client()
     contents = []

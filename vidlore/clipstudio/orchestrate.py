@@ -5610,6 +5610,23 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
                 for m, d in sorted(_cost["models"].items(), key=lambda kv: -kv[1]["usd"]))
             log(f"cost: ~${_cost['usd']:.2f} over {_cost['calls']} LLM/vision call(s) "
                 f"({_cost['prompt'] / 1000:.0f}k in / {_cost['completion'] / 1000:.0f}k out) — {_per}")
+            # WHO ACTUALLY SERVED IT. The price table above is Google's, so a render mostly served
+            # by the cheaper proxy is over-priced by this line — and on job 218acdfe10 the only
+            # signal about the split was two counters buried in perf_report.json, next to a warning
+            # that wrongly implied the proxy had been abandoned for the whole run.
+            try:
+                from . import perf_metrics as _pm_px2
+                _pc = (_pm_px2.snapshot() or {}).get("counts") or {}
+                _ok_px, _fb_px = int(_pc.get("llm.gemini_proxy.ok", 0)), \
+                    int(_pc.get("llm.gemini_proxy.fallback", 0))
+                if _ok_px or _fb_px:
+                    _tot_px = _ok_px + _fb_px
+                    log(f"cost: gemini served {_ok_px}/{_tot_px} call(s) "
+                        f"({100 * _ok_px / max(1, _tot_px):.0f}%) by the configured proxy, "
+                        f"{_fb_px} by the official Google endpoint — the estimate above prices "
+                        f"EVERY call at Google rates, so the real bill is lower")
+            except Exception:                                # noqa: BLE001 — a report, not a gate
+                pass
             log("cost: prices are configurable estimates "
                 "(VIDLORE_CLIPSTUDIO_PRICE_<MODEL>_IN/_OUT), not a provider invoice")
         proj.meta["cost"] = _cost
