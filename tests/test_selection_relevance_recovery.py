@@ -2875,9 +2875,11 @@ def test_recovery_discovery_receives_effective_query_on_disposable_segment_copy(
     captured = []
 
     def capture_discovery(_analysis, _cfg, *, segments, progress, extra_queries,
-                          required_queries):
+                          required_queries, searched=None):
         captured.extend(segments)
         assert extra_queries == required_queries == [expected_query]
+        assert isinstance(searched, set), \
+            "recovery must pass the render's already-searched memo, or it re-asks every round"
         return []
 
     still_blocked = {"status": "blocked", "blocked_count": 1,

@@ -48,8 +48,13 @@ def _wire(monkeypatch, *, cands=None, downloads=None):
                         lambda *a, **k: seen.__setitem__("pool_calls", seen["pool_calls"] + 1))
     monkeypatch.setattr(M, "usable_shot_yield", lambda *_a, **_k: (1, 1))
 
-    def _disc(analysis, cfg, *, segments=None, progress=None, extra_queries=None):
+    def _disc(analysis, cfg, *, segments=None, progress=None, extra_queries=None,
+              searched=None):
+        # `searched` is the render-scoped memo of queries already conclusively answered; the
+        # backfill shares it with the main discovery and the recovery rounds so none of them
+        # re-issues a search this render has already paid for.
         seen["queries"].append(list(extra_queries or []))
+        seen["memo_is_set"] = isinstance(searched, set)
         return list(cands)
 
     def _dl(proj, new, cfg, *, policy=None, limit=None, progress=None, on_ready=None):

@@ -1032,7 +1032,7 @@ def resolve_quality(cands: list[SourceCandidate], cfg: ClipConfig, progress=None
 
 def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None,
                      progress=None, extra_queries=None,
-                     required_queries=None) -> list[SourceCandidate]:
+                     required_queries=None, searched=None) -> list[SourceCandidate]:
     """Return a ranked, de-duplicated, diverse candidate list (~discover_target items).
     `segments` enables PER-BEAT targeted queries (the exact scene each line needs).
 
@@ -1044,7 +1044,22 @@ def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None
     `required_queries` is an opt-in strict recovery contract. Every named query must receive at
     least one final provider ``ok`` or legitimate ``empty`` status after bounded retries. If all
     providers remain technical for any required query, :class:`TargetedDiscoveryTechnicalError`
-    is raised. The default remains the historical best-effort candidate-list API."""
+    is raised. The default remains the historical best-effort candidate-list API.
+
+    `searched` is a caller-owned MUTABLE set of queries this render has already issued and had a
+    conclusive answer for. Those are not issued again, and newly-conclusive ones are added to it.
+
+    This exists because recovery re-searches. Measured on job d835faa83e: fourteen bounded-recovery
+    rounds, each rebuilding the SAME query list — 54 queries for 8 unresolved beats, 25 of them the
+    anchor queries the main discovery had already run — and the searches took 8.1 of the render's
+    22.7 hours (median 45 minutes per round, worst 77). The main discovery had answered 200 queries
+    in five minutes; by the fourteenth round the provider was throttling every repeat, so each one
+    went through the bounded serial retry. A repeated query cannot return anything new either: its
+    URLs are already in the pool and are filtered out by `have_urls` at the call site, which is why
+    round after round logged "targeted rediscovery found no NEW source".
+
+    Only conclusively-answered queries are memoised, so skipping one can never mask a provider
+    outage — and a skipped `required` query is treated as answered because, this render, it was."""
     def log(m):
         if progress:
             progress(m)
@@ -1061,7 +1076,19 @@ def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None
     # the exact raw scene clip can't be missed under the noise of essays/compilations.
     anchor_qset = {q.lower() for q in anchor_queries(analysis, segments)}
     anchor_qset |= {q.lower() for q in _extra_queries}   # backfill/recovery searches go deep too
-    log(f"discover: {len(queries)} queries ({len(anchor_qset)} anchor) · type={getattr(analysis,'video_type','')}")
+
+    # ALREADY ANSWERED THIS RENDER → not asked again. See `searched` in the docstring: recovery
+    # rebuilt the identical query list every round and spent 8.1 hours of one render re-asking it.
+    _searched = searched if isinstance(searched, set) else None
+    _skipped_q: list = []
+    if _searched:
+        _keep = []
+        for q in queries:
+            (_skipped_q if q.lower() in _searched else _keep).append(q)
+        queries = _keep
+    log(f"discover: {len(queries)} queries ({len(anchor_qset)} anchor)"
+        + (f" · {len(_skipped_q)} already answered this render, not re-issued" if _skipped_q else "")
+        + f" · type={getattr(analysis,'video_type','')}")
     from . import perf_metrics as _pm
 
     def _depths(q: str) -> tuple[int, int]:
@@ -1149,9 +1176,19 @@ def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None
             raw += _bucket_list(_b)
             log(f"discover: '{q[:40]}' → {len(raw)} cumulative")
 
+    # A query answered earlier THIS RENDER stays answered — only conclusively-answered ones are
+    # memoised, so this can never let a provider outage pass as a satisfied contract.
+    _skipped_lower = {q.lower() for q in _skipped_q}
+    if _searched is not None:
+        for _q_done, _st_done in _final_provider_status.items():
+            if any(s in (STATUS_OK, STATUS_EMPTY) for s in _st_done):
+                _searched.add(_q_done)
+
     if _required_queries:
         _unanswered = []
         for _rq in _required_queries:
+            if _rq.lower() in _skipped_lower:
+                continue                             # conclusive earlier in this render
             _statuses = _final_provider_status.get(_rq.lower())
             if not _statuses or not any(s in (STATUS_OK, STATUS_EMPTY) for s in _statuses):
                 _unanswered.append((_rq, _statuses or ("not-issued",)))

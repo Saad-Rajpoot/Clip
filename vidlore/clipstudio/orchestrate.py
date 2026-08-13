@@ -2536,8 +2536,10 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
 
         have = {(getattr(s, "url", "") or "").strip() for s in proj.sources if getattr(s, "url", "")}
         try:
+            _bf_memo = {str(q).lower() for q in (proj.meta.get("searched_queries") or [])}
             cands = discover_sources(analysis, cfg, segments=segs, progress=None,
-                                     extra_queries=queries) or []
+                                     extra_queries=queries, searched=_bf_memo) or []
+            proj.meta["searched_queries"] = sorted(_bf_memo)
         except Exception as e:                                   # noqa: BLE001
             log(f"5b/9 · backfill: discovery failed ({str(e)[:70]})")
             return _finish("incomplete", f"discovery_failed:{type(e).__name__}")
@@ -3123,9 +3125,20 @@ def _recover_unresolved_beats(proj, segs, analysis, cfg, eng, *, faceid_obj, ref
         # the uploads the recovery exists to fetch.
         cfg_r = _dc.replace(cfg, discover_target=max(12, 3 * max_sources))
         have_urls = {(getattr(s, "url", "") or "").strip() for s in proj.sources if getattr(s, "url", "")}
+        # Queries this render has already had a conclusive answer for are not asked again. Kept on
+        # the PROJECT so it survives a resume — on job d835faa83e the same query list was rebuilt
+        # every round and re-asking it cost 8.1 of the render's 22.7 hours, all of it for candidates
+        # `have_urls` below then discards as already-known.
+        _searched_memo = {str(q).lower() for q in (proj.meta.get("searched_queries") or [])}
         cands = discover_sources(
             analysis, cfg_r, segments=unresolved_segs, progress=_rlog("search"),
-            extra_queries=_effective_queries, required_queries=_effective_queries) or []
+            extra_queries=_effective_queries, required_queries=_effective_queries,
+            searched=_searched_memo) or []
+        try:
+            proj.meta["searched_queries"] = sorted(_searched_memo)
+            proj.save()
+        except Exception:                            # noqa: BLE001 — a memo, never a gate
+            pass
         _rdone("search")
         import re as _re_r
         _r_mv = {w for w in _re_r.findall(r"\w+", (getattr(analysis, "movie_title", "") or "").lower())
@@ -4990,7 +5003,12 @@ def _produce_auto(project_dir, *, topic: str = "", script_path: Optional[str] = 
         candidates = [_SourceCandidate.from_dict(d) for d in proj.meta.get("candidates", [])]
         log(f"  ↻ skipped (resume) — {len(candidates)} discovered source(s) cached")
     else:
-        candidates = discover_sources(analysis, cfg, segments=segs, progress=progress)
+        # Record what this render asks, so the recovery rounds below never re-ask it. The main
+        # pass issues the anchor queries once; recovery rebuilt the same list every round.
+        _q_memo = {str(q).lower() for q in (proj.meta.get("searched_queries") or [])}
+        candidates = discover_sources(analysis, cfg, segments=segs, progress=progress,
+                                      searched=_q_memo)
+        proj.meta["searched_queries"] = sorted(_q_memo)
         proj.meta["candidates"] = [c.to_dict() for c in candidates]
         if not candidates:
             raise PipelineError("source discovery found nothing — check connectivity / movie name.")
