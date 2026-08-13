@@ -2315,7 +2315,17 @@ def test_targeted_discovery_all_technical_statuses_leave_page_retryable(tmp_path
                 SimpleNamespace(anthropic_model="vision"), faceid_obj=None, refs={}, roster=[],
                 policy="approved_testing", log=lambda _m: None)
 
-    assert yt_calls.count(query) == archive_calls.count(query) == 3
+    # The page staying retryable is what this test is for, and it still does (the raise above, and
+    # page_completed/page_error below). What changed: a provider established as UNREACHABLE is no
+    # longer given three attempts on every remaining query. Job d835faa83e sat two hours on one log
+    # line at 0% CPU paying archive.org's 20s timeout that way — 235 queries × 3 attempts against a
+    # host in SYN_SENT. Both providers are probed, then dropped, and the render still fails
+    # honestly rather than failing slowly.
+    assert yt_calls and archive_calls, "both providers must be probed before either is written off"
+    assert len(yt_calls) <= D._PROVIDER_DOWN_AFTER + 2, \
+        f"youtube was retried {len(yt_calls)} times against a host that never answers"
+    assert len(archive_calls) <= D._PROVIDER_DOWN_AFTER + 2, \
+        f"archive was retried {len(archive_calls)} times against a host that never answers"
     images.assert_not_called()
     ladder.assert_not_called()
     assert "selection_relevance_recovery" not in proj.meta

@@ -12,6 +12,7 @@ resolved by a bounded second pass on the top candidates so low-res can be reject
 from __future__ import annotations
 
 import re
+import threading as _threading
 from dataclasses import dataclass, field, asdict
 
 from .config import ClipConfig
@@ -504,6 +505,10 @@ def build_queries(a: ScriptAnalysis, segments=None) -> list[str]:
 STATUS_OK, STATUS_EMPTY = "ok", "empty"
 STATUS_THROTTLED, STATUS_TIMEOUT, STATUS_TRANSPORT = "throttled", "timeout", "transport"
 _RETRYABLE = (STATUS_THROTTLED, STATUS_TIMEOUT, STATUS_TRANSPORT)
+# Consecutive transport/timeout failures after which a provider is treated as down for the rest of
+# one search. Five is enough to distinguish an unreachable host from a single flaky query, and
+# cheap enough that a working provider never trips it.
+_PROVIDER_DOWN_AFTER = 5
 
 
 class TargetedDiscoveryTechnicalError(RuntimeError):
@@ -1095,6 +1100,43 @@ def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None
         yt_n = cfg.discover_per_query * 2 if q.lower() in anchor_qset else cfg.discover_per_query
         return yt_n, max(2, cfg.discover_per_query // 2)
 
+    # A PROVIDER THAT IS DOWN IS DOWN FOR EVERY QUERY, NOT FOR EACH ONE SEPARATELY.
+    #
+    # Measured live on job d835faa83e: archive.org was unreachable from this machine — every
+    # connection sat in SYN_SENT until the 20s timeout — while YouTube answered in 0.7s. Each query
+    # paid that 20 seconds TWICE: once in the parallel fan-out, then again in the SERIAL
+    # bounded-backoff retry, because a timeout is retryable. A backfill round of ~235 queries
+    # therefore spent about 98 minutes waiting on a host that was never going to answer, and the
+    # render sat on one line for two hours with 0% CPU and a single SYN_SENT socket.
+    #
+    # So after `_PROVIDER_DOWN_AFTER` consecutive transport/timeout failures, that provider is
+    # skipped for the rest of THIS search and its status returned without a call. Scope is one
+    # discover_sources() call on purpose: the next search re-probes, so a network that comes back
+    # is used again with no state to reset and nothing to leak between renders.
+    #
+    # This weakens no contract. archive.org is a bonus pool; the required-query rule is satisfied by
+    # ANY provider answering, and YouTube is the one that finds this project's footage. A provider
+    # marked down is reported once, by name, so a real outage is never silent.
+    _prov_fail = {"yt": 0, "ar": 0}
+    _prov_down: dict = {}
+    _prov_lock = _threading.Lock()
+
+    def _provider_down(prov: str) -> bool:
+        with _prov_lock:
+            return bool(_prov_down.get(prov))
+
+    def _note_provider(prov: str, st: str, label: str) -> None:
+        with _prov_lock:
+            if st in _RETRYABLE:
+                _prov_fail[prov] += 1
+                if _prov_fail[prov] >= _PROVIDER_DOWN_AFTER and prov not in _prov_down:
+                    _prov_down[prov] = True
+                    log(f"discover: {label} unreachable — {_prov_fail[prov]} consecutive "
+                        f"{st} failures; skipping it for the rest of this search rather than "
+                        f"paying its timeout on every query")
+            else:
+                _prov_fail[prov] = 0
+
     def _one_query_ex(q: str) -> dict:
         """One query's per-provider results + status, in the serial loop's exact internal
         order (yt then archive). Statuses let the caller distinguish real results, a
@@ -1103,8 +1145,18 @@ def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None
         yt_n, ar_n = _depths(q)
         with _pm.timed("discover.query"):
             _pm.incr("discover.query")
-            yt_res, yt_st = _ytsearch_ex(q, yt_n)
-            ar_res, ar_st = _archive_search_ex(q, ar_n)
+            if _provider_down("yt"):
+                yt_res, yt_st = [], STATUS_TRANSPORT
+                _pm.incr("discover.provider.skipped_down")
+            else:
+                yt_res, yt_st = _ytsearch_ex(q, yt_n)
+                _note_provider("yt", yt_st, "youtube")
+            if _provider_down("ar"):
+                ar_res, ar_st = [], STATUS_TRANSPORT
+                _pm.incr("discover.provider.skipped_down")
+            else:
+                ar_res, ar_st = _archive_search_ex(q, ar_n)
+                _note_provider("ar", ar_st, "archive.org")
         for _st in (yt_st, ar_st):
             if _st in _RETRYABLE:
                 _pm.incr(f"discover.provider.{_st}")
@@ -1118,12 +1170,17 @@ def discover_sources(analysis: ScriptAnalysis, cfg: ClipConfig, *, segments=None
         yt_n, ar_n = _depths(q)
         for prov, fn, n in (("yt", _ytsearch_ex, yt_n), ("ar", _archive_search_ex, ar_n)):
             res, st = bucket[prov]
+            if _provider_down(prov):
+                continue          # already established as unreachable; retrying buys only its timeout
             attempt = 0
             while st in _RETRYABLE and attempt < 2:
                 attempt += 1
                 _pm.incr("discover.retry.serial")
                 _t.sleep(min(8.0, (4.0 if st == STATUS_THROTTLED else 1.5) * attempt))
                 res, st = fn(q, n)
+                _note_provider(prov, st, "youtube" if prov == "yt" else "archive.org")
+                if _provider_down(prov):
+                    break
             bucket[prov] = (res, st)
         return bucket
 
