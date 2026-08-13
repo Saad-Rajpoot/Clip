@@ -9426,7 +9426,17 @@ def build_video(proj: ClipProject, segments: list[ScriptSegment], cfg: ClipConfi
                         _got, _last_clean_r, via="editorial_hold",
                         extra={
                             "kind": "scene_hold",
-                            "hold_of_beat": int(_last_clean_idx),
+                            # ORIGINAL beat index, not the final scene index. The lineage gate
+                            # compares this against the record's `owner`/`original_beat`, which are
+                            # original-beat numbers; a breakout inserted earlier in the timeline
+                            # shifts final scenes past it by one, so the raw `_last_clean_idx` named
+                            # a DIFFERENT beat and the gate rejected the render. Measured on job
+                            # d835faa83e: six holds, twelve violations, every one an off-by-the-
+                            # breakout-count — "claims donor beat 177 but its root owner is 176",
+                            # and simultaneously "names itself as its own donor" (177 == this beat's
+                            # own original index). The audit record two lines below has always
+                            # applied `_orig` here; only the lineage record forgot.
+                            "hold_of_beat": int(_orig(_last_clean_idx)),
                             "hold_kind": ("editorial_hold_kenburns" if _motion_hold
                                           else "editorial_hold"),
                             "hold_duration_s": round(float(_d), 3),
