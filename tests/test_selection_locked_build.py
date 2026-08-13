@@ -71,7 +71,12 @@ def test_repairs_inherit_their_real_donor_owner():
     # DECLARES the donation (job 0ca9dc4c2f built all 152 scenes, then died at the provenance gate
     # because an undeclared but fully sanctioned hold is indistinguishable from a silent swap).
     assert '_got, _last_clean_r, via="editorial_hold"' in BUILD
-    assert '"hold_of_beat": int(_last_clean_idx)' in BUILD
+    # ...and it declares the donor in the numbering the GATE reads. This line used to pin
+    # `int(_last_clean_idx)` — a FINAL SCENE index — which is exactly what killed job d835faa83e at
+    # the same gate: with a breakout inserted earlier in the timeline, that index names a different
+    # beat than the frame actually frozen. The declaration is what matters here, not its arithmetic;
+    # the conversion itself is owned by tests/test_hold_lineage_beat_numbering.py.
+    assert '"hold_of_beat": int(_orig(_last_clean_idx))' in BUILD
     assert '"kind": "scene_hold"' in BUILD
     manifest = BUILD[BUILD.index("# FINAL BUILD-SIDE LINEAGE MANIFEST"):]
     assert '"owner_beat": None' in manifest
