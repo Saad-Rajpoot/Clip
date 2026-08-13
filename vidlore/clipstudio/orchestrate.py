@@ -2455,6 +2455,7 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
     """
     import os as _os_b
     import re as _re_b
+    import time as _time_bf
     if _os_b.environ.get("VIDLORE_CLIPSTUDIO_BACKFILL_REJECTED", "1").strip() in ("0", "false", "no"):
         return 0
     try:
@@ -2537,8 +2538,15 @@ def _backfill_rejected_sources(proj, segs, analysis, cfg, *, refs, faceid_obj, r
         have = {(getattr(s, "url", "") or "").strip() for s in proj.sources if getattr(s, "url", "")}
         try:
             _bf_memo = {str(q).lower() for q in (proj.meta.get("searched_queries") or [])}
-            cands = discover_sources(analysis, cfg, segments=segs, progress=None,
+            # NOT progress=None. This search is the longest thing the backfill does — job
+            # d835faa83e sat inside it for two hours on a single log line while archive.org refused
+            # to answer, and the provider-unreachable notice it would have printed had nowhere to
+            # go. The same silence that hid the recovery rounds hid this.
+            _bf_t0 = _time_bf.time()
+            cands = discover_sources(analysis, cfg, segments=segs,
+                                     progress=lambda m: log(f"5b/9 · backfill/search: {m}"),
                                      extra_queries=queries, searched=_bf_memo) or []
+            log(f"5b/9 · backfill/search: done in {_time_bf.time() - _bf_t0:.0f}s")
             proj.meta["searched_queries"] = sorted(_bf_memo)
         except Exception as e:                                   # noqa: BLE001
             log(f"5b/9 · backfill: discovery failed ({str(e)[:70]})")
