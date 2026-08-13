@@ -546,11 +546,39 @@ def _features_at_times(path: Path, times: list[float],
     return out
 
 
+# ffmpeg's expression parser refuses a `select` term list past a fixed size. Bisected on a real
+# 483 MB render of this project: 100 frames parse, 101 do not. Batched well under it, because
+# the ceiling is ffmpeg's and could differ by build — and a batch too large does not degrade,
+# it returns zero bytes and fails the whole canary closed.
+_MAX_SELECT_TERMS = 64
+
+
 def _features_by_frames(path: Path, frames: list[int]) -> dict[int, dict]:
-    """Decode exact frame numbers in one sequential pass (timeline order check)."""
+    """Decode exact frame numbers for the timeline-order check.
+
+    BATCHED, because ffmpeg's expression parser has a hard ceiling. The selector is one
+    `eq(n,X)+eq(n,Y)+...` term per frame, and libavutil refuses to parse it past a fixed size:
+    measured by bisection on this project's own 483 MB render, **100 frames parse and 101 do not** —
+
+        [Parsed_select_0] Error while parsing expression 'eq(n,0)+eq(n,57)+...'   rc=244
+
+    A 252-beat video asks for far more than 100 canaries, so the decode returned zero bytes, and a
+    canary that cannot decode fails closed — correctly, it cannot prove anything. The result was
+    that job d835faa83e died at the FINAL gate after 5.8 hours, reporting a timeline_order LINEAGE
+    violation, when nothing was wrong with the video at all: the check simply could not run.
+
+    Failing closed stays. What changes is that the check can now actually run at any length: the
+    frames are decoded in batches under the ceiling and merged. Same frames, same fingerprints, same
+    verdict — a batch that fails still raises, so no batch can be silently skipped.
+    """
     ordered = sorted(set(max(0, int(n)) for n in frames))
     if not ordered:
         return {}
+    if len(ordered) > _MAX_SELECT_TERMS:
+        merged: dict[int, dict] = {}
+        for i in range(0, len(ordered), _MAX_SELECT_TERMS):
+            merged.update(_features_by_frames(path, ordered[i:i + _MAX_SELECT_TERMS]))
+        return merged
     expr = "+".join(f"eq(n\\,{n})" for n in ordered)
     vf = f"select='{expr}',{_fingerprint_filter()}"
     args = [
