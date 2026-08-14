@@ -202,7 +202,29 @@ def _llm_analyze(script_text: str, topic: str, movie_hint: str, beats: list[Scri
     )
     beat_out = []
     BATCH = 18
-    for start in range(0, len(beats), BATCH):
+
+    # BOUNDED PARALLEL FAN-OUT, ORDER-PRESERVING AGGREGATION — the same shape discover.py already
+    # uses for its query fan-out, and for the same reason: these calls are independent network
+    # waits that were being taken one at a time.
+    #
+    # Every batch is built from the SAME global context header plus its own slice of beats. No
+    # batch reads another's answer; the only cross-batch fact is the order results are appended in,
+    # which is restored explicitly below. So the questions asked, the model, the token budget, the
+    # two-try retry and the heuristic fallback are all unchanged — only the waiting overlaps.
+    #
+    # Measured on job f556c8c761: 224 beats = 13 batches, each a deepseek-v4-pro generation of up
+    # to 3,840 tokens taking 12-27 minutes. Serially that is roughly four hours of a render before
+    # a single source has been searched for.
+    #
+    # Deliberately modest by default. A batch that fails twice does not merely cost time — its
+    # beats fall back to HEURISTIC visuals, which is a relevance loss. Concurrency that provoked
+    # rate limiting would buy speed with exactly the quality this pipeline exists to protect.
+    import concurrent.futures as _cf_an
+    from .config import _workers as _workers_an
+    _an_workers = max(1, _workers_an("VIDLORE_CLIPSTUDIO_ANALYZE_WORKERS", 4, 8))
+    _starts = list(range(0, len(beats), BATCH))
+
+    def _one_batch(start: int):
         chunk = beats[start:start + BATCH]
         numbered = [{"i": b.index, "line": b.text} for b in chunk]
         bu = (
@@ -256,12 +278,38 @@ def _llm_analyze(script_text: str, topic: str, movie_hint: str, beats: list[Scri
                 if isinstance(parsed, list) and parsed:
                     break
                 parsed = None                      # '[]' is no enrichment — spend the retry
-        if parsed:
-            beat_out.extend(parsed)
+        return parsed
+
+    if _an_workers > 1 and len(_starts) > 1:
+        _log(f"analyze: per-beat enrichment — {len(_starts)} batch(es) of {BATCH} beat(s) "
+             f"({_an_workers} workers; identical prompts, identical model, order preserved)")
+        with _cf_an.ThreadPoolExecutor(max_workers=_an_workers) as _ex_an:
+            _futs_an = {_ex_an.submit(_one_batch, s): s for s in _starts}
+            _done_an = 0
+            _by_start: dict = {}
+            for _fu_an in _cf_an.as_completed(_futs_an):
+                _s_an = _futs_an[_fu_an]
+                try:
+                    _by_start[_s_an] = _fu_an.result()
+                except Exception:                          # noqa: BLE001 — same as a failed parse
+                    _by_start[_s_an] = None
+                _done_an += 1
+                _log(f"analyze: per-beat {_done_an * BATCH if _done_an < len(_starts) else len(beats)}"
+                     f"/{len(beats)}")
+    else:
+        _by_start = {}
+        for _s_an in _starts:
+            _by_start[_s_an] = _one_batch(_s_an)
+            _log(f"analyze: per-beat {min(_s_an + BATCH, len(beats))}/{len(beats)}")
+
+    # ORDER IS RESTORED HERE, not by completion time. beat_out is consumed positionally downstream.
+    for _s_an in _starts:
+        _p_an = _by_start.get(_s_an)
+        if _p_an:
+            beat_out.extend(_p_an)
         else:
-            _log(f"analyze: ⚠ beats {start}-{min(start + BATCH, len(beats)) - 1} enrichment "
+            _log(f"analyze: ⚠ beats {_s_an}-{min(_s_an + BATCH, len(beats)) - 1} enrichment "
                  f"failed (invalid LLM JSON twice) — they fall back to heuristic visuals")
-        _log(f"analyze: per-beat {min(start + BATCH, len(beats))}/{len(beats)}")
     return {"analysis": analysis, "beats": beat_out}
 
 
