@@ -234,17 +234,12 @@ def assert_scene_lineage(entries: list[dict], audit_path: Path) -> dict:
     }
     # Audit persistence is part of the invariant.  A render whose provenance
     # cannot be recorded must not silently look publishable.
+    # Fail-closed, with a UNIQUE temp per attempt. The fixed `<file>.tmp` this used to reuse is
+    # what made job f3daa0ecce unrecoverable: one poisoned inode denied every retry (see
+    # vidlore/atomic_io.py).
+    from ..atomic_io import atomic_write_text
     audit_path = Path(audit_path)
-    audit_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = audit_path.with_name(audit_path.name + ".tmp")
-    try:
-        tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
-        os.replace(tmp, audit_path)
-    finally:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+    atomic_write_text(audit_path, json.dumps(payload, indent=1), label="scene-lineage audit")
     if problems:
         from .verify import NonRetryableBuildError
         raise NonRetryableBuildError(

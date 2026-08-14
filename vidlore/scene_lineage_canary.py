@@ -20,6 +20,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .atomic_io import atomic_write_text
 from .ffmpeg_tool import ffmpeg_exe
 
 
@@ -125,20 +126,17 @@ def new_audit(output: Path) -> dict:
 
 
 def write_audit(path: Path, payload: dict) -> None:
-    """Atomically persist the canary record; an unwritable audit is a failure."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    try:
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
-    finally:
-        # os.replace removes the temp file on success.  On failure, best-effort
-        # cleanup never masks the original persistence exception.
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception:  # noqa: BLE001
-            pass
+    """Atomically persist the canary record; an unwritable audit is a failure.
+
+    Still fail-closed — a render may not claim lineage protection when its evidence cannot be
+    written. What changed is the temp NAME. This used to reuse `<file>.tmp` on every attempt, and
+    job f3daa0ecce died after 9.2 hours because that one inode had picked up a `com.apple.macl`
+    decision that denied this process: every retry aimed at the same poisoned name and got the same
+    EPERM. `atomic_write_text` takes a unique temp per attempt, so a poisoned leftover can no longer
+    make a directory permanently unwritable.
+    """
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True),
+                      label="scene-lineage canary audit")
 
 
 def fail_audit(path: Path, payload: dict, stage: str,
@@ -146,11 +144,22 @@ def fail_audit(path: Path, payload: dict, stage: str,
     payload["status"] = "failed"
     payload["stage"] = stage
     payload["failures"] = list(payload.get("failures") or []) + list(failures)
-    write_audit(path, payload)
+    # THE VERDICT OUTRANKS ITS RECEIPT. If the audit cannot be persisted we still have to say what
+    # was actually wrong with the render — an operator reading only "Operation not permitted" would
+    # go hunting a disk problem while N lineage violations sat undiagnosed. The IO error is chained,
+    # never dropped, and the write is best-effort ONLY here, on the path that is already failing.
+    _io_exc = None
+    try:
+        atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True),
+                          label="scene-lineage canary audit (failure record)")
+    except OSError as exc:
+        _io_exc = exc
     first = failures[0].get("reason", "unknown lineage failure") if failures else "unknown"
+    _note = "" if _io_exc is None else \
+        f" — NOTE: the audit itself could not be written ({type(_io_exc).__name__}: {_io_exc})"
     raise SceneLineageError(
         f"scene-lineage canary failed at {stage}: {len(failures)} violation(s); "
-        f"first: {first}; see {Path(path).name}")
+        f"first: {first}; see {Path(path).name}{_note}") from _io_exc
 
 
 def _first(row: dict, *names: str):
